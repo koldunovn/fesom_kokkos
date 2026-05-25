@@ -26,6 +26,9 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
 | D9 | **Tests compiled as C++** (`LANGUAGE CXX`), not C | The model objects are now C++ (name mangling); a C test linking a C++ `fesom_calendar.o` would mismatch |
 | D10 | First GPU climate target (M3) runs **GM-off** (`FESOM_NO_GMREDI=1`) | Reuses the C port's byte-identity off-switch invariant; shrinks the validation surface before GM-on |
 | D11 | **Cast codemod ends the `-fpermissive` bridge** (`scripts/cast_alloc_voidstar.py`): declaration → `(T *)`; member/id assignment → `(decltype(lhs))`; subscript/deref LHS → `(std::remove_reference_t<decltype(lhs)>)`. Run keep-going to surface every straggler at once | Mechanical and **type-exact** — `decltype(lhs)` can never disagree with the LHS, so it can't introduce a wrong-type bug; a pointer cast changes no codegen → Serial stays bit-identical (proven, see L8). Supersedes D7 now that nvcc needs real casts (L1) |
+| D12 | **M1.2 mesh migration = `Field`-owns-storage + raw-ptr-is-non-owning-alias.** Add a `fesom::Field`/`IntField` member per persistent array; keep the legacy `real_t*`/`int*` member and re-point it at `field.h()` right after `field.alloc(label,n)`. Replace `calloc/malloc` with `.alloc` (count in **elements**, not bytes); do NOT `free()` the alias | The hot mesh arrays have 28–124 call sites each (`elem_nodes` 124, `nlevels_nod2D` 78). Rewriting them to a `View`/accessor at M1 is huge churn and risk for zero correctness gain (no device compute yet). A stable alias for set-once data keeps every `mesh->X[i*nl+lev]` and the `FESOM_NODE3D/ELEM3D` macros byte-identical → Serial stays bit-identical. The `View`/accessor flip is M5 (only the on-device hot fields, and as a rank change — see L6) |
+| D13 | **Replace `memset(m,0,sizeof(*m))` with `*m = fesom_mesh{};`** once the struct holds `Field` members | A `Field` wraps a `Kokkos::DualView` (refcounted, non-trivial). `memset` over it is UB (L13). Value-initialising a temporary and assigning it zeros every POD member **and** properly resets each DualView (assigning an empty DualView drops the old allocation's refcount → frees it). So in `fesom_mesh_free`, the `*m = fesom_mesh{}` *is* the release for every migrated Field — only the not-yet-migrated raw arrays still need explicit `free()` |
+| D14 | **np=2 pi run on `dist_2` (login-node, `vader` shmem) is the cheap gate for `scatter_mesh`.** Captured a pre-change np=2 snapshot oracle (`/scratch/a/a270088/pi_np2_ref_m12`); a correct scatter refactor must reproduce it byte-for-byte | The np=1 pi smoke does **not** call `scatter_mesh` (single rank → identity), so it can't catch a bug in the MPI mesh redistribution that Wave 2 edits. The global gathered snapshot is rank-count-deterministic, so np2-after == np2-before is a zero-tolerance gate for the data shuffle, runnable in seconds without a compute node |
 
 ## B. Lessons (what bit us / what worked)
 
@@ -104,6 +107,30 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
   (`sync_* / modify_*`). When STL/standard-library errors appear in a TU you didn't change
   structurally, suspect a comment/macro lexing problem first, and compile the TU alone to see the
   *first* diagnostic (the real one).
+
+- **L13 — `memset(struct,0,sizeof)` is undefined behaviour once the struct holds a `Field`
+  (DualView) member.** `fesom_mesh_init`/`_free` used `memset(m,0,sizeof(*m))`; a DualView is a
+  non-trivial type (refcounted handle), so memset corrupts its internal state and skips the
+  refcount bookkeeping (→ leak or, on re-alloc over a memset-zeroed handle, mismatched frees). Fix
+  = `*m = fesom_mesh{};` (D13): well-defined, zeros the PODs, and assigns an empty DualView to each
+  Field (releasing any prior allocation). Watch for this in **every** struct that gains a `Field` —
+  `memset`/`calloc`/`memcpy` of a now-non-POD aggregate is the trap. (The struct must also be
+  constructed, not `malloc`'d: `fesom_mesh mesh;` default-constructs the Fields — verified the only
+  instance in `fesom_main.cpp` is a stack object, and nothing `malloc`s/`memcpy`s the struct.)
+- **L14 — host writes through the raw alias bypass the DualView modify-flags, so `sync_device()`
+  alone is a silent no-op.** After `field.alloc()`, legacy host code fills the array via the raw
+  pointer (`m->area[i]=…`), which the DualView cannot see. `DualView::sync_device()` only deep-copies
+  when the host-modified flag is set, so without a preceding `modify_host()` the device copy stays at
+  the alloc-time zeros — a latent stale-device bug that would first bite an M2 device kernel, not the
+  M1 gate (no device reads yet). **Rule: after a legacy host kernel writes a `Field` via `.h()`, call
+  `modify_host()` before `sync_device()`.** The M1.2 set-once geometry does this once at the end of
+  `compute_metrics` (`mesh_sync_geometry_device`: `modify_host(); sync_device();` per field). On
+  Serial/OpenMP host==device so it's a no-op; on CUDA it is the only (bitwise-exact) device op at M1.
+- **L15 — a missing output directory surfaces as a NetCDF "Permission denied", not "No such file".**
+  The pi-smoke recipe runs `fesom_port … /tmp/pi_check …`; if `/tmp/pi_check` doesn't exist (fresh
+  login, ephemeral `/tmp`), the model gets through every setup/sanity line and only dies at the first
+  snapshot write with `NetCDF error: Permission denied` (`fesom_io.cpp:394`) — a misleading errno for
+  a missing dir. **Recipe fix: `mkdir -p <out_dir>` before the run** (now folded into the gate).
 
 ## C. Process lessons
 

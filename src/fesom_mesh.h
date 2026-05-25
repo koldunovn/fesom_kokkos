@@ -2,6 +2,7 @@
 #define FESOM_MESH_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M1.2: DualView-backed storage for the persistent mesh arrays
 
 /*
  * Mirror of the Fortran t_mesh subset used in Phase 1. Naming follows
@@ -116,6 +117,31 @@ typedef struct fesom_mesh {
        which moved the alloc into ice_init for namelist-timing reasons).
        Read by ice EVP. NULL until fesom_ice_init runs. */
     real_t *bc_index_nod2D;   /* [myDim+eDim] */
+
+    /* ===================== M1.2 · DualView data layer =========================
+     * Each persistent array above is OWNED by the matching fesom::Field/IntField
+     * below; the raw pointer is a NON-OWNING alias re-pointed at field.h() right
+     * after alloc (stable, since this is set-once mesh data). The Field is the
+     * storage owner — released in fesom_mesh_free via `*m = fesom_mesh{}` (which
+     * resets every DualView via Kokkos refcounting). Do NOT free() the raw alias.
+     * LayoutRight + host mirror == the C flat layout, so legacy mesh->X[...] and
+     * the FESOM_NODE3D/ELEM3D macros keep working unchanged; Serial stays
+     * bit-identical. sync_device() is a bitwise-exact deep_copy of double/int and
+     * no compute runs on device at M1, so all backends stay bit-identical.
+     *
+     * Wave 1 — set-once geometry (allocated in fesom_mesh_compute_metrics and its
+     * sub-functions) + time-evolving state (allocated in fesom_mesh_alloc_state).
+     * The scatter-touched arrays (coord_nod2D, elem_nodes, edges, …) and zbar/Z
+     * are migrated in Wave 2; bc_index_nod2D in Wave 3. */
+    fesom::IntField nod_in_elem2D_offsets_fld, nod_in_elem2D_fld;
+    fesom::IntField ulevels_fld, ulevels_nod2D_fld, nlevels_nod2D_min_fld, ulevels_nod2D_max_fld;
+    fesom::IntField edge_up_dn_tri_fld;
+    fesom::Field    elem_area_fld, area_fld, areasvol_fld;
+    fesom::Field    elem_cos_fld, metric_factor_fld, coriolis_fld, coriolis_node_fld;
+    fesom::Field    elem_center_x_fld, elem_center_y_fld;
+    fesom::Field    edge_dxdy_fld, edge_cross_dxdy_fld, gradient_sca_fld;
+    fesom::Field    mesh_resolution_fld, zbar_3d_n_fld;
+    fesom::Field    hnode_fld, hnode_new_fld, helem_fld, hbar_fld, hbar_old_fld;
 } fesom_mesh;
 
 void fesom_mesh_init(fesom_mesh *m);
