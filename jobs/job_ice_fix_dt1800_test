@@ -1,0 +1,45 @@
+#!/bin/bash
+#SBATCH --job-name=core2_2yr_dt1200
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=01:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/ice_fix_dt1800_test/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/ice_fix_dt1800_test/slurm.%j.err
+
+# 3-year CORE2 validation at dt=1200 (20 min) — the stable timestep
+# (dt=1800 hits the explicit-biharmonic CFL limit ~day 110; dt<=1740 is under it).
+# FULL sea ice (NO FESOM_NO_ICE_* flags), monthly-only output (default 17 vars).
+# Gregorian calendar: 1958(365)+1959(365)+1960(366 leap)=1096 days.
+# 1096*86400/1740 = 54422 steps; run 54500 to close the Dec-1960 monthly mean
+# (crosses into 1961, forcing present). Multi-year JRA55 rollover supported.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/ice_fix_dt1800_test
+mkdir -p "$OUT_DIR"
+export FESOM_DIAG_MICE=1
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 6500 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== reached step / final state ==="; tail -3 "$OUT_DIR/run.log"
+echo "=== m_ice trajectory (every 5000) + last 5 ==="
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | awk 'NR==1||NR%5000==0'; grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -5
+echo "=== monthly files written ==="; ls "$OUT_DIR"/*.fesom.{1958,1959,1960}.monthly.nc 2>/dev/null | wc -l
+echo "=== CG diverged (0=clean) ==="; grep -c "CG residual diverged" "$OUT_DIR/run.err"
+echo "=== FDBG_GLOBAL uv trajectory (blow-up watch) ==="
+grep "FDBG_GLOBAL" "$OUT_DIR/run.err" 2>/dev/null | tail -8
+echo "=== last step reached ==="; grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -2
+true

@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=swpene_1yr
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:50:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/eps_swpene_1yr/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/eps_swpene_1yr/slurm.%j.err
+# Validation of the shortwave-penetration port: C dt=1800, 1yr (1958), monthly out,
+# SW penetration ON (Sweeney chl, default). Compare T(z) profile vs Fortran-with-pene
+# (fortran_pp_2yr 1958): the warm-surface/cold-subsurface dipole should collapse.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/eps_swpene_1yr
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_DIAG_MICE=1
+# FESOM_CHL_SOURCE unset -> Sweeney (default); FESOM_CHL_FILE defaults to the pool path.
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 17600 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- chl loaded? ---"; grep -m3 '\[chl\]' "$OUT/run.err"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -2
+echo "--- uv every 4000 ---"; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%4==1'
+true

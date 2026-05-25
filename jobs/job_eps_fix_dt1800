@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=eps_dt1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/eps_fix_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/eps_fix_dt1800/slurm.%j.err
+
+# THE FIX TEST (2026-05-23): AB2 stabilization offset epsilon was mis-ported as
+# 1e-9; Fortran o_PARAM uses epsilon=0.1 ("AB2 offset", oce_modules.F90:92). With
+# ε=0.1 the AB2 of Coriolis+advection is ab=(-0.6,1.6) (stabilized) vs the C's
+# prior pure-AB2 (-0.5,1.5), which is marginally unstable for the Coriolis
+# oscillation at high f·dt -> the dt=1800 central-Arctic velocity-2Δx blow-up.
+# Run dt=1800 to step 11000 (~day 229) — PAST the old blow (5308) AND the
+# dt=1740 blow (7666); day 229 matches the stable Fortran+PP reference.
+# FESOM_DIAG_SPREAD watches velsprd at the old eruption node (should stay bounded
+# like Fortran's 0.006-0.039, not grow to 0.2 + erupt).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/eps_fix_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+
+export FESOM_DIAG_MICE=1
+export FESOM_DIAG_SPREAD=23926
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 11000 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "=== survived? last mice-mon ==="; grep '\[mice-mon\]' "$OUT/run.err" | tail -4
+echo "=== uv trajectory (every 1000) ==="; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log"
+echo "=== velsprd at 23926 (every 1000 + near old blow 5300) ==="
+grep '\[spread' "$OUT/run.err" | awk 'NR%1000==1' | tail -15
+true

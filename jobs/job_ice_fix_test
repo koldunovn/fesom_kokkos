@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=ice_fix_test
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=01:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/ice_fix_test/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/ice_fix_test/slurm.%j.err
+
+# A/B test of the ice_strength 0.5 restoration (fesom_ice_evp.c:309).
+# Same PHC IC + 864 ranks + dt=1200 + full ice as core2_864_2yr_dt1200, but
+# only ~97 days so the MARCH-1958 monthly mean closes. Compare Arctic ice
+# speed / ice-ocean speed ratio vs the buggy run's March 1958.
+# 97 days * 86400 / 1200 = 6984 steps; run 7100 to safely write March + start April.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/ice_fix_test
+mkdir -p "$OUT_DIR"
+export FESOM_DIAG_MICE=1
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt" 2>/dev/null
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 1200 7100 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== final state ==="; tail -3 "$OUT_DIR/run.log"
+echo "=== m_ice trajectory ==="; grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -5
+echo "=== monthly files ==="; ls "$OUT_DIR"/*.fesom.1958.monthly.nc 2>/dev/null | wc -l
+echo "=== CG diverged (0=clean) ==="; grep -c "CG residual diverged" "$OUT_DIR/run.err"

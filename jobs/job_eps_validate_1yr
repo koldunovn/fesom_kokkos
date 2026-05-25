@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=eps_val1yr
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:50:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/eps_val_1yr/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/eps_val_1yr/slurm.%j.err
+
+# Climate validation of the AB2 epsilon fix (BOTH momentum+tracer eps=0.1, matching
+# Fortran). dt=1800, 1 full year (1958, 17600 steps closes Dec monthly mean),
+# monthly output. Compare to Fortran+PP dt=1800 (/scratch/a/a270088/fortran_pp_dt1800,
+# also eps=0.1) with scripts/plot_validation_vsPP.py. The fix should match-or-improve
+# the climate since the C now matches Fortran's AB2 stabilization. NO diag env knobs.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/eps_val_1yr
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+
+export FESOM_DIAG_MICE=1
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 17600 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "=== survived the year? last mice-mon ==="; grep '\[mice-mon\]' "$OUT/run.err" | tail -3
+echo "=== uv every 1000 (bounded all year?) ==="; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | tail -20
+echo "=== monthly files ==="; ls -1 "$OUT"/*.nc 2>/dev/null | head
+true

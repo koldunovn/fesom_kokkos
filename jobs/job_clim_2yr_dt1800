@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=clim2yr_dt1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:50:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/clim_2yr_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/clim_2yr_dt1800/slurm.%j.err
+# DEFINITIVE climate validation at HEAD 6d65bd3 (first full run incl. cyclic-seam IC fix).
+# dt=1800, 2 yr (1958-1959), 864r, PP, linfs. snap_every=100000 -> ONLY the step-0 IC
+# snapshot (snap_000000.nc = interpolated IC) is written, plus the monthly streams.
+# FESOM_PRINT_EVERY=1000 keeps the per-step uv diagnostic + uv>5 guard at a sane cadence
+# (snap_every>0 would otherwise push print_every to 100000). Compare to fortran_pp_2yr.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/clim_2yr_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_DIAG_MICE=1
+export FESOM_PRINT_EVERY=1000
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 35200 100000 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -2
+echo "--- uv trajectory (every 4000) ---"; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%4==1'
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | head
+true

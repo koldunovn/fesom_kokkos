@@ -1,0 +1,32 @@
+# Build trees (one per backend)
+build/
+build-serial/
+build-omp/
+build-cuda/
+build-hip/
+
+# Object files / libs / binaries
+*.o
+*.a
+*.so
+*.mod
+compile_commands.json
+
+# Run outputs / scratch
+runs/
+*.nc
+slurm-*.out
+*.log
+*.err
+
+# Editor / OS
+*.swp
+.DS_Store
+.cache/
+
+# Kokkos submodule build artifacts (the source tree itself is tracked via the submodule)
+externals/kokkos/build/
+
+# Python
+__pycache__/
+*.pyc

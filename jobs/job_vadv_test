@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=vadv_test
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:45:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/vadv_test/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/vadv_test/slurm.%j.err
+
+# Post-biharmonic-exoneration (2026-05-23): the day-111 dt=1800 blow is NOT the
+# biharmonic operator (exp#1 bit-identical) and NOT a March Arctic velocity excess
+# (exp#2 C/F=0.94). The C run.log shows w (vertical vel) ramps 0.013->0.049 over
+# steps 3000->5000 (BEFORE uv runs away) while pgf stays flat => the SPRING-
+# CONVECTION VERTICAL PATH (explicit w·du/dz, vertical CFL>1) is the prime suspect.
+# Run A: baseline + extended spread probe (does w-spread/wmax LEAD velsprd?).
+# Run B: FESOM_NO_VADV (zero explicit vertical momentum advection) — if dt=1800
+#        now runs PAST the day-155 mark (step ~7400) clean, the vertical path is
+#        the seed. (Don't declare fixed from a run that stops at the old blow.)
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+( cd "$REPO" && git rev-parse HEAD ) 2>/dev/null
+
+OUT_A=/work/ab0995/a270088/port/vadv_test/baseline
+OUT_B=/work/ab0995/a270088/port/vadv_test/no_vadv
+mkdir -p "$OUT_A" "$OUT_B"
+
+echo "===================== RUN A: baseline + spread probe (to 5400) ====================="
+export FESOM_DIAG_MICE=1
+export FESOM_DIAG_SPREAD=23926
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT_A" 1800 5400 -1 "$PHC" 1958 \
+     > "$OUT_A/run.log" 2> "$OUT_A/run.err"
+echo "A exit: $?"
+echo "--- A: last mice-mon ---"; grep '\[mice-mon\]' "$OUT_A/run.err" | tail -4
+echo "--- A: spread at 23926 every ~400 steps ---"
+grep '\[spread' "$OUT_A/run.err" | awk 'NR%400==1 || NR>5250' | tail -20
+
+echo "===================== RUN B: FESOM_NO_VADV (to 8000) ====================="
+export FESOM_NO_VADV=1
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT_B" 1800 8000 -1 "$PHC" 1958 \
+     > "$OUT_B/run.log" 2> "$OUT_B/run.err"
+echo "B exit: $?"
+echo "--- B: last mice-mon (did it survive past 5308 / 7666?) ---"; grep '\[mice-mon\]' "$OUT_B/run.err" | tail -4
+echo "--- B: run.log uv trajectory ---"; grep -E "^ *0: *[0-9]" "$OUT_B/run.log" | tail -10
+true

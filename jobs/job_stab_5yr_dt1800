@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=stab5yr_dt1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=02:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/stab_5yr_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/stab_5yr_dt1800/slurm.%j.err
+# Multi-year stability at HEAD 6d65bd3, dt=1800, 5 yr (1958-1962), 864r, PP, linfs.
+# Goal: survive PAST year ~4.9 where the prior dt=1200 5-yr run tripped the uv>5 guard
+# (project_5yr_milestone, step 128000 ~ year 4.87). 87600 steps = 5 calendar yr (day 1825).
+# monthly-only; FESOM_PRINT_EVERY=1000 -> uv diagnostic + uv>5 guard (fesom_main.c:1139)
+# logged every ~20.8 model-days so we can watch uv_max approach 5.0.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/stab_5yr_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_DIAG_MICE=1
+export FESOM_PRINT_EVERY=1000
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 87600 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -3
+echo "--- BLOWUP? ---"; grep -i blowup "$OUT/run.err" | tail -3
+echo "--- uv trajectory (every 8000) ---"; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%8==1'
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+true

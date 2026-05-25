@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=eps_2yr_d1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=01:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/eps_2yr_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/eps_2yr_dt1800/slurm.%j.err
+
+# 2-YEAR dt=1800 confirmation of the AB2 epsilon fix (both eps=0.1 fixes in).
+# 1958+1959 = 730 days @ 48 steps/day = 35040 steps; run 35100 to close the
+# Dec-1959 monthly mean (crosses into 1960, forcing present). Cold start 1958.
+# This is the real durability test (prior dt=1800 blew at day 110; the 1-yr run
+# was clean — confirm 2 full years incl. the 1958->1959 forcing rollover).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/eps_2yr_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+
+export FESOM_DIAG_MICE=1
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 35100 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "=== reached 35040 (2 full years)? last mice-mon ==="; grep '\[mice-mon\]' "$OUT/run.err" | tail -3
+echo "=== uv every 2000 (bounded both years?) ==="; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%2==1'
+echo "=== monthly files (expect 1958 + 1959) ==="; ls -1 "$OUT"/sst.fesom.*.nc 2>/dev/null
+true

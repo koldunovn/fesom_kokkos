@@ -1,0 +1,51 @@
+#!/bin/bash
+#SBATCH --job-name=bidiff_probe
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/bidiff_probe/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/bidiff_probe/slurm.%j.err
+
+# EXP #1 (DT1800_HANDOFF §4.1): standalone bidiff diff at identical prescribed
+# state. Both C and Fortran prescribe element velocity from the SAME gid/level/
+# component integer hash, zero uv_rhs, run ONE visc_filt_bidiff, and dump the
+# owned-element surface uv_rhs by global elem id. Identical output on identical
+# input => the biharmonic operator is faithful (dt=1800 bug is upstream); a
+# difference IS the operator bug. np=8 (dist_8); gid-consistent halos make the
+# U_c exchange a no-op so owned output equals the serial result.
+
+PROBE=/work/ab0995/a270088/port/bidiff_probe
+mkdir -p "$PROBE"
+rm -f "$PROBE"/bidiff_c_r*.txt "$PROBE"/bidiff_f_r*.txt
+export FESOM_BIDIFF_PROBE="$PROBE"
+ulimit -s 204800
+
+echo "===================== C probe ====================="
+(
+  source /sw/etc/profile.levante
+  source /home/a/a270088/port2/fesom2_port/env.sh
+  srun -l --ntasks=8 /home/a/a270088/port2/fesom2_port/build/fesom_port \
+      /pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2 \
+      "$PROBE" 1800 1 -1 \
+      /home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc 1958
+  echo "C exit: $?"
+)
+
+echo "===================== Fortran probe ====================="
+(
+  source /sw/etc/profile.levante
+  read -r USED_SHELL < /home/a/a270088/port2/fesom2/bin/current_shell_path
+  source "$USED_SHELL"
+  cd /home/a/a270088/port2/fesom2/work_bidiff_probe
+  srun -l --ntasks=8 ./fesom.x > fesom2.0.out 2>&1
+  echo "F exit: $?"
+  echo "--- tail fesom2.0.out ---"
+  tail -25 fesom2.0.out
+)
+
+echo "===================== probe dumps ====================="
+ls -la "$PROBE"/bidiff_c_r*.txt "$PROBE"/bidiff_f_r*.txt 2>&1
+wc -l "$PROBE"/bidiff_c_r*.txt "$PROBE"/bidiff_f_r*.txt 2>&1 | tail -3
+true
