@@ -20,16 +20,35 @@ The C sources here were imported verbatim as the starting point and must stay
 - **Skipped** (run artifacts, regenerable): `build/`, `runs/`, and the validation/plot output
   dirs under `docs/` (`validation_*`, `compare_plots*`, `drift_*`, `kpp_5yr_figures/`).
 
-## Golden reference (M0.1 — to be captured)
+## Golden reference (M0.1)
 
 The unmodified C binary's output is the **golden reference** for the M0 bit-identity gate
-(`diff_snap.py` must read `0.0` for the C++/Kokkos Serial build). Capture two smoke runs:
+(`diff_snap.py` must read `0.0` for the C++/Kokkos Serial build).
 
-1. **Pi mesh, short run** — fast, single-rank sanity.
-2. **CORE2, 16-rank, ~50 steps** — exercises MPI + the real config.
+### Captured 2026-05-25 — pi mesh, single-rank, analytical forcing
 
-Store the resulting `snap_*.nc` under `docs/reference/c_baseline_snapshots/` and record the
-exact invocation (mesh, dt, nsteps, snap_every, PHC, jra55_year) here once run on a compute node.
+- **Built**: `bash -l configure.sh` (Release) → `build/fesom_port` — clean, exit 0.
+- **Invocation** (login node, singleton MPI):
+  ```bash
+  source ./env.sh
+  # login-node MPI: no UCX/IB → use ob1 + shared-mem/self (see below)
+  export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader
+  unset OMPI_MCA_osc OMPI_MCA_coll OMPI_MCA_coll_hcoll_enable HCOLL_ENABLE_MCAST_ALL \
+        HCOLL_MAIN_IB UCX_NET_DEVICES UCX_TLS UCX_IB_ADDR_TYPE UCX_UNIFIED_MODE
+  ./build/fesom_port /home/a/a270088/port2/fesom2/test/meshes/pi \
+      docs/reference/c_baseline_snapshots/pi  100 20 10
+  #   mesh                                       dt nsteps snap_every  (no PHC, no JRA → analytical)
+  ```
+- **Result**: 20 steps, exit 0, physical (T[10,15] S[35], CG 2 iters); `snap_000000/010/020.nc`
+  + monthly streams in `docs/reference/c_baseline_snapshots/pi/`.
+- **Gate harness validated**: `python3 scripts/diff_snap.py <golden> <golden>` →
+  "ALL FIELDS BIT-IDENTICAL", exit 0.
 
-> Note: building/running the C reference needs the Levante build env (`source env.sh`) and,
-> for CORE2, a compute-node SLURM job — done as part of completing M0.1/M0.5, not on the login node.
+> The `*.nc` are gitignored (regenerable reference data, not source) — this recipe is the
+> source of truth. The **login-node MPI override** above is required because UCX/IB transports
+> aren't available off the compute nodes.
+
+### Still to capture (when needed, on a compute node)
+
+- **CORE2, 16-rank, ~50 steps** (real MPI + production config) — a SLURM job, not login-node.
+  Not required for the M0 Serial bit-identity gate (pi suffices); capture before the M3 climate work.

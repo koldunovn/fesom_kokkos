@@ -120,14 +120,17 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - Create: `.gitignore` (build/, *.o, runs/)
 - Create: `docs/reference/c_baseline_snapshots/` (saved golden outputs)
 
-- [ ] `git init` in `/home/a/a270088/port_kokkos`; copy the C port tree in (sources, tests,
-      scripts, docs/plans/completed, env.sh, configure.sh, job_* templates, README)
-- [ ] commit "import validated C port baseline" (records the exact C starting point)
-- [ ] build the **unmodified C** binary (C99) and run two smoke refs: (a) pi mesh short run,
-      (b) CORE2 16-rank ~50-step run — save snapshots as the **golden reference** for `diff_snap.py`
-- [ ] record the C reference git SHA of `port2/fesom2_port` (HEAD) in `docs/reference/PROVENANCE.md`
-- [ ] write `docs/reference/PROVENANCE.md` documenting reference run cmds + checksums (this is the "test" for this task)
-- [ ] `diff_snap.py` sanity: golden-vs-golden == 0 (harness works) — must pass before M0.2
+- [x] `git init` in `/home/a/a270088/port_kokkos`; copy the C port tree in (sources, tests,
+      scripts, docs/plans/completed, env.sh, configure.sh, jobs/ templates, README) — jobs moved
+      to `jobs/`; plot/run artifacts excluded
+- [x] commit "import validated C port baseline" (`4778655`) + the plan (`8ecdfc7`)
+- [x] build the **unmodified C** binary (C99) — clean, exit 0, `build/fesom_port`; ran the **pi
+      smoke** golden ref (20 steps, analytical forcing) → `docs/reference/c_baseline_snapshots/pi/`
+- [x] record the C reference git SHA (`75de623`) in `docs/reference/C_PORT_SOURCE_SHA.txt` + PROVENANCE.md
+- [x] write `docs/reference/PROVENANCE.md` (reference cmds + the login-node MPI override)
+- [x] `diff_snap.py` sanity: golden-vs-golden → "ALL FIELDS BIT-IDENTICAL", exit 0 (harness works)
+- ➕ [ ] (deferred) CORE2 16-rank ~50-step golden ref — needs a compute-node SLURM job; capture
+      before M3, not required for the M0 Serial gate
 
 ### Task M0.2: Vendor Kokkos 4.4.1 as a submodule, built in-tree (ICON's approach)
 
