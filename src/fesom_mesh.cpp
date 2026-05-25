@@ -30,12 +30,10 @@ void fesom_mesh_init(fesom_mesh *m)
 
 void fesom_mesh_free(fesom_mesh *m)
 {
-    // Every persistent mesh array is now OWNED by a fesom::Field/IntField (Waves 1+2); the raw
+    // Every persistent mesh array is now OWNED by a fesom::Field/IntField (Waves 1-3); the raw
     // pointer is a non-owning alias, so it must NOT be free()d here — the `*m = fesom_mesh{}`
-    // below resets every DualView (Kokkos refcounting releases the storage). The lone exception
-    // is bc_index_nod2D, still raw (xcalloc'd in fesom_ice.cpp) until Wave 3.
-    free(m->bc_index_nod2D);
-    *m = fesom_mesh{};   // release all Field storage + zero the POD members
+    // below releases every DualView (Kokkos refcounting drops each allocation) and zeros the PODs.
+    *m = fesom_mesh{};
 }
 
 void fesom_mesh_alloc_state(fesom_mesh *m)

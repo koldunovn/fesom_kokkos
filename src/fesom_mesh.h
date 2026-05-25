@@ -151,6 +151,10 @@ typedef struct fesom_mesh {
     fesom::Field    coord_nod2D_fld, geo_coord_nod2D_fld, depth_fld, zbar_fld, Z_fld;
     fesom::IntField coast_flag_fld, nlevels_nod2D_fld, elem_nodes_fld, nlevels_fld;
     fesom::IntField edges_fld, edge_tri_fld;
+
+    /* Wave 3 — boundary mask, allocated + populated by fesom_ice_init (not compute_metrics),
+     * so it is NOT covered by mesh_sync_geometry_device; its device sync is M4 (sea ice). */
+    fesom::Field    bc_index_nod2D_fld;
 } fesom_mesh;
 
 void fesom_mesh_init(fesom_mesh *m);

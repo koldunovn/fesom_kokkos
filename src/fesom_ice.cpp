@@ -197,7 +197,10 @@ void fesom_ice_init(fesom_ice           *ice,
      * Both schemes produce the same set of boundary endpoints.
      */
     if (mesh->bc_index_nod2D == NULL) {
-        mesh->bc_index_nod2D = xcalloc(n);
+        // M1.2 Wave 3: Field-owned (released by fesom_mesh_free's *m = fesom_mesh{}); raw alias.
+        // .alloc zero-inits like xcalloc; the loop below then sets the interior mask to 1.0.
+        mesh->bc_index_nod2D_fld.alloc("bc_index_nod2D", n);
+        mesh->bc_index_nod2D = mesh->bc_index_nod2D_fld.h();
         for (size_t i = 0; i < n; ++i) mesh->bc_index_nod2D[i] = 1.0;
         for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
             if (mesh->edge_tri[ed * 2 + 1] >= 0) continue;   /* interior edge */

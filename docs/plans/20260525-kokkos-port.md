@@ -272,11 +272,22 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
 - Modify: `src/fesom_mesh.h` (members → `Field`; raw-ptr accessors alias `.h()`),
   `src/fesom_mesh.cpp` (alloc/read/free), all call sites that take the raw pointers
 
-- [ ] convert read-mostly mesh arrays (`area`, `areasvol`, `elem_area`, `gradient_sca`,
-      `coriolis`, `edge_*`, `nlevels*`, `Z`, `zbar`, `hnode*`, `helem`, …) to `Field`/`int`-`Field`
-- [ ] keep every legacy access compiling via the raw-ptr alias (`mesh->area` still valid)
-- [ ] `sync_device()` the mesh once after `compute_metrics` (set-once data)
-- [ ] verify Serial smoke == golden (bit-identical) and `ctest` green — before M1.3
+- [x] convert **all 28** persistent mesh arrays to `Field`/`IntField` (done in 3 waves):
+      Wave 1 = set-once geometry (`compute_metrics`: area/areasvol/elem_area/gradient_sca/coriolis(_node)/
+      metric_factor/elem_cos/elem_center_*/edge_dxdy/edge_cross_dxdy/mesh_resolution/zbar_3d_n/
+      nod_in_elem2D(_offsets)/ulevels(_nod2D)(_max)/nlevels_nod2D_min/edge_up_dn_tri) + state
+      (`alloc_state`: hnode/hnode_new/helem/hbar/hbar_old). Wave 2 = scatter-touched
+      (coord_nod2D/geo_coord_nod2D/coast_flag/depth/nlevels_nod2D/elem_nodes/nlevels/edges/edge_tri +
+      zbar/Z). Wave 3 = bc_index_nod2D (alloc'd in `fesom_ice.cpp`).
+- [x] keep every legacy access compiling via the raw-ptr alias (`mesh->area` still valid) — 0 call
+      sites changed; raw ptr re-pointed at `field.h()` after each (re)alloc (incl. the scatter
+      free+realloc cycle, L16). `memset(m,0,sizeof)` → `*m = fesom_mesh{}` (D13/L13).
+- [x] `sync_device()` the mesh once after `compute_metrics` (`mesh_sync_geometry_device`:
+      `modify_host()` then `sync_device()` per field — L14; bc_index sync deferred to M4/ice)
+- [x] verify Serial smoke == golden (bit-identical) and `ctest` green — **DONE**: Serial np=1 +
+      np=2(dist_2 vs captured oracle, D14) ALL FIELDS BIT-IDENTICAL, ctest 4/4; OpenMP np=1
+      bit-identical; **CUDA np=1 (A100) bit-identical** (M1 invariant: device does only deep_copy).
+      Commits 5f5cb04 (W1), 0229fff (W2), the W3 commit at HEAD; build-green fix 01edc20 (L17). → M1.3
 
 ### Task M1.3: Migrate `fesom_dyn`, `fesom_aux`, `fesom_tracers` to `Field`
 
