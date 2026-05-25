@@ -28,6 +28,8 @@
 #include "fesom_tracers.h"
 #include "fesom_types.h"
 
+#include <Kokkos_Core.hpp>   /* M0: linked but no kernels yet — see docs/plans/20260525-kokkos-port.md */
+
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -258,6 +260,12 @@ int main(int argc, char **argv)
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, mesh_dir, argc, argv);
+
+    /* Kokkos after MPI_Init (lets it pick a device per local rank later). M0: no
+     * compute runs on a Kokkos backend yet, so the result is identical to the C build. */
+    Kokkos::initialize(argc, argv);
+    if (mpi.mype == 0)
+        printf("[fesom_port] Kokkos backend: %s\n", Kokkos::DefaultExecutionSpace::name());
 
     fesom_mesh mesh;
     fesom_mesh_init(&mesh);
@@ -594,6 +602,8 @@ int main(int argc, char **argv)
      * the timestep machinery + halo exchanges, the resulting state is
      * inconsistent and the next sanity test sees garbage. */
     if (!do_sanity) goto skip_rest_state;
+    {   /* C++: scope the rest-state sanity locals (iters_rest) so the goto above
+         * doesn't cross their initialization (legal: scope opens+closes before the label). */
 
     fesom_compute_vel_rhs(&mesh, &aux, &dyn, /* is_first_step = */ 1, &mpi);
     fesom_impl_vert_visc(&mesh, &aux, &forcing, &dyn);
@@ -669,6 +679,7 @@ int main(int argc, char **argv)
                (double)kv_min, (double)kv_max, (double)av_min, (double)av_max,
                kv_off_bg, av_off_bg);
     }
+    }   /* end rest-state sanity block */
 
 skip_rest_state:
     /* tra_sc allocation runs unconditionally — needed by timestep loop. */
@@ -826,15 +837,18 @@ skip_rest_state:
 
     /* Phase 1 step 12 / Phase 2 driver loop. */
     {
-        fesom_step_ctx ctx = { .stiff = &stiff,
-                               .solver = &solver,
-                               .tra_sc = &tra_sc,
-                               .partit = &mpi,
-                               .ice    = &ice,
-                               .gm     = &gm,
-                               .kpp    = &kpp,
-                               .jra    = use_jra ? &jra : NULL,
-                               .sr     = use_sr  ? &sr  : NULL };
+        /* zero-init then assign (order-independent; C++ rejects the C out-of-order
+         * designated initializer this replaced — see plan §M0.4). */
+        fesom_step_ctx ctx = {};
+        ctx.stiff  = &stiff;
+        ctx.solver = &solver;
+        ctx.tra_sc = &tra_sc;
+        ctx.partit = &mpi;
+        ctx.ice    = &ice;
+        ctx.gm     = &gm;
+        ctx.kpp    = &kpp;
+        ctx.jra    = use_jra ? &jra : NULL;
+        ctx.sr     = use_sr  ? &sr  : NULL;
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
         /* snap_every semantics:
          *   > 0  → snapshot every N steps
@@ -1185,6 +1199,7 @@ skip_rest_state:
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);
     fesom_mesh_free(&mesh);
+    Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;
 }

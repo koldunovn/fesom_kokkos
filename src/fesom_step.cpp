@@ -3,6 +3,7 @@
  * For Phase 4 (MPI) every kernel that writes a field other ranks read is
  * followed by a halo exchange. Cheat sheet documented inline.
  */
+#include <cmath>   /* sqrt used in the FESOM_DIAG_SPREAD block */
 #include "fesom_step.h"
 #include "fesom_ale.h"
 #include "fesom_aux.h"

@@ -1,16 +1,21 @@
 cmake_minimum_required(VERSION 3.18)
-project(fesom2_port C)
+project(fesom_kokkos CXX)
 
-set(CMAKE_C_STANDARD 99)
-set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)   # gnu++17 — eases compiling the C sources as C++ (M0 bridge)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Phase 4: MPI is a hard dependency.
-find_package(MPI REQUIRED COMPONENTS C)
+if(NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
-# Detect netCDF via nc-config. On Levante: `module load netcdf-c/4.8.1-gcc-11.2.0`
-# puts the right nc-config first in PATH.
+# --- Kokkos (vendored submodule, built in-tree; backend via -DKokkos_ENABLE_*) -------------
+add_subdirectory(externals/kokkos ${CMAKE_BINARY_DIR}/kokkos)
+
+# --- MPI + netCDF (host serial I/O — FESOM gathers to rank 0) -------------------------------
+find_package(MPI REQUIRED COMPONENTS CXX)
+
 find_program(NC_CONFIG nc-config)
 if(NOT NC_CONFIG)
   message(FATAL_ERROR "nc-config not found. On Levante: module load netcdf-c/4.8.1-gcc-11.2.0")
@@ -23,96 +28,63 @@ separate_arguments(NC_LIBS UNIX_COMMAND "${NC_LIBS_RAW}")
 execute_process(COMMAND ${NC_CONFIG} --libdir
                 OUTPUT_VARIABLE NC_LIBDIR OUTPUT_STRIP_TRAILING_WHITESPACE)
 message(STATUS "netCDF include: ${NC_INCDIR}")
-message(STATUS "netCDF libdir:  ${NC_LIBDIR}")
 message(STATUS "netCDF link:    ${NC_LIBS}")
-# Embed the netCDF lib path into the binary so it runs without `module load`.
 set(CMAKE_INSTALL_RPATH "${NC_LIBDIR}")
 set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
-endif()
-
-# Warnings tight, frame pointer kept for profiling.
+# --- Compile flags --------------------------------------------------------------------------
+# Release matches the captured C golden reference (-O3, default fma contraction) so the
+# Serial build can be bit-identical (M0.5). NOTE: do NOT add -ffp-contract=off here without
+# re-capturing the golden at the same setting (see the plan §M0.3 / Technical Details).
+#
+# -fpermissive: temporary M0 bridge — downgrades C void*->T* (303 alloc sites) to a warning
+# without changing codegen. Removed per-file as files are C++-ified in M2. (See plan §M0.4.)
 add_compile_options(
-  -Wall -Wextra -Wshadow -Wstrict-prototypes -Wmissing-prototypes
-  -Wno-unused-parameter
+  $<$<COMPILE_LANGUAGE:CXX>:-fpermissive>
+  -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
   -fno-omit-frame-pointer
-)
-add_compile_options(
   "$<$<CONFIG:Debug>:-O0>"  "$<$<CONFIG:Debug>:-g3>"
   "$<$<CONFIG:Release>:-O3>" "$<$<CONFIG:Release>:-g>"
 )
 
-add_executable(fesom_port
-  src/fesom_main.c
-  src/fesom_mesh.c
-  src/fesom_mpi.c
-  src/fesom_dyn.c
-  src/fesom_tracers.c
-  src/fesom_aux.c
-  src/fesom_forcing.c
-  src/fesom_ic.c
-  src/fesom_eos.c
-  src/fesom_ale.c
-  src/fesom_ssh.c
-  src/fesom_momentum.c
-  src/fesom_tracer_adv.c
-  src/fesom_pp.c
-  src/fesom_step.c
-  src/fesom_forcing_analytical.c
-  src/fesom_io.c
-  src/fesom_constants.c
-  src/fesom_phc.c
-  src/fesom_jra55.c
-  src/fesom_bulk.c
-  src/fesom_tracer_diff.c
-  src/fesom_sss_runoff.c
-  src/fesom_partit.c
-  src/fesom_halo.c
-  src/fesom_ice.c
-  src/fesom_ice_thermo.c
-  src/fesom_ice_coupling.c
-  src/fesom_ice_evp.c
-  src/fesom_ice_fct.c
-  src/fesom_gm.c
-  src/fesom_kpp.c
-  src/fesom_calendar.c
-  src/fesom_io_stream.c
-  src/fesom_io_stream_dispatch.c
-  src/fesom_io_config.c
+# --- Model executable -----------------------------------------------------------------------
+set(FESOM_SRC
+  src/fesom_main.cpp        src/fesom_mesh.cpp        src/fesom_mpi.cpp
+  src/fesom_dyn.cpp         src/fesom_tracers.cpp     src/fesom_aux.cpp
+  src/fesom_forcing.cpp     src/fesom_ic.cpp          src/fesom_eos.cpp
+  src/fesom_ale.cpp         src/fesom_ssh.cpp         src/fesom_momentum.cpp
+  src/fesom_tracer_adv.cpp  src/fesom_pp.cpp          src/fesom_step.cpp
+  src/fesom_forcing_analytical.cpp                    src/fesom_io.cpp
+  src/fesom_constants.cpp   src/fesom_phc.cpp         src/fesom_jra55.cpp
+  src/fesom_bulk.cpp        src/fesom_tracer_diff.cpp src/fesom_sss_runoff.cpp
+  src/fesom_partit.cpp      src/fesom_halo.cpp        src/fesom_ice.cpp
+  src/fesom_ice_thermo.cpp  src/fesom_ice_coupling.cpp src/fesom_ice_evp.cpp
+  src/fesom_ice_fct.cpp     src/fesom_gm.cpp          src/fesom_kpp.cpp
+  src/fesom_calendar.cpp    src/fesom_io_stream.cpp   src/fesom_io_stream_dispatch.cpp
+  src/fesom_io_config.cpp
 )
+add_executable(fesom_port ${FESOM_SRC})
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
-target_link_libraries(fesom_port PRIVATE m ${NC_LIBS} MPI::MPI_C)
+target_link_libraries(fesom_port PRIVATE Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CXX)
 
-# --- Tests --------------------------------------------------------------
-# Calendar is pure logic — no MPI, no netCDF — so test_calendar links only
-# fesom_calendar.c and the math library. CTest invocation: `ctest -V`.
+# --- Tests (compiled as C++ to match the now-C++ model objects' linkage) --------------------
 enable_testing()
-add_executable(test_calendar
-  tests/test_calendar.c
-  src/fesom_calendar.c
-)
+
+add_executable(test_calendar tests/test_calendar.c src/fesom_calendar.cpp)
+set_source_files_properties(tests/test_calendar.c PROPERTIES LANGUAGE CXX)
 target_include_directories(test_calendar PRIVATE src)
 target_link_libraries(test_calendar PRIVATE m)
 add_test(NAME calendar COMMAND test_calendar)
 
-# Stream dispatcher unit test: no netCDF, no fesom_io.c, just MPI for
-# the FESOM_DIE → MPI_Abort symbol on the never-taken error path.
-add_executable(test_io_stream_unit
-  tests/test_io_stream_unit.c
-  src/fesom_io_stream_dispatch.c
-)
+add_executable(test_io_stream_unit tests/test_io_stream_unit.c src/fesom_io_stream_dispatch.cpp)
+set_source_files_properties(tests/test_io_stream_unit.c PROPERTIES LANGUAGE CXX)
 target_include_directories(test_io_stream_unit PRIVATE src)
-target_link_libraries(test_io_stream_unit PRIVATE m MPI::MPI_C)
+target_link_libraries(test_io_stream_unit PRIVATE m MPI::MPI_CXX)
 add_test(NAME io_stream_unit COMMAND test_io_stream_unit)
 
-# Config-file parser test: pure C, no MPI/netCDF.
-add_executable(test_io_config
-  tests/test_io_config.c
-  src/fesom_io_config.c
-)
+add_executable(test_io_config tests/test_io_config.c src/fesom_io_config.cpp)
+set_source_files_properties(tests/test_io_config.c PROPERTIES LANGUAGE CXX)
 target_include_directories(test_io_config PRIVATE src)
 target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(test_io_config PRIVATE m)

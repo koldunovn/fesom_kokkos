@@ -159,29 +159,38 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - Create: `scripts/check_kokkos_purity.sh` (grep gate)
 - Create: `cmake/CompilerFlags.cmake` (`-ffp-contract=off` knob for host bit-identity diffs)
 
-- [ ] CMake: switch language to CXX, add CUDA; backend selected by `-DFESOM_BACKEND=Serial|OpenMP|Cuda`
-- [ ] `git mv` all `src/*.c` → `.cpp`; update the source list; keep `tests/*.c` as C (ctest)
-- [ ] add `scripts/check_kokkos_purity.sh`: fail if `cudaMalloc|cudaMemcpy|__device__|__CUDA_ARCH__|<cuda_runtime.h>`
-      appears in `src/` (allowlist: none); wire as a CMake/CTest target
-- [ ] add `-ffp-contract=off` to host builds so Serial-vs-C fma rounding matches (document the flag)
-- [ ] verify: `cmake` configures for all 3 backends; purity check passes (no kernels yet) — before M0.4
+- [x] CMake → `project(... CXX)`, `add_subdirectory(externals/kokkos)`, backend via
+      `-DKokkos_ENABLE_{SERIAL,OPENMP,CUDA}`; link `Kokkos::kokkos` + `MPI::MPI_CXX` + netcdf
+- [x] `git mv` all 36 `src/*.c` → `.cpp`; **tests compiled as C++** (`LANGUAGE CXX`) — deviation
+      from "keep tests as C" so linkage matches the now-C++ model objects (single compiler)
+- [x] `scripts/check_kokkos_purity.sh` (greps cuda*/hip*/`__device__` etc.) — **passes** (no kernels)
+- ➕ [ ] `-ffp-contract=off` **deferred to M2**: the captured golden was built fma=fast, so the
+      C++ build matches it at default `-O3` (fma=fast). Adopt `-ffp-contract=off` + re-baseline the
+      golden when the first kernel lands (it's the kernel-gate determinism knob, not needed at M0)
+- [x] `cmake` configures + builds on Serial **and** OpenMP; purity passes — M0.3 done (CUDA below)
 
 ### Task M0.4: Make the code compile as C++ (mechanical)
 
 **Files:**
-- Modify: all `src/*.cpp` (malloc casts), `src/fesom_main.cpp` (designated init)
-- Create: `scripts/add_malloc_casts.py` *(optional — a sed + compiler-error loop may be faster
-  for a one-shot codemod; don't gold-plate it)*
+- Modify: CMake compile flags (`-fpermissive` on the C++ flip), `src/fesom_main.cpp`
+  (designated init), `src/fesom_step.cpp` (+`<cmath>`), others as the compiler flags them
 
-- [ ] cast the **~360** `malloc/calloc/realloc` returns (concentrated in `fesom_mesh.cpp` ~63
-      and `fesom_io.cpp` ~51); drive the residue with the compiler's own errors
-- [ ] replace the `fesom_main.cpp:829` designated initializer with positional/explicit assignment
-- [ ] (no real `restrict` qualifiers exist — all "restrict" hits are the word "restricted" in
-      comments; defensively `#define RESTRICT __restrict__` only if a future use appears)
-- [ ] fix any remaining C++ diagnostics (implicit enum→int, `void*` assignments, `extern "C"`
-      around C headers only if needed — MPI/netcdf headers self-guard); ensure the IO-dispatch
-      file `fesom_io_stream_dispatch.cpp` is included in the `git mv` and source list
-- [ ] build clean (`-Wall -Wextra`) on Serial **and** OpenMP **and** CUDA-host pass — before M0.5
+> **Decision (M0 cast strategy):** only 74 of 303 alloc sites are the easy `TYPE *x = …`
+> declaration pattern; 229 are bare `name = calloc(...)` struct-member assignments whose type a
+> script can't infer. Rather than hand-cast 300 sites up front, the M0 flip uses **`-fpermissive`**,
+> which downgrades the C++ `void*→T*` conversion from error to warning **without changing
+> codegen** (bit-identity unaffected — it's a front-end diagnostic level). Proper casts are added
+> **per file as it is C++-ified during M2 kernel conversion**; `-fpermissive` is removed once all
+> files are clean. Tracked as a temporary bridge, not the end state.
+
+- [x] `git mv src/*.c → src/*.cpp` (36 files; done in M0.3); tests compiled as C++
+- [x] `-fpermissive` added (temporary M0 bridge; handled all 303 `void*→T*` sites — no codegen change)
+- [x] designated initializer at `fesom_main.cpp` replaced with `= {}` + explicit assignment
+- [x] `<cmath>` added to `fesom_step.cpp`; the **one** non-`-fpermissive` error fixed:
+      `goto skip_rest_state` crossed `int iters_rest` init → wrapped the skipped sanity body in a
+      block so the var's scope is fully contained (behavior-preserving)
+- [x] `fesom_io_stream_dispatch.cpp` in the source list
+- [x] build green on Serial **and** OpenMP (CUDA below) — M0.4 done
 
 ### Task M0.5: Initialise Kokkos in main; prove the bit-identical baseline
 
@@ -189,13 +198,14 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - Modify: `src/fesom_main.cpp` (`Kokkos::ScopeGuard` after `MPI_Init`, before any compute)
 - Create: `tests/run_bitident_baseline.sh`
 
-- [ ] add `Kokkos::ScopeGuard kokkos(argc, argv);` scoped inside `MPI_Init`/`MPI_Finalize`;
-      print `Kokkos::DefaultExecutionSpace` name at startup
-- [ ] run the C++ **Serial** build on both smoke refs → `diff_snap.py` vs golden == **0.0** (gate 0)
-- [ ] run the C++ **CUDA** build on the smoke refs → also == 0.0 (no kernels on device yet, so
-      compute is still host code; this confirms the GPU build path runs)
-- [ ] keep `ctest` (calendar/io_config/io_stream) green
-- [ ] tag `m0-baseline`; this task's "test" is the snapshot bit-identity — before M1
+- [x] `Kokkos::initialize(argc,argv)` after `fesom_mpi_init`, `Kokkos::finalize()` before MPI
+      finalize; prints the active backend at startup (`[fesom_port] Kokkos backend: …`)
+- [x] **Serial** build, pi smoke → `diff_snap.py` vs golden = **ALL FIELDS BIT-IDENTICAL** (gate 0 ✓)
+- [x] **OpenMP** build, pi smoke → vs golden = **BIT-IDENTICAL** (bonus; expected — no device kernels)
+- [ ] **CUDA** full-model build (nvcc_wrapper) + pi smoke on a GPU node → expect bit-identical
+      (all host code at M0) — in progress
+- [x] `ctest` green (calendar / io_stream_unit / io_config)
+- [ ] tag `m0-baseline` after the CUDA confirmation
 
 ## ───────────── M1 · DualView data layer (Serial stays bit-identical) ─────────────
 *Goal: every PERSISTENT field becomes a `Kokkos::DualView<double*, LayoutRight>` owned by its
