@@ -1,9 +1,7 @@
-# Build trees (one per backend)
+# Build trees (one per backend) — covers build/, build-serial/, build-omp/,
+# build-cuda/, build-hip/, build-smoke-*/ etc.
 build/
-build-serial/
-build-omp/
-build-cuda/
-build-hip/
+build-*/
 
 # Object files / libs / binaries
 *.o

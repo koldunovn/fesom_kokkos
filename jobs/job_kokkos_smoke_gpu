@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH --job-name=kk_smoke_gpu
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
+#SBATCH --time=00:05:00
+#SBATCH -o /home/a/a270088/port_kokkos/build-smoke-cuda/smoke_gpu.%j.out
+#SBATCH -e /home/a/a270088/port_kokkos/build-smoke-cuda/smoke_gpu.%j.err
+#
+# M0.2 GPU smoke: run the CUDA Kokkos smoke on an A100. Build it first on a login node
+# (see docs/BUILD.md), then `sbatch jobs/job_kokkos_smoke_gpu`.
+
+source /sw/etc/profile.levante
+module --force purge
+module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0
+
+BIN=/home/a/a270088/port_kokkos/build-smoke-cuda/kokkos_smoke
+echo "host: $(hostname)"; nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+"$BIN"
+echo "Exit: $?"

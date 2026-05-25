@@ -140,18 +140,15 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - Modify: `env.sh` (module loads: gcc, cuda via nvhpc, cmake)
 - Create: `docs/BUILD.md`
 
-- [ ] add Kokkos 4.4.1 as a pinned submodule; integrate via `add_subdirectory` (no separate
-      install — backend chosen at configure time per build dir: `build-serial`, `build-omp`,
-      `build-cuda` with `-DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON`)
-- [ ] crib compiler/arch flags from ICON's readable tree
-      (`/work/aa0049/a271109/icon-2026.04/externals/kokkos/`) — it builds the same 4.4.1 here
-- [ ] document the exact module env in `env.sh` (gcc 11/13 + matching nvhpc/cuda + cmake 3.31)
-- [ ] build + run an in-tree Kokkos smoke (`parallel_for` + `parallel_reduce`) on Serial and
-      OpenMP (login node), and on GPU via `gpu-devel` (A100 visible, kernel executes)
-- [ ] write `docs/BUILD.md` (recipe = deliverable/test); note the **spack alternative**
-      (`spack install kokkos +cuda cuda_arch=80 +openmp` / `+rocm amdgpu_target=gfx90a`) for
-      sites where vendoring is undesirable
-- [ ] verify all three build dirs configure+smoke — must pass before M0.3
+- [x] Kokkos **4.4.01** pinned submodule at `externals/kokkos` (matches ICON); integrated via
+      `add_subdirectory` (`kokkos_smoke/CMakeLists.txt`); backend per build dir
+- [x] CUDA build: `nvcc_wrapper` as `CMAKE_CXX_COMPILER`, `NVCC_WRAPPER_DEFAULT_COMPILER=g++`,
+      `-DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON`; modules gcc/11.2.0 + nvhpc/24.7 (nvcc 12.5)
+- [x] module env documented in `docs/BUILD.md` (Serial/OpenMP = gcc/11.2.0; CUDA += nvhpc/24.7)
+- [x] in-tree Kokkos smoke (`parallel_for`+`parallel_reduce`+DualView round-trip): **Serial PASS**,
+      **OpenMP PASS** (login), **CUDA PASS on A100-PCIE-40GB** (`srun -p gpu-devel`)
+- [x] `docs/BUILD.md` written (incl. spack alternative + LUMI/HIP note); `jobs/job_kokkos_smoke_gpu`
+- [x] all three backends configure+smoke green — M0.2 done
 
 ### Task M0.3: Convert the build system to C++/Kokkos + add Kokkos-purity guard
 
