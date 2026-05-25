@@ -72,24 +72,32 @@ target_link_libraries(fesom_port PRIVATE Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CX
 # --- Tests (compiled as C++ to match the now-C++ model objects' linkage) --------------------
 enable_testing()
 
-add_executable(test_calendar tests/test_calendar.c src/fesom_calendar.cpp)
-set_source_files_properties(tests/test_calendar.c PROPERTIES LANGUAGE CXX)
-target_include_directories(test_calendar PRIVATE src)
-target_link_libraries(test_calendar PRIVATE m)
-add_test(NAME calendar COMMAND test_calendar)
+# These three unit tests have .c source files compiled as C++ (LANGUAGE CXX, see D9). nvcc_wrapper
+# (the CUDA build's CXX compiler) keys off the .c extension and rejects it ("nvcc fatal: No input
+# files specified"), so they are excluded from CUDA builds — letting `cmake --build build-cuda` stay
+# green. They are pure host logic (calendar math, I/O config/stream parsing) with no Kokkos
+# dependency and no backend-dependent behaviour, fully covered by the Serial/OpenMP ctest.
+# (test_field below links Kokkos and builds on every backend.)
+if(NOT Kokkos_ENABLE_CUDA)
+  add_executable(test_calendar tests/test_calendar.c src/fesom_calendar.cpp)
+  set_source_files_properties(tests/test_calendar.c PROPERTIES LANGUAGE CXX)
+  target_include_directories(test_calendar PRIVATE src)
+  target_link_libraries(test_calendar PRIVATE m)
+  add_test(NAME calendar COMMAND test_calendar)
 
-add_executable(test_io_stream_unit tests/test_io_stream_unit.c src/fesom_io_stream_dispatch.cpp)
-set_source_files_properties(tests/test_io_stream_unit.c PROPERTIES LANGUAGE CXX)
-target_include_directories(test_io_stream_unit PRIVATE src)
-target_link_libraries(test_io_stream_unit PRIVATE m MPI::MPI_CXX)
-add_test(NAME io_stream_unit COMMAND test_io_stream_unit)
+  add_executable(test_io_stream_unit tests/test_io_stream_unit.c src/fesom_io_stream_dispatch.cpp)
+  set_source_files_properties(tests/test_io_stream_unit.c PROPERTIES LANGUAGE CXX)
+  target_include_directories(test_io_stream_unit PRIVATE src)
+  target_link_libraries(test_io_stream_unit PRIVATE m MPI::MPI_CXX)
+  add_test(NAME io_stream_unit COMMAND test_io_stream_unit)
 
-add_executable(test_io_config tests/test_io_config.c src/fesom_io_config.cpp)
-set_source_files_properties(tests/test_io_config.c PROPERTIES LANGUAGE CXX)
-target_include_directories(test_io_config PRIVATE src)
-target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
-target_link_libraries(test_io_config PRIVATE m)
-add_test(NAME io_config COMMAND test_io_config)
+  add_executable(test_io_config tests/test_io_config.c src/fesom_io_config.cpp)
+  set_source_files_properties(tests/test_io_config.c PROPERTIES LANGUAGE CXX)
+  target_include_directories(test_io_config PRIVATE src)
+  target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
+  target_link_libraries(test_io_config PRIVATE m)
+  add_test(NAME io_config COMMAND test_io_config)
+endif()
 
 # M1.1: fesom::Field DualView wrapper round-trip (host<->device sync, deep_copy). Needs Kokkos
 # only; links the active backend (Serial/OpenMP/CUDA) so the round trip is exercised per build.

@@ -145,6 +145,20 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
   as `if (rank!=0) fld.alloc(); MPI_Bcast(fld.h(),...)`. Only the np=2 `dist_2` gate (D14) exercises
   any of this -- np=1 never enters `scatter_mesh`.
 
+- **L17 — `nvcc_wrapper` rejects `.c`-extension sources even with CMake `LANGUAGE CXX`.** The three
+  C unit tests (`tests/test_*.c`, compiled as C++ via `set_source_files_properties(... LANGUAGE CXX)`,
+  per D9) build fine under g++ but fail under the CUDA build's `nvcc_wrapper` with `nvcc fatal: No
+  input files specified` — the wrapper keys off the `.c` file extension, not the CMake LANGUAGE
+  property, and drops the input. This is **pre-existing** (independent of M1.2 — the test sources and
+  their CMake targets were untouched) and only surfaced because a *full* `cmake --build build-cuda`
+  (vs `--target fesom_port`) tries to build them. Fix: guard those three targets with
+  `if(NOT Kokkos_ENABLE_CUDA)` — they're pure host logic (no Kokkos, backend-independent), fully
+  covered by the Serial/OpenMP `ctest`; the model (`fesom_port`) and `test_field` build on every
+  backend. **The model itself compiled cleanly under nvcc** — Wave-1's `*m = fesom_mesh{}` and the
+  `Field`-in-struct/`DualView` patterns gave nvcc no trouble (consistent with L11). Also: in a bash
+  one-liner, `echo "...exit=$?"` after a `$(date)` reports **date's** exit, not the build's — verify
+  build success from the log/`Built target`, not such an `echo`.
+
 ## C. Process lessons
 
 - Validate at **every** step on Serial bit-identity; commit per milestone-step; **tag** milestones.
