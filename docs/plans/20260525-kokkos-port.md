@@ -294,10 +294,11 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
 **Files:**
 - Modify: `src/fesom_dyn.{h,cpp}`, `src/fesom_aux.{h,cpp}`, `src/fesom_tracers.{h,cpp}` + call sites
 
-- [ ] convert `uv/uv_rhs/uv_rhsAB/w/w_e/w_i/eta_n/d_eta/ssh_rhs*/uvnode*/fer_*/cfl_z` (dyn)
-- [ ] convert `density_m_rho0/hpressure/bvfreq/sw_alpha/sw_beta/Kv/Av/pgf_x/pgf_y/…` (aux)
-- [ ] convert `tracers->data[*].values` (mind the **stride `nl`** — `feedback_tracer_stride_nl`)
-- [ ] verify Serial smoke == golden; `ctest` green — before M1.4
+- [x] convert all 19 `fesom_dyn` arrays (`uv/uv_rhs/uv_rhsAB/w/w_e/w_i/cfl_z/uvnode/uvnode_rhs/u_b/v_b/u_c/v_c/eta_n/d_eta/ssh_rhs/ssh_rhs_old/fer_uv/fer_w`) → `Field`
+- [x] convert all 11 `fesom_aux` arrays (`density_m_rho0/hpressure/bvfreq/sw_alpha/sw_beta/Kv/dbsfc/Av/pgf_x/pgf_y` → `Field`, `MLD1_ind` → `IntField`)
+- [x] convert `fesom_tracers` (`data[k].values/valuesAB/valuesold` ×2 + `del_ttf`) → `Field`, **stride `nl`** preserved (alloc `N*nl`, `feedback_tracer_stride_nl`)
+- [x] same M1.2 pattern (D15): stack structs, raw alias = `field.h()` set once (no pointer swaps — all time-history updates are value/memcpy), `memset`→`*x=T{}` (D13), allocate-once/free-once, **no Field sync** for time-evolving state (cf. mesh `hnode/hbar`; sync is M1.5/M2)
+- [x] **verify DONE**: Serial np=1 == golden bit-identical; `ctest` 4/4; **np=2 == M1.2 oracle bit-identical** — ⚠️ but only with `OMPI_MCA_btl_vader_single_copy_mechanism=none`. The default vader CMA path makes the snapshot `MPI_Gatherv` buffer-address-dependent (identical sends → different gather) → a false "divergence" that is NOT in the port (per-step OWNED state proven byte-identical). New robust oracle `/scratch/a/a270088/pi_np2_ref_m13_nocma`; old `…_m12` CMA-tainted. New decision D15, lessons **L18 (vader-CMA), L19 (diff_snap dirs-only)**. CUDA np=1 bit-identity via `jobs/job_pi_smoke_gpu`. — before M1.4
 
 ### Task M1.4: Migrate `fesom_forcing` + sea-ice structs to `Field`
 

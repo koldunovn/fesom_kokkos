@@ -2,6 +2,7 @@
 #define FESOM_DYN_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M1.3: DualView-backed storage for the persistent dynamics arrays
 
 struct fesom_mesh;
 
@@ -58,6 +59,25 @@ typedef struct fesom_dyn {
     real_t *v_c;
 
     int AB_order;   /* fixed at 2 in Phase 1 */
+
+    /* ===================== M1.3 · DualView data layer =========================
+     * Each persistent array above is OWNED by the matching fesom::Field below; the
+     * raw pointer is a NON-OWNING alias re-pointed at field.h() right after
+     * field.alloc() in fesom_dyn_alloc (the same pattern proven on the 28 mesh
+     * arrays in M1.2, D12). These arrays are time-evolving state (written every
+     * step through the raw alias); all updates are in-place value writes/memcpy —
+     * the alias is NEVER re-pointed by a buffer swap, so it stays valid for the
+     * whole run. LayoutRight + host mirror == the C flat layout, so legacy
+     * dyn->X[...] and the FESOM_*3D/ELEMVEC macros keep working unchanged → Serial
+     * stays bit-identical. No device sync at M1: nothing reads these on device yet
+     * (cf. the M1.2 mesh STATE arrays hnode/hbar, likewise not synced); the
+     * step-driver sync discipline for this evolving state lands in M1.5/M2 (D15). */
+    fesom::Field uv_fld, uv_rhs_fld, uv_rhsAB_fld;
+    fesom::Field w_fld, w_e_fld, w_i_fld, cfl_z_fld;
+    fesom::Field uvnode_fld, uvnode_rhs_fld;
+    fesom::Field u_b_fld, v_b_fld, u_c_fld, v_c_fld;
+    fesom::Field eta_n_fld, d_eta_fld, ssh_rhs_fld, ssh_rhs_old_fld;
+    fesom::Field fer_uv_fld, fer_w_fld;
 } fesom_dyn;
 
 void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh);

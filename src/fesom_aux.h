@@ -2,6 +2,7 @@
 #define FESOM_AUX_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M1.3: DualView-backed storage for the persistent aux arrays
 
 struct fesom_mesh;
 
@@ -54,6 +55,20 @@ typedef struct fesom_aux {
     real_t *pgf_y;
 
     int    *MLD1_ind;       /* [nod2D] — populated by fesom_pressure_bv */
+
+    /* ===================== M1.3 · DualView data layer =========================
+     * Each persistent array above is OWNED by the matching fesom::Field/IntField
+     * below; the raw pointer is a NON-OWNING alias re-pointed at field.h() right
+     * after field.alloc() in fesom_aux_alloc (the M1.2 mesh pattern, D12). These
+     * are recomputed in place every step through the raw alias (no buffer swap),
+     * so the alias stays valid for the whole run. LayoutRight host mirror == the C
+     * flat layout → legacy aux->X[...] + FESOM_*3D macros unchanged → Serial
+     * bit-identical. No device sync at M1 (nothing reads these on device yet;
+     * step-driver sync is M1.5/M2, D15). */
+    fesom::Field    density_m_rho0_fld, hpressure_fld, bvfreq_fld;
+    fesom::Field    sw_alpha_fld, sw_beta_fld, Kv_fld, dbsfc_fld;
+    fesom::Field    Av_fld, pgf_x_fld, pgf_y_fld;
+    fesom::IntField MLD1_ind_fld;
 } fesom_aux;
 
 void fesom_aux_alloc(fesom_aux *a, const struct fesom_mesh *mesh);

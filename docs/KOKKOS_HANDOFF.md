@@ -26,8 +26,16 @@ in `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
   pushed to device once after `compute_metrics`. **Serial np=1 + np=2 (dist_2) ALL FIELDS
   BIT-IDENTICAL; OpenMP np=1 bit-identical; CUDA np=1 (A100) bit-identical; ctest 4/4.** New
   decisions D12–D14, lessons L13–L17. (M1 invariant intact: device does only deep_copy of double/int.)
-- **NEXT: M1.3** — migrate `fesom_dyn`/`fesom_aux`/`fesom_tracers` persistent arrays to `Field`
-  (same alias pattern; mind the tracer **stride `nl`**). Serial must stay bit-identical.
+- **M1.3 DONE** (commit at HEAD): **all `fesom_dyn` (19), `fesom_aux` (11), `fesom_tracers` (7)
+  persistent arrays are now `Field`/`IntField`-backed** (same M1.2 alias pattern, D15). Serial
+  np=1 == golden, **Serial np=2 == M1.2 oracle (CMA-off)**, ctest 4/4, **CUDA np=1 (A100)
+  bit-identical** — all verified. ⚠️ **A multi-hour red herring resolved (L18): the np=2 gate's
+  apparent divergence was a login-node `vader` CMA `MPI_Gatherv` artifact (identical sends →
+  address-dependent gather), NOT the port** — the per-step OWNED state is byte-identical. The np=2
+  gate now requires `OMPI_MCA_btl_vader_single_copy_mechanism=none` (recipe §2) and a regenerated
+  oracle (`pi_np2_ref_m13_nocma`). New decision D15; lessons L18 (vader-CMA), L19 (diff_snap dirs-only).
+- **NEXT: M1.4** — migrate `fesom_forcing` + sea-ice structs to `Field` (same alias pattern; honour
+  halo-sized allocation `feedback_array_size_vs_reader_loop`). Serial must stay bit-identical.
 
 ## 1. Git state
 
@@ -62,10 +70,14 @@ mkdir -p /tmp/pi_check                            # REQUIRED: a missing out-dir 
     docs/reference/c_baseline_snapshots/pi /tmp/pi_check        # expect ALL FIELDS BIT-IDENTICAL
 ( cd build-serial && ctest )                      # 4/4: calendar, io_stream_unit, io_config, field
 # np=2 scatter gate (login-node vader; exercises scatter_mesh, which np=1 skips — D14):
+# ⚠️ MUST disable vader CMA or the snapshot MPI_Gatherv is buffer-address-dependent (L18) —
+#    a false "divergence" that depends on struct sizes, NOT on the port.
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
 mkdir -p /tmp/pi_np2 && mpirun -np 2 ./build-serial/fesom_port \
     /home/a/a270088/port2/fesom2/test/meshes/pi /tmp/pi_np2 100 20 10
 /work/ab0995/a270088/mambaforge/envs/nereus/bin/python scripts/diff_snap.py \
-    /scratch/a/a270088/pi_np2_ref_m12 /tmp/pi_np2   # expect ALL FIELDS BIT-IDENTICAL
+    /scratch/a/a270088/pi_np2_ref_m13_nocma /tmp/pi_np2   # expect ALL FIELDS BIT-IDENTICAL
+#   (robust CMA-off oracle; the old …_m12 was CMA-tainted — do NOT use it)
 
 # --- CUDA (now builds the full model; nvcc ~fast at M0, all host code) ---
 module load nvhpc/24.7-gcc-11.2.0 ; export NVCC_WRAPPER_DEFAULT_COMPILER=g++
@@ -78,7 +90,18 @@ sbatch jobs/job_pi_smoke_gpu                       # A100 pi smoke → runs/pi_c
 GPU unit test: `sbatch … --wrap "… ./build-cuda/test_field"` (see git history for the exact wrap),
 or just run `test_field` inside any `gpu-devel` allocation.
 
-## 3. THE NEXT TASK — M1.3: migrate `fesom_dyn`/`fesom_aux`/`fesom_tracers` to `Field`
+## 3. THE NEXT TASK — M1.4: migrate `fesom_forcing` + sea-ice structs to `Field`
+
+Per plan §M1.4. **Reuse the exact M1.2/M1.3 pattern** (now proven on 28 mesh + 37 dyn/aux/tracers
+arrays): `Field`/`IntField` member per persistent array; raw ptr = non-owning `field.h()` alias
+re-pointed after `.alloc`; `memset(s,0,sizeof)` → `*s = T{}` (D13); allocate-once/free-once. Honour
+**halo-sized allocation** (`feedback_array_size_vs_reader_loop`). Check the structs are
+stack/`new` (Field ctors run), not `malloc`'d (L13). Convert forcing (`stress_*`, `heat_flux`,
+`water_flux`, `virtual_salt`, …) and ice state (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work).
+**Gate** exactly as M1.3 below — and note the **np=2 gate needs
+`OMPI_MCA_btl_vader_single_copy_mechanism=none`** vs `pi_np2_ref_m13_nocma` (L18).
+
+⚠️ **M1.3 is DONE** — the rest of this section documents the M1.3 method (reuse it for M1.4):
 
 Per plan §M1.3. **Reuse the exact M1.2 pattern** (now proven on 28 mesh arrays):
 - Add a `fesom::Field`/`IntField` member per persistent array in `src/fesom_{dyn,aux,tracers}.{h,cpp}`;

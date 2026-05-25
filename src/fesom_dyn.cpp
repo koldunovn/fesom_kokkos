@@ -7,7 +7,9 @@
 
 void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
 {
-    memset(d, 0, sizeof(*d));
+    // The struct holds fesom::Field members (DualView, non-trivial): a raw memset is UB (L13).
+    // Value-initialise instead — zeros every POD and leaves each Field an empty DualView (D13).
+    *d = fesom_dyn{};
     d->AB_order = FESOM_PHASE1_AB_ORDER;
 
     /* MPI: size for full local extent (myDim+eDim for nodes,
@@ -17,28 +19,31 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     size_t e_nl_2 = (size_t)E * (size_t)mesh->nl * 2;
     size_t n_nl   = (size_t)N * (size_t)mesh->nl;
     size_t n      = (size_t)N;
+    size_t e_nl   = (size_t)E * (size_t)mesh->nl;
 
-    d->uv          = (decltype(d->uv))calloc(e_nl_2, sizeof(real_t));
-    d->uv_rhs      = (decltype(d->uv_rhs))calloc(e_nl_2, sizeof(real_t));
-    d->uv_rhsAB    = (decltype(d->uv_rhsAB))calloc(e_nl_2, sizeof(real_t));
-    d->w           = (decltype(d->w))calloc(n_nl,   sizeof(real_t));
-    d->w_e         = (decltype(d->w_e))calloc(n_nl,   sizeof(real_t));
-    d->w_i         = (decltype(d->w_i))calloc(n_nl,   sizeof(real_t));
-    d->cfl_z       = (decltype(d->cfl_z))calloc(n_nl,   sizeof(real_t));
-    d->uvnode      = (decltype(d->uvnode))calloc(n_nl * 2, sizeof(real_t));
-    d->uvnode_rhs  = (decltype(d->uvnode_rhs))calloc(n_nl * 2, sizeof(real_t));
-    size_t e_nl = (size_t)E * (size_t)mesh->nl;
-    d->u_b = (decltype(d->u_b))calloc(e_nl, sizeof(real_t));
-    d->v_b = (decltype(d->v_b))calloc(e_nl, sizeof(real_t));
-    d->u_c = (decltype(d->u_c))calloc(n_nl, sizeof(real_t));
-    d->v_c = (decltype(d->v_c))calloc(n_nl, sizeof(real_t));
-    d->eta_n       = (decltype(d->eta_n))calloc(n,      sizeof(real_t));
-    d->d_eta       = (decltype(d->d_eta))calloc(n,      sizeof(real_t));
-    d->ssh_rhs     = (decltype(d->ssh_rhs))calloc(n,      sizeof(real_t));
-    d->ssh_rhs_old = (decltype(d->ssh_rhs_old))calloc(n,      sizeof(real_t));
+    // M1.3: each Field owns its storage; the raw pointer is a non-owning alias = field.h()
+    // (D12). .alloc(label, count) takes the count in ELEMENTS (== the old calloc count) and
+    // zero-inits like calloc. Element counts are byte-for-byte the C layout → Serial bit-identical.
+    d->uv_fld.alloc("dyn.uv", e_nl_2);                 d->uv          = d->uv_fld.h();
+    d->uv_rhs_fld.alloc("dyn.uv_rhs", e_nl_2);         d->uv_rhs      = d->uv_rhs_fld.h();
+    d->uv_rhsAB_fld.alloc("dyn.uv_rhsAB", e_nl_2);     d->uv_rhsAB    = d->uv_rhsAB_fld.h();
+    d->w_fld.alloc("dyn.w", n_nl);                     d->w           = d->w_fld.h();
+    d->w_e_fld.alloc("dyn.w_e", n_nl);                 d->w_e         = d->w_e_fld.h();
+    d->w_i_fld.alloc("dyn.w_i", n_nl);                 d->w_i         = d->w_i_fld.h();
+    d->cfl_z_fld.alloc("dyn.cfl_z", n_nl);             d->cfl_z       = d->cfl_z_fld.h();
+    d->uvnode_fld.alloc("dyn.uvnode", n_nl * 2);       d->uvnode      = d->uvnode_fld.h();
+    d->uvnode_rhs_fld.alloc("dyn.uvnode_rhs", n_nl * 2); d->uvnode_rhs = d->uvnode_rhs_fld.h();
+    d->u_b_fld.alloc("dyn.u_b", e_nl);                 d->u_b         = d->u_b_fld.h();
+    d->v_b_fld.alloc("dyn.v_b", e_nl);                 d->v_b         = d->v_b_fld.h();
+    d->u_c_fld.alloc("dyn.u_c", n_nl);                 d->u_c         = d->u_c_fld.h();
+    d->v_c_fld.alloc("dyn.v_c", n_nl);                 d->v_c         = d->v_c_fld.h();
+    d->eta_n_fld.alloc("dyn.eta_n", n);                d->eta_n       = d->eta_n_fld.h();
+    d->d_eta_fld.alloc("dyn.d_eta", n);                d->d_eta       = d->d_eta_fld.h();
+    d->ssh_rhs_fld.alloc("dyn.ssh_rhs", n);            d->ssh_rhs     = d->ssh_rhs_fld.h();
+    d->ssh_rhs_old_fld.alloc("dyn.ssh_rhs_old", n);    d->ssh_rhs_old = d->ssh_rhs_old_fld.h();
     /* GM bolus velocity (Phase G1) — zero until G4/G6a write to them. */
-    d->fer_uv      = (decltype(d->fer_uv))calloc(e_nl_2, sizeof(real_t));
-    d->fer_w       = (decltype(d->fer_w))calloc(n_nl,   sizeof(real_t));
+    d->fer_uv_fld.alloc("dyn.fer_uv", e_nl_2);         d->fer_uv      = d->fer_uv_fld.h();
+    d->fer_w_fld.alloc("dyn.fer_w", n_nl);             d->fer_w       = d->fer_w_fld.h();
     FESOM_CHECK(d->uv && d->uv_rhs && d->uv_rhsAB && d->w && d->w_e && d->w_i
              && d->cfl_z && d->uvnode && d->uvnode_rhs
              && d->u_b && d->v_b && d->u_c && d->v_c
@@ -49,24 +54,8 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
 
 void fesom_dyn_free(fesom_dyn *d)
 {
-    free(d->uv);
-    free(d->uv_rhs);
-    free(d->uv_rhsAB);
-    free(d->w);
-    free(d->w_e);
-    free(d->w_i);
-    free(d->cfl_z);
-    free(d->uvnode);
-    free(d->uvnode_rhs);
-    free(d->u_b);
-    free(d->v_b);
-    free(d->u_c);
-    free(d->v_c);
-    free(d->eta_n);
-    free(d->d_eta);
-    free(d->ssh_rhs);
-    free(d->ssh_rhs_old);
-    free(d->fer_uv);
-    free(d->fer_w);
-    memset(d, 0, sizeof(*d));
+    // Every array is now OWNED by a fesom::Field; the raw pointers are non-owning aliases, so they
+    // must NOT be free()d. `*d = fesom_dyn{}` releases every DualView (Kokkos refcounting) and zeros
+    // the PODs — the assignment IS the release (D13). Mirrors fesom_mesh_free.
+    *d = fesom_dyn{};
 }
