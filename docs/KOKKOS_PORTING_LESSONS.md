@@ -94,6 +94,17 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
   (~17 s, `-j16`); EDG strictness ⊇ g++-no-permissive turned out to add nothing here. (Device-code
   divergences are expected to begin at M2.1, not M0.)
 
+- **L12 — a stray `*/` in a C block comment closes it early → a cascade of *misleading* STL
+  errors.** Writing `sync_*/modify_*` inside a `/* … */` doc-comment in `fesom_field.hpp` contained
+  the token `*/`, which terminated the comment; the trailing prose then parsed as code and the
+  compiler vomited ~12 errors deep inside `<bits/stl_*.h>` / Kokkos-Tools (`_M_max_size`,
+  `max_size` not a member, placement-`operator new` not matching) — nothing pointed at the comment.
+  Kokkos' own `sync_*` / `modify_*` naming convention makes this easy to hit. **Use `//` line
+  comments for doc-blocks that mention `sync_*`/`modify_*`/pointer-glob patterns**, or space them
+  (`sync_* / modify_*`). When STL/standard-library errors appear in a TU you didn't change
+  structurally, suspect a comment/macro lexing problem first, and compile the TU alone to see the
+  *first* diagnostic (the real one).
+
 ## C. Process lessons
 
 - Validate at **every** step on Serial bit-identity; commit per milestone-step; **tag** milestones.

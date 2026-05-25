@@ -247,23 +247,24 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
 - Create: `src/fesom_field.hpp` (the `Field` type)
 - Create: `tests/test_field.cpp` + CMake `add_test`
 
-- [ ] `struct Field { Kokkos::DualView<double*, Kokkos::LayoutRight> dv; double* h; ... }` with:
-      `alloc(n)`, `h()` (host raw ptr for legacy code, = `dv.view_host().data()`),
-      `d()` (device `View`), `modify_host()/modify_device()`, `sync_host()/sync_device()`,
-      `size()`, `free()`
-- [ ] explicit `LayoutRight` so the host mirror byte-matches the C `[entity*nl+lev]` layout
-      (legacy macros keep working). Document in the header that the M5 flip to space-default
-      layout is a **rank change** (1-D flat → 2-D/3-D `View`) for interleaved/3-D hot fields
-      (`uv` etc. via `FESOM_ELEMVEC`), not a mere `LayoutRight`→default swap, and requires the
-      index macros to become layout-agnostic accessors — see M5
-- [ ] `tests/test_field.cpp`: alloc; host write → `sync_device` → device read (in a `parallel_for`)
-      → mutate on device → `sync_host` → assert round-trip identity; `deep_copy` paths
-- [ ] **`FESOM_KK_SYNCCHECK` — concrete mechanism (not just DualView flags):** each `Field`
-      carries an "authoritative space" tag set by `modify_host()/modify_device()`; provide a
-      debug accessor `h_checked()` that asserts host-authoritative, and route halo/I/O/legacy
-      entry points through it in debug builds (bare `.h()` cannot trap stale raw-pointer reads).
-      This is the GPU analogue of the stale-halo guard (`feedback_write_loops_halo`)
-- [ ] `ctest` for `test_field` passes on Serial+OpenMP+CUDA — before M1.2
+- [x] `FieldT<T>` template in `src/fesom_field.hpp` (`Field=FieldT<double>`, `IntField=FieldT<int>`):
+      `Kokkos::DualView<T*, LayoutRight>` + `alloc(label,n)`, `h()` (= `view_host().data()`),
+      `d()` (device `View`), `hv()`, `modify_host()/modify_device()`, `sync_host()/sync_device()`,
+      `size()`, `allocated()`, `free()`
+- [x] explicit `LayoutRight` so the host mirror byte-matches the C `[entity*nl+lev]` layout
+      (legacy macros keep working). Header documents the M5 flip to space-default layout as a
+      **rank change** (1-D flat → 2-D/3-D `View`) for interleaved/3-D hot fields (`uv` etc. via
+      `FESOM_ELEMVEC`), not a mere `LayoutRight`→default swap, requiring layout-agnostic accessors
+- [x] `tests/test_field.cpp` (+ CMake `add_test(field)`): alloc; host write → `sync_device` →
+      device mutate in a `parallel_for` → `sync_host` → assert round-trip identity; `deep_copy` path;
+      exact-integer values so `==` is deterministic on every backend; runs for `Field` and `IntField`
+- [x] **`FESOM_KK_SYNCCHECK` mechanism provided:** each `Field` carries an `Auth` tag
+      (`Synced/Host/Device`) set by `modify_host()/modify_device()`; `h_checked()` asserts
+      host-authoritative under `-DFESOM_KK_SYNCCHECK` (zero-cost otherwise). **Routing** halo/I/O/
+      legacy host reads through `h_checked()` happens as each field migrates (M1.2–M1.5) — no
+      Field-backed entry points exist yet. GPU analogue of the stale-halo guard.
+- [x] `ctest` for `test_field` passes on **Serial + OpenMP + CUDA** (A100/vader1, `backend: Cuda`,
+      `ALL PASS`); full suite 4/4 green on Serial+OpenMP — M1.1 done, → M1.2
 
 ### Task M1.2: Migrate `fesom_mesh` geometry fields to `Field`
 

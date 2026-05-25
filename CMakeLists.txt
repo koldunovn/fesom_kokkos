@@ -90,3 +90,10 @@ target_include_directories(test_io_config PRIVATE src)
 target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(test_io_config PRIVATE m)
 add_test(NAME io_config COMMAND test_io_config)
+
+# M1.1: fesom::Field DualView wrapper round-trip (host<->device sync, deep_copy). Needs Kokkos
+# only; links the active backend (Serial/OpenMP/CUDA) so the round trip is exercised per build.
+add_executable(test_field tests/test_field.cpp)
+target_include_directories(test_field PRIVATE src)
+target_link_libraries(test_field PRIVATE Kokkos::kokkos)
+add_test(NAME field COMMAND test_field)
