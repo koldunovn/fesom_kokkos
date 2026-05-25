@@ -1,6 +1,6 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 3 (2026-05-25) — M1.2 complete.** Repo: `/home/a/a270088/port_kokkos` (git). Read this first, then
+**Session 4 (2026-05-26) — M1.3 complete (commit `d42c7cc`).** Repo: `/home/a/a270088/port_kokkos` (git). Read this first, then
 `docs/plans/20260525-kokkos-port.md`, `docs/KOKKOS_PORTING_LESSONS.md`, and the project memory
 in `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
 
@@ -40,17 +40,16 @@ in `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
 ## 1. Git state
 
 ```
-HEAD     M1.2 Wave 3: migrate bc_index_nod2D — fesom_mesh fully Field-backed; M1.2 complete
+HEAD     d42c7cc M1.3: migrate fesom_dyn/aux/tracers to fesom::Field (37 arrays); resolve np=2 vader-CMA gate artifact
+e2dc45e  M1.2 Wave 3: migrate bc_index_nod2D — fesom_mesh fully Field-backed; M1.2 complete
 01edc20  build: keep full CUDA build green — exclude host-only C unit tests (nvcc .c)
 0229fff  M1.2 Wave 2: migrate scatter-touched fesom_mesh arrays to fesom::Field
 5f5cb04  M1.2 Wave 1: back set-once fesom_mesh geometry+state with fesom::Field
-b78067a  docs: session-2 handoff — M0 complete (m0-baseline) + M1.1 done; next M1.2
-8f95c1c  M1.1: fesom::Field DualView wrapper + round-trip test (Serial/OpenMP/CUDA green)
 2c960bc  M0 DONE: cast void* allocs, drop -fpermissive — CUDA full model bit-identical on A100  (tag m0-baseline)
-535cc8c  M0.2: Kokkos 4.4.01 backends validated (Serial/OpenMP/CUDA-A100)
 ```
-(np=2 scatter oracle for regression-testing `scatter_mesh`: `/scratch/a/a270088/pi_np2_ref_m12`.)
-Working tree clean. First checkout elsewhere needs `git submodule update --init --recursive`.
+(np=2 scatter oracle: **`/scratch/a/a270088/pi_np2_ref_m13_nocma`** — captured CMA-off, L18; the
+old `…_m12` is CMA-tainted, do not use.) Working tree clean. First checkout elsewhere needs
+`git submodule update --init --recursive`.
 
 ## 2. Build & run (full recipe in `docs/BUILD.md`; MPI caveat in `docs/reference/PROVENANCE.md`)
 
@@ -152,41 +151,47 @@ NO compute kernel runs on device → Serial+OpenMP+CUDA all stay bit-identical. 
 ## 5. NEXT-SESSION PROMPT (paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
-> `git log --oneline -8` to orient. **M0 + M1.1 + M1.2 are complete**: Serial+OpenMP+CUDA builds
-> are bit-for-bit identical to the C golden; `fesom::Field` (DualView wrapper) exists; and **all 28
-> persistent `fesom_mesh` arrays are now `Field`/`IntField`-backed** with the raw pointer kept as a
-> non-owning `field.h()` alias (0 call sites changed). Serial np=1 + np=2 + OpenMP np=1 + CUDA np=1
-> all ALL FIELDS BIT-IDENTICAL; ctest 4/4. Work tree clean.
+> `git log --oneline -8` to orient. **M0 + M1.1 + M1.2 + M1.3 are complete**: Serial+CUDA builds are
+> bit-for-bit identical to the C golden; `fesom::Field` (DualView wrapper) exists; and **all 28
+> `fesom_mesh` + 37 `fesom_dyn`/`fesom_aux`/`fesom_tracers` persistent arrays are now
+> `Field`/`IntField`-backed** with the raw pointer kept as a non-owning `field.h()` alias (0 call
+> sites changed). Serial np=1 + np=2 (CMA-off) + CUDA np=1 all ALL FIELDS BIT-IDENTICAL; ctest 4/4.
+> Work tree clean (HEAD `d42c7cc`).
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status, build/run recipes §2 incl. the np=2 gate, the M1.3 task §3)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M1.3; §M1.2 is ticked with the done-notes)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D14, L1–L17) — APPEND every session
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status, build/run recipes §2 incl. the **np=2 vader-CMA gate fix**, the M1.4 task §3)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M1.4; §M1.3 is ticked with done-notes)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D15, L1–L19) — APPEND every session
 > - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps, **tracer stride nl**, halo bounds)
-> - `/home/a/a270088/port_kokkos/src/fesom_mesh.{h,cpp}`  ← **the worked example of the M1.2/M1.3 pattern** (Field member + raw alias = `field.h()`; `*m = fesom_mesh{}`; `mesh_sync_geometry_device`)
+> - `/home/a/a270088/port_kokkos/src/fesom_{mesh,dyn,aux,tracers}.{h,cpp}`  ← **worked examples of the migration pattern** (Field member + raw alias = `field.h()`; `*x = T{}`)
 > - `/home/a/a270088/port_kokkos/src/fesom_field.hpp` + `tests/test_field.cpp`; GPU smoke `jobs/job_pi_smoke_gpu`
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/`
 >
-> GOAL: **M1.3 — back the persistent `fesom_dyn` / `fesom_aux` / `fesom_tracers` arrays with
-> `fesom::Field`/`IntField`** (per plan §M1.3 + handoff §3), reusing the M1.2 pattern verbatim: add a
-> Field member per array, keep the raw pointer as a `field.h()` alias re-pointed after `.alloc`, do
-> NOT rewrite call sites; `memset(s,0,sizeof)` → `*s = T{}` (and if the struct is `malloc`'d rather
-> than constructed, fix that — Field has a non-trivial ctor, L13). ⚠️ `tracers->data[*].values` uses
-> **stride `nl`** (`feedback_tracer_stride_nl`) — alloc `N*nl`, index via `FESOM_NODE3D`. Per-kernel
-> scratch (GM/KPP/FCT/tracer-diff/CG) is NOT migrated in M1. Then M1.4 (`forcing`/ice), M1.5 (sync
-> map + 1-yr CORE2 acceptance, tag `m1-datalayer`).
+> GOAL: **M1.4 — back the persistent `fesom_forcing` + sea-ice (`fesom_ice*`) arrays with
+> `fesom::Field`/`IntField`** (per plan §M1.4 + handoff §3), reusing the M1.2/M1.3 pattern verbatim:
+> add a Field member per array, keep the raw pointer as a `field.h()` alias re-pointed after `.alloc`,
+> do NOT rewrite call sites; `memset(s,0,sizeof)` → `*s = T{}` (D13; first check the structs are
+> stack/`new`, not `malloc`'d — Field has a non-trivial ctor, L13; and audit for pointer swaps as in
+> M1.3/D15). Convert forcing (`stress_*`, `heat_flux`, `water_flux`, `virtual_salt`, …) honouring
+> **halo-sized allocation** (`feedback_array_size_vs_reader_loop`) and ice state
+> (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work). Per-kernel scratch (GM/KPP/FCT/tracer-diff/CG) is
+> NOT migrated in M1. Then M1.5 (sync map + 1-yr CORE2 acceptance, tag `m1-datalayer`).
 >
-> GATE every step (recipe §2): `mkdir -p /tmp/pi_check` (a missing out-dir → NetCDF "Permission
-> denied", L15), Serial pi smoke `./build-serial/fesom_port .../meshes/pi /tmp/pi_check 100 20 10`
-> then `…/nereus/bin/python scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi /tmp/pi_check`
-> must print ALL FIELDS BIT-IDENTICAL; `ctest` 4/4; the np=2 (dist_2) scatter gate vs
-> `/scratch/a/a270088/pi_np2_ref_m12`; CUDA bit-identity via `sbatch jobs/job_pi_smoke_gpu` (build
-> `--target fesom_port`, L17).
+> GATE every step (recipe §2): `mkdir -p /tmp/pi_check`, Serial pi smoke
+> `./build-serial/fesom_port .../meshes/pi /tmp/pi_check 100 20 10` then `…/nereus/bin/python
+> scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi /tmp/pi_check` must print ALL FIELDS
+> BIT-IDENTICAL; `ctest` 4/4; **the np=2 gate — `export OMPI_MCA_btl_vader_single_copy_mechanism=none`
+> first (L18!) — vs `/scratch/a/a270088/pi_np2_ref_m13_nocma`** (`diff_snap.py` takes DIRECTORIES, L19);
+> CUDA bit-identity via `sbatch jobs/job_pi_smoke_gpu` (build `--target fesom_port`, L17).
 >
-> INVARIANTS: M1 moves NO compute to the device (deep_copy of double/int only → Serial+OpenMP+CUDA
-> all stay bit-identical; a stray device `parallel_for`/fill is a bug). Never simplify physics;
-> preserve every constant/loop-bound verbatim (re-read PORTING_LESSONS before touching a kernel).
-> Append every decision/lesson to KOKKOS_PORTING_LESSONS.md in the SAME commit; commit per
-> milestone-step. C twin (the oracle): `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623);
-> Fortran ground truth `/home/a/a270088/port2/fesom2/src`, run `/scratch/a/a270088/fortran_pp_2yr`.
-> SLURM account `ab0995`; GPU partitions `gpu`/`gpu-devel`. First fresh checkout: `git submodule update --init --recursive`.
+> ⚠️ If a gate "diverges": first rule out the **vader-CMA artifact (L18)** — dump the OWNED state
+> right after the producing kernel; if byte-identical across builds, the divergence is in the
+> snapshot `MPI_Gatherv`/transport, not the port (cost the M1.3 session hours).
+>
+> INVARIANTS: M1 moves NO compute to the device (deep_copy of double/int only → all backends stay
+> bit-identical; a stray device `parallel_for`/fill is a bug). Never simplify physics; preserve every
+> constant/loop-bound verbatim (re-read PORTING_LESSONS before touching a kernel). Append every
+> decision/lesson to KOKKOS_PORTING_LESSONS.md in the SAME commit; commit per milestone-step. C twin
+> (the oracle): `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623); Fortran ground truth
+> `/home/a/a270088/port2/fesom2/src`, run `/scratch/a/a270088/fortran_pp_2yr`. SLURM account `ab0995`;
+> GPU partitions `gpu`/`gpu-devel`. First fresh checkout: `git submodule update --init --recursive`.
