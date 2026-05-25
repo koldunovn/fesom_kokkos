@@ -1,0 +1,516 @@
+# FESOM2 C → C++/Kokkos Port (CPU + GPU)
+
+## Overview
+
+Port the existing, climate-validated **C** port of FESOM2 to **C++/Kokkos** so the
+same source runs on CPU (Serial/OpenMP) and GPU (CUDA now; AMD/HIP later), with
+**no NVIDIA vendor lock**.
+
+- **Problem it solves**: the C port is CPU/MPI-only. We want a single performance-portable
+  source that runs on Levante A100 *and* LUMI MI250x without rewriting per vendor.
+- **Priority**: correctness/fidelity over initial performance. Per-step host↔device copies
+  are explicitly acceptable at first.
+- **Fidelity target** (the user's words, mapped to a validation ladder):
+  - **Kokkos Serial == the C port, bit-for-bit** ("binary identity when possible") — the
+    per-kernel gate.
+  - **Kokkos OpenMP** ≈ Serial (reduction-order only) → climate-identical.
+  - **Kokkos CUDA/HIP** = "very close on the climate time scale" (≈ the Fortran↔C difference
+    we already accept) — fma contraction, libdevice/ROCm transcendentals, and reduction/atomic
+    order make exact identity impossible on GPU, by design.
+- **Integration**: the C port's entire validation apparatus (operator-diff harness,
+  per-substep dumps, `scripts/*.py` comparators, `FESOM_NO_*` bisect knobs, the
+  `fortran_pp_2yr` reference run) is reused unchanged.
+
+## Context (from discovery)
+
+- **Source C port** (`/home/a/a270088/port2/fesom2_port/`): ~17 kLoC across 35 `src/*.{c,h}`
+  modules; CORE2 @ dt=1800, linfs ALE, KPP(default)/PP, FCT advection, GM/Redi, EVP sea ice,
+  JRA55 forcing, PHC IC, CG SSH solver; MPI to 864 ranks; reproduces the Fortran climate to
+  SST/SSS RMS ~0.005–0.04. **This validated behaviour is the thing we must not break.**
+- **Data model**: flat `double*`, row-major `[entity*nl + level]` (level contiguous) via
+  `FESOM_NODE3D/ELEM3D/ELEMVEC` macros; `real_t` is one typedef (`double`). Node↔element
+  coupling is a **gather** over the `nod_in_elem2D` CSR (race-free). Host MPI halo pack/unpack
+  follows each shared-field write (see `fesom_step.c`). SSH is a **parallel CG** (MPI-allreduce
+  dot products).
+- **Kernel shape**: `for entity { for level {…} }`, entity outer — a natural `parallel_for`
+  over entity with the level loop inside the lambda.
+- **C→C++ cost is low and mechanical**: ~303 `malloc`/`calloc` sites need casts; 1 designated
+  initializer (`fesom_main.c:829`); 2 `restrict`; no VLAs; keyword "clashes" are all in comments.
+- **Levante**: A100 (Ampere80), `nvhpc`+CUDA, gcc 11/13, cmake 3.31. GPU partitions `gpu`
+  (a100_80, 4 GPUs/node) and `gpu-devel`. Account `ab0995`. I/O is gather→host serial-netcdf,
+  so **no GPU-netcdf is needed**.
+- **Kokkos availability** (checked 2026-05-25): no loadable `module`, but (1) it's an
+  installable **spack** package — `spack install kokkos +cuda cuda_arch=80 +openmp`; the recipe
+  also supports `+rocm amdgpu_target=gfx90a` (== LUMI MI250x), confirming the no-vendor-lock
+  path; spack's *preferred* version is an older 4.0.01. (2) **ICON vendors Kokkos 4.4.1 as a
+  git submodule** at `/work/aa0049/a271109/icon-2026.04/externals/kokkos/` (readable by us, full
+  source, built in-tree via `add_subdirectory`) — this is the "ICON kokkos build" and it's the
+  approach we adopt (self-contained, version-pinned, portable to LUMI without depending on each
+  cluster's spack having the right variant).
+- **Reusable scripts** (`scripts/`): `exp1_compare_bidiff.py` (operator diff), `diff_snap.py`,
+  `compare_c_vs_fortran.py`, `clim_validation_2yr.py`, `drift_5yr_d1800.py`, KPP cross-checks.
+- **Plan/format precedents**: `docs/plans/completed/{20260424-mpi-port,20260425-gm-redi-port,
+  20260524-kpp-vertical-mixing}.md`.
+- **Project memory**: `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`
+  (`project-kokkos-port.md`, `reference-c-port.md`, `user-role.md`).
+
+## Development Approach
+
+This is a **fidelity port of a scientific model**, not greenfield feature work. The
+generic "unit-test-per-function/TDD" model does **not** fit physics kernels — the real
+test is **bit-identity vs the C twin** and **climate-match vs Fortran**. Concretely:
+
+- **Per-kernel gate (the "test")**: keep the legacy C function *and* the new Kokkos kernel
+  in the binary; an env-gated verify mode (`FESOM_KK_VERIFY=<kernel>`) runs **both** on the
+  same live state and asserts `max|Δ| == 0` on the **Serial** backend before the Kokkos
+  version becomes default. This is the in-binary analogue of `exp1_compare_bidiff.py`.
+- **Build gate**: every task keeps **all configured backends compiling** (Serial+OpenMP+CUDA),
+  and keeps the **Serial run bit-identical** to the saved C reference snapshots.
+- **Stay Kokkos-pure**: `KOKKOS_LAMBDA`/`KOKKOS_FUNCTION`, `Kokkos::deep_copy`, `Kokkos::`
+  math only. **No** `cuda*`, `__device__`, `__CUDA_ARCH__`, `<cuda_runtime.h>`. A CI grep
+  enforces this (Task M0.3).
+- Complete each task fully (kernel + its verify gate + backends green) before the next.
+- Preserve **every** physics constant and loop bound verbatim — re-read `PORTING_LESSONS.md`
+  before touching any kernel (the "no-op at dt=500, decisive at dt=1800" traps).
+- The classic unit tests that *do* exist (`tests/test_calendar.c`, `test_io_config.c`,
+  `test_io_stream_unit.c`) are carried over and must keep passing.
+
+## Testing Strategy
+
+- **Bit-identity gate (primary)**: `FESOM_KK_VERIFY` in-binary C-vs-Kokkos diff (Serial,
+  `max|Δ|==0`) per kernel; whole-run `diff_snap.py` Serial-vs-C-reference `==0`.
+- **Climate gate (periodic)**: 2-yr CORE2 vs `fortran_pp_2yr` (+ KPP ref) — SST/SSS area-wtd
+  RMS within the established Fortran↔C budget (~0.005–0.04); 5-yr stability run (`max uv < 5`).
+  Scripts: `clim_validation_2yr.py`, `drift_5yr_d1800.py`, `kpp_climate_compare.py`.
+- **Per-backend acceptance**: Serial = bit-identical · OpenMP = climate-identical (per-step
+  Δ ≲ 1e-12) · CUDA/HIP = climate-close (≈ Fortran↔C noise).
+- **Plumbing tests**: a `fesom_field` unit test (alloc / host-write→sync→device-read→sync-back
+  identity / `deep_copy`); an env-gated `FESOM_KK_SYNCCHECK` coherence assertion.
+- **C unit tests**: keep `ctest` (calendar, io_config, io_stream) green throughout.
+
+## Progress Tracking
+
+- mark completed items `[x]` immediately when done
+- add newly discovered tasks with ➕ prefix
+- document blockers with ⚠️ prefix
+- M5/M6 are intentionally coarse — **expand them into detailed tasks when M4 completes**
+- keep this plan in sync with actual work
+
+## What Goes Where
+
+- **Implementation Steps** (`[ ]`): everything achievable in this repo — build, code, the
+  in-binary verify gates, Serial bit-identity runs.
+- **Post-Completion** (no checkboxes): GPU/LUMI run configs, multi-GPU MPI mapping, perf
+  targets, upstreaming — things needing external systems or long HPC jobs.
+
+---
+
+## Implementation Steps
+
+## ───────────── M0 · C++/Kokkos bit-identical baseline ─────────────
+*Goal: same code, compiled as C++ with Kokkos initialised, builds on Serial+OpenMP+CUDA, and
+the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical to the C binary.*
+
+### Task M0.1: Create fresh repo + import the C sources + capture the golden reference
+
+**Files:**
+- Create: `/home/a/a270088/port_kokkos/.git` (`git init`)
+- Create: `src/`, `tests/`, `scripts/`, `docs/`, `env.sh`, `configure.sh`, `CMakeLists.txt`,
+  job templates, `README.md` (copied from `port2/fesom2_port/`)
+- Create: `.gitignore` (build/, *.o, runs/)
+- Create: `docs/reference/c_baseline_snapshots/` (saved golden outputs)
+
+- [ ] `git init` in `/home/a/a270088/port_kokkos`; copy the C port tree in (sources, tests,
+      scripts, docs/plans/completed, env.sh, configure.sh, job_* templates, README)
+- [ ] commit "import validated C port baseline" (records the exact C starting point)
+- [ ] build the **unmodified C** binary (C99) and run two smoke refs: (a) pi mesh short run,
+      (b) CORE2 16-rank ~50-step run — save snapshots as the **golden reference** for `diff_snap.py`
+- [ ] record the C reference git SHA of `port2/fesom2_port` (HEAD) in `docs/reference/PROVENANCE.md`
+- [ ] write `docs/reference/PROVENANCE.md` documenting reference run cmds + checksums (this is the "test" for this task)
+- [ ] `diff_snap.py` sanity: golden-vs-golden == 0 (harness works) — must pass before M0.2
+
+### Task M0.2: Vendor Kokkos 4.4.1 as a submodule, built in-tree (ICON's approach)
+
+**Files:**
+- Create: `externals/kokkos` (git submodule, **pinned to 4.4.1** to match ICON)
+- Modify: `CMakeLists.txt` (`add_subdirectory(externals/kokkos)`; backend via `-DKokkos_ENABLE_*`)
+- Modify: `env.sh` (module loads: gcc, cuda via nvhpc, cmake)
+- Create: `docs/BUILD.md`
+
+- [ ] add Kokkos 4.4.1 as a pinned submodule; integrate via `add_subdirectory` (no separate
+      install — backend chosen at configure time per build dir: `build-serial`, `build-omp`,
+      `build-cuda` with `-DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON`)
+- [ ] crib compiler/arch flags from ICON's readable tree
+      (`/work/aa0049/a271109/icon-2026.04/externals/kokkos/`) — it builds the same 4.4.1 here
+- [ ] document the exact module env in `env.sh` (gcc 11/13 + matching nvhpc/cuda + cmake 3.31)
+- [ ] build + run an in-tree Kokkos smoke (`parallel_for` + `parallel_reduce`) on Serial and
+      OpenMP (login node), and on GPU via `gpu-devel` (A100 visible, kernel executes)
+- [ ] write `docs/BUILD.md` (recipe = deliverable/test); note the **spack alternative**
+      (`spack install kokkos +cuda cuda_arch=80 +openmp` / `+rocm amdgpu_target=gfx90a`) for
+      sites where vendoring is undesirable
+- [ ] verify all three build dirs configure+smoke — must pass before M0.3
+
+### Task M0.3: Convert the build system to C++/Kokkos + add Kokkos-purity guard
+
+**Files:**
+- Modify: `CMakeLists.txt` (project `CXX`+`CUDA`; `find_package(Kokkos)`; link
+  `Kokkos::kokkos`, `MPI::MPI_CXX`, netcdf, `m`)
+- Rename: `src/*.c` → `src/*.cpp` (keep `.h`; git-mv to preserve history)
+- Create: `scripts/check_kokkos_purity.sh` (grep gate)
+- Create: `cmake/CompilerFlags.cmake` (`-ffp-contract=off` knob for host bit-identity diffs)
+
+- [ ] CMake: switch language to CXX, add CUDA; backend selected by `-DFESOM_BACKEND=Serial|OpenMP|Cuda`
+- [ ] `git mv` all `src/*.c` → `.cpp`; update the source list; keep `tests/*.c` as C (ctest)
+- [ ] add `scripts/check_kokkos_purity.sh`: fail if `cudaMalloc|cudaMemcpy|__device__|__CUDA_ARCH__|<cuda_runtime.h>`
+      appears in `src/` (allowlist: none); wire as a CMake/CTest target
+- [ ] add `-ffp-contract=off` to host builds so Serial-vs-C fma rounding matches (document the flag)
+- [ ] verify: `cmake` configures for all 3 backends; purity check passes (no kernels yet) — before M0.4
+
+### Task M0.4: Make the code compile as C++ (mechanical)
+
+**Files:**
+- Modify: all `src/*.cpp` (malloc casts), `src/fesom_main.cpp` (designated init)
+- Create: `scripts/add_malloc_casts.py` *(optional — a sed + compiler-error loop may be faster
+  for a one-shot codemod; don't gold-plate it)*
+
+- [ ] cast the **~360** `malloc/calloc/realloc` returns (concentrated in `fesom_mesh.cpp` ~63
+      and `fesom_io.cpp` ~51); drive the residue with the compiler's own errors
+- [ ] replace the `fesom_main.cpp:829` designated initializer with positional/explicit assignment
+- [ ] (no real `restrict` qualifiers exist — all "restrict" hits are the word "restricted" in
+      comments; defensively `#define RESTRICT __restrict__` only if a future use appears)
+- [ ] fix any remaining C++ diagnostics (implicit enum→int, `void*` assignments, `extern "C"`
+      around C headers only if needed — MPI/netcdf headers self-guard); ensure the IO-dispatch
+      file `fesom_io_stream_dispatch.cpp` is included in the `git mv` and source list
+- [ ] build clean (`-Wall -Wextra`) on Serial **and** OpenMP **and** CUDA-host pass — before M0.5
+
+### Task M0.5: Initialise Kokkos in main; prove the bit-identical baseline
+
+**Files:**
+- Modify: `src/fesom_main.cpp` (`Kokkos::ScopeGuard` after `MPI_Init`, before any compute)
+- Create: `tests/run_bitident_baseline.sh`
+
+- [ ] add `Kokkos::ScopeGuard kokkos(argc, argv);` scoped inside `MPI_Init`/`MPI_Finalize`;
+      print `Kokkos::DefaultExecutionSpace` name at startup
+- [ ] run the C++ **Serial** build on both smoke refs → `diff_snap.py` vs golden == **0.0** (gate 0)
+- [ ] run the C++ **CUDA** build on the smoke refs → also == 0.0 (no kernels on device yet, so
+      compute is still host code; this confirms the GPU build path runs)
+- [ ] keep `ctest` (calendar/io_config/io_stream) green
+- [ ] tag `m0-baseline`; this task's "test" is the snapshot bit-identity — before M1
+
+## ───────────── M1 · DualView data layer (Serial stays bit-identical) ─────────────
+*Goal: every PERSISTENT field becomes a `Kokkos::DualView<double*, LayoutRight>` owned by its
+struct; legacy kernels keep using a host raw-pointer alias; a sync discipline in the step driver
+keeps host/device coherent. No compute moves to device yet → all backends stay bit-identical.*
+
+> **Scope note (review fix):** M1 migrates the *persistent state* arrays
+> (mesh/dyn/aux/tracers/forcing/ice). **Per-kernel scratch arrays** owned by GM (`fesom_gm.cpp`:
+> `fer_K/fer_C/fer_gamma/neutral_slope/slope_tapered/sigma_xy`), KPP (`fesom_kpp.cpp`:
+> `blmc/ghats/profiles`), FCT (`fesom_tracer_adv.cpp`: `edge_up_dn_grad/fct_LO/tr_xy`),
+> tracer-diff, and the CG vectors (`fesom_ssh.cpp`: `r/p/Ap`, stiffness CSR) are migrated to
+> `Field` **inside their own M2/M4 conversion task** (each such task carries an explicit "wrap
+> this kernel's scratch arrays in `Field`" checkbox). This avoids a false "everything migrated"
+> claim and the `feedback_unported_consumer_gaps` trap (a device kernel with no device storage).
+>
+> **Invariant — why CUDA stays bit-identical through all of M1:** the only device operation is
+> `Kokkos::deep_copy` of `double` (bitwise-exact) and **no compute kernel runs on device yet**;
+> all compute is still host C-code. The first expected CUDA divergence is M2.1. Anything that
+> breaks M1 CUDA bit-identity (a stray device `parallel_for`/fill) is a bug.
+
+### Task M1.1: `fesom_field` wrapper + sync discipline primitives
+
+**Files:**
+- Create: `src/fesom_field.hpp` (the `Field` type)
+- Create: `tests/test_field.cpp` + CMake `add_test`
+
+- [ ] `struct Field { Kokkos::DualView<double*, Kokkos::LayoutRight> dv; double* h; ... }` with:
+      `alloc(n)`, `h()` (host raw ptr for legacy code, = `dv.view_host().data()`),
+      `d()` (device `View`), `modify_host()/modify_device()`, `sync_host()/sync_device()`,
+      `size()`, `free()`
+- [ ] explicit `LayoutRight` so the host mirror byte-matches the C `[entity*nl+lev]` layout
+      (legacy macros keep working). Document in the header that the M5 flip to space-default
+      layout is a **rank change** (1-D flat → 2-D/3-D `View`) for interleaved/3-D hot fields
+      (`uv` etc. via `FESOM_ELEMVEC`), not a mere `LayoutRight`→default swap, and requires the
+      index macros to become layout-agnostic accessors — see M5
+- [ ] `tests/test_field.cpp`: alloc; host write → `sync_device` → device read (in a `parallel_for`)
+      → mutate on device → `sync_host` → assert round-trip identity; `deep_copy` paths
+- [ ] **`FESOM_KK_SYNCCHECK` — concrete mechanism (not just DualView flags):** each `Field`
+      carries an "authoritative space" tag set by `modify_host()/modify_device()`; provide a
+      debug accessor `h_checked()` that asserts host-authoritative, and route halo/I/O/legacy
+      entry points through it in debug builds (bare `.h()` cannot trap stale raw-pointer reads).
+      This is the GPU analogue of the stale-halo guard (`feedback_write_loops_halo`)
+- [ ] `ctest` for `test_field` passes on Serial+OpenMP+CUDA — before M1.2
+
+### Task M1.2: Migrate `fesom_mesh` geometry fields to `Field`
+
+**Files:**
+- Modify: `src/fesom_mesh.h` (members → `Field`; raw-ptr accessors alias `.h()`),
+  `src/fesom_mesh.cpp` (alloc/read/free), all call sites that take the raw pointers
+
+- [ ] convert read-mostly mesh arrays (`area`, `areasvol`, `elem_area`, `gradient_sca`,
+      `coriolis`, `edge_*`, `nlevels*`, `Z`, `zbar`, `hnode*`, `helem`, …) to `Field`/`int`-`Field`
+- [ ] keep every legacy access compiling via the raw-ptr alias (`mesh->area` still valid)
+- [ ] `sync_device()` the mesh once after `compute_metrics` (set-once data)
+- [ ] verify Serial smoke == golden (bit-identical) and `ctest` green — before M1.3
+
+### Task M1.3: Migrate `fesom_dyn`, `fesom_aux`, `fesom_tracers` to `Field`
+
+**Files:**
+- Modify: `src/fesom_dyn.{h,cpp}`, `src/fesom_aux.{h,cpp}`, `src/fesom_tracers.{h,cpp}` + call sites
+
+- [ ] convert `uv/uv_rhs/uv_rhsAB/w/w_e/w_i/eta_n/d_eta/ssh_rhs*/uvnode*/fer_*/cfl_z` (dyn)
+- [ ] convert `density_m_rho0/hpressure/bvfreq/sw_alpha/sw_beta/Kv/Av/pgf_x/pgf_y/…` (aux)
+- [ ] convert `tracers->data[*].values` (mind the **stride `nl`** — `feedback_tracer_stride_nl`)
+- [ ] verify Serial smoke == golden; `ctest` green — before M1.4
+
+### Task M1.4: Migrate `fesom_forcing` + sea-ice structs to `Field`
+
+**Files:**
+- Modify: `src/fesom_forcing.{h,cpp}`, `src/fesom_ice*.{h,cpp}` (ice state arrays) + call sites
+
+- [ ] convert forcing arrays (`stress_*`, `heat_flux`, `water_flux`, `virtual_salt`, …) —
+      honour halo-sized allocation (`feedback_array_size_vs_reader_loop`)
+- [ ] convert ice state (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work arrays)
+- [ ] verify Serial smoke == golden; `ctest` green — before M1.5
+
+### Task M1.5: Sync discipline in the step driver + M1 acceptance
+
+**Files:**
+- Modify: `src/fesom_step.cpp`, `src/fesom_ice.cpp`, `src/fesom_main.cpp`
+- Create: `docs/SYNC_MAP.md` (per-substep host/device currency map — mirrors the halo map)
+
+- [ ] add coarse-but-correct sync: before a (future) device kernel `sync_device` its inputs;
+      after, `modify_device`; before halo/I/O/legacy-host-kernel, `sync_host`. At M1 all compute
+      is still host, so the map starts as "host authoritative"; this task lays the rails
+- [ ] exercise a no-op device round-trip each step under `FESOM_KK_SYNCCHECK` to prove plumbing
+- [ ] document the map in `docs/SYNC_MAP.md` (the deliverable/test for this task)
+- [ ] **M1 acceptance**: Serial+OpenMP+CUDA all run a **1-yr CORE2** bit-identical to the C
+      reference (compute still on host); tag `m1-datalayer` — before M2
+
+## ───────────── M2 · Ocean hot-path kernels on device ─────────────
+*Goal: convert leaf compute kernels to `parallel_for`, one (group) per task, each gated
+`FESOM_KK_VERIFY` Serial `max|Δ|==0` vs its C twin. LayoutRight (correct-but-uncoalesced on
+GPU — fine, slow-first is accepted). Order chosen so the Serial build stays green throughout.*
+
+> **Cross-cutting for every M2/M4 task:**
+> - Each task also **wraps that kernel's own scratch arrays in `Field`** (per the M1 scope note).
+> - A ported routine that contains **internal `fesom_exchange_*` halo calls** (KPP has 6; the
+>   FCT pipeline interleaves them) must round-trip per exchange: device-compute → `sync_host` →
+>   halo → `sync_device` → device-compute. The sync map is **per-substep *including* intra-kernel
+>   exchanges**, not just per-top-level-kernel — list these sync points as explicit checkboxes.
+> - **Mid-step host round-trip is expected, not a regression:** the SSH **CG solve sits in the
+>   middle of the step** (`fesom_step.c:147-164`), and stays on host until M4.2. So while the
+>   ocean kernels around it are on device, each step does `sync_host(uv_rhs/ssh_rhs)` before CG
+>   and `sync_device` after `update_vel`. State this in the M2 acceptance.
+> - **GM/Redi scope:** GM runs **by default** in the C step (off only via `FESOM_NO_GMREDI=1`).
+>   It IS in the conversion sequence (Task M2.5b). The **first GPU climate target (M3) is run
+>   GM-off** (`FESOM_NO_GMREDI=1`) against a GM-off reference — this reuses the C port's existing
+>   byte-identity off-switch invariant and shrinks the M3 surface; GM-on climate follows.
+
+### Task M2.1: EOS / pressure_bv / sw_alpha_beta (first GPU-math test)
+
+**Files:**
+- Modify: `src/fesom_eos.cpp` (`fesom_pressure_bv`, `fesom_compute_sw_alpha_beta`),
+  `src/fesom_step.cpp` (dispatch + verify hook)
+
+- [ ] port `fesom_pressure_bv` to a `parallel_for` over nodes, level loop in the lambda;
+      `Kokkos::` math for `pow/sqrt` (JM-EOS) — first check of transcendental portability
+- [ ] port `compute_sw_alpha_beta`
+- [ ] add `FESOM_KK_VERIFY=eos` mode: run C twin + Kokkos on the same state, assert `max|Δ|==0` (Serial)
+- [ ] keep the C twin in-tree (dead-but-diffable) until M2 closes
+- [ ] verify: Serial smoke still == golden; OpenMP Δ ≲ 1e-12; CUDA runs — before M2.2
+
+### Task M2.2: PP mixing (`compute_vel_nodes` gather, `pp_mixing`, `mo_convect`)
+
+**Files:**
+- Modify: `src/fesom_pp.cpp`, `src/fesom_step.cpp`
+
+- [ ] port `compute_vel_nodes` (gather over `nod_in_elem2D` → accumulate-local-then-write; race-free)
+- [ ] port the 3 `pp_mixing` loops (preserve the loop-2-before-loop-3 ordering subtlety) + `mo_convect`
+- [ ] `FESOM_KK_VERIFY=pp` Serial `max|Δ|==0`
+- [ ] verify backends as M2.1 — before M2.3
+
+### Task M2.3: KPP vertical mixing (the large mixing kernel)
+
+**Files:**
+- Modify: `src/fesom_kpp.cpp` (1046 LoC), `src/fesom_step.cpp`
+
+- [ ] wrap KPP scratch arrays in `Field` (`blmc/ghats`, working profiles) — deferred from M1
+- [ ] port `bldepth/blmix/enhance/combine/wscale/ri_iwmix` etc. as node-parallel kernels;
+      `Kokkos::` math throughout; preserve the `bvfreq` smoothing + bottom-pad fixes
+- [ ] ⚠️ KPP does **6 internal `fesom_exchange_*`** (`fesom_step.c:116` notes this) — add a
+      `sync_host`→halo→`sync_device` bracket at **each** of the 6, as explicit checkboxes; these
+      are M5 candidates for on-device pack/unpack but stay host round-trips here
+- [ ] `FESOM_KK_VERIFY=kpp` Serial `max|Δ|==0` (cross-check vs `kpp_*_xcheck.py` reference dumps)
+- [ ] verify backends — before M2.4
+
+### Task M2.4: PGF + momentum RHS + viscosity + implicit vertical viscosity
+
+**Files:**
+- Modify: `src/fesom_aux.cpp` (PGF), `src/fesom_momentum.cpp` (`compute_vel_rhs`,
+  `visc_filt_bidiff`, `impl_vert_visc`), `src/fesom_step.cpp`
+
+- [ ] port `pressure_force_linfs_fullcell` (element-parallel)
+- [ ] port `compute_vel_rhs` — **preserve AB2 `eps=0.1`** (the dt=1800 trap, `PORTING_LESSONS §1`)
+- [ ] port `visc_filt_bidiff` (biharmonic; element-parallel; reuse the `exp1_compare_bidiff.py` idea)
+- [ ] port `impl_vert_visc` (per-element TDMA: parallel over element, sequential sweep in level)
+- [ ] **leave `compute_ssh_rhs_linfs`, `ssh_solve_cg`, `update_vel`, `compute_hbar` on host**
+      (steps 7–10) until M4.2 — they bracket the CG; bridge with `sync_host` before
+      `compute_ssh_rhs` and `sync_device` after `update_vel` (the expected mid-step round-trip)
+- [ ] `FESOM_KK_VERIFY` Serial `max|Δ|==0` for each; backends verified — before M2.5
+
+### Task M2.5: ALE thickness / vertical velocity / CFLz / wsplit
+
+**Files:**
+- Modify: `src/fesom_ale.cpp`, `src/fesom_step.cpp`
+
+- [ ] port `ale_thickness_linfs`, `ale_vert_vel_linfs` (+ `fer_w` accumulator), `compute_cflz`,
+      `compute_wvel_split` (preserve `use_wsplit=.false.` behaviour), `commit_thickness`
+- [ ] `FESOM_KK_VERIFY=ale` Serial `max|Δ|==0`; backends — before M2.5b
+
+### Task M2.5b: GM/Redi (sigma_xy, neutral_slope, streamfunction, bolus, horizontal Redi)
+
+**Files:**
+- Modify: `src/fesom_gm.cpp` (1077 LoC), `src/fesom_step.cpp`
+
+- [ ] wrap GM scratch arrays in `Field` (`fer_K/fer_C/Ki/fer_gamma/sigma_xy/neutral_slope/
+      slope_tapered/fer_tapfac`) — these were deferred from M1
+- [ ] port `compute_sigma_xy`, `compute_neutral_slope`, `init_redi_gm`, `fer_solve_gamma`
+      (vertical solve), `fer_gamma2vel`; preserve ODM95 tapering + `scaling_GMzexp`
+- [ ] port the bolus add/sub on `uv`/`w`/`w_e` and `diff_part_hor_redi` — ⚠️ honour
+      `feedback_bolus_divergence_balance` (never clamp `fer_uv` per-cell; scale `fer_gamma`
+      uniformly so the FCT continuity holds)
+- [ ] **gate two ways:** `FESOM_NO_GMREDI=1` Serial run is **byte-identical to the GM-off path**
+      (the C port's existing invariant); `FESOM_KK_VERIFY=gm` Serial `max|Δ|==0` with GM on
+- [ ] backends verified — before M2.6
+
+### Task M2.6: FCT tracer advection (the big one — scatter decision)
+
+**Files:**
+- Modify: `src/fesom_tracer_adv.cpp` (1301 LoC), `src/fesom_step.cpp`
+- Create: `docs/SCATTER_STRATEGY.md`
+
+- [ ] wrap FCT scratch arrays in `Field` (`edge_up_dn_grad/fct_LO/tr_xy`, flux work) — deferred
+      from M1; bracket the pipeline's internal `fesom_exchange_*` with sync points (as in M2.3)
+- [ ] port the MFCT 3rd-order horizontal + vertical FCT pipeline; gradients from `values`
+      (`feedback_mfct_gradient_from_values`); **preserve the tracer AB2 `eps=0.1`** too
+      (`PORTING_LESSONS §1`, `oce_tracer_mod.F90:53`)
+- [ ] ⚠️ **flux assembly is edge→node scatter**: on Serial it's a sequential `+=` → bit-identical.
+      GPU strategy = `Kokkos::atomic_add` (simplest, climate-close). **Constraint:** the **Serial
+      verify path keeps natural edge order** so `max|Δ|==0` holds; edge-**coloring**, if ever
+      adopted, is **GPU-only** (it reorders a physics sum → would break the Serial gate and the
+      no-simplification rule). Record this in `docs/SCATTER_STRATEGY.md`
+- [ ] `FESOM_KK_VERIFY=tradv` Serial `max|Δ|==0`; backends — before M2.7
+
+### Task M2.7: Tracer diffusion (implicit vertical + Redi K33) + M2 acceptance
+
+**Files:**
+- Modify: `src/fesom_tracer_diff.cpp`, `src/fesom_step.cpp`
+
+- [ ] port `impl_vert_diff_tracers` (per-node TDMA) + surface flux BC + the salinity floor
+- [ ] `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`
+- [ ] **M2 acceptance**: full ocean step (minus CG/reductions/ice) on device; Serial 1-yr CORE2
+      bit-identical to C; CUDA 1-yr runs (slow) and is physical. Tag `m2-ocean-device` — before M3
+
+## ───────────── M3 · Climate validation on GPU ─────────────
+*Goal: prove the CUDA build reproduces the Fortran climate within the Fortran↔C budget.*
+
+### Task M3.1: GPU run configuration (multi-GPU MPI mapping)
+
+**Files:**
+- Create: `job_gpu_core2_*` SLURM templates, `docs/RUN_GPU.md`
+
+- [ ] map MPI ranks → GPUs (1 rank/GPU, 4/node on `gpu`); pick `dist_<#gpus>` partitions;
+      set `Kokkos` device-per-rank (local-rank → `cudaSetDevice` via `Kokkos` `--kokkos-device-id`)
+- [ ] short multi-GPU smoke on `gpu-devel`; document in `docs/RUN_GPU.md`
+
+### Task M3.2: 2-yr + 5-yr GPU climate validation
+
+- [ ] CUDA 2-yr CORE2 vs `fortran_pp_2yr` (+ KPP ref): `clim_validation_2yr.py` — SST/SSS RMS
+      within the Fortran↔C budget (~0.005–0.04)
+- [ ] CUDA 5-yr stability (`drift_5yr_d1800.py`): completes, `max uv < 5`, drift non-growing
+- [ ] document the **GPU↔CPU difference budget** (expect ≈ Fortran↔C) in `docs/GPU_FIDELITY.md`
+- [ ] tag `m3-gpu-climate`
+
+## ───────────── M4 · Reductions + CG SSH solver + sea ice on device ─────────────
+
+### Task M4.1: Global reductions / diagnostics → `parallel_reduce`
+**Files:** Modify `src/fesom_main.cpp`, `src/fesom_aux.cpp`, diagnostics
+- [ ] port `ocean_area` and per-step stat reductions; Serial bit-identical, OpenMP/GPU climate-close
+- [ ] verify
+
+### Task M4.2: SSH RHS + CG solver + velocity update + hbar on device (closes the mid-step gap)
+**Files:** Modify `src/fesom_ssh.cpp`, `src/fesom_step.cpp`
+- [ ] wrap CG vectors + stiffness CSR in `Field` (`r/p/Ap`, matrix) — deferred from M1
+- [ ] port `compute_ssh_rhs_linfs`, the CG (`SpMV + axpy + dot` via `parallel_reduce` +
+      `MPI_Allreduce`), `update_vel`, `compute_hbar` — this removes the M2 mid-step host
+      round-trip; Serial `max|Δ|==0`; document the GPU non-determinism source (dot-product order)
+- [ ] verify a year on Serial (bit-identical) + CUDA (climate-close)
+
+### Task M4.3: Sea ice (EVP / thermo / FCT) on device
+**Files:** Modify `src/fesom_ice_evp.cpp`, `src/fesom_ice_thermo.cpp`, `src/fesom_ice_fct.cpp`, `src/fesom_ice.cpp`
+- [ ] port EVP subcycle kernels, thermodynamics, ice FCT (same scatter decision as M2.6)
+- [ ] `FESOM_KK_VERIFY` per kernel; **M4 acceptance**: whole model on device; 2-yr+5-yr re-validated;
+      tag `m4-full-device`
+
+## ───────────── M5 · Performance (expand after M4) ─────────────
+*Coarse now; detail when reached.*
+- [ ] per-field layout flip for hot fields whose kernels are all on-device; re-validate (Serial
+      still bit-identical — only memory order changes, not arithmetic order). ⚠️ For a **1-D flat
+      `Field`, LayoutLeft==LayoutRight (no-op for coalescing)** — the interleaved 2-component
+      (`uv/uv_rhs/tr_xy` via `FESOM_ELEMVEC`) and 3-D node fields need a **rank change** to
+      `View<double**[2]>`/`View<double**>`, and the `FESOM_NODE3D/ELEM3D/ELEMVEC` macros must
+      become **layout-agnostic accessor functions** over the `View`. Extend the same
+      layout-agnostic-accessor work to halo pack/unpack + I/O gather
+- [ ] data residency: keep state on device across steps; sync host only for halo (pre-GPU-MPI) + I/O cadence
+- [ ] GPU-aware MPI: device-pointer halo exchange (CUDA-aware OpenMPI); on-device pack/unpack kernels
+- [ ] profiling + tuning (`TeamPolicy`/hierarchical over levels where it pays); tag `m5-perf`
+
+## ───────────── M6 · HIP / LUMI bring-up (expand after M5) ─────────────
+*Coarse now; should be config-only if Kokkos-purity held.*
+- [ ] build Kokkos + model with HIP (`Kokkos_ARCH_AMD_GFX90A`) on LUMI; fix any surfaced non-portability
+- [ ] ROCm-aware MPI; LUMI run configs (`docs/RUN_LUMI.md`)
+- [ ] AMD climate-close acceptance (2-yr vs Fortran); tag `m6-lumi`
+
+### Task FINAL-1: Verify acceptance criteria
+- [ ] Serial == C bit-for-bit (smoke + 1-yr); OpenMP climate-identical; CUDA & HIP climate-close
+- [ ] all `FESOM_KK_VERIFY` kernels pass; `ctest` green; purity check green
+- [ ] 2-yr + 5-yr climate within budget on CPU and both GPUs
+
+### Task FINAL-2: Documentation
+- [ ] update `README.md` (build matrix, backends, run recipes), `docs/BUILD.md`, `docs/RUN_*.md`
+- [ ] write/refresh `CLAUDE.md` with the Kokkos patterns + the bit-identity gate workflow
+- [ ] move this plan to `docs/plans/completed/`
+
+## Technical Details
+
+- **`Field` (`fesom_field.hpp`)**: `DualView<double*, LayoutRight>` + a host raw-ptr alias so
+  legacy `entity*nl+lev` macro indexing is unchanged. `int` fields get an int-typed twin.
+  M5 swaps `LayoutRight` → space-default per hot field (no Serial arithmetic change; GPU coalescing).
+- **Sync model**: orchestrated in `fesom_step`/`fesom_ice`/`main`, mirroring the existing
+  halo-exchange map (`docs/SYNC_MAP.md`), **per-substep including intra-kernel exchanges**
+  (KPP's 6, the FCT pipeline). Coarse `sync_device(inputs)→kernel→modify_device(outputs)`;
+  `sync_host` before halo/I/O/legacy. The SSH CG sits mid-step → a mandatory `sync_host`/`sync_device`
+  bracket around it until M4.2. `FESOM_KK_SYNCCHECK` = per-`Field` authoritative-space tag +
+  a checked `h_checked()` accessor on host entry points (not just DualView flags).
+- **Determinism rule**: any reordering of a physics sum (edge-coloring) is **GPU-only**; the
+  Serial path keeps natural order so `max|Δ|==0` vs C holds (coloring on Serial would also
+  violate the no-simplification rule).
+- **Per-kernel gate** (`FESOM_KK_VERIFY=<name>`): both C twin and Kokkos kernel run on the same
+  live state; `max|Δ|` over all entities/levels printed + asserted `==0` on Serial.
+- **Why GPU can't be bit-identical**: fma contraction, libdevice/ROCm transcendental ULPs,
+  `parallel_reduce` tree order, scatter atomics — all expected; acceptance is climate-close.
+- **Build**: `-DFESOM_BACKEND={Serial,OpenMP,Cuda,Hip}`; host builds add `-ffp-contract=off`
+  for the Serial-vs-C diff. Kokkos from source (no Levante module).
+
+## Post-Completion
+*External / long-running — no checkboxes.*
+
+**Manual verification / HPC jobs:**
+- 2-yr & 5-yr climate runs are multi-hour SLURM jobs (CPU 864-rank and multi-GPU) — run on
+  `compute`/`gpu`, compare with `scripts/*.py` against `fortran_pp_2yr` and the KPP ref.
+- Multi-GPU rank↔device mapping and CUDA/ROCm-aware MPI need testing on real `gpu` nodes.
+
+**External systems:**
+- LUMI access + module environment (ROCm, Cray MPICH GPU-aware) for M6.
+- Pre-generated mesh partitions for the GPU rank counts actually used (`dist_<#gpus>`).
+- Optional: upstream the performance-portable port back to `koldunovn/fesom_port` or a new repo.
