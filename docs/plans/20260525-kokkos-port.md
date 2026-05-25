@@ -69,6 +69,13 @@ test is **bit-identity vs the C twin** and **climate-match vs Fortran**. Concret
 - **Stay Kokkos-pure**: `KOKKOS_LAMBDA`/`KOKKOS_FUNCTION`, `Kokkos::deep_copy`, `Kokkos::`
   math only. **No** `cuda*`, `__device__`, `__CUDA_ARCH__`, `<cuda_runtime.h>`. A CI grep
   enforces this (Task M0.3).
+- **Maintain a running Decisions & Lessons log — `docs/KOKKOS_PORTING_LESSONS.md` — as a
+  first-class deliverable, updated EVERY session.** This Fortran→C→Kokkos pipeline will be
+  reused to port *additional* FESOM components later, so every non-obvious **decision** (with
+  its rationale) and every **lesson** (what bit us, what worked) must be captured while fresh —
+  not reconstructed months later. It complements `docs/PORTING_LESSONS.md` (the Fortran→C
+  lessons inherited from the C port). When a task surfaces a decision or a gotcha, append it to
+  the log in the SAME commit. Treat an un-logged hard-won lesson as incomplete work.
 - Complete each task fully (kernel + its verify gate + backends green) before the next.
 - Preserve **every** physics constant and loop bound verbatim — re-read `PORTING_LESSONS.md`
   before touching any kernel (the "no-op at dt=500, decisive at dt=1800" traps).
@@ -494,6 +501,9 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 ### Task FINAL-2: Documentation
 - [ ] update `README.md` (build matrix, backends, run recipes), `docs/BUILD.md`, `docs/RUN_*.md`
 - [ ] write/refresh `CLAUDE.md` with the Kokkos patterns + the bit-identity gate workflow
+- [ ] review/finalize `docs/KOKKOS_PORTING_LESSONS.md` — it should already be complete (kept
+      current every session); distill it into a reusable "Fortran→C→Kokkos playbook" for the
+      next component port
 - [ ] move this plan to `docs/plans/completed/`
 
 ## Technical Details
