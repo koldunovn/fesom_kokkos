@@ -58,9 +58,9 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     /* n_num: counter per row in pass 1, and node-id → sparse-position lookup
      * in pass 2 (used as a sparse hash, so it must be sized for ALL local
      * nodes — interior + halo — since column indices reach into halo). */
-    int *n_num = calloc((size_t)N_alloc, sizeof(int));
+    int *n_num = (int *)calloc((size_t)N_alloc, sizeof(int));
     int  max_neighbors = 12;     /* Fortran uses 12 — same hard cap */
-    int *n_pos = calloc((size_t)N * (size_t)max_neighbors, sizeof(int));
+    int *n_pos = (int *)calloc((size_t)N * (size_t)max_neighbors, sizeof(int));
     FESOM_CHECK(n_num && n_pos, "ssh_stiff: out of memory (neighbour build)");
 
     for (int n = 0; n < N; ++n) {
@@ -85,7 +85,7 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     }
 
     /* ---- 2. Build CSR rowptr (lines 1467-1477) ---------------------------- */
-    S->rowptr = malloc((size_t)(N + 1) * sizeof(int));
+    S->rowptr = (decltype(S->rowptr))malloc((size_t)(N + 1) * sizeof(int));
     FESOM_CHECK(S->rowptr, "ssh_stiff: out of memory (rowptr)");
     S->rowptr[0] = 0;
     for (int n = 0; n < N; ++n) {
@@ -94,9 +94,9 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     S->nnz = S->rowptr[N];
 
     /* ---- 3. Fill colind + zero values + alloc pr_values (lines 1481-1494) - */
-    S->colind    = malloc((size_t)S->nnz * sizeof(int));
-    S->values    = calloc((size_t)S->nnz, sizeof(real_t));
-    S->pr_values = calloc((size_t)S->nnz, sizeof(real_t));
+    S->colind    = (decltype(S->colind))malloc((size_t)S->nnz * sizeof(int));
+    S->values    = (decltype(S->values))calloc((size_t)S->nnz, sizeof(real_t));
+    S->pr_values = (decltype(S->pr_values))calloc((size_t)S->nnz, sizeof(real_t));
     FESOM_CHECK(S->colind && S->values && S->pr_values,
                 "ssh_stiff: out of memory (CSR arrays)");
     for (int n = 0; n < N; ++n) {
@@ -227,7 +227,7 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
      * indices in `S->colind` can refer to halo nodes (n >= N), and the
      * preconditioner formula reads diag_values[node] for every off-diagonal.
      * Halo entries are filled by halo exchange below (solver.F90 mirrors). */
-    real_t *diag_values = calloc((size_t)N_alloc, sizeof(real_t));
+    real_t *diag_values = (real_t *)calloc((size_t)N_alloc, sizeof(real_t));
     FESOM_CHECK(diag_values, "preconditioner: out of memory");
     for (int row = 0; row < N; ++row) {
         diag_values[row] = S->values[S->rowptr[row]];   /* diag at offset 0 */
@@ -340,10 +340,10 @@ void fesom_solverinfo_alloc(fesom_solverinfo       *si,
     /* Allocate for full local extent — matrix-vector reads pp at column
      * indices that may reach into halo. */
     size_t n = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
-    si->rr  = calloc(n, sizeof(real_t));
-    si->zz  = calloc(n, sizeof(real_t));
-    si->pp  = calloc(n, sizeof(real_t));
-    si->App = calloc(n, sizeof(real_t));
+    si->rr  = (decltype(si->rr))calloc(n, sizeof(real_t));
+    si->zz  = (decltype(si->zz))calloc(n, sizeof(real_t));
+    si->pp  = (decltype(si->pp))calloc(n, sizeof(real_t));
+    si->App = (decltype(si->App))calloc(n, sizeof(real_t));
     FESOM_CHECK(si->rr && si->zz && si->pp && si->App,
                 "solverinfo: out of memory");
 }

@@ -104,7 +104,7 @@ static void load_one_variable(int ncid, const char *varname,
 {
     /* Allocate full ncdata[Nlon][Nlat][Ndepth] (C row-major; first index Nlon). */
     size_t ntot = (size_t)Nlon * (size_t)Nlat * (size_t)Ndepth;
-    double *ncdata = malloc(ntot * sizeof(double));
+    double *ncdata = (double *)malloc(ntot * sizeof(double));
     FESOM_CHECK(ncdata, "phc: oom (ncdata for %s)", varname);
 
     /* PHC stores temp/salt as (depth, lat, lon). nf_get_vara reads in dimension
@@ -114,7 +114,7 @@ static void load_one_variable(int ncid, const char *varname,
        and Nlon-2), we read into a temporary (depth, lat, Nlon-2) buffer then
        transpose + wrap. */
     size_t nint = (size_t)(Nlon - 2);
-    double *tmp = malloc((size_t)Ndepth * (size_t)Nlat * nint * sizeof(double));
+    double *tmp = (double *)malloc((size_t)Ndepth * (size_t)Nlat * nint * sizeof(double));
     FESOM_CHECK(tmp, "phc: oom (tmp for %s)", varname);
 
     int varid;
@@ -174,7 +174,7 @@ static void load_one_variable(int ncid, const char *varname,
 
     /* Per-node bilinear horizontal + linear vertical interpolation
        (Fortran lines 392-485). */
-    double *data1d = malloc((size_t)Ndepth * sizeof(double));
+    double *data1d = (double *)malloc((size_t)Ndepth * sizeof(double));
     FESOM_CHECK(data1d, "phc: oom (data1d)");
 
     for (int ii = 0; ii < N; ++ii) {
@@ -271,7 +271,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
 
     /* work_array sized for full local extent — Fortran line 418. Reads at
      * `work[enodes(j)]` may index halo nodes (eDim) which need valid values. */
-    real_t *work = malloc((size_t)N_alloc * sizeof(real_t));
+    real_t *work = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
     FESOM_CHECK(work, "extrap_nod3D: oom");
 
     /* Initial halo exchange so halo entries of arr reflect owner state.
@@ -283,7 +283,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
              * but our halo module operates on contiguous per-entity buffers.
              * Here we exchange the whole 3D array layer-by-layer using a
              * temporary scalar field, which is cheap (PHC IC is one-shot). */
-            real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+            real_t *layer = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
             for (int n = 0; n < N_alloc; ++n)
                 layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
             fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
@@ -347,7 +347,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
         /* Cross-rank propagation between outer iterations — Fortran line 484. */
         if (partit && partit->npes > 1) {
             for (int nz = 0; nz < nl; ++nz) {
-                real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+                real_t *layer = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
                 for (int n = 0; n < N_alloc; ++n)
                     layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
                 fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
@@ -370,7 +370,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
     /* Final exchange — Fortran line 502. */
     if (partit && partit->npes > 1) {
         for (int nz = 0; nz < nl; ++nz) {
-            real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+            real_t *layer = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
             for (int n = 0; n < N_alloc; ++n)
                 layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
             fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
@@ -425,9 +425,9 @@ void fesom_phc_load_ic(const char                  *path,
        load_one_variable. (The previous code dropped the first/last real columns
        and shifted them by ±360 in place — breaking the interpolation within ~2°
        of lon 0/360, e.g. the western Med.) */
-    double *nc_lon   = malloc((size_t)(Nlon + 2) * sizeof(double));
-    double *nc_lat   = malloc((size_t)Nlat   * sizeof(double));
-    double *nc_depth = malloc((size_t)Ndepth * sizeof(double));
+    double *nc_lon   = (double *)malloc((size_t)(Nlon + 2) * sizeof(double));
+    double *nc_lat   = (double *)malloc((size_t)Nlat   * sizeof(double));
+    double *nc_depth = (double *)malloc((size_t)Ndepth * sizeof(double));
     FESOM_CHECK(nc_lon && nc_lat && nc_depth, "phc: oom (coord arrays)");
     {
         int varid;
@@ -443,8 +443,8 @@ void fesom_phc_load_ic(const char                  *path,
     Nlon += 2;   /* Nlon is now the PADDED count; real cells at [1..Nlon-2] */
 
     /* nc_ic3d_ini: per-node bilin_indx (Fortran 281-299, non-cavity branch). */
-    int *bilin_i = malloc((size_t)mesh->myDim_nod2D * sizeof(int));
-    int *bilin_j = malloc((size_t)mesh->myDim_nod2D * sizeof(int));
+    int *bilin_i = (int *)malloc((size_t)mesh->myDim_nod2D * sizeof(int));
+    int *bilin_j = (int *)malloc((size_t)mesh->myDim_nod2D * sizeof(int));
     FESOM_CHECK(bilin_i && bilin_j, "phc: oom (bilin)");
 
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {

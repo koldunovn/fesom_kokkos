@@ -12,20 +12,20 @@ void fesom_aux_alloc(fesom_aux *a, const struct fesom_mesh *mesh)
     size_t n_nl = (size_t)N * (size_t)mesh->nl;
     size_t e_nl = (size_t)E * (size_t)mesh->nl;
 
-    a->density_m_rho0 = calloc(n_nl, sizeof(real_t));
-    a->hpressure      = calloc(n_nl, sizeof(real_t));
-    a->bvfreq         = calloc(n_nl, sizeof(real_t));
-    a->sw_alpha       = calloc(n_nl, sizeof(real_t));
-    a->sw_beta        = calloc(n_nl, sizeof(real_t));
-    a->Kv             = calloc(n_nl, sizeof(real_t));
-    a->dbsfc          = calloc(n_nl, sizeof(real_t));
+    a->density_m_rho0 = (decltype(a->density_m_rho0))calloc(n_nl, sizeof(real_t));
+    a->hpressure      = (decltype(a->hpressure))calloc(n_nl, sizeof(real_t));
+    a->bvfreq         = (decltype(a->bvfreq))calloc(n_nl, sizeof(real_t));
+    a->sw_alpha       = (decltype(a->sw_alpha))calloc(n_nl, sizeof(real_t));
+    a->sw_beta        = (decltype(a->sw_beta))calloc(n_nl, sizeof(real_t));
+    a->Kv             = (decltype(a->Kv))calloc(n_nl, sizeof(real_t));
+    a->dbsfc          = (decltype(a->dbsfc))calloc(n_nl, sizeof(real_t));
 
-    a->Av             = calloc(e_nl, sizeof(real_t));
-    a->pgf_x          = calloc(e_nl, sizeof(real_t));
-    a->pgf_y          = calloc(e_nl, sizeof(real_t));
+    a->Av             = (decltype(a->Av))calloc(e_nl, sizeof(real_t));
+    a->pgf_x          = (decltype(a->pgf_x))calloc(e_nl, sizeof(real_t));
+    a->pgf_y          = (decltype(a->pgf_y))calloc(e_nl, sizeof(real_t));
 
     /* Phase G2a: MLD1_ind (filled by fesom_pressure_bv). */
-    a->MLD1_ind       = calloc((size_t)N, sizeof(int));
+    a->MLD1_ind       = (decltype(a->MLD1_ind))calloc((size_t)N, sizeof(int));
 
     FESOM_CHECK(a->density_m_rho0 && a->hpressure && a->bvfreq
              && a->sw_alpha && a->sw_beta && a->Kv && a->dbsfc

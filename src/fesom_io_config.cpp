@@ -52,7 +52,7 @@ static int valid_varname(const char *s, size_t len)
 
 static char *strndup_local(const char *s, size_t n)
 {
-    char *out = malloc(n + 1);
+    char *out = (char *)malloc(n + 1);
     if (!out) return NULL;
     memcpy(out, s, n);
     out[n] = '\0';
@@ -111,7 +111,7 @@ static int comma_split_strict(const char *s, size_t len,
     /* Count commas to size the fields array. */
     int n = 1;
     for (size_t i = 0; i < len; ++i) if (s[i] == ',') ++n;
-    char **fields = calloc((size_t)n, sizeof(char *));
+    char **fields = (char **)calloc((size_t)n, sizeof(char *));
     if (!fields) {
         return parse_error(path, lineno, "out of memory in %s", what);
     }
@@ -163,7 +163,7 @@ int fesom_io_config_parse(const char *path, fesom_io_config_t *out)
     }
 
     int cap = 16;
-    out->entries = calloc((size_t)cap, sizeof(*out->entries));
+    out->entries = (decltype(out->entries))calloc((size_t)cap, sizeof(*out->entries));
     if (!out->entries) {
         fclose(f);
         fprintf(stderr, "%s: out of memory\n", path);
@@ -239,7 +239,7 @@ int fesom_io_config_parse(const char *path, fesom_io_config_t *out)
         }
 
         /* Convert each cadence token "period[:kind]" into an enum. */
-        fesom_period_kind_t *cad_enums = malloc((size_t)n_cads * sizeof(*cad_enums));
+        fesom_period_kind_t *cad_enums = (fesom_period_kind_t *)malloc((size_t)n_cads * sizeof(*cad_enums));
         if (!cad_enums) {
             parse_error(path, lineno, "out of memory");
             free_str_array(vars, n_vars);
@@ -283,7 +283,7 @@ int fesom_io_config_parse(const char *path, fesom_io_config_t *out)
             if (out->n_entries == cap) {
                 cap *= 2;
                 fesom_io_config_entry_t *resized =
-                    realloc(out->entries, (size_t)cap * sizeof(*out->entries));
+                    (fesom_io_config_entry_t *)realloc(out->entries, (size_t)cap * sizeof(*out->entries));
                 if (!resized) {
                     parse_error(path, lineno, "out of memory");
                     free(cad_enums);
@@ -299,7 +299,7 @@ int fesom_io_config_parse(const char *path, fesom_io_config_t *out)
             fesom_io_config_entry_t *e = &out->entries[out->n_entries++];
             e->varname    = vars[v];          /* take ownership */
             e->n_cadences = n_cads;
-            e->cadences   = malloc((size_t)n_cads * sizeof(fesom_period_kind_t));
+            e->cadences   = (decltype(e->cadences))malloc((size_t)n_cads * sizeof(fesom_period_kind_t));
             if (!e->cadences) {
                 parse_error(path, lineno, "out of memory");
                 free(e->varname); e->varname = NULL;

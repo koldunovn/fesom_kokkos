@@ -72,7 +72,7 @@ void fesom_ice_mass_matrix_fill(fesom_ice                    *ice,
     /* (Re-)allocate to ssh_stiff->nnz, zero-initialised. Fortran allocates
      * with the same shape via mass_matrix=0 then accumulates. */
     if (ice->work.fct_massmatrix == NULL) {
-        ice->work.fct_massmatrix = calloc((size_t)stiff->nnz, sizeof(real_t));
+        ice->work.fct_massmatrix = (decltype(ice->work.fct_massmatrix))calloc((size_t)stiff->nnz, sizeof(real_t));
         if (!ice->work.fct_massmatrix) {
             fprintf(stderr, "fesom_ice_mass_matrix_fill: out of memory (nnz=%d)\n",
                     stiff->nnz);

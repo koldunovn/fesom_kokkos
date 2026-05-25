@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=kk_pi_gpu
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --gres=gpu:1
+#SBATCH --ntasks=1
+#SBATCH --time=00:10:00
+#SBATCH -o /home/a/a270088/port_kokkos/runs/pi_gpu.%j.out
+#SBATCH -e /home/a/a270088/port_kokkos/runs/pi_gpu.%j.err
+#
+# M0 CUDA bit-identity smoke: run the CUDA full-model build on an A100 over the pi mesh,
+# same args as the golden capture (dt=100, 20 steps, snap_every=10, analytical forcing).
+# At M0 NO compute kernels are on the device (all host C-code; Kokkos::Cuda is initialised
+# but runs no parallel_for), so the result must be BIT-IDENTICAL to the C/Serial golden.
+# Build build-cuda on a login node first (docs/BUILD.md), then: sbatch jobs/job_pi_smoke_gpu
+# Gate afterwards on the login node:
+#   python scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi runs/pi_check_cuda
+
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+module --force purge
+# nvhpc first so the explicitly-linked openmpi/4.1.2 + netcdf libs win the LD_LIBRARY_PATH order
+module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 \
+            openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
+
+# single rank => no inter-rank comm, so the transport choice cannot affect the result;
+# self,vader avoids any IB/UCX dependency.
+export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader
+unset OMPI_MCA_osc OMPI_MCA_coll OMPI_MCA_coll_hcoll_enable HCOLL_ENABLE_MCAST_ALL \
+      HCOLL_MAIN_IB UCX_NET_DEVICES UCX_TLS UCX_IB_ADDR_TYPE UCX_UNIFIED_MODE 2>/dev/null
+export HDF5_USE_FILE_LOCKING=FALSE
+
+OUT=$ROOT/runs/pi_check_cuda
+rm -rf "$OUT"; mkdir -p "$OUT"
+echo "host: $(hostname)"
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+"$ROOT/build-cuda/fesom_port" /home/a/a270088/port2/fesom2/test/meshes/pi "$OUT" 100 20 10
+echo "Exit: $?"

@@ -157,18 +157,18 @@ static void nc_read_time_grid(fesom_jra55 *jra,
 
     /* Allocate (or reallocate just the time axis on year change). */
     if (!flf->nc_lat) {
-        flf->nc_lon = malloc((size_t)flf->Nlon * sizeof(real_t));
-        flf->nc_lat = malloc((size_t)flf->Nlat * sizeof(real_t));
+        flf->nc_lon = (decltype(flf->nc_lon))malloc((size_t)flf->Nlon * sizeof(real_t));
+        flf->nc_lat = (decltype(flf->nc_lat))malloc((size_t)flf->Nlat * sizeof(real_t));
     }
     if (flf->nc_time) free(flf->nc_time);
-    flf->nc_time = malloc((size_t)flf->Ntime * sizeof(real_t));
+    flf->nc_time = (decltype(flf->nc_time))malloc((size_t)flf->Ntime * sizeof(real_t));
     FESOM_CHECK(flf->nc_lon && flf->nc_lat && flf->nc_time,
                 "fesom_jra55: nc_lon/lat/time alloc failed");
 
     /* Read lat (full extent) */
     {
         size_t st = 0, ct = (size_t)flf->Nlat;
-        double *tmp = malloc(ct * sizeof(double));
+        double *tmp = (double *)malloc(ct * sizeof(double));
         FESOM_CHECK(tmp, "fesom_jra55: tmp lat alloc");
         NC_CHECK(nc_get_vara_double(ncid, id_lat, &st, &ct, tmp));
         for (int i = 0; i < flf->Nlat; ++i) flf->nc_lat[i] = (real_t)tmp[i];
@@ -178,7 +178,7 @@ static void nc_read_time_grid(fesom_jra55 *jra,
     /* Read lon into [1..Nlon-2] (Fortran indices 2..Nlon-1) — leave halo for later */
     {
         size_t st = 0, ct = (size_t)(flf->Nlon - 2);
-        double *tmp = malloc(ct * sizeof(double));
+        double *tmp = (double *)malloc(ct * sizeof(double));
         FESOM_CHECK(tmp, "fesom_jra55: tmp lon alloc");
         NC_CHECK(nc_get_vara_double(ncid, id_lon, &st, &ct, tmp));
         for (size_t i = 0; i < ct; ++i) flf->nc_lon[i + 1] = (real_t)tmp[i];
@@ -191,7 +191,7 @@ static void nc_read_time_grid(fesom_jra55 *jra,
     /* Read time */
     {
         size_t st = 0, ct = (size_t)flf->Ntime;
-        double *tmp = malloc(ct * sizeof(double));
+        double *tmp = (double *)malloc(ct * sizeof(double));
         FESOM_CHECK(tmp, "fesom_jra55: tmp time alloc");
         NC_CHECK(nc_get_vara_double(ncid, id_time, &st, &ct, tmp));
         for (int i = 0; i < flf->Ntime; ++i) flf->nc_time[i] = (real_t)tmp[i];
@@ -297,8 +297,8 @@ static void build_bilin_indices(fesom_jra55_field *flf,
 {
     int N = mesh->myDim_nod2D;
     if (!flf->bilin_i) {
-        flf->bilin_i = malloc((size_t)N * sizeof(int));
-        flf->bilin_j = malloc((size_t)N * sizeof(int));
+        flf->bilin_i = (decltype(flf->bilin_i))malloc((size_t)N * sizeof(int));
+        flf->bilin_j = (decltype(flf->bilin_j))malloc((size_t)N * sizeof(int));
         FESOM_CHECK(flf->bilin_i && flf->bilin_j,
                     "fesom_jra55: bilin_i/j alloc");
     }
@@ -344,7 +344,7 @@ static void read_one_time_slice(const fesom_jra55_field *flf,
     size_t start[3] = { (size_t)(t_indx_1based - 1), 0, 0 };
     size_t count[3] = { 1, (size_t)flf->Nlat, (size_t)(flf->Nlon - 2) };
     /* JRA55 stores float; allocate scratch and convert. */
-    float *tmp = malloc(count[1] * count[2] * sizeof(float));
+    float *tmp = (float *)malloc(count[1] * count[2] * sizeof(float));
     FESOM_CHECK(tmp, "fesom_jra55: time-slice scratch alloc");
     NC_CHECK(nc_get_vara_float(flf->ncid, varid, start, count, tmp));
 
@@ -393,8 +393,8 @@ static void getcoeffld(fesom_jra55_field *flf,
 
     /* Allocate sbcdata1/2 lazily. */
     if (!flf->sbcdata1) {
-        flf->sbcdata1 = malloc((size_t)Nlon * Nlat * sizeof(real_t));
-        flf->sbcdata2 = malloc((size_t)Nlon * Nlat * sizeof(real_t));
+        flf->sbcdata1 = (decltype(flf->sbcdata1))malloc((size_t)Nlon * Nlat * sizeof(real_t));
+        flf->sbcdata2 = (decltype(flf->sbcdata2))malloc((size_t)Nlon * Nlat * sizeof(real_t));
         FESOM_CHECK(flf->sbcdata1 && flf->sbcdata2,
                     "fesom_jra55: sbcdata alloc");
         flf->sbcdata1_t_index = -1;
@@ -552,8 +552,8 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         flf->ncid        = -1;
         /* coef_a/b are computed only at myDim — the halo of jra->* is filled
          * by exchange after the step compute, so coefs need not extend. */
-        flf->coef_a = calloc((size_t)N_my, sizeof(real_t));
-        flf->coef_b = calloc((size_t)N_my, sizeof(real_t));
+        flf->coef_a = (decltype(flf->coef_a))calloc((size_t)N_my, sizeof(real_t));
+        flf->coef_b = (decltype(flf->coef_b))calloc((size_t)N_my, sizeof(real_t));
         flf->sbcdata1_t_index = -1;
         flf->sbcdata2_t_index = -1;
         FESOM_CHECK(flf->coef_a && flf->coef_b,
@@ -563,14 +563,14 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
     /* Physics arrays sized myDim+eDim: thermo's compute-over-halo loop in
      * fesom_ice_thermo.c reads jra->shortwave[halo_n] etc.; this used to
      * be an out-of-bounds read when arrays were sized myDim only. */
-    jra->u_wind    = calloc((size_t)N, sizeof(real_t));
-    jra->v_wind    = calloc((size_t)N, sizeof(real_t));
-    jra->shum      = calloc((size_t)N, sizeof(real_t));
-    jra->shortwave = calloc((size_t)N, sizeof(real_t));
-    jra->longwave  = calloc((size_t)N, sizeof(real_t));
-    jra->Tair      = calloc((size_t)N, sizeof(real_t));
-    jra->prec_rain = calloc((size_t)N, sizeof(real_t));
-    jra->prec_snow = calloc((size_t)N, sizeof(real_t));
+    jra->u_wind    = (decltype(jra->u_wind))calloc((size_t)N, sizeof(real_t));
+    jra->v_wind    = (decltype(jra->v_wind))calloc((size_t)N, sizeof(real_t));
+    jra->shum      = (decltype(jra->shum))calloc((size_t)N, sizeof(real_t));
+    jra->shortwave = (decltype(jra->shortwave))calloc((size_t)N, sizeof(real_t));
+    jra->longwave  = (decltype(jra->longwave))calloc((size_t)N, sizeof(real_t));
+    jra->Tair      = (decltype(jra->Tair))calloc((size_t)N, sizeof(real_t));
+    jra->prec_rain = (decltype(jra->prec_rain))calloc((size_t)N, sizeof(real_t));
+    jra->prec_snow = (decltype(jra->prec_snow))calloc((size_t)N, sizeof(real_t));
     FESOM_CHECK(jra->u_wind && jra->v_wind && jra->shum && jra->shortwave
                 && jra->longwave && jra->Tair && jra->prec_rain && jra->prec_snow,
                 "fesom_jra55_init: physics arrays alloc");

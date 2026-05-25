@@ -192,6 +192,10 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 
 - [x] `git mv src/*.c → src/*.cpp` (36 files; done in M0.3); tests compiled as C++
 - [x] `-fpermissive` added (temporary M0 bridge; handled all 303 `void*→T*` sites — no codegen change)
+- [x] **`-fpermissive` REMOVED 2026-05-25** — `scripts/cast_alloc_voidstar.py` cast all 305 alloc
+      sites (decl `(T*)`, member `(decltype(lhs))`, subscript/deref `(remove_reference_t<decltype>)`);
+      removal also surfaced 12 `int→fesom_halo_kind` conversions in `fesom_mesh.cpp` (fixed → named
+      enum constants). Serial pi smoke still ALL FIELDS BIT-IDENTICAL. (Lessons L1/L8–L11)
 - [x] designated initializer at `fesom_main.cpp` replaced with `= {}` + explicit assignment
 - [x] `<cmath>` added to `fesom_step.cpp`; the **one** non-`-fpermissive` error fixed:
       `goto skip_rest_state` crossed `int iters_rest` init → wrapped the skipped sanity body in a
@@ -210,14 +214,13 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - [x] **Serial** build, pi smoke → `diff_snap.py` vs golden = **ALL FIELDS BIT-IDENTICAL** (gate 0 ✓)
 - [x] **OpenMP** build, pi smoke → vs golden = **BIT-IDENTICAL** (bonus; expected — no device kernels)
 - [x] tag `m0-cpu-baseline` (Serial+OpenMP bit-identical milestone committed)
-- ⚠️ [ ] **CUDA full-model build BLOCKED on casts** (finding 2026-05-25): nvcc's front-end
-      rejects `void*→T*` and does **NOT** honor `-fpermissive` (g++-only). CUDA *config* + Kokkos-CUDA
-      link already work (the 4.4.01 smoke ran on A100); the model TUs fail to compile under nvcc.
-      **Fix = bring M0.4's proper casts forward** (was deferred behind `-fpermissive`): script them —
-      assignment `lhs = alloc(...)` → `lhs = (decltype(lhs))alloc(...)`; declaration `T *x = alloc(...)`
-      → `(T*)alloc(...)`. Then drop `-fpermissive`, rebuild Serial (must stay bit-identical — casts
-      don't change codegen), rebuild CUDA, run pi smoke on `gpu-devel`, diff vs golden, tag `m0-baseline`.
+- [x] **CUDA full-model build UNBLOCKED 2026-05-25** — cast codemod (above) + the int→enum fix made
+      nvcc compile all 36 model TUs with zero errors. CUDA pi smoke on A100 (`gpu-devel`/vader1,
+      `Kokkos backend: Cuda`) → `diff_snap.py` vs golden = **ALL FIELDS BIT-IDENTICAL** (expected: no
+      device kernels at M0). `jobs/job_pi_smoke_gpu` is the reusable GPU smoke. **Tagged `m0-baseline`.**
 - [x] `ctest` green (calendar / io_stream_unit / io_config)
+- [x] **M0 COMPLETE**: Serial + OpenMP + CUDA all bit-identical to the C golden ("binary identity
+      when possible" achieved on all three backends). → M1.
 
 ## ───────────── M1 · DualView data layer (Serial stays bit-identical) ─────────────
 *Goal: every PERSISTENT field becomes a `Kokkos::DualView<double*, LayoutRight>` owned by its

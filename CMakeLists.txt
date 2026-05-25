@@ -38,10 +38,11 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 # Serial build can be bit-identical (M0.5). NOTE: do NOT add -ffp-contract=off here without
 # re-capturing the golden at the same setting (see the plan §M0.3 / Technical Details).
 #
-# -fpermissive: temporary M0 bridge — downgrades C void*->T* (303 alloc sites) to a warning
-# without changing codegen. Removed per-file as files are C++-ified in M2. (See plan §M0.4.)
+# void*->T* casts: all 305 malloc/calloc/realloc sites now carry explicit casts
+# (scripts/cast_alloc_voidstar.py — M0-cuda), so -fpermissive is GONE. nvcc's front-end rejects
+# implicit void*->T* and ignores -fpermissive anyway (lesson L1); the casts don't change codegen,
+# so the Serial build stays bit-identical to the C golden.
 add_compile_options(
-  $<$<COMPILE_LANGUAGE:CXX>:-fpermissive>
   -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
   -fno-omit-frame-pointer
   "$<$<CONFIG:Debug>:-O0>"  "$<$<CONFIG:Debug>:-g3>"

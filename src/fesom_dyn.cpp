@@ -18,27 +18,27 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     size_t n_nl   = (size_t)N * (size_t)mesh->nl;
     size_t n      = (size_t)N;
 
-    d->uv          = calloc(e_nl_2, sizeof(real_t));
-    d->uv_rhs      = calloc(e_nl_2, sizeof(real_t));
-    d->uv_rhsAB    = calloc(e_nl_2, sizeof(real_t));
-    d->w           = calloc(n_nl,   sizeof(real_t));
-    d->w_e         = calloc(n_nl,   sizeof(real_t));
-    d->w_i         = calloc(n_nl,   sizeof(real_t));
-    d->cfl_z       = calloc(n_nl,   sizeof(real_t));
-    d->uvnode      = calloc(n_nl * 2, sizeof(real_t));
-    d->uvnode_rhs  = calloc(n_nl * 2, sizeof(real_t));
+    d->uv          = (decltype(d->uv))calloc(e_nl_2, sizeof(real_t));
+    d->uv_rhs      = (decltype(d->uv_rhs))calloc(e_nl_2, sizeof(real_t));
+    d->uv_rhsAB    = (decltype(d->uv_rhsAB))calloc(e_nl_2, sizeof(real_t));
+    d->w           = (decltype(d->w))calloc(n_nl,   sizeof(real_t));
+    d->w_e         = (decltype(d->w_e))calloc(n_nl,   sizeof(real_t));
+    d->w_i         = (decltype(d->w_i))calloc(n_nl,   sizeof(real_t));
+    d->cfl_z       = (decltype(d->cfl_z))calloc(n_nl,   sizeof(real_t));
+    d->uvnode      = (decltype(d->uvnode))calloc(n_nl * 2, sizeof(real_t));
+    d->uvnode_rhs  = (decltype(d->uvnode_rhs))calloc(n_nl * 2, sizeof(real_t));
     size_t e_nl = (size_t)E * (size_t)mesh->nl;
-    d->u_b = calloc(e_nl, sizeof(real_t));
-    d->v_b = calloc(e_nl, sizeof(real_t));
-    d->u_c = calloc(n_nl, sizeof(real_t));
-    d->v_c = calloc(n_nl, sizeof(real_t));
-    d->eta_n       = calloc(n,      sizeof(real_t));
-    d->d_eta       = calloc(n,      sizeof(real_t));
-    d->ssh_rhs     = calloc(n,      sizeof(real_t));
-    d->ssh_rhs_old = calloc(n,      sizeof(real_t));
+    d->u_b = (decltype(d->u_b))calloc(e_nl, sizeof(real_t));
+    d->v_b = (decltype(d->v_b))calloc(e_nl, sizeof(real_t));
+    d->u_c = (decltype(d->u_c))calloc(n_nl, sizeof(real_t));
+    d->v_c = (decltype(d->v_c))calloc(n_nl, sizeof(real_t));
+    d->eta_n       = (decltype(d->eta_n))calloc(n,      sizeof(real_t));
+    d->d_eta       = (decltype(d->d_eta))calloc(n,      sizeof(real_t));
+    d->ssh_rhs     = (decltype(d->ssh_rhs))calloc(n,      sizeof(real_t));
+    d->ssh_rhs_old = (decltype(d->ssh_rhs_old))calloc(n,      sizeof(real_t));
     /* GM bolus velocity (Phase G1) — zero until G4/G6a write to them. */
-    d->fer_uv      = calloc(e_nl_2, sizeof(real_t));
-    d->fer_w       = calloc(n_nl,   sizeof(real_t));
+    d->fer_uv      = (decltype(d->fer_uv))calloc(e_nl_2, sizeof(real_t));
+    d->fer_w       = (decltype(d->fer_w))calloc(n_nl,   sizeof(real_t));
     FESOM_CHECK(d->uv && d->uv_rhs && d->uv_rhsAB && d->w && d->w_e && d->w_i
              && d->cfl_z && d->uvnode && d->uvnode_rhs
              && d->u_b && d->v_b && d->u_c && d->v_c

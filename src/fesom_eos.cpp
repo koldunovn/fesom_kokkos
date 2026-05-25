@@ -229,8 +229,8 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
     if (n_smooth < 1) return;
     const int Nmy = mesh->myDim_nod2D;
     const size_t sz = (size_t)Nmy * (size_t)nl;
-    real_t *vol  = malloc(sz * sizeof(real_t));
-    real_t *work = malloc(sz * sizeof(real_t));
+    real_t *vol  = (real_t *)malloc(sz * sizeof(real_t));
+    real_t *work = (real_t *)malloc(sz * sizeof(real_t));
     FESOM_CHECK(vol && work, "fesom_smooth_nod3D: out of memory");
 
     for (int sweep = 0; sweep < n_smooth; ++sweep) {

@@ -12,6 +12,7 @@
  * and other cadences/rollovers wired in Task 7.
  */
 #include "fesom_io_stream.h"
+#include <type_traits>
 #include "fesom_io.h"          /* full fesom_state typedef */
 #include "fesom_aux.h"
 #include "fesom_constants.h"
@@ -60,8 +61,8 @@ static void build_coord_cache(fesom_io_stream_t *s)
     const int my_e = mesh->myDim_elem2D;
 
     /* Local node coords in degrees (interior only). */
-    real_t *loc_lon_n = malloc((size_t)my_n * sizeof(real_t));
-    real_t *loc_lat_n = malloc((size_t)my_n * sizeof(real_t));
+    real_t *loc_lon_n = (real_t *)malloc((size_t)my_n * sizeof(real_t));
+    real_t *loc_lat_n = (real_t *)malloc((size_t)my_n * sizeof(real_t));
     FESOM_CHECK(loc_lon_n && loc_lat_n, "io_stream: oom (local node coord)");
     for (int n = 0; n < my_n; ++n) {
         loc_lon_n[n] = (real_t)((double)mesh->geo_coord_nod2D[2 * n + 0] * rad2deg);
@@ -71,8 +72,8 @@ static void build_coord_cache(fesom_io_stream_t *s)
     /* Local element centroids in degrees (interior only). Each elem's
      * 3 vertex IDs are LOCAL indices into geo_coord_nod2D, which is
      * sized myDim+eDim, so this access is always in-bounds. */
-    real_t *loc_lon_e = malloc((size_t)my_e * sizeof(real_t));
-    real_t *loc_lat_e = malloc((size_t)my_e * sizeof(real_t));
+    real_t *loc_lon_e = (real_t *)malloc((size_t)my_e * sizeof(real_t));
+    real_t *loc_lat_e = (real_t *)malloc((size_t)my_e * sizeof(real_t));
     FESOM_CHECK(loc_lon_e && loc_lat_e, "io_stream: oom (local elem centroid)");
     for (int e = 0; e < my_e; ++e) {
         double slon = 0.0, slat = 0.0;
@@ -87,10 +88,10 @@ static void build_coord_cache(fesom_io_stream_t *s)
 
     /* Allocate global on rank 0 and gather. */
     if (s->mype == 0) {
-        s->cached_lon_node = malloc((size_t)mesh->nod2D * sizeof(double));
-        s->cached_lat_node = malloc((size_t)mesh->nod2D * sizeof(double));
-        s->cached_lon_elem = malloc((size_t)mesh->elem2D * sizeof(double));
-        s->cached_lat_elem = malloc((size_t)mesh->elem2D * sizeof(double));
+        s->cached_lon_node = (decltype(s->cached_lon_node))malloc((size_t)mesh->nod2D * sizeof(double));
+        s->cached_lat_node = (decltype(s->cached_lat_node))malloc((size_t)mesh->nod2D * sizeof(double));
+        s->cached_lon_elem = (decltype(s->cached_lon_elem))malloc((size_t)mesh->elem2D * sizeof(double));
+        s->cached_lat_elem = (decltype(s->cached_lat_elem))malloc((size_t)mesh->elem2D * sizeof(double));
         FESOM_CHECK(s->cached_lon_node && s->cached_lat_node
                     && s->cached_lon_elem && s->cached_lat_elem,
                     "io_stream: oom (cached coord)");
@@ -100,8 +101,8 @@ static void build_coord_cache(fesom_io_stream_t *s)
      * the global double caches via a temporary real_t global. */
     real_t *tmp_n = NULL, *tmp_e = NULL;
     if (s->mype == 0) {
-        tmp_n = malloc((size_t)mesh->nod2D  * sizeof(real_t));
-        tmp_e = malloc((size_t)mesh->elem2D * sizeof(real_t));
+        tmp_n = (decltype(tmp_n))malloc((size_t)mesh->nod2D  * sizeof(real_t));
+        tmp_e = (decltype(tmp_e))malloc((size_t)mesh->elem2D * sizeof(real_t));
         FESOM_CHECK(tmp_n && tmp_e, "io_stream: oom (gather tmp)");
     }
 
@@ -351,7 +352,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     real_t *global = NULL;
     if (s->mype == 0) {
         size_t gsz = fesom_io_stream_global_size(kind, mesh->nod2D, mesh->elem2D, nl);
-        global = malloc(gsz * sizeof(real_t));
+        global = (decltype(global))malloc(gsz * sizeof(real_t));
         FESOM_CHECK(global, "io_stream: oom (global buf)");
     }
 
@@ -395,7 +396,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, 2, (size_t)mesh->elem2D};
             /* gather_elem laid out global as [elem][2]; transpose to [2][elem]. */
-            real_t *xy = malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(real_t));
+            real_t *xy = (real_t *)malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(real_t));
             FESOM_CHECK(xy, "io_stream: oom (uv transpose)");
             for (int e = 0; e < mesh->elem2D; ++e) {
                 xy[(size_t)0 * mesh->elem2D + e] = global[(size_t)e * 2 + 0];
@@ -409,7 +410,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
             int N = kind_is_node(kind) ? mesh->nod2D : mesh->elem2D;
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, (size_t)n_layers, (size_t)N};
-            real_t *t = malloc((size_t)n_layers * (size_t)N * sizeof(real_t));
+            real_t *t = (real_t *)malloc((size_t)n_layers * (size_t)N * sizeof(real_t));
             FESOM_CHECK(t, "io_stream: oom (3D transpose)");
             for (int n = 0; n < N; ++n) {
                 for (int k = 0; k < n_layers; ++k) {
@@ -509,7 +510,7 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
     /* strdup is POSIX, not C99; do it by hand to keep -std=c99 clean. */
     {
         size_t n = strlen(out_dir) + 1;
-        s->out_dir = malloc(n);
+        s->out_dir = (decltype(s->out_dir))malloc(n);
         FESOM_CHECK(s->out_dir, "io_stream: oom (out_dir)");
         memcpy(s->out_dir, out_dir, n);
     }
@@ -520,13 +521,13 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
     /* Cached coords on rank 0 — built ONCE here; reused on every file open. */
     build_coord_cache(s);
 
-    s->ncid       = malloc((size_t)nvars * sizeof(int));
-    s->var_id     = malloc((size_t)nvars * sizeof(int));
-    s->time_id    = malloc((size_t)nvars * sizeof(int));
-    s->bnds_id    = malloc((size_t)nvars * sizeof(int));
-    s->time_index = malloc((size_t)nvars * sizeof(int));
-    s->dim_time_id= malloc((size_t)nvars * sizeof(int));
-    s->accum_sz   = malloc((size_t)nvars * sizeof(size_t));
+    s->ncid       = (decltype(s->ncid))malloc((size_t)nvars * sizeof(int));
+    s->var_id     = (decltype(s->var_id))malloc((size_t)nvars * sizeof(int));
+    s->time_id    = (decltype(s->time_id))malloc((size_t)nvars * sizeof(int));
+    s->bnds_id    = (decltype(s->bnds_id))malloc((size_t)nvars * sizeof(int));
+    s->time_index = (decltype(s->time_index))malloc((size_t)nvars * sizeof(int));
+    s->dim_time_id= (decltype(s->dim_time_id))malloc((size_t)nvars * sizeof(int));
+    s->accum_sz   = (decltype(s->accum_sz))malloc((size_t)nvars * sizeof(size_t));
     FESOM_CHECK(s->ncid && s->var_id && s->time_id && s->bnds_id
                 && s->time_index && s->dim_time_id && s->accum_sz,
                 "io_stream: oom (per-var arrays)");
@@ -534,7 +535,7 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
     /* Always allocate per-variable accum buffers. MEAN streams accumulate
      * into them across the period; INSTANT streams reuse them as scratch
      * (zero-then-resolver-fill on each flush trigger). */
-    s->accum = calloc((size_t)nvars, sizeof(real_t *));
+    s->accum = (decltype(s->accum))calloc((size_t)nvars, sizeof(real_t *));
     FESOM_CHECK(s->accum, "io_stream: oom (accum array)");
 
     for (int v = 0; v < nvars; ++v) {
@@ -548,7 +549,7 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
                                                        mesh->myDim_nod2D,
                                                        mesh->myDim_elem2D,
                                                        mesh->nl);
-        s->accum[v] = calloc(s->accum_sz[v], sizeof(real_t));
+        s->accum[v] = (std::remove_reference_t<decltype(s->accum[v])>)calloc(s->accum_sz[v], sizeof(real_t));
         FESOM_CHECK(s->accum[v], "io_stream: oom (accum[%d] %zu)",
                     v, s->accum_sz[v]);
     }

@@ -48,17 +48,17 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     int E_full = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
     size_t e_nl1x2 = (size_t)E_full * (size_t)(nl - 1) * 2;
 
-    g->sigma_xy      = calloc(n_nlx2,    sizeof(real_t));
-    g->neutral_slope = calloc(n_nlm1x3,  sizeof(real_t));
-    g->slope_tapered = calloc(n_nlm1x3,  sizeof(real_t));
-    g->fer_tapfac    = calloc(n_nl,      sizeof(real_t));
-    g->fer_gamma     = calloc(n_nlx2,    sizeof(real_t));
-    g->fer_K         = calloc(n_nl,      sizeof(real_t));
-    g->Ki            = calloc(n_nl,      sizeof(real_t));
-    g->fer_C         = calloc((size_t)N, sizeof(real_t));
-    g->fer_scal      = calloc((size_t)N, sizeof(real_t));
-    g->tr_xy         = calloc(e_nl1x2,   sizeof(real_t));
-    g->tr_z          = calloc(n_nl,      sizeof(real_t));
+    g->sigma_xy      = (decltype(g->sigma_xy))calloc(n_nlx2,    sizeof(real_t));
+    g->neutral_slope = (decltype(g->neutral_slope))calloc(n_nlm1x3,  sizeof(real_t));
+    g->slope_tapered = (decltype(g->slope_tapered))calloc(n_nlm1x3,  sizeof(real_t));
+    g->fer_tapfac    = (decltype(g->fer_tapfac))calloc(n_nl,      sizeof(real_t));
+    g->fer_gamma     = (decltype(g->fer_gamma))calloc(n_nlx2,    sizeof(real_t));
+    g->fer_K         = (decltype(g->fer_K))calloc(n_nl,      sizeof(real_t));
+    g->Ki            = (decltype(g->Ki))calloc(n_nl,      sizeof(real_t));
+    g->fer_C         = (decltype(g->fer_C))calloc((size_t)N, sizeof(real_t));
+    g->fer_scal      = (decltype(g->fer_scal))calloc((size_t)N, sizeof(real_t));
+    g->tr_xy         = (decltype(g->tr_xy))calloc(e_nl1x2,   sizeof(real_t));
+    g->tr_z          = (decltype(g->tr_z))calloc(n_nl,      sizeof(real_t));
 
     GM_CHECK(g->sigma_xy,      "sigma_xy");
     GM_CHECK(g->neutral_slope, "neutral_slope");

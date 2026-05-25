@@ -144,18 +144,18 @@ void fesom_read_other_NetCDF(const char *file,
     NC_CHECK(nc_inq_varid(ncid, "lon", &lonvarid));
     NC_CHECK(nc_inq_varid(ncid, vari,  &varid));
 
-    real_t *lat = malloc(latlen * sizeof(real_t));
-    real_t *lon = malloc(lonlen * sizeof(real_t));
+    real_t *lat = (real_t *)malloc(latlen * sizeof(real_t));
+    real_t *lon = (real_t *)malloc(lonlen * sizeof(real_t));
     FESOM_CHECK(lat && lon, "read_other_NetCDF: lat/lon alloc");
 
     {
         size_t st = 0;
-        double *tmp = malloc(latlen * sizeof(double));
+        double *tmp = (double *)malloc(latlen * sizeof(double));
         FESOM_CHECK(tmp, "read_other_NetCDF: tmp lat alloc");
         NC_CHECK(nc_get_vara_double(ncid, latvarid, &st, &latlen, tmp));
         for (size_t i = 0; i < latlen; ++i) lat[i] = (real_t)tmp[i];
         free(tmp);
-        tmp = malloc(lonlen * sizeof(double));
+        tmp = (decltype(tmp))malloc(lonlen * sizeof(double));
         FESOM_CHECK(tmp, "read_other_NetCDF: tmp lon alloc");
         NC_CHECK(nc_get_vara_double(ncid, lonvarid, &st, &lonlen, tmp));
         for (size_t i = 0; i < lonlen; ++i) lon[i] = (real_t)tmp[i];
@@ -167,8 +167,8 @@ void fesom_read_other_NetCDF(const char *file,
         if (lon[i] < 0.0) lon[i] += 360.0;
     }
 
-    real_t *ncdata      = malloc(lonlen * latlen * sizeof(real_t));
-    real_t *ncdata_temp = malloc(lonlen * latlen * sizeof(real_t));
+    real_t *ncdata      = (real_t *)malloc(lonlen * latlen * sizeof(real_t));
+    real_t *ncdata_temp = (real_t *)malloc(lonlen * latlen * sizeof(real_t));
     FESOM_CHECK(ncdata && ncdata_temp, "read_other_NetCDF: ncdata alloc");
     memset(ncdata, 0, lonlen * latlen * sizeof(real_t));
 
@@ -178,7 +178,7 @@ void fesom_read_other_NetCDF(const char *file,
     {
         size_t start[3] = { (size_t)(itime - 1), 0, 0 };
         size_t count[3] = { 1, latlen, lonlen };
-        float *tmp = malloc(latlen * lonlen * sizeof(float));
+        float *tmp = (float *)malloc(latlen * lonlen * sizeof(float));
         FESOM_CHECK(tmp, "read_other_NetCDF: tmp data alloc");
         NC_CHECK(nc_get_vara_float(ncid, varid, start, count, tmp));
         /* Fortran stores ncdata(lon, lat) → row-major (lat, lon) for us. */
@@ -240,8 +240,8 @@ void fesom_read_other_NetCDF(const char *file,
 
     /* Coordinate prep — Fortran 142-175 (do_onvert branch only). */
     int    num    = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    real_t *temp_x = malloc((size_t)num * sizeof(real_t));
-    real_t *temp_y = malloc((size_t)num * sizeof(real_t));
+    real_t *temp_x = (real_t *)malloc((size_t)num * sizeof(real_t));
+    real_t *temp_y = (real_t *)malloc((size_t)num * sizeof(real_t));
     FESOM_CHECK(temp_x && temp_y, "read_other_NetCDF: temp_x/y alloc");
     if (do_onvert) {
         for (int n = 0; n < num; ++n) {
@@ -420,7 +420,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
      * subtract its global mean from water_flux to enforce zero net mass.
      * (Without sea ice: a_ice_old = 0 → snow factor (1-a_ice_old)=1.) */
     {
-        real_t *flux = malloc((size_t)N_full * sizeof(real_t));
+        real_t *flux = (real_t *)malloc((size_t)N_full * sizeof(real_t));
         FESOM_CHECK(flux, "sss_runoff_step: flux alloc");
         for (int n = 0; n < N_full; ++n) {
             /* evaporation: in Fortran ice_thermo this is set to the bulk

@@ -8,6 +8,7 @@
  * pack-unpack loop is correct and equivalent.
  */
 #include "fesom_halo.h"
+#include <type_traits>
 
 #include "fesom_partit.h"
 #include "fesom_types.h"
@@ -48,7 +49,7 @@ static void scratch_grow_buf(real_t **buf, size_t *cap, size_t need)
 {
     if (need <= *cap) return;
     free(*buf);
-    *buf = malloc(need * sizeof(real_t));
+    *buf = (std::remove_reference_t<decltype(*buf)>)malloc(need * sizeof(real_t));
     FESOM_CHECK(*buf, "fesom_halo: scratch buffer alloc (need=%zu real_t)", need);
     *cap = need;
 }
@@ -57,7 +58,7 @@ static void scratch_grow_reqs(halo_scratch *s, int need)
 {
     if (need <= s->reqs_cap) return;
     free(s->reqs);
-    s->reqs = malloc((size_t)need * sizeof(MPI_Request));
+    s->reqs = (decltype(s->reqs))malloc((size_t)need * sizeof(MPI_Request));
     FESOM_CHECK(s->reqs, "fesom_halo: reqs alloc");
     s->reqs_cap = need;
 }
@@ -219,7 +220,7 @@ void fesom_halo_identity_test(fesom_partit *p)
     }
 
     int N = p->myDim_nod2D + p->eDim_nod2D;
-    real_t *f = malloc((size_t)N * sizeof(real_t));
+    real_t *f = (real_t *)malloc((size_t)N * sizeof(real_t));
     FESOM_CHECK(f, "fesom_halo: identity test field alloc");
 
     /* Round 1: positive test. */

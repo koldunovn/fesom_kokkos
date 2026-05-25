@@ -576,7 +576,7 @@ int main(int argc, char **argv)
             if (a > deta_max) deta_max = a;
         }
         /* Verify residual: ‖rhs - A x‖ / ‖rhs‖ should be ≤ soltol */
-        real_t *Ax = malloc((size_t)mesh.myDim_nod2D * sizeof(real_t));
+        real_t *Ax = (real_t *)malloc((size_t)mesh.myDim_nod2D * sizeof(real_t));
         for (int row = 0; row < mesh.myDim_nod2D; ++row) {
             real_t s = 0;
             for (int j = stiff.rowptr[row]; j < stiff.rowptr[row+1]; ++j) {
@@ -878,7 +878,7 @@ skip_rest_state:
         if (freeze_ts) {
             ts_nbytes = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D)
                       * (size_t)mesh.nl * sizeof(real_t);
-            T_ic = malloc(ts_nbytes); S_ic = malloc(ts_nbytes);
+            T_ic = (decltype(T_ic))malloc(ts_nbytes); S_ic = (decltype(S_ic))malloc(ts_nbytes);
             FESOM_CHECK(T_ic && S_ic, "FESOM_FREEZE_TS: alloc snapshot");
             memcpy(T_ic, tracers.data[FESOM_TRACER_T].values, ts_nbytes);
             memcpy(S_ic, tracers.data[FESOM_TRACER_S].values, ts_nbytes);

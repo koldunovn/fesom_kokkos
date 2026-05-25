@@ -55,19 +55,19 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
     size_t e_full = (size_t)EG * (size_t)mesh->nl;
     size_t n_full = (size_t)N  * (size_t)mesh->nl;
 
-    sc->adv_flux_hor     = calloc(e_full,         sizeof(real_t));
-    sc->adv_flux_ver     = calloc(n_full,         sizeof(real_t));
-    sc->del_ttf_advhoriz = calloc(n_full,         sizeof(real_t));
-    sc->del_ttf_advvert  = calloc(n_full,         sizeof(real_t));
-    sc->fct_LO           = calloc(n_full,         sizeof(real_t));
-    sc->fct_ttf_min      = calloc(n_full,         sizeof(real_t));
-    sc->fct_ttf_max      = calloc(n_full,         sizeof(real_t));
-    sc->fct_plus         = calloc(n_full,         sizeof(real_t));
-    sc->fct_minus        = calloc(n_full,         sizeof(real_t));
-    sc->fct_aux          = calloc((size_t)E * (size_t)mesh->nl * 2,
+    sc->adv_flux_hor     = (decltype(sc->adv_flux_hor))calloc(e_full,         sizeof(real_t));
+    sc->adv_flux_ver     = (decltype(sc->adv_flux_ver))calloc(n_full,         sizeof(real_t));
+    sc->del_ttf_advhoriz = (decltype(sc->del_ttf_advhoriz))calloc(n_full,         sizeof(real_t));
+    sc->del_ttf_advvert  = (decltype(sc->del_ttf_advvert))calloc(n_full,         sizeof(real_t));
+    sc->fct_LO           = (decltype(sc->fct_LO))calloc(n_full,         sizeof(real_t));
+    sc->fct_ttf_min      = (decltype(sc->fct_ttf_min))calloc(n_full,         sizeof(real_t));
+    sc->fct_ttf_max      = (decltype(sc->fct_ttf_max))calloc(n_full,         sizeof(real_t));
+    sc->fct_plus         = (decltype(sc->fct_plus))calloc(n_full,         sizeof(real_t));
+    sc->fct_minus        = (decltype(sc->fct_minus))calloc(n_full,         sizeof(real_t));
+    sc->fct_aux          = (decltype(sc->fct_aux))calloc((size_t)E * (size_t)mesh->nl * 2,
                                   sizeof(real_t));
-    sc->tr_xy            = calloc((size_t)E * (size_t)mesh->nl * 2, sizeof(real_t));
-    sc->edge_up_dn_grad  = calloc((size_t)mesh->myDim_edge2D * (size_t)mesh->nl * 4,
+    sc->tr_xy            = (decltype(sc->tr_xy))calloc((size_t)E * (size_t)mesh->nl * 2, sizeof(real_t));
+    sc->edge_up_dn_grad  = (decltype(sc->edge_up_dn_grad))calloc((size_t)mesh->myDim_edge2D * (size_t)mesh->nl * 4,
                                   sizeof(real_t));
     FESOM_CHECK(sc->adv_flux_hor && sc->adv_flux_ver
              && sc->del_ttf_advhoriz && sc->del_ttf_advvert
@@ -915,8 +915,8 @@ static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
 
     /* a3. Per-node max/min over surrounding cells (cluster). Use a per-node
        small buffer for tvert_max/min — allocated once, reused per node. */
-    real_t *tvert_max = malloc((size_t)N * (size_t)nl * sizeof(real_t));
-    real_t *tvert_min = malloc((size_t)N * (size_t)nl * sizeof(real_t));
+    real_t *tvert_max = (real_t *)malloc((size_t)N * (size_t)nl * sizeof(real_t));
+    real_t *tvert_min = (real_t *)malloc((size_t)N * (size_t)nl * sizeof(real_t));
     FESOM_CHECK(tvert_max && tvert_min, "FCT: oom (tvert)");
     for (int n = 0; n < N; ++n) {
         int nu1 = mesh->ulevels_nod2D[n] - 1;

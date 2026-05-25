@@ -12,18 +12,18 @@ void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh)
     size_t n  = (size_t)N;
     size_t e2 = (size_t)E * 2;
 
-    f->heat_flux        = calloc(n,      sizeof(real_t));
-    f->water_flux       = calloc(n,      sizeof(real_t));
-    f->stress_node_surf = calloc(n * 2,  sizeof(real_t));
-    f->stress_surf      = calloc(e2,     sizeof(real_t));
-    f->runoff           = calloc(n,      sizeof(real_t));
-    f->Ssurf            = calloc(n,      sizeof(real_t));
-    f->virtual_salt     = calloc(n,      sizeof(real_t));
-    f->relax_salt       = calloc(n,      sizeof(real_t));
-    f->Ch_atm_oce       = calloc(n,      sizeof(real_t));
-    f->Ce_atm_oce       = calloc(n,      sizeof(real_t));
-    f->chl              = calloc(n,             sizeof(real_t));
-    f->sw_3d            = calloc(n * (size_t)mesh->nl, sizeof(real_t));
+    f->heat_flux        = (decltype(f->heat_flux))calloc(n,      sizeof(real_t));
+    f->water_flux       = (decltype(f->water_flux))calloc(n,      sizeof(real_t));
+    f->stress_node_surf = (decltype(f->stress_node_surf))calloc(n * 2,  sizeof(real_t));
+    f->stress_surf      = (decltype(f->stress_surf))calloc(e2,     sizeof(real_t));
+    f->runoff           = (decltype(f->runoff))calloc(n,      sizeof(real_t));
+    f->Ssurf            = (decltype(f->Ssurf))calloc(n,      sizeof(real_t));
+    f->virtual_salt     = (decltype(f->virtual_salt))calloc(n,      sizeof(real_t));
+    f->relax_salt       = (decltype(f->relax_salt))calloc(n,      sizeof(real_t));
+    f->Ch_atm_oce       = (decltype(f->Ch_atm_oce))calloc(n,      sizeof(real_t));
+    f->Ce_atm_oce       = (decltype(f->Ce_atm_oce))calloc(n,      sizeof(real_t));
+    f->chl              = (decltype(f->chl))calloc(n,             sizeof(real_t));
+    f->sw_3d            = (decltype(f->sw_3d))calloc(n * (size_t)mesh->nl, sizeof(real_t));
     FESOM_CHECK(f->heat_flux && f->water_flux
              && f->stress_node_surf && f->stress_surf
              && f->runoff && f->Ssurf

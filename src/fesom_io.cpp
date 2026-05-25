@@ -8,6 +8,7 @@
  * can be opened together via `xarray.open_mfdataset(...)`.
  */
 #include "fesom_io.h"
+#include <type_traits>
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -46,10 +47,10 @@ void gather_plan_init(gather_plan *gp,
     gp->myDim_n = mesh->myDim_nod2D;
     gp->myDim_e = mesh->myDim_elem2D;
     if (gp->mype == 0) {
-        gp->all_n   = malloc((size_t)gp->npes * sizeof(int));
-        gp->all_e   = malloc((size_t)gp->npes * sizeof(int));
-        gp->displ_n = malloc((size_t)gp->npes * sizeof(int));
-        gp->displ_e = malloc((size_t)gp->npes * sizeof(int));
+        gp->all_n   = (decltype(gp->all_n))malloc((size_t)gp->npes * sizeof(int));
+        gp->all_e   = (decltype(gp->all_e))malloc((size_t)gp->npes * sizeof(int));
+        gp->displ_n = (decltype(gp->displ_n))malloc((size_t)gp->npes * sizeof(int));
+        gp->displ_e = (decltype(gp->displ_e))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(gp->all_n && gp->all_e && gp->displ_n && gp->displ_e,
                     "gather_plan: oom");
     }
@@ -75,8 +76,8 @@ void gather_plan_init(gather_plan *gp,
         FESOM_CHECK(gp->total_e >= mesh->elem2D,
                     "gather_plan: Σmye=%d < elem2D=%d (cannot cover global)",
                     gp->total_e, mesh->elem2D);
-        gp->gathered_myList_n = malloc((size_t)gp->total_n * sizeof(int));
-        gp->gathered_myList_e = malloc((size_t)gp->total_e * sizeof(int));
+        gp->gathered_myList_n = (decltype(gp->gathered_myList_n))malloc((size_t)gp->total_n * sizeof(int));
+        gp->gathered_myList_e = (decltype(gp->gathered_myList_e))malloc((size_t)gp->total_e * sizeof(int));
         FESOM_CHECK(gp->gathered_myList_n && gp->gathered_myList_e, "gather_plan: oom");
     }
     MPI_Gatherv(partit->myList_nod2D, gp->myDim_n, MPI_INT,
@@ -105,9 +106,9 @@ void gather_node(const real_t *local, int stride,
     real_t *recv = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = malloc((size_t)gp->total_n * (size_t)stride * sizeof(real_t));
-        counts = malloc((size_t)gp->npes * sizeof(int));
-        displs = malloc((size_t)gp->npes * sizeof(int));
+        recv   = (decltype(recv))malloc((size_t)gp->total_n * (size_t)stride * sizeof(real_t));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_node: oom");
         for (int r = 0; r < gp->npes; ++r) {
             counts[r] = gp->all_n[r] * stride;
@@ -138,9 +139,9 @@ void gather_elem(const real_t *local, int stride,
     real_t *recv = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = malloc((size_t)gp->total_e * (size_t)stride * sizeof(real_t));
-        counts = malloc((size_t)gp->npes * sizeof(int));
-        displs = malloc((size_t)gp->npes * sizeof(int));
+        recv   = (decltype(recv))malloc((size_t)gp->total_e * (size_t)stride * sizeof(real_t));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_elem: oom");
         for (int r = 0; r < gp->npes; ++r) {
             counts[r] = gp->all_e[r] * stride;
@@ -170,9 +171,9 @@ static void gather_node_int(const int *local, int stride,
 {
     int *recv = NULL, *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = malloc((size_t)gp->total_n * (size_t)stride * sizeof(int));
-        counts = malloc((size_t)gp->npes * sizeof(int));
-        displs = malloc((size_t)gp->npes * sizeof(int));
+        recv   = (decltype(recv))malloc((size_t)gp->total_n * (size_t)stride * sizeof(int));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_node_int: oom");
         for (int r = 0; r < gp->npes; ++r) {
             counts[r] = gp->all_n[r] * stride;
@@ -201,9 +202,9 @@ static void gather_elem_int(const int *local, int stride,
 {
     int *recv = NULL, *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = malloc((size_t)gp->total_e * (size_t)stride * sizeof(int));
-        counts = malloc((size_t)gp->npes * sizeof(int));
-        displs = malloc((size_t)gp->npes * sizeof(int));
+        recv   = (decltype(recv))malloc((size_t)gp->total_e * (size_t)stride * sizeof(int));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_elem_int: oom");
         for (int r = 0; r < gp->npes; ++r) {
             counts[r] = gp->all_e[r] * stride;
@@ -283,34 +284,34 @@ void fesom_io_write_snapshot(const char                  *path,
     real_t *g_uice = NULL, *g_vice = NULL;
     real_t *g_hice = NULL, *g_hsnow = NULL;
     if (mype == 0) {
-        g_T    = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_S    = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_eta  = malloc((size_t)nod2D  * sizeof(real_t));
-        g_w    = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_uv   = malloc((size_t)elem2D * (size_t)nl * 2 * sizeof(real_t));
-        g_dens = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_bv   = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_pgfx = malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
-        g_pgfy = malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
-        g_Kv   = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
-        g_Av   = malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
-        g_lon  = malloc((size_t)nod2D  * sizeof(real_t));
-        g_lat  = malloc((size_t)nod2D  * sizeof(real_t));
-        g_elem_nodes = malloc((size_t)elem2D * 3 * sizeof(int));
-        g_nlev_nod   = malloc((size_t)nod2D  * sizeof(int));
-        g_nlev_elem  = malloc((size_t)elem2D * sizeof(int));
+        g_T    = (decltype(g_T))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_S    = (decltype(g_S))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_eta  = (decltype(g_eta))malloc((size_t)nod2D  * sizeof(real_t));
+        g_w    = (decltype(g_w))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_uv   = (decltype(g_uv))malloc((size_t)elem2D * (size_t)nl * 2 * sizeof(real_t));
+        g_dens = (decltype(g_dens))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_bv   = (decltype(g_bv))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_pgfx = (decltype(g_pgfx))malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
+        g_pgfy = (decltype(g_pgfy))malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
+        g_Kv   = (decltype(g_Kv))malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
+        g_Av   = (decltype(g_Av))malloc((size_t)elem2D * (size_t)nl * sizeof(real_t));
+        g_lon  = (decltype(g_lon))malloc((size_t)nod2D  * sizeof(real_t));
+        g_lat  = (decltype(g_lat))malloc((size_t)nod2D  * sizeof(real_t));
+        g_elem_nodes = (decltype(g_elem_nodes))malloc((size_t)elem2D * 3 * sizeof(int));
+        g_nlev_nod   = (decltype(g_nlev_nod))malloc((size_t)nod2D  * sizeof(int));
+        g_nlev_elem  = (decltype(g_nlev_elem))malloc((size_t)elem2D * sizeof(int));
         FESOM_CHECK(g_T && g_S && g_eta && g_w && g_uv && g_dens && g_bv &&
                     g_pgfx && g_pgfy && g_Kv && g_Av && g_lon && g_lat &&
                     g_elem_nodes && g_nlev_nod && g_nlev_elem,
                     "io: oom (global buffers)");
         if (ice) {
-            g_aice  = malloc((size_t)nod2D * sizeof(real_t));
-            g_mice  = malloc((size_t)nod2D * sizeof(real_t));
-            g_msnow = malloc((size_t)nod2D * sizeof(real_t));
-            g_uice  = malloc((size_t)nod2D * sizeof(real_t));
-            g_vice  = malloc((size_t)nod2D * sizeof(real_t));
-            g_hice  = malloc((size_t)nod2D * sizeof(real_t));
-            g_hsnow = malloc((size_t)nod2D * sizeof(real_t));
+            g_aice  = (decltype(g_aice))malloc((size_t)nod2D * sizeof(real_t));
+            g_mice  = (decltype(g_mice))malloc((size_t)nod2D * sizeof(real_t));
+            g_msnow = (decltype(g_msnow))malloc((size_t)nod2D * sizeof(real_t));
+            g_uice  = (decltype(g_uice))malloc((size_t)nod2D * sizeof(real_t));
+            g_vice  = (decltype(g_vice))malloc((size_t)nod2D * sizeof(real_t));
+            g_hice  = (decltype(g_hice))malloc((size_t)nod2D * sizeof(real_t));
+            g_hsnow = (decltype(g_hsnow))malloc((size_t)nod2D * sizeof(real_t));
             FESOM_CHECK(g_aice && g_mice && g_msnow && g_uice && g_vice
                      && g_hice && g_hsnow, "io: oom (ice global buffers)");
         }
@@ -318,8 +319,8 @@ void fesom_io_write_snapshot(const char                  *path,
 
     /* ---- Gather per-vertex coordinates (geo radians → degrees on rank 0) -- */
     {
-        real_t *lon_loc = malloc((size_t)gp.myDim_n * sizeof(real_t));
-        real_t *lat_loc = malloc((size_t)gp.myDim_n * sizeof(real_t));
+        real_t *lon_loc = (real_t *)malloc((size_t)gp.myDim_n * sizeof(real_t));
+        real_t *lat_loc = (real_t *)malloc((size_t)gp.myDim_n * sizeof(real_t));
         FESOM_CHECK(lon_loc && lat_loc, "io: oom (lon/lat local)");
         for (int n = 0; n < gp.myDim_n; ++n) {
             lon_loc[n] = mesh->geo_coord_nod2D[2*n + 0];
@@ -338,7 +339,7 @@ void fesom_io_write_snapshot(const char                  *path,
 
     /* ---- Gather elem_nodes: translate local→global node IDs first --- */
     {
-        int *eln_loc = malloc((size_t)gp.myDim_e * 3 * sizeof(int));
+        int *eln_loc = (int *)malloc((size_t)gp.myDim_e * 3 * sizeof(int));
         FESOM_CHECK(eln_loc, "io: oom (elem_nodes local)");
         for (int e = 0; e < gp.myDim_e; ++e) {
             for (int k = 0; k < 3; ++k) {
@@ -510,8 +511,8 @@ void fesom_io_write_snapshot(const char                  *path,
 
     /* ---- static fields --------------------------------------------- */
     {
-        double *lon_d = malloc((size_t)nod2D * sizeof(double));
-        double *lat_d = malloc((size_t)nod2D * sizeof(double));
+        double *lon_d = (double *)malloc((size_t)nod2D * sizeof(double));
+        double *lat_d = (double *)malloc((size_t)nod2D * sizeof(double));
         FESOM_CHECK(lon_d && lat_d, "io: oom (lon/lat double cast)");
         for (int n = 0; n < nod2D; ++n) {
             lon_d[n] = (double)g_lon[n];
@@ -528,9 +529,9 @@ void fesom_io_write_snapshot(const char                  *path,
     NC_CHECK(nc_put_var_int   (ncid, var_nlev_elem, g_nlev_elem));
 
     /* ---- transposed time-varying state at time index 0 ------------- */
-    real_t *buf_nl   = malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(real_t));
-    real_t *buf_nl_e = malloc((size_t)n_lay  * (size_t)elem2D * sizeof(real_t));
-    real_t *buf_w    = malloc((size_t)nl     * (size_t)nod2D  * sizeof(real_t));
+    real_t *buf_nl   = (real_t *)malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(real_t));
+    real_t *buf_nl_e = (real_t *)malloc((size_t)n_lay  * (size_t)elem2D * sizeof(real_t));
+    real_t *buf_w    = (real_t *)malloc((size_t)nl     * (size_t)nod2D  * sizeof(real_t));
     FESOM_CHECK(buf_nl && buf_nl_e && buf_w, "io: oom (transpose buffers)");
 
     /* Slab-write: start at time=0, count=1 along time, full extent for the rest. */
@@ -773,7 +774,7 @@ void fesom_io_init(fesom_io_t                  *io,
     /* Heap-owned out_dir copy. */
     {
         size_t n = strlen(out_dir) + 1;
-        io->out_dir = malloc(n);
+        io->out_dir = (decltype(io->out_dir))malloc(n);
         FESOM_CHECK(io->out_dir, "fesom_io_init: oom (out_dir)");
         memcpy(io->out_dir, out_dir, n);
     }
@@ -813,7 +814,7 @@ void fesom_io_init(fesom_io_t                  *io,
     for (int p = 0; p < 5; ++p) {
         io->owned_nvars[p] = per_cad_count[p];
         if (per_cad_count[p] > 0) {
-            io->owned_vars[p] = malloc((size_t)per_cad_count[p] * sizeof(fesom_var_desc_t));
+            io->owned_vars[p] = (std::remove_reference_t<decltype(io->owned_vars[p])>)malloc((size_t)per_cad_count[p] * sizeof(fesom_var_desc_t));
             FESOM_CHECK(io->owned_vars[p], "fesom_io_init: oom (cadence %d)", p);
         }
     }

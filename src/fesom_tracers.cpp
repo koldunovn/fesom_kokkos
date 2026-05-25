@@ -12,13 +12,13 @@ void fesom_tracers_alloc(fesom_tracers *t, const struct fesom_mesh *mesh)
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     size_t n_nl = (size_t)N * (size_t)mesh->nl;
     for (int k = 0; k < FESOM_NUM_TRACERS; ++k) {
-        t->data[k].values    = calloc(n_nl, sizeof(real_t));
-        t->data[k].valuesAB  = calloc(n_nl, sizeof(real_t));
-        t->data[k].valuesold = calloc(n_nl, sizeof(real_t));
+        t->data[k].values    = (decltype(t->data[k].values))calloc(n_nl, sizeof(real_t));
+        t->data[k].valuesAB  = (decltype(t->data[k].valuesAB))calloc(n_nl, sizeof(real_t));
+        t->data[k].valuesold = (decltype(t->data[k].valuesold))calloc(n_nl, sizeof(real_t));
         FESOM_CHECK(t->data[k].values && t->data[k].valuesAB && t->data[k].valuesold,
                     "tracer %d alloc: out of memory", k);
     }
-    t->del_ttf = calloc(n_nl, sizeof(real_t));
+    t->del_ttf = (decltype(t->del_ttf))calloc(n_nl, sizeof(real_t));
     FESOM_CHECK(t->del_ttf, "del_ttf alloc: out of memory");
 }
 

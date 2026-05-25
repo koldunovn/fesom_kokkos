@@ -71,7 +71,7 @@ static void read_rpart(fesom_partit *p, const char *dist_dir)
     snprintf(path, sizeof(path), "%s/rpart.out", dist_dir);
 
     int file_npes = -1;
-    p->part = malloc((size_t)(p->npes + 1) * sizeof(int));
+    p->part = (decltype(p->part))malloc((size_t)(p->npes + 1) * sizeof(int));
     FESOM_CHECK(p->part, "fesom_partit: part alloc");
 
     if (p->mype == 0) {
@@ -123,7 +123,7 @@ static void read_my_list(fesom_partit *p, const char *dist_dir)
 
     p->myDim_nod2D = read_int(f);
     p->eDim_nod2D  = read_int(f);
-    p->myList_nod2D = malloc((size_t)(p->myDim_nod2D + p->eDim_nod2D) * sizeof(int));
+    p->myList_nod2D = (decltype(p->myList_nod2D))malloc((size_t)(p->myDim_nod2D + p->eDim_nod2D) * sizeof(int));
     FESOM_CHECK(p->myList_nod2D, "fesom_partit: myList_nod2D alloc");
     read_int_array(f, p->myList_nod2D, p->myDim_nod2D + p->eDim_nod2D);
 
@@ -131,13 +131,13 @@ static void read_my_list(fesom_partit *p, const char *dist_dir)
     p->eDim_elem2D   = read_int(f);
     p->eXDim_elem2D  = read_int(f);
     int n_elem = p->myDim_elem2D + p->eDim_elem2D + p->eXDim_elem2D;
-    p->myList_elem2D = malloc((size_t)n_elem * sizeof(int));
+    p->myList_elem2D = (decltype(p->myList_elem2D))malloc((size_t)n_elem * sizeof(int));
     FESOM_CHECK(p->myList_elem2D, "fesom_partit: myList_elem2D alloc");
     read_int_array(f, p->myList_elem2D, n_elem);
 
     p->myDim_edge2D = read_int(f);
     p->eDim_edge2D  = read_int(f);
-    p->myList_edge2D = malloc((size_t)(p->myDim_edge2D + p->eDim_edge2D) * sizeof(int));
+    p->myList_edge2D = (decltype(p->myList_edge2D))malloc((size_t)(p->myDim_edge2D + p->eDim_edge2D) * sizeof(int));
     FESOM_CHECK(p->myList_edge2D, "fesom_partit: myList_edge2D alloc");
     read_int_array(f, p->myList_edge2D, p->myDim_edge2D + p->eDim_edge2D);
 
@@ -162,7 +162,7 @@ static void read_com_block(FILE *f, fesom_com_struct *cs, int rlist_size,
     read_int_array(f, cs->rPE,  cs->rPEnum);
     read_int_array(f, cs->rptr, cs->rPEnum + 1);
 
-    cs->rlist = malloc((size_t)rlist_size * sizeof(int));
+    cs->rlist = (decltype(cs->rlist))malloc((size_t)rlist_size * sizeof(int));
     FESOM_CHECK(cs->rlist, "fesom_partit: %s rlist alloc", kind);
     read_int_array(f, cs->rlist, rlist_size);
 
@@ -175,7 +175,7 @@ static void read_com_block(FILE *f, fesom_com_struct *cs, int rlist_size,
     read_int_array(f, cs->sptr, cs->sPEnum + 1);
 
     int slist_size = cs->sptr[cs->sPEnum] - cs->sptr[0];  /* sptr is 1-based */
-    cs->slist = malloc((size_t)slist_size * sizeof(int));
+    cs->slist = (decltype(cs->slist))malloc((size_t)slist_size * sizeof(int));
     FESOM_CHECK(cs->slist, "fesom_partit: %s slist alloc", kind);
     read_int_array(f, cs->slist, slist_size);
 }
@@ -286,19 +286,19 @@ void fesom_partit_set_global_counts_serial(fesom_partit *p,
     p->myDim_edge2D = edge2D;  p->eDim_edge2D  = 0;
 
     /* Synthesise myList_* as identity (1-based global IDs == local indices+1). */
-    p->myList_nod2D = malloc((size_t)nod2D * sizeof(int));
+    p->myList_nod2D = (decltype(p->myList_nod2D))malloc((size_t)nod2D * sizeof(int));
     FESOM_CHECK(p->myList_nod2D, "fesom_partit: serial myList_nod2D alloc");
     for (int i = 0; i < nod2D; ++i) p->myList_nod2D[i] = i + 1;
 
-    p->myList_elem2D = malloc((size_t)elem2D * sizeof(int));
+    p->myList_elem2D = (decltype(p->myList_elem2D))malloc((size_t)elem2D * sizeof(int));
     FESOM_CHECK(p->myList_elem2D, "fesom_partit: serial myList_elem2D alloc");
     for (int i = 0; i < elem2D; ++i) p->myList_elem2D[i] = i + 1;
 
-    p->myList_edge2D = malloc((size_t)edge2D * sizeof(int));
+    p->myList_edge2D = (decltype(p->myList_edge2D))malloc((size_t)edge2D * sizeof(int));
     FESOM_CHECK(p->myList_edge2D, "fesom_partit: serial myList_edge2D alloc");
     for (int i = 0; i < edge2D; ++i) p->myList_edge2D[i] = i + 1;
 
-    p->part = malloc(2 * sizeof(int));
+    p->part = (decltype(p->part))malloc(2 * sizeof(int));
     FESOM_CHECK(p->part, "fesom_partit: serial part alloc");
     p->part[0] = 1;
     p->part[1] = nod2D + 1;

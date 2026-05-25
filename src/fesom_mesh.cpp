@@ -1,4 +1,5 @@
 #include "fesom_mesh.h"
+#include <type_traits>
 #include "fesom_constants.h"
 #include "fesom_halo.h"
 #include "fesom_partit.h"
@@ -73,11 +74,11 @@ void fesom_mesh_alloc_state(fesom_mesh *m)
     int E = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
     size_t n_nl = (size_t)N * (size_t)m->nl;
     size_t e_nl = (size_t)E * (size_t)m->nl;
-    m->hnode     = calloc(n_nl, sizeof(real_t));
-    m->hnode_new = calloc(n_nl, sizeof(real_t));
-    m->helem     = calloc(e_nl, sizeof(real_t));
-    m->hbar      = calloc((size_t)N, sizeof(real_t));
-    m->hbar_old  = calloc((size_t)N, sizeof(real_t));
+    m->hnode     = (decltype(m->hnode))calloc(n_nl, sizeof(real_t));
+    m->hnode_new = (decltype(m->hnode_new))calloc(n_nl, sizeof(real_t));
+    m->helem     = (decltype(m->helem))calloc(e_nl, sizeof(real_t));
+    m->hbar      = (decltype(m->hbar))calloc((size_t)N, sizeof(real_t));
+    m->hbar_old  = (decltype(m->hbar_old))calloc((size_t)N, sizeof(real_t));
     FESOM_CHECK(m->hnode && m->hnode_new && m->helem && m->hbar && m->hbar_old,
                 "mesh state alloc: out of memory");
 }
@@ -209,9 +210,9 @@ static void read_nod2d(fesom_mesh *m, const char *mesh_dir)
     m->nod2D = n;
     m->myDim_nod2D = n;
     m->eDim_nod2D  = 0;
-    m->coord_nod2D     = malloc((size_t)n * 2 * sizeof(real_t));
-    m->geo_coord_nod2D = malloc((size_t)n * 2 * sizeof(real_t));
-    m->coast_flag      = malloc((size_t)n * sizeof(int));
+    m->coord_nod2D     = (decltype(m->coord_nod2D))malloc((size_t)n * 2 * sizeof(real_t));
+    m->geo_coord_nod2D = (decltype(m->geo_coord_nod2D))malloc((size_t)n * 2 * sizeof(real_t));
+    m->coast_flag      = (decltype(m->coast_flag))malloc((size_t)n * sizeof(int));
     FESOM_CHECK(m->coord_nod2D && m->geo_coord_nod2D && m->coast_flag,
                 "nod2d.out: out of memory");
 
@@ -260,7 +261,7 @@ static void read_elem2d(fesom_mesh *m, const char *mesh_dir)
     m->elem2D       = n;
     m->myDim_elem2D = n;
     m->eDim_elem2D  = 0;
-    m->elem_nodes   = malloc((size_t)n * 3 * sizeof(int));
+    m->elem_nodes   = (decltype(m->elem_nodes))malloc((size_t)n * 3 * sizeof(int));
     FESOM_CHECK(m->elem_nodes, "elem2d.out: out of memory");
 
     for (int i = 0; i < n; ++i) {
@@ -296,7 +297,7 @@ static void read_aux3d(fesom_mesh *m, const char *mesh_dir)
     FESOM_CHECK(fscanf(fh, "%d", &nl) == 1, "aux3d.out: missing nl");
     FESOM_CHECK(nl >= 3, "aux3d.out: nl=%d too small", nl);
     m->nl   = nl;
-    m->zbar = malloc((size_t)nl * sizeof(real_t));
+    m->zbar = (decltype(m->zbar))malloc((size_t)nl * sizeof(real_t));
     FESOM_CHECK(m->zbar, "aux3d.out: out of memory (zbar)");
 
     for (int k = 0; k < nl; ++k) {
@@ -311,13 +312,13 @@ static void read_aux3d(fesom_mesh *m, const char *mesh_dir)
 
     /* Mid-layer depths Z[nz] = 0.5*(zbar[nz]+zbar[nz+1]) for nz=0..nl-2.
        Mirror of mesh%Z = 0.5*(zbar(1:nl-1)+zbar(2:nl)) at oce_mesh.F90:580. */
-    m->Z = malloc((size_t)(nl - 1) * sizeof(real_t));
+    m->Z = (decltype(m->Z))malloc((size_t)(nl - 1) * sizeof(real_t));
     FESOM_CHECK(m->Z, "aux3d.out: out of memory (Z)");
     for (int k = 0; k < nl - 1; ++k) {
         m->Z[k] = 0.5 * (m->zbar[k] + m->zbar[k + 1]);
     }
 
-    m->depth = malloc((size_t)m->nod2D * sizeof(real_t));
+    m->depth = (decltype(m->depth))malloc((size_t)m->nod2D * sizeof(real_t));
     FESOM_CHECK(m->depth, "aux3d.out: out of memory (depth)");
     for (int i = 0; i < m->nod2D; ++i) {
         double v;
@@ -345,7 +346,7 @@ static void read_nlvls(fesom_mesh *m, const char *mesh_dir)
 {
     char path[1024];
     snprintf(path, sizeof(path), "%s/nlvls.out", mesh_dir);
-    m->nlevels_nod2D = malloc((size_t)m->nod2D * sizeof(int));
+    m->nlevels_nod2D = (decltype(m->nlevels_nod2D))malloc((size_t)m->nod2D * sizeof(int));
     FESOM_CHECK(m->nlevels_nod2D, "nlvls.out: out of memory");
     read_int_per_line(path, m->nlevels_nod2D, m->nod2D);
 }
@@ -354,7 +355,7 @@ static void read_elvls(fesom_mesh *m, const char *mesh_dir)
 {
     char path[1024];
     snprintf(path, sizeof(path), "%s/elvls.out", mesh_dir);
-    m->nlevels = malloc((size_t)m->elem2D * sizeof(int));
+    m->nlevels = (decltype(m->nlevels))malloc((size_t)m->elem2D * sizeof(int));
     FESOM_CHECK(m->nlevels, "elvls.out: out of memory");
     read_int_per_line(path, m->nlevels, m->elem2D);
 }
@@ -386,8 +387,8 @@ static void read_edges(fesom_mesh *m, const char *mesh_dir)
     int nt = count_lines(path_t);
     FESOM_CHECK(ne == nt, "edges.out (%d) and edge_tri.out (%d) row mismatch", ne, nt);
     m->edge2D   = ne;
-    m->edges    = malloc((size_t)ne * 2 * sizeof(int));
-    m->edge_tri = malloc((size_t)ne * 2 * sizeof(int));
+    m->edges    = (decltype(m->edges))malloc((size_t)ne * 2 * sizeof(int));
+    m->edge_tri = (decltype(m->edge_tri))malloc((size_t)ne * 2 * sizeof(int));
     FESOM_CHECK(m->edges && m->edge_tri, "edges: out of memory");
 
     FILE *fe = fopen(path_e, "r");
@@ -480,7 +481,7 @@ static void build_nod_in_elem2D(fesom_mesh *m)
      * CG converges to oversized eta → blow-up. (oce_mesh.F90:2266) */
     const int N = m->myDim_nod2D + m->eDim_nod2D;
     const int E = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
-    m->nod_in_elem2D_offsets = calloc((size_t)N + 1, sizeof(int));
+    m->nod_in_elem2D_offsets = (decltype(m->nod_in_elem2D_offsets))calloc((size_t)N + 1, sizeof(int));
     FESOM_CHECK(m->nod_in_elem2D_offsets, "nod_in_elem2D_offsets: out of memory");
 
     /* Pass 1: count per node. Skip elem entries with v=-1 (outer-halo unmappable). */
@@ -497,9 +498,9 @@ static void build_nod_in_elem2D(fesom_mesh *m)
     int total = m->nod_in_elem2D_offsets[N];
 
     /* Pass 2: scatter. */
-    int *cursor = calloc((size_t)N, sizeof(int));
+    int *cursor = (int *)calloc((size_t)N, sizeof(int));
     FESOM_CHECK(cursor, "nod_in_elem2D: cursor OOM");
-    m->nod_in_elem2D = malloc((size_t)total * sizeof(int));
+    m->nod_in_elem2D = (decltype(m->nod_in_elem2D))malloc((size_t)total * sizeof(int));
     FESOM_CHECK(m->nod_in_elem2D, "nod_in_elem2D: out of memory");
 
     for (int e = 0; e < E; ++e) {
@@ -521,10 +522,10 @@ static void compute_vertical_levels_aux(fesom_mesh *m)
 {
     int N = m->myDim_nod2D + m->eDim_nod2D;
     int E = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
-    m->ulevels           = malloc((size_t)E * sizeof(int));
-    m->ulevels_nod2D     = malloc((size_t)N * sizeof(int));
-    m->nlevels_nod2D_min = malloc((size_t)N * sizeof(int));
-    m->ulevels_nod2D_max = malloc((size_t)N * sizeof(int));
+    m->ulevels           = (decltype(m->ulevels))malloc((size_t)E * sizeof(int));
+    m->ulevels_nod2D     = (decltype(m->ulevels_nod2D))malloc((size_t)N * sizeof(int));
+    m->nlevels_nod2D_min = (decltype(m->nlevels_nod2D_min))malloc((size_t)N * sizeof(int));
+    m->ulevels_nod2D_max = (decltype(m->ulevels_nod2D_max))malloc((size_t)N * sizeof(int));
     FESOM_CHECK(m->ulevels && m->ulevels_nod2D && m->nlevels_nod2D_min
              && m->ulevels_nod2D_max,
                 "vertical aux: out of memory");
@@ -571,7 +572,7 @@ static void compute_mesh_resolution(fesom_mesh *m, fesom_partit *partit)
     int N_own  = m->myDim_nod2D;
     int nl     = m->nl;
 
-    m->mesh_resolution = malloc((size_t)N * sizeof(real_t));
+    m->mesh_resolution = (decltype(m->mesh_resolution))malloc((size_t)N * sizeof(real_t));
     FESOM_CHECK(m->mesh_resolution, "mesh_resolution: out of memory");
 
     /* Voronoi diameter: 2 * sqrt(areasvol(ulevels_nod2D(n), n) / pi).
@@ -586,7 +587,7 @@ static void compute_mesh_resolution(fesom_mesh *m, fesom_partit *partit)
     /* 3 passes of mass-matrix smoothing: per-node weighted mean of
      * surrounding-element vertex resolutions (oce_mesh.F90:2361-2377).
      * Fortran writes only myDim then exchange_nod, three times. */
-    real_t *work = calloc((size_t)N_own, sizeof(real_t));
+    real_t *work = (real_t *)calloc((size_t)N_own, sizeof(real_t));
     FESOM_CHECK(work, "mesh_resolution smoothing: out of memory");
     for (int pass = 0; pass < 3; ++pass) {
         for (int n = 0; n < N_own; ++n) {
@@ -618,7 +619,7 @@ static void compute_zbar_3d_n(fesom_mesh *m)
 {
     int N  = m->myDim_nod2D + m->eDim_nod2D;
     int nl = m->nl;
-    m->zbar_3d_n = calloc((size_t)N * nl, sizeof(real_t));
+    m->zbar_3d_n = (decltype(m->zbar_3d_n))calloc((size_t)N * nl, sizeof(real_t));
     FESOM_CHECK(m->zbar_3d_n, "zbar_3d_n: out of memory");
 
     /* Fortran oce_ale.F90:342-375 with our config (no cavity, no partial
@@ -655,9 +656,9 @@ static void compute_elem_area_only(fesom_mesh *m)
     int N  = m->myDim_nod2D + m->eDim_nod2D;
     int E  = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
     int Ei = m->myDim_elem2D;
-    m->elem_area = calloc((size_t)E, sizeof(real_t));
-    m->area      = calloc((size_t)N * (size_t)m->nl, sizeof(real_t));
-    m->areasvol  = calloc((size_t)N * (size_t)m->nl, sizeof(real_t));
+    m->elem_area = (decltype(m->elem_area))calloc((size_t)E, sizeof(real_t));
+    m->area      = (decltype(m->area))calloc((size_t)N * (size_t)m->nl, sizeof(real_t));
+    m->areasvol  = (decltype(m->areasvol))calloc((size_t)N * (size_t)m->nl, sizeof(real_t));
     FESOM_CHECK(m->elem_area && m->area && m->areasvol,
                 "areas: out of memory");
 
@@ -777,12 +778,12 @@ static void compute_metric_and_coriolis(fesom_mesh *m)
     int N  = m->myDim_nod2D + m->eDim_nod2D;
     int E  = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
     int Ei = m->myDim_elem2D;
-    m->elem_cos      = calloc((size_t)E, sizeof(real_t));
-    m->metric_factor = calloc((size_t)E, sizeof(real_t));
-    m->coriolis      = calloc((size_t)E, sizeof(real_t));
-    m->coriolis_node = malloc((size_t)N * sizeof(real_t));
-    m->elem_center_x = calloc((size_t)E, sizeof(real_t));
-    m->elem_center_y = calloc((size_t)E, sizeof(real_t));
+    m->elem_cos      = (decltype(m->elem_cos))calloc((size_t)E, sizeof(real_t));
+    m->metric_factor = (decltype(m->metric_factor))calloc((size_t)E, sizeof(real_t));
+    m->coriolis      = (decltype(m->coriolis))calloc((size_t)E, sizeof(real_t));
+    m->coriolis_node = (decltype(m->coriolis_node))malloc((size_t)N * sizeof(real_t));
+    m->elem_center_x = (decltype(m->elem_center_x))calloc((size_t)E, sizeof(real_t));
+    m->elem_center_y = (decltype(m->elem_center_y))calloc((size_t)E, sizeof(real_t));
     FESOM_CHECK(m->elem_cos && m->metric_factor && m->coriolis && m->coriolis_node
              && m->elem_center_x && m->elem_center_y,
                 "metric/coriolis: out of memory");
@@ -822,8 +823,8 @@ static void compute_edges_geometry(fesom_mesh *m)
 
     int E  = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
     int EG = m->myDim_edge2D + m->eDim_edge2D;
-    m->edge_dxdy       = malloc((size_t)EG * 2 * sizeof(real_t));
-    m->edge_cross_dxdy = malloc((size_t)EG * 4 * sizeof(real_t));
+    m->edge_dxdy       = (decltype(m->edge_dxdy))malloc((size_t)EG * 2 * sizeof(real_t));
+    m->edge_cross_dxdy = (decltype(m->edge_cross_dxdy))malloc((size_t)EG * 4 * sizeof(real_t));
     FESOM_CHECK(m->edge_dxdy && m->edge_cross_dxdy, "edges geometry: out of memory");
 
     /* Cell centroids — use the persistent mesh fields. For interior elements
@@ -910,7 +911,7 @@ static void compute_gradient_sca(fesom_mesh *m)
 
     /* Fortran sizes gradient_sca for myDim_elem2D ONLY (oce_mesh.F90:2461) */
     int Ei = m->myDim_elem2D;
-    m->gradient_sca = malloc((size_t)Ei * 6 * sizeof(real_t));
+    m->gradient_sca = (decltype(m->gradient_sca))malloc((size_t)Ei * 6 * sizeof(real_t));
     FESOM_CHECK(m->gradient_sca, "gradient_sca: out of memory");
 
     for (int e = 0; e < Ei; ++e) {
@@ -957,7 +958,7 @@ static void bcast_real_array(real_t **buf, int n, fesom_partit *p)
 {
     if (p->mype != 0) {
         free(*buf);
-        *buf = malloc((size_t)n * sizeof(real_t));
+        *buf = (std::remove_reference_t<decltype(*buf)>)malloc((size_t)n * sizeof(real_t));
         FESOM_CHECK(*buf, "bcast_real_array: alloc on rank %d", p->mype);
     }
     MPI_CHECK(MPI_Bcast(*buf, n, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
@@ -1002,22 +1003,22 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
 
     /* zbar / Z are global (depth column shared across ranks) — small. */
     bcast_real_array(&m->zbar, g_nl, p);
-    if (p->mype != 0) { free(m->Z); m->Z = malloc((size_t)(g_nl - 1) * sizeof(real_t));
+    if (p->mype != 0) { free(m->Z); m->Z = (decltype(m->Z))malloc((size_t)(g_nl - 1) * sizeof(real_t));
                         FESOM_CHECK(m->Z, "Z alloc"); }
     MPI_CHECK(MPI_Bcast(m->Z, g_nl - 1, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
 
     /* Broadcast the global per-node and per-elem arrays from rank 0. */
     /* coord_nod2D + geo_coord_nod2D are 2D (lon, lat). */
     if (p->mype != 0) {
-        free(m->coord_nod2D);     m->coord_nod2D     = malloc((size_t)g_nod2D * 2 * sizeof(real_t));
-        free(m->geo_coord_nod2D); m->geo_coord_nod2D = malloc((size_t)g_nod2D * 2 * sizeof(real_t));
-        free(m->coast_flag);      m->coast_flag      = malloc((size_t)g_nod2D * sizeof(int));
-        free(m->depth);           m->depth           = malloc((size_t)g_nod2D * sizeof(real_t));
-        free(m->nlevels_nod2D);   m->nlevels_nod2D   = malloc((size_t)g_nod2D * sizeof(int));
-        free(m->elem_nodes);      m->elem_nodes      = malloc((size_t)g_elem2D * 3 * sizeof(int));
-        free(m->nlevels);         m->nlevels         = malloc((size_t)g_elem2D * sizeof(int));
-        free(m->edges);           m->edges           = malloc((size_t)g_edge2D * 2 * sizeof(int));
-        free(m->edge_tri);        m->edge_tri        = malloc((size_t)g_edge2D * 2 * sizeof(int));
+        free(m->coord_nod2D);     m->coord_nod2D     = (decltype(m->coord_nod2D))malloc((size_t)g_nod2D * 2 * sizeof(real_t));
+        free(m->geo_coord_nod2D); m->geo_coord_nod2D = (decltype(m->geo_coord_nod2D))malloc((size_t)g_nod2D * 2 * sizeof(real_t));
+        free(m->coast_flag);      m->coast_flag      = (decltype(m->coast_flag))malloc((size_t)g_nod2D * sizeof(int));
+        free(m->depth);           m->depth           = (decltype(m->depth))malloc((size_t)g_nod2D * sizeof(real_t));
+        free(m->nlevels_nod2D);   m->nlevels_nod2D   = (decltype(m->nlevels_nod2D))malloc((size_t)g_nod2D * sizeof(int));
+        free(m->elem_nodes);      m->elem_nodes      = (decltype(m->elem_nodes))malloc((size_t)g_elem2D * 3 * sizeof(int));
+        free(m->nlevels);         m->nlevels         = (decltype(m->nlevels))malloc((size_t)g_elem2D * sizeof(int));
+        free(m->edges);           m->edges           = (decltype(m->edges))malloc((size_t)g_edge2D * 2 * sizeof(int));
+        free(m->edge_tri);        m->edge_tri        = (decltype(m->edge_tri))malloc((size_t)g_edge2D * 2 * sizeof(int));
         FESOM_CHECK(m->coord_nod2D && m->geo_coord_nod2D && m->coast_flag
                  && m->depth && m->nlevels_nod2D && m->elem_nodes
                  && m->nlevels && m->edges && m->edge_tri,
@@ -1039,16 +1040,16 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
     int my_eg = p->myDim_edge2D + p->eDim_edge2D;
 
     /* Build global→local node lookup (used to translate elem_nodes). */
-    int *node_g2l = malloc((size_t)g_nod2D * sizeof(int));
+    int *node_g2l = (int *)malloc((size_t)g_nod2D * sizeof(int));
     FESOM_CHECK(node_g2l, "scatter_mesh: node_g2l alloc");
     build_node_g2l(node_g2l, p, g_nod2D);
 
     /* Per-node arrays — extract by myList_nod2D[i]-1. */
-    real_t *new_coord     = malloc((size_t)my_n * 2 * sizeof(real_t));
-    real_t *new_geo_coord = malloc((size_t)my_n * 2 * sizeof(real_t));
-    int    *new_coast     = malloc((size_t)my_n * sizeof(int));
-    real_t *new_depth     = malloc((size_t)my_n * sizeof(real_t));
-    int    *new_nlevels_n = malloc((size_t)my_n * sizeof(int));
+    real_t *new_coord     = (real_t *)malloc((size_t)my_n * 2 * sizeof(real_t));
+    real_t *new_geo_coord = (real_t *)malloc((size_t)my_n * 2 * sizeof(real_t));
+    int    *new_coast     = (int *)malloc((size_t)my_n * sizeof(int));
+    real_t *new_depth     = (real_t *)malloc((size_t)my_n * sizeof(real_t));
+    int    *new_nlevels_n = (int *)malloc((size_t)my_n * sizeof(int));
     FESOM_CHECK(new_coord && new_geo_coord && new_coast && new_depth && new_nlevels_n,
                 "scatter_mesh: per-node alloc");
     for (int i = 0; i < my_n; ++i) {
@@ -1075,8 +1076,8 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
      *                trust callers to skip).
      *   nlevels    : sized myDim+eDim+eXDim (line 943).
      */
-    int    *new_elem_nodes = malloc((size_t)my_e * 3 * sizeof(int));
-    int    *new_nlevels_e  = malloc((size_t)my_e * sizeof(int));
+    int    *new_elem_nodes = (int *)malloc((size_t)my_e * 3 * sizeof(int));
+    int    *new_nlevels_e  = (int *)malloc((size_t)my_e * sizeof(int));
     FESOM_CHECK(new_elem_nodes && new_nlevels_e, "scatter_mesh: per-elem alloc");
     for (int i = 0; i < my_e; ++i) {
         int gid = p->myList_elem2D[i] - 1;
@@ -1112,7 +1113,7 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
     /* Per-edge arrays — extract by myList_edge2D[i]-1; translate node ids to
      * local; translate edge_tri (global elem id) to local elem id. For the
      * latter we'd need an elem global→local hash too. */
-    int *elem_g2l = malloc((size_t)g_elem2D * sizeof(int));
+    int *elem_g2l = (int *)malloc((size_t)g_elem2D * sizeof(int));
     FESOM_CHECK(elem_g2l, "scatter_mesh: elem_g2l alloc");
     for (int i = 0; i < g_elem2D; ++i) elem_g2l[i] = -1;
     for (int i = 0; i < my_e; ++i) {
@@ -1120,8 +1121,8 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
         elem_g2l[gid] = i;
     }
 
-    int *new_edges    = malloc((size_t)my_eg * 2 * sizeof(int));
-    int *new_edge_tri = malloc((size_t)my_eg * 2 * sizeof(int));
+    int *new_edges    = (int *)malloc((size_t)my_eg * 2 * sizeof(int));
+    int *new_edge_tri = (int *)malloc((size_t)my_eg * 2 * sizeof(int));
     FESOM_CHECK(new_edges && new_edge_tri, "scatter_mesh: per-edge alloc");
     for (int i = 0; i < my_eg; ++i) {
         int gid = p->myList_edge2D[i] - 1;
@@ -1218,8 +1219,8 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
      * matrix term too small → CG converges to oversized eta → blow-up. */
     compute_elem_area_only(m);
     if (partit->npes > 1) {
-        fesom_halo_exchange(m->elem_area, 2 /* ELEM2D */,      1, 1, partit);
-        fesom_halo_exchange(m->elem_area, 4 /* ELEM2D_FULL */, 1, 1, partit);
+        fesom_halo_exchange(m->elem_area, FESOM_HALO_ELEM2D,      1, 1, partit);
+        fesom_halo_exchange(m->elem_area, FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
     }
     compute_node_areas(m);
 
@@ -1227,16 +1228,16 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
 
     /* Halo exchange of remaining element-scalar fields (elem_area already done). */
     if (partit->npes > 1) {
-        fesom_halo_exchange(m->elem_cos,       2, 1, 1, partit);
-        fesom_halo_exchange(m->metric_factor,  2, 1, 1, partit);
-        fesom_halo_exchange(m->coriolis,       2, 1, 1, partit);
-        fesom_halo_exchange(m->elem_center_x,  2, 1, 1, partit);
-        fesom_halo_exchange(m->elem_center_y,  2, 1, 1, partit);
-        fesom_halo_exchange(m->elem_cos,       4, 1, 1, partit);
-        fesom_halo_exchange(m->metric_factor,  4, 1, 1, partit);
-        fesom_halo_exchange(m->coriolis,       4, 1, 1, partit);
-        fesom_halo_exchange(m->elem_center_x,  4, 1, 1, partit);
-        fesom_halo_exchange(m->elem_center_y,  4, 1, 1, partit);
+        fesom_halo_exchange(m->elem_cos,       FESOM_HALO_ELEM2D, 1, 1, partit);
+        fesom_halo_exchange(m->metric_factor,  FESOM_HALO_ELEM2D, 1, 1, partit);
+        fesom_halo_exchange(m->coriolis,       FESOM_HALO_ELEM2D, 1, 1, partit);
+        fesom_halo_exchange(m->elem_center_x,  FESOM_HALO_ELEM2D, 1, 1, partit);
+        fesom_halo_exchange(m->elem_center_y,  FESOM_HALO_ELEM2D, 1, 1, partit);
+        fesom_halo_exchange(m->elem_cos,       FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
+        fesom_halo_exchange(m->metric_factor,  FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
+        fesom_halo_exchange(m->coriolis,       FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
+        fesom_halo_exchange(m->elem_center_x,  FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
+        fesom_halo_exchange(m->elem_center_y,  FESOM_HALO_ELEM2D_FULL, 1, 1, partit);
     }
 
     compute_edges_geometry(m);        /* needs elem_cos */
@@ -1320,14 +1321,14 @@ void fesom_mesh_build_edge_up_dn_tri(fesom_mesh *m, fesom_partit *partit)
     const int E   = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
     const real_t cyc = (real_t)FESOM_CYCLIC_LENGTH_RAD, hcyc = 0.5*cyc;
 
-    m->edge_up_dn_tri = malloc((size_t)Eme * 2 * sizeof(int));
+    m->edge_up_dn_tri = (decltype(m->edge_up_dn_tri))malloc((size_t)Eme * 2 * sizeof(int));
     FESOM_CHECK(m->edge_up_dn_tri, "edge_up_dn_tri alloc");
     for (int i = 0; i < Eme * 2; ++i) m->edge_up_dn_tri[i] = -1;
 
     /* coord_elem [E*6] + e_nodes (global ids) [E*3], on the wide element halo
      * (F:192-235: exchange_elem of the element node coords + ids). */
-    real_t *ce = calloc((size_t)E * 6, sizeof(real_t));
-    real_t *en = calloc((size_t)E * 3, sizeof(real_t));
+    real_t *ce = (real_t *)calloc((size_t)E * 6, sizeof(real_t));
+    real_t *en = (real_t *)calloc((size_t)E * 3, sizeof(real_t));
     FESOM_CHECK(ce && en, "edge_up_dn_tri scratch alloc");
     for (int el = 0; el < m->myDim_elem2D; ++el)
         for (int j = 0; j < 3; ++j) {

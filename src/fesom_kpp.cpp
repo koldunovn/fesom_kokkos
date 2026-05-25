@@ -81,23 +81,23 @@ void fesom_kpp_alloc(fesom_kpp *k, const struct fesom_mesh *mesh, int num_tracer
     size_t n_nl1  = (size_t)N * (size_t)(nl - 1);
     size_t tbl    = (size_t)(FESOM_KPP_NNI + 2) * (size_t)(FESOM_KPP_NNJ + 2);
 
-    k->diffK  = calloc((size_t)num_tracers * n_nl, sizeof(real_t));
-    k->viscA  = calloc(n_nl,                       sizeof(real_t));
-    k->blmc   = calloc((size_t)3 * n_nl,           sizeof(real_t));
-    k->ghats  = calloc(n_nl1,                      sizeof(real_t));
-    k->dVsq   = calloc(n_nl,                       sizeof(real_t));
+    k->diffK  = (decltype(k->diffK))calloc((size_t)num_tracers * n_nl, sizeof(real_t));
+    k->viscA  = (decltype(k->viscA))calloc(n_nl,                       sizeof(real_t));
+    k->blmc   = (decltype(k->blmc))calloc((size_t)3 * n_nl,           sizeof(real_t));
+    k->ghats  = (decltype(k->ghats))calloc(n_nl1,                      sizeof(real_t));
+    k->dVsq   = (decltype(k->dVsq))calloc(n_nl,                       sizeof(real_t));
 
-    k->dkm1   = calloc((size_t)3 * (size_t)N,      sizeof(real_t));
-    k->hbl    = calloc((size_t)N,                  sizeof(real_t));
-    k->bfsfc  = calloc((size_t)N,                  sizeof(real_t));
-    k->caseA  = calloc((size_t)N,                  sizeof(real_t));
-    k->stable = calloc((size_t)N,                  sizeof(real_t));
-    k->ustar  = calloc((size_t)N,                  sizeof(real_t));
-    k->Bo     = calloc((size_t)N,                  sizeof(real_t));
-    k->kbl    = calloc((size_t)N,                  sizeof(int));
+    k->dkm1   = (decltype(k->dkm1))calloc((size_t)3 * (size_t)N,      sizeof(real_t));
+    k->hbl    = (decltype(k->hbl))calloc((size_t)N,                  sizeof(real_t));
+    k->bfsfc  = (decltype(k->bfsfc))calloc((size_t)N,                  sizeof(real_t));
+    k->caseA  = (decltype(k->caseA))calloc((size_t)N,                  sizeof(real_t));
+    k->stable = (decltype(k->stable))calloc((size_t)N,                  sizeof(real_t));
+    k->ustar  = (decltype(k->ustar))calloc((size_t)N,                  sizeof(real_t));
+    k->Bo     = (decltype(k->Bo))calloc((size_t)N,                  sizeof(real_t));
+    k->kbl    = (decltype(k->kbl))calloc((size_t)N,                  sizeof(int));
 
-    k->wmt    = calloc(tbl,                        sizeof(real_t));
-    k->wst    = calloc(tbl,                        sizeof(real_t));
+    k->wmt    = (decltype(k->wmt))calloc(tbl,                        sizeof(real_t));
+    k->wst    = (decltype(k->wst))calloc(tbl,                        sizeof(real_t));
 
     FESOM_CHECK(k->diffK && k->viscA && k->blmc && k->ghats && k->dVsq
              && k->dkm1 && k->hbl && k->bfsfc && k->caseA && k->stable
@@ -735,8 +735,8 @@ static void kpp_replay_inputs(fesom_kpp *k, const struct fesom_mesh *mesh,
 {
     const int nl = k->nl, Nmy = mesh->myDim_nod2D;
     const size_t slab = (size_t)k->n_nod * (size_t)nl;
-    double *buf = malloc((size_t)Nmy * (size_t)nl * sizeof(double));
-    double *p5  = malloc((size_t)Nmy * 5 * sizeof(double));
+    double *buf = (double *)malloc((size_t)Nmy * (size_t)nl * sizeof(double));
+    double *p5  = (double *)malloc((size_t)Nmy * 5 * sizeof(double));
     FESOM_CHECK(buf && p5, "kpp_replay: out of memory");
     /* bldepth (5): hbl, kbl(dump is +1 → back to 0-based), bfsfc, stable, caseA */
     kpp_replay_file(dir, "bldepth", partit, Nmy, 5, p5);

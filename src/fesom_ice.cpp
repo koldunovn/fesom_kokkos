@@ -37,7 +37,7 @@
  */
 static real_t *xcalloc(size_t n)
 {
-    real_t *p = calloc(n, sizeof(real_t));
+    real_t *p = (real_t *)calloc(n, sizeof(real_t));
     FESOM_CHECK(p, "fesom_ice: out of memory (%zu doubles)", n);
     return p;
 }
