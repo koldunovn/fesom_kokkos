@@ -132,6 +132,19 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
   snapshot write with `NetCDF error: Permission denied` (`fesom_io.cpp:394`) — a misleading errno for
   a missing dir. **Recipe fix: `mkdir -p <out_dir>` before the run** (now folded into the gate).
 
+- **L16 — an array with a free+realloc lifecycle (MPI scatter) must re-`alloc()` its Field at EVERY
+  reassignment, not just the final one.** `scatter_mesh` reassigns `m->coord_nod2D` three times:
+  `read_*` (rank 0 / npes==1), the rank!=0 broadcast receive buffer, and the per-rank local-slice
+  swap. To keep the `Field` the sole owner across all of it, each `free(m->X); m->X = malloc(...)`
+  became `m->X_fld.alloc(...); m->X = m->X_fld.h();` (`.alloc` releases the prior allocation via
+  refcounting -- no `free` needed). Two traps: (a) the local-slice swap fills a *raw* `new_*` buffer
+  from the global Field, so you can't just alias `.h()` to it -- re-`alloc()` the Field to the local
+  extent (releasing the global storage the slice was read from, already copied out),
+  `memcpy(field.h(), new_X, ...)`, then `free(new_X)`. (b) a helper taking `T** buf` that does
+  `free(*buf); *buf = malloc(...)` (here `bcast_real_array`) cannot operate on a `Field` -- inline it
+  as `if (rank!=0) fld.alloc(); MPI_Bcast(fld.h(),...)`. Only the np=2 `dist_2` gate (D14) exercises
+  any of this -- np=1 never enters `scatter_mesh`.
+
 ## C. Process lessons
 
 - Validate at **every** step on Serial bit-identity; commit per milestone-step; **tag** milestones.

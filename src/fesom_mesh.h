@@ -142,6 +142,15 @@ typedef struct fesom_mesh {
     fesom::Field    edge_dxdy_fld, edge_cross_dxdy_fld, gradient_sca_fld;
     fesom::Field    mesh_resolution_fld, zbar_3d_n_fld;
     fesom::Field    hnode_fld, hnode_new_fld, helem_fld, hbar_fld, hbar_old_fld;
+
+    /* Wave 2 — the connectivity/coordinate arrays read on rank 0 and then
+     * redistributed by scatter_mesh (freed + replaced with per-rank slices for
+     * npes>1; identity for npes==1). Each Field is re-alloc'd at every point its
+     * raw alias is (re)assigned: read_*, the rank!=0 broadcast receive buffer,
+     * and the local-slice swap. zbar/Z are global (broadcast, not sliced). */
+    fesom::Field    coord_nod2D_fld, geo_coord_nod2D_fld, depth_fld, zbar_fld, Z_fld;
+    fesom::IntField coast_flag_fld, nlevels_nod2D_fld, elem_nodes_fld, nlevels_fld;
+    fesom::IntField edges_fld, edge_tri_fld;
 } fesom_mesh;
 
 void fesom_mesh_init(fesom_mesh *m);

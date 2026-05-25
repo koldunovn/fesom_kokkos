@@ -30,26 +30,10 @@ void fesom_mesh_init(fesom_mesh *m)
 
 void fesom_mesh_free(fesom_mesh *m)
 {
-    // Arrays migrated to fesom::Field/IntField (M1.2) are OWNED by their Field; the raw
+    // Every persistent mesh array is now OWNED by a fesom::Field/IntField (Waves 1+2); the raw
     // pointer is a non-owning alias, so it must NOT be free()d here — the `*m = fesom_mesh{}`
-    // below resets every DualView (Kokkos refcounting releases the storage). Only the arrays
-    // still backed by raw malloc/calloc are freed explicitly.
-    //   Wave 1 migrated (NOT freed here): nod_in_elem2D(_offsets), ulevels, ulevels_nod2D,
-    //   nlevels_nod2D_min, ulevels_nod2D_max, edge_up_dn_tri, elem_area, area, areasvol,
-    //   elem_cos, metric_factor, coriolis, coriolis_node, elem_center_x/y, edge_dxdy,
-    //   edge_cross_dxdy, gradient_sca, zbar_3d_n, mesh_resolution, hnode(_new), helem, hbar(_old).
-    // Still raw (freed here until migrated in Wave 2/3):
-    free(m->coord_nod2D);
-    free(m->geo_coord_nod2D);
-    free(m->coast_flag);
-    free(m->elem_nodes);
-    free(m->edges);
-    free(m->edge_tri);
-    free(m->nlevels_nod2D);
-    free(m->nlevels);
-    free(m->zbar);
-    free(m->Z);
-    free(m->depth);
+    // below resets every DualView (Kokkos refcounting releases the storage). The lone exception
+    // is bc_index_nod2D, still raw (xcalloc'd in fesom_ice.cpp) until Wave 3.
     free(m->bc_index_nod2D);
     *m = fesom_mesh{};   // release all Field storage + zero the POD members
 }
@@ -197,9 +181,9 @@ static void read_nod2d(fesom_mesh *m, const char *mesh_dir)
     m->nod2D = n;
     m->myDim_nod2D = n;
     m->eDim_nod2D  = 0;
-    m->coord_nod2D     = (decltype(m->coord_nod2D))malloc((size_t)n * 2 * sizeof(real_t));
-    m->geo_coord_nod2D = (decltype(m->geo_coord_nod2D))malloc((size_t)n * 2 * sizeof(real_t));
-    m->coast_flag      = (decltype(m->coast_flag))malloc((size_t)n * sizeof(int));
+    m->coord_nod2D_fld.alloc("coord_nod2D", (size_t)n * 2);         m->coord_nod2D     = m->coord_nod2D_fld.h();
+    m->geo_coord_nod2D_fld.alloc("geo_coord_nod2D", (size_t)n * 2); m->geo_coord_nod2D = m->geo_coord_nod2D_fld.h();
+    m->coast_flag_fld.alloc("coast_flag", (size_t)n);               m->coast_flag      = m->coast_flag_fld.h();
     FESOM_CHECK(m->coord_nod2D && m->geo_coord_nod2D && m->coast_flag,
                 "nod2d.out: out of memory");
 
@@ -248,7 +232,7 @@ static void read_elem2d(fesom_mesh *m, const char *mesh_dir)
     m->elem2D       = n;
     m->myDim_elem2D = n;
     m->eDim_elem2D  = 0;
-    m->elem_nodes   = (decltype(m->elem_nodes))malloc((size_t)n * 3 * sizeof(int));
+    m->elem_nodes_fld.alloc("elem_nodes", (size_t)n * 3);   m->elem_nodes = m->elem_nodes_fld.h();
     FESOM_CHECK(m->elem_nodes, "elem2d.out: out of memory");
 
     for (int i = 0; i < n; ++i) {
@@ -284,7 +268,7 @@ static void read_aux3d(fesom_mesh *m, const char *mesh_dir)
     FESOM_CHECK(fscanf(fh, "%d", &nl) == 1, "aux3d.out: missing nl");
     FESOM_CHECK(nl >= 3, "aux3d.out: nl=%d too small", nl);
     m->nl   = nl;
-    m->zbar = (decltype(m->zbar))malloc((size_t)nl * sizeof(real_t));
+    m->zbar_fld.alloc("zbar", (size_t)nl);   m->zbar = m->zbar_fld.h();
     FESOM_CHECK(m->zbar, "aux3d.out: out of memory (zbar)");
 
     for (int k = 0; k < nl; ++k) {
@@ -299,13 +283,13 @@ static void read_aux3d(fesom_mesh *m, const char *mesh_dir)
 
     /* Mid-layer depths Z[nz] = 0.5*(zbar[nz]+zbar[nz+1]) for nz=0..nl-2.
        Mirror of mesh%Z = 0.5*(zbar(1:nl-1)+zbar(2:nl)) at oce_mesh.F90:580. */
-    m->Z = (decltype(m->Z))malloc((size_t)(nl - 1) * sizeof(real_t));
+    m->Z_fld.alloc("Z", (size_t)(nl - 1));   m->Z = m->Z_fld.h();
     FESOM_CHECK(m->Z, "aux3d.out: out of memory (Z)");
     for (int k = 0; k < nl - 1; ++k) {
         m->Z[k] = 0.5 * (m->zbar[k] + m->zbar[k + 1]);
     }
 
-    m->depth = (decltype(m->depth))malloc((size_t)m->nod2D * sizeof(real_t));
+    m->depth_fld.alloc("depth", (size_t)m->nod2D);   m->depth = m->depth_fld.h();
     FESOM_CHECK(m->depth, "aux3d.out: out of memory (depth)");
     for (int i = 0; i < m->nod2D; ++i) {
         double v;
@@ -333,7 +317,7 @@ static void read_nlvls(fesom_mesh *m, const char *mesh_dir)
 {
     char path[1024];
     snprintf(path, sizeof(path), "%s/nlvls.out", mesh_dir);
-    m->nlevels_nod2D = (decltype(m->nlevels_nod2D))malloc((size_t)m->nod2D * sizeof(int));
+    m->nlevels_nod2D_fld.alloc("nlevels_nod2D", (size_t)m->nod2D);   m->nlevels_nod2D = m->nlevels_nod2D_fld.h();
     FESOM_CHECK(m->nlevels_nod2D, "nlvls.out: out of memory");
     read_int_per_line(path, m->nlevels_nod2D, m->nod2D);
 }
@@ -342,7 +326,7 @@ static void read_elvls(fesom_mesh *m, const char *mesh_dir)
 {
     char path[1024];
     snprintf(path, sizeof(path), "%s/elvls.out", mesh_dir);
-    m->nlevels = (decltype(m->nlevels))malloc((size_t)m->elem2D * sizeof(int));
+    m->nlevels_fld.alloc("nlevels", (size_t)m->elem2D);   m->nlevels = m->nlevels_fld.h();
     FESOM_CHECK(m->nlevels, "elvls.out: out of memory");
     read_int_per_line(path, m->nlevels, m->elem2D);
 }
@@ -374,8 +358,8 @@ static void read_edges(fesom_mesh *m, const char *mesh_dir)
     int nt = count_lines(path_t);
     FESOM_CHECK(ne == nt, "edges.out (%d) and edge_tri.out (%d) row mismatch", ne, nt);
     m->edge2D   = ne;
-    m->edges    = (decltype(m->edges))malloc((size_t)ne * 2 * sizeof(int));
-    m->edge_tri = (decltype(m->edge_tri))malloc((size_t)ne * 2 * sizeof(int));
+    m->edges_fld.alloc("edges", (size_t)ne * 2);       m->edges    = m->edges_fld.h();
+    m->edge_tri_fld.alloc("edge_tri", (size_t)ne * 2); m->edge_tri = m->edge_tri_fld.h();
     FESOM_CHECK(m->edges && m->edge_tri, "edges: out of memory");
 
     FILE *fe = fopen(path_e, "r");
@@ -946,16 +930,6 @@ static void compute_gradient_sca(fesom_mesh *m)
  * For npes==1 with synthesised partit (myList_*[i]=i+1), the extraction is
  * an identity copy and the result is bit-identical to the pre-MPI serial
  * mesh. */
-static void bcast_real_array(real_t **buf, int n, fesom_partit *p)
-{
-    if (p->mype != 0) {
-        free(*buf);
-        *buf = (std::remove_reference_t<decltype(*buf)>)malloc((size_t)n * sizeof(real_t));
-        FESOM_CHECK(*buf, "bcast_real_array: alloc on rank %d", p->mype);
-    }
-    MPI_CHECK(MPI_Bcast(*buf, n, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
-}
-
 /* Build global-id → local-index hash for nodes. lookup[gid_0_based] = local
  * index in [0, myDim+eDim), or -1 if the global node is not in this rank's
  * local set. We allocate a flat lookup table sized to global nod2D — at
@@ -993,24 +967,28 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
         m->edge2D_in = dims[4];
     }
 
-    /* zbar / Z are global (depth column shared across ranks) — small. */
-    bcast_real_array(&m->zbar, g_nl, p);
-    if (p->mype != 0) { free(m->Z); m->Z = (decltype(m->Z))malloc((size_t)(g_nl - 1) * sizeof(real_t));
+    /* zbar / Z are global (depth column shared across ranks) — small. Field-backed (M1.2):
+     * rank 0 already holds them from read_aux3d (broadcast in place); rank!=0 ran no read_*,
+     * so its Field is still empty and .alloc() makes the receive buffer. */
+    if (p->mype != 0) { m->zbar_fld.alloc("zbar", (size_t)g_nl); m->zbar = m->zbar_fld.h(); }
+    MPI_CHECK(MPI_Bcast(m->zbar, g_nl, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
+    if (p->mype != 0) { m->Z_fld.alloc("Z", (size_t)(g_nl - 1)); m->Z = m->Z_fld.h();
                         FESOM_CHECK(m->Z, "Z alloc"); }
     MPI_CHECK(MPI_Bcast(m->Z, g_nl - 1, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
 
     /* Broadcast the global per-node and per-elem arrays from rank 0. */
     /* coord_nod2D + geo_coord_nod2D are 2D (lon, lat). */
     if (p->mype != 0) {
-        free(m->coord_nod2D);     m->coord_nod2D     = (decltype(m->coord_nod2D))malloc((size_t)g_nod2D * 2 * sizeof(real_t));
-        free(m->geo_coord_nod2D); m->geo_coord_nod2D = (decltype(m->geo_coord_nod2D))malloc((size_t)g_nod2D * 2 * sizeof(real_t));
-        free(m->coast_flag);      m->coast_flag      = (decltype(m->coast_flag))malloc((size_t)g_nod2D * sizeof(int));
-        free(m->depth);           m->depth           = (decltype(m->depth))malloc((size_t)g_nod2D * sizeof(real_t));
-        free(m->nlevels_nod2D);   m->nlevels_nod2D   = (decltype(m->nlevels_nod2D))malloc((size_t)g_nod2D * sizeof(int));
-        free(m->elem_nodes);      m->elem_nodes      = (decltype(m->elem_nodes))malloc((size_t)g_elem2D * 3 * sizeof(int));
-        free(m->nlevels);         m->nlevels         = (decltype(m->nlevels))malloc((size_t)g_elem2D * sizeof(int));
-        free(m->edges);           m->edges           = (decltype(m->edges))malloc((size_t)g_edge2D * 2 * sizeof(int));
-        free(m->edge_tri);        m->edge_tri        = (decltype(m->edge_tri))malloc((size_t)g_edge2D * 2 * sizeof(int));
+        // rank!=0 ran no read_*: these Fields are empty, so .alloc() makes the global receive buffer.
+        m->coord_nod2D_fld.alloc("coord_nod2D", (size_t)g_nod2D * 2);         m->coord_nod2D     = m->coord_nod2D_fld.h();
+        m->geo_coord_nod2D_fld.alloc("geo_coord_nod2D", (size_t)g_nod2D * 2); m->geo_coord_nod2D = m->geo_coord_nod2D_fld.h();
+        m->coast_flag_fld.alloc("coast_flag", (size_t)g_nod2D);              m->coast_flag      = m->coast_flag_fld.h();
+        m->depth_fld.alloc("depth", (size_t)g_nod2D);                        m->depth           = m->depth_fld.h();
+        m->nlevels_nod2D_fld.alloc("nlevels_nod2D", (size_t)g_nod2D);        m->nlevels_nod2D   = m->nlevels_nod2D_fld.h();
+        m->elem_nodes_fld.alloc("elem_nodes", (size_t)g_elem2D * 3);         m->elem_nodes      = m->elem_nodes_fld.h();
+        m->nlevels_fld.alloc("nlevels", (size_t)g_elem2D);                   m->nlevels         = m->nlevels_fld.h();
+        m->edges_fld.alloc("edges", (size_t)g_edge2D * 2);                   m->edges           = m->edges_fld.h();
+        m->edge_tri_fld.alloc("edge_tri", (size_t)g_edge2D * 2);             m->edge_tri        = m->edge_tri_fld.h();
         FESOM_CHECK(m->coord_nod2D && m->geo_coord_nod2D && m->coast_flag
                  && m->depth && m->nlevels_nod2D && m->elem_nodes
                  && m->nlevels && m->edges && m->edge_tri,
@@ -1138,16 +1116,37 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
     free(node_g2l);
     free(elem_g2l);
 
-    /* Swap in new local arrays, free the old global ones. */
-    free(m->coord_nod2D);     m->coord_nod2D     = new_coord;
-    free(m->geo_coord_nod2D); m->geo_coord_nod2D = new_geo_coord;
-    free(m->coast_flag);      m->coast_flag      = new_coast;
-    free(m->depth);           m->depth           = new_depth;
-    free(m->nlevels_nod2D);   m->nlevels_nod2D   = new_nlevels_n;
-    free(m->elem_nodes);      m->elem_nodes      = new_elem_nodes;
-    free(m->nlevels);         m->nlevels         = new_nlevels_e;
-    free(m->edges);           m->edges           = new_edges;
-    free(m->edge_tri);        m->edge_tri        = new_edge_tri;
+    /* Swap in the new local slices. The Field currently owns the GLOBAL broadcast array, which
+     * the new_* buffers were just filled from; re-alloc each Field to the LOCAL extent (this
+     * releases the global storage), copy the slice in, free the raw new_* buffer, and re-point
+     * the alias. The Field remains the sole owner of every m->X across the whole scatter (M1.2). */
+    m->coord_nod2D_fld.alloc("coord_nod2D", (size_t)my_n * 2);
+    memcpy(m->coord_nod2D_fld.h(), new_coord, (size_t)my_n * 2 * sizeof(real_t));
+    free(new_coord);     m->coord_nod2D     = m->coord_nod2D_fld.h();
+    m->geo_coord_nod2D_fld.alloc("geo_coord_nod2D", (size_t)my_n * 2);
+    memcpy(m->geo_coord_nod2D_fld.h(), new_geo_coord, (size_t)my_n * 2 * sizeof(real_t));
+    free(new_geo_coord); m->geo_coord_nod2D = m->geo_coord_nod2D_fld.h();
+    m->coast_flag_fld.alloc("coast_flag", (size_t)my_n);
+    memcpy(m->coast_flag_fld.h(), new_coast, (size_t)my_n * sizeof(int));
+    free(new_coast);     m->coast_flag      = m->coast_flag_fld.h();
+    m->depth_fld.alloc("depth", (size_t)my_n);
+    memcpy(m->depth_fld.h(), new_depth, (size_t)my_n * sizeof(real_t));
+    free(new_depth);     m->depth           = m->depth_fld.h();
+    m->nlevels_nod2D_fld.alloc("nlevels_nod2D", (size_t)my_n);
+    memcpy(m->nlevels_nod2D_fld.h(), new_nlevels_n, (size_t)my_n * sizeof(int));
+    free(new_nlevels_n); m->nlevels_nod2D   = m->nlevels_nod2D_fld.h();
+    m->elem_nodes_fld.alloc("elem_nodes", (size_t)my_e * 3);
+    memcpy(m->elem_nodes_fld.h(), new_elem_nodes, (size_t)my_e * 3 * sizeof(int));
+    free(new_elem_nodes); m->elem_nodes     = m->elem_nodes_fld.h();
+    m->nlevels_fld.alloc("nlevels", (size_t)my_e);
+    memcpy(m->nlevels_fld.h(), new_nlevels_e, (size_t)my_e * sizeof(int));
+    free(new_nlevels_e); m->nlevels         = m->nlevels_fld.h();
+    m->edges_fld.alloc("edges", (size_t)my_eg * 2);
+    memcpy(m->edges_fld.h(), new_edges, (size_t)my_eg * 2 * sizeof(int));
+    free(new_edges);     m->edges           = m->edges_fld.h();
+    m->edge_tri_fld.alloc("edge_tri", (size_t)my_eg * 2);
+    memcpy(m->edge_tri_fld.h(), new_edge_tri, (size_t)my_eg * 2 * sizeof(int));
+    free(new_edge_tri);  m->edge_tri        = m->edge_tri_fld.h();
 
     /* Sync mesh's myDim_ / eDim_ fields from partit. */
     m->myDim_nod2D   = p->myDim_nod2D;
@@ -1226,6 +1225,19 @@ static void mesh_sync_geometry_device(fesom_mesh *m)
     FESOM_MESH_SYNC_DEV(m->gradient_sca_fld);
     FESOM_MESH_SYNC_DEV(m->mesh_resolution_fld);
     FESOM_MESH_SYNC_DEV(m->zbar_3d_n_fld);
+    // Wave 2 — connectivity/coordinates (set once by read_* + scatter_mesh + orient_cw, all done
+    // before this point; e.g. elem_nodes is post-orient here).
+    FESOM_MESH_SYNC_DEV(m->coord_nod2D_fld);
+    FESOM_MESH_SYNC_DEV(m->geo_coord_nod2D_fld);
+    FESOM_MESH_SYNC_DEV(m->coast_flag_fld);
+    FESOM_MESH_SYNC_DEV(m->depth_fld);
+    FESOM_MESH_SYNC_DEV(m->nlevels_nod2D_fld);
+    FESOM_MESH_SYNC_DEV(m->elem_nodes_fld);
+    FESOM_MESH_SYNC_DEV(m->nlevels_fld);
+    FESOM_MESH_SYNC_DEV(m->edges_fld);
+    FESOM_MESH_SYNC_DEV(m->edge_tri_fld);
+    FESOM_MESH_SYNC_DEV(m->zbar_fld);
+    FESOM_MESH_SYNC_DEV(m->Z_fld);
 #undef FESOM_MESH_SYNC_DEV
 }
 
