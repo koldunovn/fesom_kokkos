@@ -169,6 +169,29 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
 - Record **provenance** (C source SHA, exact build/run recipe) so any reference is regenerable.
 - nvcc full-model compiles are slow → run them **in the background**; iterate config on the login
   node, run device smokes via `srun -p gpu-devel -A ab0995 --gres=gpu:1`.
+- **A phantom multi-rank divergence debugging ladder (from the M1.3 vader-CMA saga — follow it
+  BEFORE suspecting the port; it would have saved hours).** When np=1 is bit-identical but np>1
+  diverges after a change that *shouldn't* affect results (a storage/struct refactor):
+  1. **Confirm it's reproducible and your change caused it**: rebuild the pre-change HEAD, run np>1,
+     diff vs the oracle (it should match). Then your change vs HEAD. (Don't trust a possibly-stale
+     scratch oracle — regenerate it.) Beware **incremental-build staleness** after a struct-layout
+     change: `touch src/*` to force a full recompile, or the divergence may be a stale `.o`.
+  2. **Bisect compute-vs-I/O**: dump the OWNED state (`field[0..myDim*stride)` per rank) right after
+     the producing kernel, both builds, and `cmp`. **Byte-identical owned ⇒ the port is correct and
+     the divergence is in the gather/transport/output path, not the physics.** (This single check
+     reframes the whole hunt.) A coarse sum+max checksum can match by luck — `cmp` the raw bytes.
+  3. **ASan clean ≠ no memory problem.** ASan catches OOB / use-after-free but **not uninitialized
+     reads** and **not transport-layer artifacts**. A clean ASan run does not exonerate the gather.
+  4. **Suspect the MPI transport.** If per-rank SENDS + the gather plan (counts/displs/lists) are all
+     byte-identical yet `MPI_Gatherv`'s `recv` differs between builds, it's the transport, not your
+     code — see L18 (login-node `vader` CMA). Try `OMPI_MCA_btl_vader_single_copy_mechanism=none`.
+  5. **Don't be fooled by "data-dependent" divergence**: a transport/gather bug only *shows* in
+     non-zero fields, so it looks like it singles out specific variables (Av/Kv/uv diverged, the
+     ~0 `pgf` didn't) — that's a visibility artifact, not a clue about which kernel is "wrong".
+- **np=1 bit-identity is necessary but NOT sufficient.** np=1 skips `scatter_mesh`, every halo
+  exchange, and the cross-rank gather, and has no halo/eXDim storage — so it cannot test those code
+  paths or that region's init. The np≥2 gate (D14, CMA-off) is a *separate* obligation for any change
+  that touches storage size/layout or MPI.
 
 ---
 
