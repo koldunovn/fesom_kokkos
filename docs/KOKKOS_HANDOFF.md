@@ -1,19 +1,47 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 10 (2026-05-26) — M2.5 COMPLETE (ALE thickness / vertical velocity / CFLz / wsplit on
-device, substeps 12 + 14).** Five `_kk` twins (commit `d6937f1`); the whole ALE block is now
-device-resident, so the ocean step is on the device for **substeps 1–6 AND 12/14** (modulo the
-driver halos + the mid-step CG host round-trip). `vert_vel` is the port's **third+ scatter** (edge→node
-`atomic_add`, D22) + a per-node level cumsum; the other four are race-free maps (bit-identical on
-Serial AND OpenMP). **Key finding (L34): GM is ON by default in the pi smoke** (the prior handoff said
-off), so `vert_vel`'s `fer_w` accumulator is LIVE — porting the `gm_on` branch verbatim + its
-`fer_uv`/`fer_w` rails is what keeps pi == golden. Repo: `/home/a/a270088/port_kokkos` (git, branch
+**Session 11 (2026-05-26) — M2.5b COMPLETE (GM/Redi on device: the substep-1b streamfunction/bolus
+chain + the substep-13 Redi tracer diffusion).** Three commits: `8645824` (M2.5b-a: Field-wrap the 11
+GM scratch arrays, bit-identical), `ab57fd6` (M2.5b-b: the 5-kernel chain `sigma_xy`→`neutral_slope`→
+`init_redi_gm`→`fer_solve_gamma`→`fer_gamma2vel`), `4bccd69` (M2.5b-c: `diff_ver_part_redi_expl` +
+`diff_part_hor_redi`). The GM/Redi PHYSICS is now device-resident; ⚠️ **GM is ON by default in the pi
+smoke (L34)** so all of it runs every step on the golden path. The 5 chain kernels are race-free
+maps/gathers/per-node TDMA → **Serial AND OpenMP bit-identical**; `diff_hor` is the port's **4th scatter**
+(edge→node `atomic_add`, D22). **Key scope decision (L36): the bolus add/sub STAY ON HOST** — the
+bolus-augmented `uv`/`w`/`w_e` have no device consumer (FCT + tracer-diff only READ them, grep-verified),
+so they move to the device with the FCT in M2.6. Repo: `/home/a/a270088/port_kokkos` (git, branch
 `master`). Read this first, then `docs/plans/20260525-kokkos-port.md`, `docs/KOKKOS_PORTING_LESSONS.md`,
 `docs/SYNC_MAP.md`, **`docs/SCATTER_STRATEGY.md`**, and the project memory in
 `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
 
 ## 0. TL;DR status
 
+- **M2.5b COMPLETE — GM/Redi on device** (commits `8645824` wrap, `ab57fd6` chain, `4bccd69` Redi). The
+  GM/Redi physics — the substep-1b streamfunction/bolus chain AND the substep-13 Redi tracer diffusion —
+  is device-resident. ⚠️ **GM is ON by default in pi (L34)** → all on the golden path.
+  - **M2.5b-a** — Field-wrap the 11 GM scratch arrays (`sigma_xy/neutral_slope/slope_tapered/fer_tapfac/
+    fer_gamma/fer_K/Ki/fer_C/fer_scal/tr_xy/tr_z`), the M2.3a data-layer pattern (`*g = fesom_gm{}` not
+    memset, D13/L13). Bit-identical.
+  - **M2.5b-b** — the substep-1b chain `compute_sigma_xy_kk`→`compute_neutral_slope_kk`→`init_redi_gm_kk`
+    (2 launches, D20)→`fer_solve_gamma_kk` (per-node TDMA, L31)→`fer_gamma2vel_kk` (all in `fesom_gm.cpp`).
+    ODM95 taper + `scaling_GMzexp` verbatim. All race-free maps/gathers/TDMA → **Serial AND OpenMP
+    bit-identical**. C twins' 6 internal halos move to the DRIVER (the ALE pattern, NOT KPP's D21);
+    kernels flow DEVICE→DEVICE reading each upstream's OWNED output; only `fer_gamma` is re-pushed
+    (`fer_gamma2vel` reads it at HALO vertices, L30). Produces `fer_uv` (→ device `vert_vel` 12b + the
+    bolus 13a) + `slope_tapered`/`Ki` (→ the Redi).
+  - **M2.5b-c** — `diff_ver_part_redi_expl_kk` (per-node gather + vd_flux → `+= values`, race-free map) +
+    `diff_part_hor_redi_kk` (build `tr_z` + edge→node SCATTER `atomic_add` D22, 5 partial-cell branches),
+    run per tracer (T,S) as a DEVICE ISLAND between the host FCT calls (the M2.2/§5 host-round-trip-on-
+    `values` pattern). Each owns its internal halo (D21: `tr_xy`, `tr_z`); `values` read-modify-write →
+    L26 capture-before verify. **The bolus add/sub STAY ON HOST** (L36 — no device consumer until M2.6).
+  - **M2.5b gate — ALL GREEN**: `FESOM_KK_VERIFY=gm` **Serial `max|Δ|==0`** (140 lines = 5 chain + 2 redi
+    × 20 steps, 0 non-zero) **and OpenMP `max|Δ|==0`** (every kernel race-free or non-diverging-scatter
+    on pi); Serial pi == golden (np=1 **and** np=2 CMA-off vs `…m13_nocma` — exercises the new D21
+    brackets + the Redi scatter under MPI); `ctest` 4/4; **SYNCCHECK clean + bit-identical**;
+    `FESOM_NO_GMREDI=1` runs clean + differs from golden (GM live, off-path byte-identical by
+    construction — all changes `if(gm)`-guarded); **CUDA (A100) climate-close at the UNCHANGED
+    M2.1/M2.4/M2.5 budget** (M2.5b-b job `25135312`: density 3.18e-12 STABLE, bvfreq 2.6e-15, u/v
+    3.8e-4/7.4e-5, pgf 6-8e-18, w 2.9e-8; **no new divergence class**, D5; M2.5b-c smoke job `25136248`).
 - **M2.5 COMPLETE — ALE thickness / vertical velocity / CFLz / wsplit on device** (commit `d6937f1`,
   substeps 12 + 14, all in `src/fesom_ale.cpp`). Five `_kk` twins beside the untouched C twins (D19),
   one shared verify key `ale`:
@@ -124,20 +152,20 @@ off), so `vert_vel`'s `fer_w` accumulator is LIVE — porting the `gm_on` branch
 ## 1. Git state
 
 ```
-HEAD  <handoff> docs: handoff → M2.5 done / next M2.5b   (this commit)
+HEAD  <handoff> docs: handoff → M2.5b done / next M2.6   (this commit)
+      4bccd69   M2.5b-c: GM/Redi tracer diffusion on device (diff_ver + diff_hor)
+      ab57fd6   M2.5b-b: substep-1b GM chain on device (sigma_xy/.../fer_gamma2vel)
+      8645824   M2.5b-a: Field-wrap the GM scratch arrays (data layer, bit-identical)
+      3086ad0   docs: handoff → M2.5 done (ALE on device) / next M2.5b (GM/Redi)
       d6937f1   M2.5: ALE thickness/vert_vel/CFLz/wsplit on device (substeps 12/14)
-      d399df6   docs: handoff → M2.4 done (PGF+momentum+visc on device) / next M2.5 (ALE)
       4e5c8ba   M2.4d: momentum RHS on device (compute_vel_rhs + momentum_adv_scalar, substep 4)
-      5fde72c   M2.4c: biharmonic viscosity on device (visc_filt_bidiff, substep 5)
-      8a419e0   M2.4b: implicit vertical viscosity on device (impl_vert_visc, substep 6)
-      07094b5   M2.4a: PGF on device (pressure_force_linfs_fullcell, substep 2)
       61a4816   M2.3b: KPP vertical mixing on device (the large mixing kernel, 1046 LoC)
       e060473   M2.1: EOS on device — first Kokkos compute kernels (pressure_bv + sw_alpha_beta)
 tag   m1-datalayer  → end of M1 (annotated; CORE2 acceptance + CUDA disposition)
 tag   m0-baseline   → M0 (Serial+OpenMP+CUDA pi bit-identical)
 ```
-No tag for M2.1–M2.5 (the M2 milestone tag `m2-ocean-device` lands at M2.7, after the whole ocean step
-is on device). CUDA smoke `runs/pi_check_cuda` (job `25133976`) is climate-close, not a bit oracle.
+No tag for M2.1–M2.5b (the M2 milestone tag `m2-ocean-device` lands at M2.7, after the whole ocean step
+is on device). CUDA smoke `runs/pi_check_cuda` (M2.5b-c job `25136248`) is climate-close, not a bit oracle.
 No tag for M2.1/M2.2/M2.3 (the M2 milestone tag `m2-ocean-device` is at M2.7, after the whole ocean
 step is on device). Oracles: pi golden `docs/reference/c_baseline_snapshots/pi` (byte-identical at
 `-ffp-contract=off`, L23); np=2 scatter `/scratch/a/a270088/pi_np2_ref_m13_nocma` (CMA-off, L18; old
@@ -204,47 +232,46 @@ build dirs (`build-serial`, `build-omp`, `build-cuda`, `build-synccheck`) are al
 then `scripts/m1_accept_compare.sh` — see `docs/M1_ACCEPTANCE.md` (incl. the §ranks same-rank-count
 rule and the §CUDA / M3.1 deferral).
 
-## 3. THE NEXT TASK — M2.5b: GM/Redi (sigma_xy, neutral_slope, streamfunction, bolus, horizontal Redi)
+## 3. THE NEXT TASK — M2.6: FCT tracer advection (the big one — scatter + internal exchanges)
 
-Per plan §M2.5b. Mostly in **`src/fesom_gm.cpp`** (1077 LoC) + `src/fesom_step.cpp` rails. ⚠️ **GM is
-ON by default in the pi smoke** (L34 — `s_no_gmredi=0` → `gm=ctx->gm` non-NULL), so **all of M2.5b is
-already on the golden path** — Serial pi must STAY `== golden`, and the GM routines run every step.
-**Templates:** `src/fesom_kpp.cpp` + **`src/fesom_momentum.cpp`** are the closest shapes — GM's
-`fer_solve_gamma` is a **vertical solve** (the per-element/per-node TDMA shape, L31/`impl_vert_visc_kk`);
-the bolus add/sub are simple per-entity maps; `diff_part_hor_redi` likely has **edge scatters (D22)** +
-**internal exchanges (D21)** — ⚠️ **derive each kernel's actual shape from the C BODY (L33), do not trust
-this one-liner.** Re-read **D19–D22, L26/L28/L31/L33/L34**.
+Per plan §M2.6. Mostly in **`src/fesom_tracer_adv.cpp`** (1301 LoC — `fesom_tracer_advect_one_fct` +
+helpers) + `src/fesom_step.cpp` substep-13 rails. This is the largest remaining ocean kernel and runs
+**every step on the golden path** (FCT is the default tracer advection). It is **substep 13** — currently
+the only HOST compute left in the substep-13 region, sandwiched between the now-device Redi (M2.5b-c) and
+tracer-diff (M2.7, still host). ⚠️ **derive each stage's shape from the C BODY (L33)** — re-read
+**D19–D22, L25/L26/L28/L31/L33/L36** and **`docs/SCATTER_STRATEGY.md`** (the FCT flux assembly is the next
+edge→node scatter, the D22 default `atomic_add`).
 
-Steps (verify key `gm` — check no substring collision; "gm" is short, guard like the `pp`⊂`kpp` case L25):
-- **M2.5b-a — wrap the GM scratch arrays in `Field`** (`fer_K`/`fer_C`/`Ki`/`fer_gamma`/`sigma_xy`/
-  `neutral_slope`/`slope_tapered`/`fer_tapfac`), the M2.3a/D12/D16 pure data-layer pattern (bit-identical;
-  these were deferred from M1). Commit on its own.
-- **M2.5b-b — port the substep-1b chain** (`fesom_step.cpp:206-211`, inside `if (gm)`): `compute_sigma_xy`,
-  `compute_neutral_slope`, `init_redi_gm`, `fer_solve_gamma` (the vertical solve), `fer_gamma2vel`
-  (writes `dyn->fer_uv`, which `vert_vel_kk` already consumes — M2.5). **⚠️ preserve ODM95 tapering +
-  `scaling_GMzexp` verbatim** (numerics knobs, PORTING_LESSONS §1). `_kk` twins beside the C twins (D19);
-  driver IN/OUT rails (L28); wrap any internal `fesom_exchange_*` in a D21 bracket.
-- **M2.5b-c — port the bolus add/sub + horizontal Redi**: the bolus add (substep 13a, `fesom_step.cpp`
-  ~`:515-532`: `uv+=fer_uv`, `w+=fer_w`, `w_e+=fer_w`) and sub (13c, ~`:618-635`, the restore); and
-  `fesom_diff_ver_part_redi_expl` + `fesom_diff_part_hor_redi` (substep 13, ~`:546-555`). ⚠️ **honour
-  `feedback_bolus_divergence_balance`** (never clamp `fer_uv` per-cell; scale `fer_gamma` uniformly so the
-  FCT continuity holds — plan note). The bolus add/sub read `fer_w` (M2.5's device output, OUT-rail
-  `sync_host`'d under `if(gm)`) and `fer_uv` — wire their device rails.
-- **Gate** (recipe §2): **two ways** — (1) `FESOM_NO_GMREDI=1` Serial run is **byte-identical to the
-  GM-off path** (the C port's existing off-switch invariant, D10); (2) `FESOM_KK_VERIFY=gm` Serial
-  `max|Δ|==0` with GM on. Plus Serial pi == golden (np=1 + np=2 CMA-off); `ctest` 4/4; SYNCCHECK clean;
-  **OpenMP** bit-identical for maps/solves, climate-close for any scatter (D22); CUDA builds + climate-close.
-  Commit per step; append lessons (D/L) + update SYNC_MAP row 1b/13a/13/13c in the SAME commit.
+Steps (verify key `tradv` — distinct token, no substring collision):
+- **M2.6-a — wrap the FCT scratch arrays in `Field`** (`edge_up_dn_grad`, `fct_LO`/low-order solution,
+  the antidiffusive-flux + plus/minus-flux work, and any per-edge/per-node accumulators), the
+  M2.3a/M2.5b-a data-layer pattern (bit-identical; deferred from M1). Own commit. ⚠️ grep the struct that
+  holds them (`fesom_tra_sc`/`ctx->tra_sc`) and `*x = T{}` not memset (D13/L13).
+- **M2.6-b — port the MFCT pipeline** (3rd-order horizontal + vertical FCT): per-element/per-node
+  gradient + low-order + antidiffusive flux + the Zalesak limiter + the flux-corrected update. ⚠️ **preserve
+  the tracer AB2 `eps=0.1`** (PORTING_LESSONS §1, `oce_tracer_mod.F90:53`) and `feedback_mfct_gradient_from_values`.
+  The flux assembly is an **edge→node SCATTER** → `Kokkos::atomic_add` in natural edge order (D22 — Serial
+  bit-identical, OpenMP/CUDA climate-close; edge-coloring is GPU-only, never on the Serial gate path).
+  Multiple **internal `fesom_exchange_*`** (low-order solution, the flux sums, the limiter coeffs) → each a
+  **D21 bracket** owned by the kernel (the KPP/Redi idiom). `_kk` twins beside the C twins (D19); per-tracer
+  (T,S) like the Redi.
+- **M2.6-c — move the bolus add/sub (13a/13c) to the device** alongside the FCT (L36): now that the FCT
+  reads `uv`/`w`/`w_e` ON the device, the bolus add can write them on device (no more pure round-trip).
+  Wire: bolus-add `_kk` (`uv+=fer_uv` elem map, `w/w_e+=fer_w` node maps) → device FCT reads them →
+  bolus-sub `_kk` restores. `fer_uv`/`fer_w` are device outputs from 1b/12b (re-push the halo'd values, L30).
+- **Gate** (recipe §2): `FESOM_KK_VERIFY=tradv` Serial `max|Δ|==0`; Serial pi == golden (np=1 + np=2
+  CMA-off vs `…m13_nocma`); `ctest` 4/4; SYNCCHECK clean; **OpenMP** bit-identical for the maps, climate-
+  close for the flux scatter (D22); CUDA builds + climate-close. Commit per step; append lessons (D/L) +
+  update SYNC_MAP row 13 + §6 in the SAME commit.
 
-After M2.5b: **M2.6** (FCT tracer advection — the big one, edge→node scatter per D22/`SCATTER_STRATEGY.md`
-+ internal exchanges + wrap FCT scratch in `Field`), **M2.7** (tracer diffusion `impl_vert_diff_tracers`
-per-node TDMA + S-floor + M2 acceptance, tag `m2-ocean-device`). (Optional if asked: **M3.1** multi-GPU
-mapping to unblock the CUDA CORE2 acceptance row.)
+After M2.6: **M2.7** (tracer diffusion `impl_vert_diff_tracers` per-node TDMA + S-floor + the bolus
+already on device + **M2 acceptance** = full ocean step on device, Serial 1-yr CORE2 bit-identical, tag
+`m2-ocean-device`). (Optional if asked: **M3.1** multi-GPU mapping to unblock the CUDA CORE2 acceptance row.)
 
 ## 4. Key paths
 
-- Plan: `docs/plans/20260525-kokkos-port.md` (you are entering §M2.5; §M2.1–§M2.4 ticked) · Kokkos
-  lessons: `docs/KOKKOS_PORTING_LESSONS.md` (D1–D22, L1–L33) · **Scatter strategy: `docs/SCATTER_STRATEGY.md`**
+- Plan: `docs/plans/20260525-kokkos-port.md` (you are entering §M2.6; §M2.1–§M2.5b ticked) · Kokkos
+  lessons: `docs/KOKKOS_PORTING_LESSONS.md` (D1–D22, L1–L36) · **Scatter strategy: `docs/SCATTER_STRATEGY.md`**
   (D22) · Fortran→C traps: `docs/PORTING_LESSONS.md` (dt=1800 AB2 eps=0.1, **wsplit=.false.**, tracer
   stride nl, halo bounds) · **Sync map: `docs/SYNC_MAP.md`** · Acceptance: `docs/M1_ACCEPTANCE.md` ·
   Build: `docs/BUILD.md` · Provenance/MPI: `docs/reference/PROVENANCE.md`
@@ -257,7 +284,11 @@ mapping to unblock the CUDA CORE2 acceptance row.)
   shapes for the next tasks: `impl_vert_visc_kk` = per-element TDMA with `[64]` per-column scratch;
   `visc_filt_bidiff_kk` = the first **scatter** (`atomic_add`, D22) + a D21 internal halo;
   `momentum_adv_scalar_kk` = a 5-stage gather/scatter pipeline + internal halo; `compute_vel_rhs_kk` =
-  the composite). Driver rails: the substep-1/2/3/4/5/6 blocks in `src/fesom_step.cpp` (driver IN
+  the composite); and **`src/fesom_gm.cpp`** (the M2.5b twins — the closest shape for M2.6: the substep-1b
+  chain = device→device with DRIVER halos (the ALE pattern) + the L30 `fer_gamma` re-push; `fer_solve_gamma_kk`
+  = per-node TDMA (L31); the two Redi kernels = a per-node gather + an **edge→node scatter (D22)** each with
+  its own **D21 internal halo** (`tr_xy`/`tr_z`) + the L26 capture-before `fesom_gm_redi_verify`). Driver
+  rails: the substep-1/1b/2/3/4/5/6/12/13/14 blocks in `src/fesom_step.cpp` (driver IN
   `modify_host+sync_device` ALL inputs L28, kernel `mod_dev`, driver `sync_host`, halos via `h_checked`;
   D21 split = driver IN/OUT + kernel-owned internal brackets; L26 capture-before for read-modify-write).
 - `Field`: `src/fesom_field.hpp` (incl. `h_checked()` + the `Auth` tag) · its test `tests/test_field.cpp`
@@ -274,50 +305,48 @@ mapping to unblock the CUDA CORE2 acceptance row.)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
 > `git log --oneline -10` to orient. **M0 + ALL of M1 (tag `m1-datalayer`) + M2.1 (EOS) + M2.2 (PP) +
-> M2.3 (KPP) + M2.4 (PGF/momentum/viscosity/impl-vert-visc) + M2.5 (ALE) are COMPLETE.** M2.5 (commit
-> `d6937f1`) put the **ALE block (substeps 12 + 14)** on the device — `thickness`/`commit` (flat copy +
-> vertex-mean), `vert_vel` (continuity integral: edge→node SCATTER `atomic_add` D22 + per-node level
-> cumsum), `cflz`, `wvel_split` (⚠️`use_wsplit=.false.` preserved) — so the ocean step is device-resident
-> for **substeps 1–6 AND 12/14** (modulo driver halos + the mid-step CG host round-trip, SYNC_MAP §5).
-> ⚠️ **Key finding (L34): GM is ON by default in the pi smoke** (`s_no_gmredi=0`), so `vert_vel`'s `fer_w`
-> accumulator is LIVE and **all of M2.5b (GM/Redi) is already on the golden path**. Validation model:
-> per-kernel **`FESOM_KK_VERIFY=<k>` gate is Serial `max|Δ|==0`** (M2.5 key `ale`, all 5 kernels); the
-> four ALE maps are bit-identical on OpenMP too, only `vert_vel` (the scatter) is OpenMP/CUDA
-> climate-close (D22). CUDA stays at the **unchanged M2.1/M2.4 budget** (density Δ≈3e-12, Av/Kv≈0.095
-> flips, u/v≈3.7e-4/5.9e-5, pgf≈8e-18; no new divergence class, D5). SYNCCHECK clean.
+> M2.3 (KPP) + M2.4 (PGF/momentum/viscosity/impl-vert-visc) + M2.5 (ALE) + M2.5b (GM/Redi) are COMPLETE.**
+> M2.5b (commits `8645824` wrap, `ab57fd6` chain, `4bccd69` Redi) put the **GM/Redi physics** on the
+> device: the substep-1b streamfunction/bolus chain (`sigma_xy`→`neutral_slope`→`init_redi_gm`→
+> `fer_solve_gamma`(per-node TDMA)→`fer_gamma2vel`, all race-free → Serial AND OpenMP bit-identical; C
+> twins' halos in the DRIVER, ALE pattern; only `fer_gamma` re-pushed L30) and the substep-13 Redi
+> (`diff_ver_part_redi_expl` per-node gather + `diff_part_hor_redi` edge→node SCATTER `atomic_add` D22,
+> each owning a `tr_xy`/`tr_z` internal-halo D21 bracket; a device island between the host FCT calls).
+> ⚠️ **GM is ON by default in pi (L34)** → all of it runs every step on the golden path. **Scope decision
+> (L36): the bolus add/sub STAY ON HOST** — no device consumer of `uv`/`w`/`w_e` until the FCT moves to
+> device (M2.6, verified FCT/tracer-diff only READ them). Validation model: per-kernel
+> **`FESOM_KK_VERIFY=<k>` gate is Serial `max|Δ|==0`** (M2.5b key `gm`, 7 kernels: 5 chain + 2 redi); CUDA
+> stays at the **unchanged M2.1/M2.4/M2.5 budget** (density Δ≈3.18e-12, u/v≈3.8e-4/7.4e-5, pgf≈8e-18; no
+> new divergence class, D5). SYNCCHECK clean.
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, the **M2.5b task §3**)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M2.5b; §M2.1–§M2.5 ticked)
-> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6 + 12/14 DONE are the worked rails; rows **1b/13a/13/13c** are your M2.5b GM kernels; **§6 = intra-kernel exchanges**; **§5 = the mid-step CG host round-trip**; §9 kernel-author checklist)
-> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22**: edge→entity scatters = `atomic_add`, Serial bit-identical / OpenMP+CUDA climate-close (the GM horizontal-Redi flux + M2.6 FCT are the next scatters)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L34; **D19/D20 = template; D21 = internal-exchange rail split; D22 = scatter/atomic_add; L26 = capture-before; L28 = sync ALL inputs; L31 = per-element TDMA; L33 = derive the shape from the BODY; L34 = M2.5 ALE + the "GM is ON in pi" / "described-dead ≠ actually-dead" finding**) — APPEND every session
-> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps — ⚠️ GM/Redi numerics knobs (ODM95 tapering, `scaling_GMzexp`, `feedback_bolus_divergence_balance`); AB2 eps=0.1; tracer stride nl; halo bounds
-> - **THE FILE TO PORT: `/home/a/a270088/port_kokkos/src/fesom_gm.cpp`** (1077 LoC, the M2.5b C twins — read the BODIES, L33) + its header `src/fesom_gm.h` (lists the deferred branches) · call sites in `/home/a/a270088/port_kokkos/src/fesom_step.cpp` (substep-1b `if(gm)` block ~`:206-211`; bolus add/sub 13a/13c; Redi 13) · Fortran ground truth `/home/a/a270088/port2/fesom2/src/oce_fer_gm.F90` (GM streamfunction/bolus = `sigma_xy`/`neutral_slope`/`init_Redi_GM`/`fer_solve`/`fer_gamma2vel`) + `oce_ale.F90`/`oce_ale_tracer.F90` (the Redi diffusion) — grep the routine names
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, the **M2.6 task §3**)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M2.6; §M2.1–§M2.5b ticked)
+> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6, 1b, 12/13(Redi)/14 DONE are the worked rails; **row 13 (FCT) is your M2.6**; **§6 = intra-kernel exchanges**; **§5 = the mid-step CG host round-trip**; §9 kernel-author checklist)
+> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22**: edge→entity scatters = `atomic_add`, Serial bit-identical / OpenMP+CUDA climate-close (the **FCT flux assembly is the next scatter**)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L36; **D19/D20 = template; D21 = internal-exchange bracket; D22 = scatter/atomic_add; L25 = verify-token collision; L26 = capture-before; L28 = sync ALL inputs; L31 = per-node TDMA; L33 = derive shape from the BODY; L35 = the GM chain / DRIVER-halo + L30 re-push; L36 = M2.5b-c Redi + the "bolus stays host, no device consumer" scope rule**) — APPEND every session
+> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps — ⚠️ **tracer AB2 `eps=0.1`** (`oce_tracer_mod.F90:53`), `feedback_mfct_gradient_from_values`; tracer stride nl; halo bounds
+> - **THE FILE TO PORT: `/home/a/a270088/port_kokkos/src/fesom_tracer_adv.cpp`** (1301 LoC — `fesom_tracer_advect_one_fct` + the MFCT helpers; read the BODIES, L33) · call sites in `src/fesom_step.cpp` (substep-13 `if (!nt_adv_skip)` block; the device Redi already wraps it) · Fortran ground truth `/home/a/a270088/port2/fesom2/src/oce_ale_tracer.F90` (the FCT/MFCT pipeline) — grep the routine names
 > - build/run/VERIFY/SYNCCHECK recipe = handoff **§2** (and `/home/a/a270088/port_kokkos/docs/BUILD.md`); meshes/oracles/C-twin-bin = handoff **§4 Key paths**
-> - **TEMPLATE: `/home/a/a270088/port_kokkos/src/{fesom_eos,fesom_pp,fesom_kpp,fesom_momentum,fesom_ale}.cpp`** (`_kk` twins + `*_verify` gates) + the substep rail blocks in `src/fesom_step.cpp`. `fesom_momentum.cpp` (per-element TDMA = the `fer_solve_gamma` vertical-solve analogue; scatter+atomic; internal-halo D21; L26 capture-before) and `fesom_ale.cpp` (the freshest: race-free maps + the `vert_vel` scatter/scan, all gated under one key) are the closest shapes
-> - M2.5b targets — mostly in `src/fesom_gm.cpp` (1077 LoC): wrap the 8 GM scratch arrays in `Field` (M2.3a pattern), then port `compute_sigma_xy`/`compute_neutral_slope`/`init_redi_gm`/`fer_solve_gamma`(vertical solve)/`fer_gamma2vel` (substep-1b `if(gm)` block, `fesom_step.cpp:206-211`) + the bolus add/sub (13a/13c) + `diff_ver_part_redi_expl`/`diff_part_hor_redi` (13). ⚠️ **GM is ON in pi (L34)** → already on the golden path. ⚠️ **derive each kernel's actual shape from the C body** (L33); honour `feedback_bolus_divergence_balance`
+> - **TEMPLATE: `/home/a/a270088/port_kokkos/src/{fesom_kpp,fesom_momentum,fesom_ale,fesom_gm}.cpp`** (`_kk` twins + `*_verify` gates) + the substep rail blocks in `src/fesom_step.cpp`. **`fesom_gm.cpp`** (the freshest — the M2.5b twins: device→device chain with DRIVER halos, per-node TDMA, the two Redi kernels = gather + edge→node scatter D22 each with a D21 internal halo, the L26 capture-before `fesom_gm_redi_verify`) and `fesom_momentum.cpp` (`momentum_adv_scalar_kk` = the 5-stage gather/scatter pipeline + internal halo — the closest shape to FCT) are the closest
+> - M2.6 targets — mostly in `src/fesom_tracer_adv.cpp` (1301 LoC): (a) wrap the FCT scratch in `Field` (`edge_up_dn_grad`/`fct_LO`/flux work — grep the `tra_sc` struct, M2.3a pattern, `*x=T{}` not memset); (b) port the MFCT 3rd-order H+V pipeline — the flux assembly is an **edge→node scatter** (`atomic_add` D22) with **multiple internal exchanges** (each a D21 bracket); ⚠️ **preserve tracer AB2 `eps=0.1`** + `feedback_mfct_gradient_from_values`; (c) **move the bolus add/sub (13a/13c) to device** alongside the FCT (L36 — now there's a device consumer of `uv`/`w`/`w_e`). ⚠️ **derive each stage's shape from the C body** (L33)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = what climate-close looks like)
 >
-> GOAL — **M2.5b: GM/Redi** (substep-1b streamfunction/bolus chain + the bolus add/sub + horizontal
-> Redi, substeps 13a/13/13c; ⚠️ **GM is ON in pi (L34)** so all on the default golden path → Serial pi
-> must stay `== golden`). Three steps: (a) wrap the 8 GM scratch arrays (`fer_K/fer_C/Ki/fer_gamma/
-> sigma_xy/neutral_slope/slope_tapered/fer_tapfac`) in `Field` (the M2.3a/D12 data-layer pattern,
-> bit-identical, own commit); (b) port `compute_sigma_xy`/`compute_neutral_slope`/`init_redi_gm`/
-> `fer_solve_gamma`(vertical solve, the L31 per-node/elem TDMA shape)/`fer_gamma2vel` as `_kk` twins
-> (D19), ⚠️ preserving ODM95 tapering + `scaling_GMzexp` verbatim; (c) port the bolus add/sub (`uv`/`w`/
-> `w_e` ± `fer_uv`/`fer_w`) + `diff_ver_part_redi_expl`/`diff_part_hor_redi`, ⚠️ honouring
-> `feedback_bolus_divergence_balance`. Each kernel: a `FESOM_KK_VERIFY=gm` gate (`max|Δ|==0` on Serial;
-> guard the "gm" token if it could substring-collide, L25) + its driver IN/OUT rail (L28; `sync_host`
-> before halos via `h_checked`). Wrap any internal `fesom_exchange_*` in a D21 bracket; edge→entity
-> Redi-flux scatters use `atomic_add` (D22).
+> GOAL — **M2.6: FCT tracer advection** (substep 13, the default tracer scheme → on the golden path,
+> runs every step; Serial pi must stay `== golden`). Three steps: (a) wrap the FCT scratch arrays in
+> `Field` (M2.3a/M2.5b-a data-layer pattern, bit-identical, own commit); (b) port the MFCT pipeline
+> (per-element/node gradient + low-order + antidiffusive flux + Zalesak limiter + flux-corrected update)
+> as `_kk` twins (D19), per tracer (T,S) like the Redi — the **flux assembly = edge→node `atomic_add`
+> scatter** (D22, natural edge order; edge-coloring is GPU-only), each internal `fesom_exchange_*` a **D21
+> bracket** owned by the kernel; ⚠️ preserve tracer AB2 `eps=0.1`; (c) move the bolus add/sub to device
+> (L36). Each kernel: a `FESOM_KK_VERIFY=tradv` gate + its driver IN/OUT rail (L28; `sync_host` before
+> halos via `h_checked`).
 >
-> GATE: **two ways** — (1) `FESOM_NO_GMREDI=1` Serial run **byte-identical to the GM-off path** (D10
-> off-switch invariant); (2) `FESOM_KK_VERIFY=gm` Serial `max|Δ|==0` with GM on. Plus Serial pi smoke ==
-> golden + `ctest` 4/4 + np=2 (CMA-off!) == `…m13_nocma` oracle; **OpenMP** (bit-identical for maps/
-> solves; climate-close for any scatter, per D22); SYNCCHECK clean; CUDA builds (`--target fesom_port`,
-> L17) + pi smoke runs (climate-close). Recipe in §2. Append every decision/lesson to
-> `docs/KOKKOS_PORTING_LESSONS.md` + update the SYNC_MAP rows in the SAME commit; commit per step.
+> GATE: `FESOM_KK_VERIFY=tradv` Serial `max|Δ|==0`. Plus Serial pi smoke == golden + `ctest` 4/4 + np=2
+> (CMA-off!) == `…m13_nocma` oracle; **OpenMP** (bit-identical for maps; climate-close for the flux
+> scatter, per D22); SYNCCHECK clean; CUDA builds (`--target fesom_port`, L17) + pi smoke runs
+> (climate-close). Recipe in §2. Append every decision/lesson to `docs/KOKKOS_PORTING_LESSONS.md` + update
+> the SYNC_MAP row 13 + §6 in the SAME commit; commit per step.
 >
 > INVARIANTS: never simplify physics; preserve every constant/loop bound verbatim. The Serial backend
 > stays the bit-identity oracle (`max|Δ|==0` vs the C twin) for every kernel. C twin oracle:

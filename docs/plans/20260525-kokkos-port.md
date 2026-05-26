@@ -492,16 +492,25 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Modify: `src/fesom_gm.cpp` (1077 LoC), `src/fesom_step.cpp`
 
-- [ ] wrap GM scratch arrays in `Field` (`fer_K/fer_C/Ki/fer_gamma/sigma_xy/neutral_slope/
-      slope_tapered/fer_tapfac`) — these were deferred from M1
-- [ ] port `compute_sigma_xy`, `compute_neutral_slope`, `init_redi_gm`, `fer_solve_gamma`
-      (vertical solve), `fer_gamma2vel`; preserve ODM95 tapering + `scaling_GMzexp`
-- [ ] port the bolus add/sub on `uv`/`w`/`w_e` and `diff_part_hor_redi` — ⚠️ honour
-      `feedback_bolus_divergence_balance` (never clamp `fer_uv` per-cell; scale `fer_gamma`
-      uniformly so the FCT continuity holds)
-- [ ] **gate two ways:** `FESOM_NO_GMREDI=1` Serial run is **byte-identical to the GM-off path**
-      (the C port's existing invariant); `FESOM_KK_VERIFY=gm` Serial `max|Δ|==0` with GM on
-- [ ] backends verified — before M2.6
+- [x] wrap GM scratch arrays in `Field` (all 11: `sigma_xy/neutral_slope/slope_tapered/fer_tapfac/
+      fer_gamma/fer_K/Ki/fer_C/fer_scal/tr_xy/tr_z`) — deferred from M1 (commit `8645824`, M2.5b-a,
+      bit-identical; `*g = fesom_gm{}` not memset, D13/L13)
+- [x] port `compute_sigma_xy`, `compute_neutral_slope`, `init_redi_gm`, `fer_solve_gamma`
+      (per-node TDMA, L31), `fer_gamma2vel`; ODM95 tapering + `scaling_GMzexp` verbatim (commit
+      `ab57fd6`, M2.5b-b). 5 `_kk` twins, all race-free maps/gathers/TDMA → Serial AND OpenMP
+      bit-identical; C twins' halos move to the driver (ALE pattern), only `fer_gamma` re-pushed (L30/L35)
+- [x] port `diff_ver_part_redi_expl` + `diff_part_hor_redi` (substep-13 Redi) on device — commit
+      `4bccd69`, M2.5b-c. `diff_hor` = edge→node scatter (atomic_add, D22) + 5 partial-cell branches;
+      both own their `tr_xy`/`tr_z` internal halo (D21). ⚠️ `feedback_bolus_divergence_balance` honoured
+      (C verbatim, no per-cell clamp). **The bolus add/sub STAY ON HOST** — no device consumer of the
+      bolus-augmented `uv`/`w`/`w_e` until the FCT moves to device (M2.6); deferred there (L36)
+- [x] **gate two ways:** `FESOM_NO_GMREDI=1` Serial runs clean + differs from the GM-on golden (GM
+      live, L34) — off-path byte-identical by construction (all changes `if(gm)`-guarded);
+      `FESOM_KK_VERIFY=gm` Serial `max|Δ|==0` (140 lines = 5 chain + 2 redi × 20 steps)
+- [x] backends verified: Serial pi == golden (np=1 + np=2 CMA-off vs `…m13_nocma`); `ctest` 4/4;
+      SYNCCHECK clean + bit-identical; OpenMP bit-identical (chain + redi; whole-run only the M2.5
+      vert_vel `w`-scatter floor ≈3.4e-21, no new class); CUDA builds + climate-close at the unchanged
+      M2.1/M2.4/M2.5 budget (density 3.18e-12, u/v 3.8e-4/7.4e-5, pgf 6-8e-18, no new divergence). → M2.6
 
 ### Task M2.6: FCT tracer advection (the big one — scatter decision)
 
