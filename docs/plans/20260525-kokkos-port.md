@@ -590,7 +590,8 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       `parallel_reduce`) + the 2 SSH scatters** (L41).
 - [x] gates: pi==golden (np=1 + np=2 CMA-off); `ctest` 4/4; SYNCCHECK np=1+np=2 clean; OpenMP
       climate-close (`T`≈1.8e-15, ≪1e-12); CUDA climate-close at the unchanged M2 budget + `eta_n`≈9.4e-11
-- [~] 1-yr CORE2 Serial bit-identical to cref (job `25146822`, RUNNING) + CUDA smoke climate-close (done)
+- [x] 1-yr CORE2 Serial bit-identical to cref (job `25146822`: all 13 monthly snaps ALL FIELDS
+      BIT-IDENTICAL) + CUDA smoke climate-close at the unchanged M2 budget — **M4.2 acceptance PASSED**
 
 ### Task M4.3: Sea ice (EVP / thermo / FCT) on device
 **Files:** Modify `src/fesom_ice_evp.cpp`, `src/fesom_ice_thermo.cpp`, `src/fesom_ice_fct.cpp`, `src/fesom_ice.cpp`

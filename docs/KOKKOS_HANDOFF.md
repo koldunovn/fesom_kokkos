@@ -28,10 +28,11 @@ bit-identical**; **OpenMP climate-close** (NEW floor `T`≈1.8e-15 / `Av/Kv`≈2
 step 20 — the 2 SSH scatters + the dot reduce; ≪ the ≲1e-12 budget, NO blow-up; SpMV/maps bit-identical);
 **CUDA (A100) climate-close at the UNCHANGED M2 budget** (job `25146872`: density 3.18e-12 stable, Av/Kv
 0.095 flips, u/v 1.8e-4/3.1e-5 — identical to M2.5/6/7) **+ a new `eta_n`≈9.4e-11** (the device CG reduce
-+ scatters; bounded, no new class). **M4.2 acceptance** (1-yr CORE2 Serial bit-identical to
-`/scratch/a/a270088/m1_accept/cref`, job `25146822`): **RUNNING — confirm with `scripts/m1_accept_compare.sh`**
-(Serial device kernels proven bit-identical per-step → expected to reproduce cref; the C twins are
-UNCHANGED, only `_kk` twins added). Lesson **L41**. **The whole ocean step (substeps 1-14) now flows on
++ scatters; bounded, no new class). **M4.2 acceptance PASSED** (1-yr CORE2 Serial, job
+`25146822`, 17280 steps × ~90 CG iters/step, real JRA55 forcing): **all 13 monthly snapshots ALL FIELDS
+BIT-IDENTICAL** to `/scratch/a/a270088/m1_accept/cref` (`scripts/m1_accept_compare.sh`) — the device CG
+touches every step, confirming the §5 device block is bit-identical to the host C over a full year.
+Lesson **L41**. **The whole ocean step (substeps 1-14) now flows on
 the device** except the host `eta_n` map, the salinity floor (L39), and the ice step (M4.3). Tag
 `m2-ocean-device` still latest (M4.2 = no new tag until the §4 milestone). **⚠️ Run OUTPUT →
 `/work/ab0995/a270088/port2`, never `$HOME`.** **NEXT = M4.3 (sea-ice on device — the last per-step host
