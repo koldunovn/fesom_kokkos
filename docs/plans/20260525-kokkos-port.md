@@ -539,10 +539,13 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Modify: `src/fesom_tracer_diff.cpp`, `src/fesom_step.cpp`
 
-- [ ] port `impl_vert_diff_tracers` (per-node TDMA) + surface flux BC + the salinity floor
-- [ ] `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`
+- [x] port `impl_vert_diff_tracers_kk` (per-node TDMA, L31) + surface flux BC (`bc_surface_kk`) +
+      shortwave penetration + Redi K33; salinity floor kept HOST (L36/L39). Serial `trdiff` 40×`max|Δ|=0`,
+      pi==golden (np=1 + np=2 CMA-off), ctest 4/4, SYNCCHECK clean, OpenMP bit-identical, CUDA built.
+- [x] `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`
 - [ ] **M2 acceptance**: full ocean step (minus CG/reductions/ice) on device; Serial 1-yr CORE2
       bit-identical to C; CUDA 1-yr runs (slow) and is physical. Tag `m2-ocean-device` — before M3
+      *(in progress: acceptance job 25138814 queued on `compute`; GPU smoke 25138812 on `gpu-devel`)*
 
 ## ───────────── M3 · Climate validation on GPU ─────────────
 *Goal: prove the CUDA build reproduces the Fortran climate within the Fortran↔C budget.*

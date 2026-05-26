@@ -27,11 +27,20 @@
 
 #include "fesom_aux.h"
 #include "fesom_constants.h"
+#include "fesom_field.hpp"   // M2.7: DualView device views for the _kk twin
 #include "fesom_forcing.h"
 #include "fesom_gm.h"
 #include "fesom_mesh.h"
 #include "fesom_tracers.h"
 #include "fesom_types.h"
+
+#include <Kokkos_Core.hpp>   // M2.7: device kernels (parallel_for) + Kokkos:: math
+#include <algorithm>         // M2.7: FESOM_KK_VERIFY snapshot copies (host-only diagnostic)
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 enum { NL_MAX = 64 };
 
@@ -343,4 +352,311 @@ void fesom_impl_vert_diff_tracers(const struct fesom_mesh    *mesh,
 {
     diff_ver_part_impl_ale(FESOM_TRACER_T, mesh, aux, forcing, tracers, gm);
     diff_ver_part_impl_ale(FESOM_TRACER_S, mesh, aux, forcing, tracers, gm);
+}
+
+/* ======================================================================== *
+ *  M2.7 — DEVICE (Kokkos) twins of the routines above (the LAST host ocean  *
+ *  compute in substep 13). Per-node TDMA: the Thomas sweep runs SEQUENTIALLY *
+ *  in level inside the per-node lambda over [NL_MAX] column scratch — the    *
+ *  impl_vert_visc_kk / fer_solve_gamma_kk shape (L31). Each node solves only *
+ *  its OWN column of `values` → NO cross-node race, NO scatter → Serial AND  *
+ *  OpenMP bit-identical. The driver (substep 13b in fesom_step.cpp) owns the *
+ *  IN/OUT sync rails (D19/L28); these kernels own no internal halo.          *
+ * ======================================================================== */
+
+/*--- bc_surface — DEVICE inline twin (M2.7) ---------------------------------
+ * KOKKOS_INLINE_FUNCTION verbatim copy of bc_surface above; the forcing arrays
+ * arrive as device Views (templated DV, the kpp_wscale_kk idiom). Pure arithmetic,
+ * no transcendentals → Serial bit-identical. id==1 reads heat_flux/water_flux,
+ * id==2 reads virtual_salt/relax_salt (all four captured; the dead branch's reads
+ * are compiled but never executed for the launched tracer). */
+template <class DV>
+KOKKOS_INLINE_FUNCTION
+static real_t bc_surface_kk(int n, int id, real_t sval, real_t dt, real_t vcpw,
+                            const DV &heat_flux, const DV &water_flux,
+                            const DV &virtual_salt, const DV &relax_salt)
+{
+    const real_t is_nonlinfs = 0.0;     /* linfs */
+    real_t bc = 0.0;
+    if (id == 1) {
+        bc = -dt * (heat_flux(n) / vcpw
+                   + sval * water_flux(n) * is_nonlinfs);
+    } else if (id == 2) {
+        const real_t real_salt_flux = 0.0;  /* sea ice */
+        bc = dt * (virtual_salt(n)
+                  + relax_salt(n)
+                  + real_salt_flux * is_nonlinfs);
+    }
+    return bc;
+}
+
+/*--- diff_ver_part_impl_ale — DEVICE kernel (M2.7): per-node TDMA -----------
+ * Kokkos parallel_for over owned nodes; verbatim copy of diff_ver_part_impl_ale
+ * above (every constant/bound/index association preserved). FCT path: do_wimpl
+ * == false, so the C twin's empty `if (do_wimpl)` blocks are absent here. Marks
+ * `values` modify_device() for the driver OUT rail. */
+static void diff_ver_part_impl_ale_kk(int                          tr_num,
+                                      const struct fesom_mesh     *mesh,
+                                      const struct fesom_aux      *aux,
+                                      const struct fesom_forcing  *forcing,
+                                      struct fesom_tracers        *tracers,
+                                      const struct fesom_gm       *gm)
+{
+    const int    myDim_nod2D = mesh->myDim_nod2D;
+    const int    nl          = mesh->nl;
+    const int    nl1         = nl - 1;          /* slope_tapered second axis size */
+    const real_t dt          = (real_t)FESOM_PHASE1_DT;
+    const real_t vcpw        = (real_t)FESOM_VCPW;
+    /* tra_adv_lim is FCT for both T and S → do_wimpl=.false. (the implicit-w terms
+     * the C twin keeps as empty `if (do_wimpl)` blocks are simply not emitted). */
+    const real_t isredi      = (gm != NULL) ? 1.0 : 0.0;
+    const int    gm_on       = (gm != NULL) ? 1 : 0;
+    /* tracers%data(tr_num)%ID is 1 for T, 2 for S → id = tr_num + 1. */
+    const int    id          = tr_num + 1;
+    const int    use_sw      = FESOM_PHASE1_USE_SW_PENE;
+
+    auto Kv         = aux->Kv_fld.d();
+    auto hnode_new  = mesh->hnode_new_fld.d();
+    auto area       = mesh->area_fld.d();
+    auto areasvol   = mesh->areasvol_fld.d();
+    auto zbar       = mesh->zbar_fld.d();
+    auto nlev_n     = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n     = mesh->ulevels_nod2D_fld.d();
+    auto trv        = tracers->data[tr_num].values_fld.d();
+    auto heat_flux  = forcing->heat_flux_fld.d();
+    auto water_flux = forcing->water_flux_fld.d();
+    auto vsalt      = forcing->virtual_salt_fld.d();
+    auto rsalt      = forcing->relax_salt_fld.d();
+    auto sw         = forcing->sw_3d_fld.d();
+
+    /* GM/Redi K33 inputs; indexed only under gm_on (the C `if (gm)` guard). When
+     * gm==NULL these stay default-constructed empty Views — safe to capture into the
+     * lambda by value (never dereferenced), mirroring `st=NULL`/`Ki=NULL` in the C. */
+    fesom::Field::dev_view_t st_v, Ki_v;
+    if (gm) { st_v = gm->slope_tapered_fld.d(); Ki_v = gm->Ki_fld.d(); }
+
+    Kokkos::parallel_for("fesom_impl_vert_diff_tracers",
+        Kokkos::RangePolicy<>(0, myDim_nod2D),
+        KOKKOS_LAMBDA(const int n) {
+            real_t a[NL_MAX], b[NL_MAX], c[NL_MAX], tr[NL_MAX];
+            real_t cp[NL_MAX], tp[NL_MAX];
+            real_t zbar_n[NL_MAX], Z_n[NL_MAX];
+
+            /* initialise (Fortran lines 727-733) */
+            for (int k = 0; k < NL_MAX; ++k) {
+                a[k] = 0.0; b[k] = 0.0; c[k] = 0.0;
+                tr[k] = 0.0; tp[k] = 0.0; cp[k] = 0.0;
+                zbar_n[k] = 0.0; Z_n[k] = 0.0;
+            }
+            const int nzmax = nlev_n(n) - 1;    /* bottom interface (0-based) */
+            const int nzmin = ulev_n(n) - 1;    /* top    interface (0-based) */
+            if (nzmax - nzmin < 1) return;      /* C twin: continue */
+
+            /* zbar_n & Z_n on the NEW vertical mesh (Fortran lines 743-751). */
+            zbar_n[nzmax]   = zbar(nzmax);
+            Z_n[nzmax - 1]  = zbar_n[nzmax]
+                            + hnode_new(FESOM_NODE3D(n, nzmax - 1, nl)) / 2.0;
+            for (int nz = nzmax - 1; nz >= nzmin + 1; --nz) {
+                zbar_n[nz]    = zbar_n[nz + 1]
+                              + hnode_new(FESOM_NODE3D(n, nz, nl));
+                Z_n[nz - 1]   = zbar_n[nz]
+                              + hnode_new(FESOM_NODE3D(n, nz - 1, nl)) / 2.0;
+            }
+            zbar_n[nzmin]   = zbar_n[nzmin + 1]
+                            + hnode_new(FESOM_NODE3D(n, nzmin, nl));
+
+            real_t zinv1 = 0.0, zinv2 = 0.0, zinv = 0.0;
+
+            /* surface layer (Fortran 752-786) */
+            {
+                const int nz = nzmin;
+                zinv2 = 1.0 / (Z_n[nz] - Z_n[nz + 1]);
+                zinv  = 1.0 * dt;
+                real_t Ty1 = 0.0;
+                if (gm_on) {
+                    real_t st_nz   = st_v((size_t)n * nl1 * 3 + nz       * 3 + 2);
+                    real_t st_nz1  = st_v((size_t)n * nl1 * 3 + (nz + 1) * 3 + 2);
+                    real_t Ki_nz   = Ki_v((size_t)n * nl + nz);
+                    real_t Ki_nz1  = Ki_v((size_t)n * nl + (nz + 1));
+                    Ty1 = (Z_n[nz] - zbar_n[nz + 1]) * zinv2 * st_nz  * st_nz  * Ki_nz
+                        + (zbar_n[nz + 1] - Z_n[nz + 1]) * zinv2 * st_nz1 * st_nz1 * Ki_nz1;
+                }
+                Ty1 = Ty1 * isredi;
+                a[nz] = 0.0;
+                c[nz] = -(Kv(FESOM_NODE3D(n, nz + 1, nl)) + Ty1) * zinv2 * zinv
+                       * area(FESOM_NODE3D(n, nz + 1, nl))
+                       / areasvol(FESOM_NODE3D(n, nz, nl));
+                b[nz] = -c[nz] + hnode_new(FESOM_NODE3D(n, nz, nl));
+                zinv1 = zinv2;
+            }
+
+            /* 2nd...nl-2 layer (Fortran 788-828) */
+            for (int nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                zinv2 = 1.0 / (Z_n[nz] - Z_n[nz + 1]);
+                real_t Ty  = 0.0;
+                real_t Ty1 = 0.0;
+                if (gm_on) {
+                    real_t st_m1  = st_v((size_t)n * nl1 * 3 + (nz - 1) * 3 + 2);
+                    real_t st_nz  = st_v((size_t)n * nl1 * 3 + nz       * 3 + 2);
+                    real_t st_nz1 = st_v((size_t)n * nl1 * 3 + (nz + 1) * 3 + 2);
+                    real_t Ki_m1  = Ki_v((size_t)n * nl + (nz - 1));
+                    real_t Ki_nz  = Ki_v((size_t)n * nl + nz);
+                    real_t Ki_nz1 = Ki_v((size_t)n * nl + (nz + 1));
+                    Ty  = (Z_n[nz - 1] - zbar_n[nz]) * zinv1 * st_m1 * st_m1 * Ki_m1
+                        + (zbar_n[nz]  - Z_n[nz])    * zinv1 * st_nz * st_nz * Ki_nz;
+                    Ty1 = (Z_n[nz]     - zbar_n[nz + 1]) * zinv2 * st_nz  * st_nz  * Ki_nz
+                        + (zbar_n[nz + 1] - Z_n[nz + 1]) * zinv2 * st_nz1 * st_nz1 * Ki_nz1;
+                }
+                Ty  = Ty  * isredi;
+                Ty1 = Ty1 * isredi;
+                a[nz] = -(Kv(FESOM_NODE3D(n, nz, nl)) + Ty) * zinv1 * zinv
+                       * (area(FESOM_NODE3D(n, nz, nl))
+                          / areasvol(FESOM_NODE3D(n, nz, nl)));
+                c[nz] = -(Kv(FESOM_NODE3D(n, nz + 1, nl)) + Ty1) * zinv2 * zinv
+                       * area(FESOM_NODE3D(n, nz + 1, nl))
+                       / areasvol(FESOM_NODE3D(n, nz, nl));
+                b[nz] = -a[nz] - c[nz] + hnode_new(FESOM_NODE3D(n, nz, nl));
+                zinv1 = zinv2;
+            }
+
+            /* nl-1 layer (Fortran 830-859) */
+            {
+                const int nz = nzmax - 1;
+                zinv = 1.0 * dt;
+                real_t Ty = 0.0;
+                if (gm_on) {
+                    real_t st_m1 = st_v((size_t)n * nl1 * 3 + (nz - 1) * 3 + 2);
+                    real_t st_nz = st_v((size_t)n * nl1 * 3 + nz       * 3 + 2);
+                    real_t Ki_m1 = Ki_v((size_t)n * nl + (nz - 1));
+                    real_t Ki_nz = Ki_v((size_t)n * nl + nz);
+                    Ty = (Z_n[nz - 1] - zbar_n[nz]) * zinv1 * st_m1 * st_m1 * Ki_m1
+                       + (zbar_n[nz]  - Z_n[nz])    * zinv1 * st_nz * st_nz * Ki_nz;
+                }
+                Ty = Ty * isredi;
+                a[nz] = -(Kv(FESOM_NODE3D(n, nz, nl)) + Ty) * zinv1 * zinv
+                       * (area(FESOM_NODE3D(n, nz, nl))
+                          / areasvol(FESOM_NODE3D(n, nz, nl)));
+                c[nz] = 0.0;
+                b[nz] = -a[nz] + hnode_new(FESOM_NODE3D(n, nz, nl));
+            }
+
+            /* RHS construction (Fortran 862-884) */
+            {
+                const int nz = nzmin;
+                const real_t dz = hnode_new(FESOM_NODE3D(n, nz, nl));
+                tr[nz] = -(b[nz] - dz) * trv(FESOM_NODE3D(n, nz,     nl))
+                        - c[nz]        * trv(FESOM_NODE3D(n, nz + 1, nl));
+            }
+            for (int nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                const real_t dz = hnode_new(FESOM_NODE3D(n, nz, nl));
+                tr[nz] = -a[nz]        * trv(FESOM_NODE3D(n, nz - 1, nl))
+                        -(b[nz] - dz)  * trv(FESOM_NODE3D(n, nz,     nl))
+                        -c[nz]         * trv(FESOM_NODE3D(n, nz + 1, nl));
+            }
+            {
+                const int nz = nzmax - 1;
+                const real_t dz = hnode_new(FESOM_NODE3D(n, nz, nl));
+                tr[nz] = -a[nz]       * trv(FESOM_NODE3D(n, nz - 1, nl))
+                        -(b[nz] - dz) * trv(FESOM_NODE3D(n, nz,     nl));
+            }
+
+            /* Surface BC (Fortran 1018-1030): tr(nzmin) += bc_surface(...) */
+            {
+                const int    nz   = nzmin;
+                const real_t sval = trv(FESOM_NODE3D(n, nz, nl));
+                tr[nz] += bc_surface_kk(n, id, sval, dt, vcpw,
+                                        heat_flux, water_flux, vsalt, rsalt);
+            }
+
+            /* Shortwave penetration (Fortran 990; id==1, sw_3d flux divergence). */
+            if (id == 1 && use_sw) {
+                const real_t dtl = dt;
+                for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                    const real_t top = sw(FESOM_NODE3D(n, nz,     nl));
+                    const real_t bot = sw(FESOM_NODE3D(n, nz + 1, nl));
+                    const real_t ar  = area(FESOM_NODE3D(n, nz + 1, nl))
+                                     / areasvol(FESOM_NODE3D(n, nz, nl));
+                    tr[nz] += (top - bot * ar) * dtl;
+                }
+            }
+
+            /* Forward sweep (Fortran 1052-1061) */
+            cp[nzmin] = c[nzmin] / b[nzmin];
+            tp[nzmin] = tr[nzmin] / b[nzmin];
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                const real_t m = b[nz] - cp[nz - 1] * a[nz];
+                cp[nz] = c[nz] / m;
+                tp[nz] = (tr[nz] - tp[nz - 1] * a[nz]) / m;
+            }
+
+            /* Back substitution (Fortran 1063-1069) */
+            tr[nzmax - 1] = tp[nzmax - 1];
+            for (int nz = nzmax - 2; nz >= nzmin; --nz) {
+                tr[nz] = tp[nz] - cp[nz] * tr[nz + 1];
+            }
+
+            /* Update tracer (Fortran 1073-1077) */
+            for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                trv(FESOM_NODE3D(n, nz, nl)) += tr[nz];
+            }
+        });
+
+    tracers->data[tr_num].values_fld.modify_device();   /* driver sync_host()s before the halos */
+}
+
+/* Public DEVICE driver — call once per timestep (substep 13b). Mirrors the C
+ * twin: T then S, each its own parallel_for over owned nodes. */
+void fesom_impl_vert_diff_tracers_kk(const struct fesom_mesh    *mesh,
+                                     const struct fesom_aux     *aux,
+                                     const struct fesom_forcing *forcing,
+                                     struct fesom_tracers       *tracers,
+                                     const struct fesom_gm      *gm)
+{
+    diff_ver_part_impl_ale_kk(FESOM_TRACER_T, mesh, aux, forcing, tracers, gm);
+    diff_ver_part_impl_ale_kk(FESOM_TRACER_S, mesh, aux, forcing, tracers, gm);
+}
+
+/*--- FESOM_KK_VERIFY=trdiff (M2.7) -------------------------------------------
+ * impl_vert_diff_tracers READ-MODIFY-WRITES `values` (+= the TDMA solution + the
+ * surface flux BC), so the C-twin oracle needs the PRE-kernel `values` — the L26
+ * capture-before pattern (cf. fesom_tracer_fct_verify). The driver captures pre_T/
+ * pre_S before the IN rail; here: snapshot the KK result, restore the inputs, run
+ * the C twin (T then S, reading the intact Kv/forcing/geometry/slope_tapered/Ki),
+ * diff both, restore KK. The kernel and the C twin both write ONLY owned nodes, so
+ * the halo region matches by construction. Non-intrusive; asserts max|Δ|==0 on Serial. */
+void fesom_impl_vert_diff_tracers_verify(const struct fesom_mesh    *mesh,
+                                         const struct fesom_aux     *aux,
+                                         const struct fesom_forcing *forcing,
+                                         struct fesom_tracers       *tracers,
+                                         const struct fesom_gm      *gm,
+                                         int step_n,
+                                         const std::vector<real_t>  &pre_T,
+                                         const std::vector<real_t>  &pre_S)
+{
+    const int nl = mesh->nl;
+    const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
+    real_t *vT = tracers->data[FESOM_TRACER_T].values;
+    real_t *vS = tracers->data[FESOM_TRACER_S].values;
+    std::vector<real_t> kk_T(vT, vT + total);                /* KK result (host-synced) */
+    std::vector<real_t> kk_S(vS, vS + total);
+    std::copy(pre_T.begin(), pre_T.end(), vT);               /* restore the pre-kernel inputs */
+    std::copy(pre_S.begin(), pre_S.end(), vS);
+    fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, gm);   /* C twin: T then S */
+    double dT = 0.0, dS = 0.0;
+    for (size_t i = 0; i < total; ++i) {
+        double a = std::fabs((double)kk_T[i] - (double)vT[i]); if (a > dT) dT = a;
+        double bb = std::fabs((double)kk_S[i] - (double)vS[i]); if (bb > dS) dS = bb;
+    }
+    std::copy(kk_T.begin(), kk_T.end(), vT);                 /* restore KK production state */
+    std::copy(kk_S.begin(), kk_S.end(), vS);
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=trdiff] step %d backend=%s  max|Δ|: trdiff(T) values=%.3e  trdiff(S) values=%.3e\n",
+                step_n, backend.c_str(), dT, dS);
+    std::fflush(stdout);
+    if (backend == "Serial" && (dT != 0.0 || dS != 0.0)) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=trdiff] FAIL step %d: Serial must be bit-identical "
+                             "to the C twin (max|Δ| T=%.3e S=%.3e)\n", step_n, dT, dS);
+        std::abort();
+    }
 }

@@ -2,6 +2,7 @@
 #define FESOM_TRACER_DIFF_H
 
 #include "fesom_types.h"
+#include <vector>            // M2.7: FESOM_KK_VERIFY capture-before buffers
 
 struct fesom_mesh;
 struct fesom_aux;
@@ -37,5 +38,32 @@ void fesom_impl_vert_diff_tracers(const struct fesom_mesh    *mesh,
                                   const struct fesom_forcing *forcing,
                                   struct fesom_tracers       *tracers,
                                   const struct fesom_gm      *gm);
+
+/*
+ * M2.7: DEVICE (Kokkos) twin of fesom_impl_vert_diff_tracers — the per-node
+ * implicit vertical tracer-diffusion TDMA (T then S) on the device. The Thomas
+ * sweep runs sequentially in level inside the per-node lambda over [NL_MAX]
+ * scratch (the impl_vert_visc/fer_solve_gamma shape, L31) → race-free, NO scatter
+ * → Serial AND OpenMP bit-identical. The DRIVER (substep 13b) owns the IN/OUT rails.
+ */
+void fesom_impl_vert_diff_tracers_kk(const struct fesom_mesh    *mesh,
+                                     const struct fesom_aux     *aux,
+                                     const struct fesom_forcing *forcing,
+                                     struct fesom_tracers       *tracers,
+                                     const struct fesom_gm      *gm);
+
+/*
+ * FESOM_KK_VERIFY=trdiff gate: capture-before (L26) on `values` for T and S (the
+ * diffusion read-modifies both). Runs the C twin on the restored inputs and asserts
+ * the final `values` is bit-identical on Serial; non-intrusive (restores KK state).
+ */
+void fesom_impl_vert_diff_tracers_verify(const struct fesom_mesh    *mesh,
+                                         const struct fesom_aux     *aux,
+                                         const struct fesom_forcing *forcing,
+                                         struct fesom_tracers       *tracers,
+                                         const struct fesom_gm      *gm,
+                                         int step_n,
+                                         const std::vector<real_t>  &pre_T,
+                                         const std::vector<real_t>  &pre_S);
 
 #endif /* FESOM_TRACER_DIFF_H */

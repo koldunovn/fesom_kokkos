@@ -129,6 +129,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_ale    = 0;   /* M2.5 substeps 12/14 */
     static int s_verify_gm     = 0;   /* M2.5b substep 1b */
     static int s_verify_tradv  = 0;   /* M2.6 substep 13 (FCT) */
+    static int s_verify_trdiff = 0;   /* M2.7 substep 13b (tracer diffusion) */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -140,6 +141,7 @@ int fesom_timestep(int                          step_n,
         s_verify_ale = (e && strstr(e, "ale")) ? 1 : 0;       /* M2.5: no substring collision */
         s_verify_gm  = (e && strstr(e, "gm"))  ? 1 : 0;       /* M2.5b: no substring collision (gm ⊄ any key) */
         s_verify_tradv = (e && strstr(e, "tradv")) ? 1 : 0;   /* M2.6: distinct token (no collision either way, L25) */
+        s_verify_trdiff = (e && strstr(e, "trdiff")) ? 1 : 0; /* M2.7: distinct token — ⊄ tradv and tradv ⊄ trdiff (L25) */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -739,7 +741,23 @@ int fesom_timestep(int                          step_n,
     }
 
     /* 13b. implicit vertical diffusion of tracers + surface heat/water flux BC.
-     * FESOM_NO_TRDIFF=1 → skip diffusion. */
+     * M2.7: ON THE DEVICE (fesom_impl_vert_diff_tracers_kk) — the per-node implicit
+     * vertical TDMA (T then S), the LAST host ocean compute in substep 13. The Thomas
+     * sweep runs sequentially in level inside the per-node lambda over [NL_MAX] scratch
+     * (the impl_vert_visc/fer_solve_gamma shape, L31): each node solves only its own
+     * column of `values` → race-free, NO scatter → Serial AND OpenMP bit-identical.
+     * SYNC_MAP §2 row 13b.
+     *
+     * IN rail (L28 — sync EVERY input the body reads): aux Kv (KPP/PP device output,
+     * sync_host'd + halo'd substep 3 — re-push so the device owned Kv matches the host),
+     * forcing heat_flux/water_flux/virtual_salt/relax_salt/sw_3d (host-produced; const →
+     * localized const_cast), per-tracer values (host-current: post-Redi sync_host + the
+     * two halos above), slope_tapered/Ki re-pushed if gm (the K33 augmentation, L30).
+     * mesh hnode_new (Synced since 12a) + set-once area/areasvol/zbar/levels are already
+     * device-current (no push). OUT: the kernel marks values modify_device; sync_host both
+     * before the two nod3D halos. `values` is read-modify-write → FESOM_KK_VERIFY=trdiff
+     * is L26 capture-before (both T and S). On Serial/OpenMP host==device → every sync a
+     * no-op (run stays bit-identical). FESOM_NO_TRDIFF=1 → skip diffusion. */
     static int nt_dif_checked = 0, nt_dif_skip = 0;
     if (!nt_dif_checked) {
         const char *e = getenv("FESOM_NO_TRDIFF");
@@ -747,9 +765,38 @@ int fesom_timestep(int                          step_n,
         nt_dif_checked = 1;
     }
     if (!nt_dif_skip) {
-        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, gm);
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+        std::vector<real_t> trd_pre_T, trd_pre_S;     /* L26 capture-before (pre-diffusion values) */
+        if (s_verify_trdiff) {
+            const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
+            trd_pre_T.assign(tracers->data[FESOM_TRACER_T].values,
+                             tracers->data[FESOM_TRACER_T].values + total);
+            trd_pre_S.assign(tracers->data[FESOM_TRACER_S].values,
+                             tracers->data[FESOM_TRACER_S].values + total);
+        }
+        /* IN rail (L28: sync every input the body reads). */
+        aux->Kv_fld.modify_host(); aux->Kv_fld.sync_device();
+        mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
+        {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
+            fnc->heat_flux_fld.modify_host();    fnc->heat_flux_fld.sync_device();
+            fnc->water_flux_fld.modify_host();   fnc->water_flux_fld.sync_device();
+            fnc->virtual_salt_fld.modify_host(); fnc->virtual_salt_fld.sync_device();
+            fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device();
+            fnc->sw_3d_fld.modify_host();        fnc->sw_3d_fld.sync_device();   }
+        tracers->data[FESOM_TRACER_T].values_fld.modify_host();
+        tracers->data[FESOM_TRACER_T].values_fld.sync_device();
+        tracers->data[FESOM_TRACER_S].values_fld.modify_host();
+        tracers->data[FESOM_TRACER_S].values_fld.sync_device();
+        if (gm) {
+            gm->slope_tapered_fld.modify_host(); gm->slope_tapered_fld.sync_device();
+            gm->Ki_fld.modify_host();            gm->Ki_fld.sync_device();
+        }
+        fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
+        tracers->data[FESOM_TRACER_T].values_fld.sync_host();              /* OUT rail: before the halos */
+        tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+        if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,
+                                                                 step_n, trd_pre_T, trd_pre_S);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
     }
 
     /* Salinity floor — port of the *intent* behind Fortran's tracer_cutoff
