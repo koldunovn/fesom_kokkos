@@ -1,5 +1,45 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 15 (2026-05-26) — M4.2 COMPLETE: the §5 SSH block (SSH RHS + CG solver + update_vel +
+hbar) is on the device — the SYNC_MAP §5 mid-step host CG round-trip is CLOSED.** This was the M3.1
+perf bottleneck (the serial host CG ~127 iters/step + the device→host→device PCIe round-trip = ~0.7 of
+the GPU step, L40). Commits: **M4.2-a `4de3230`** (Field-wrap the stiffness CSR `rowptr/colind/values/
+pr_values` + the CG scratch `rr/zz/pp/App`, pushed once in the preconditioner — data layer, bit-identical),
+**M4.2-b `<this>`** (the device kernels). Four `_kk` twins replace the host §5 block (substeps 7-10) in
+`src/fesom_step.cpp`:
+- **`fesom_compute_ssh_rhs_linfs_kk`** (`src/fesom_ssh.cpp`) — edge→node SCATTER (`atomic_add`, D22) +
+  the (1-α)`ssh_rhs_old` linfs map.
+- **`fesom_ssh_solve_cg_kk`** (`src/fesom_ssh.cpp`) — **HOST loop control + DEVICE vector kernels**: the
+  SpMV `App=A·p` is a per-ROW CSR GATHER (race-free → Serial AND OpenMP bit-identical); the dot products
+  are the **FIRST `Kokkos::parallel_reduce`** in the port (Serial seq reduce == the C loop → bit-identical;
+  **OpenMP/CUDA climate-close — the FP reduction associativity, the CG's GPU non-determinism source**, D22)
+  + the unchanged scalar `MPI_Allreduce`; the AXPYs are maps. **The CG owns its per-iteration `pp`/`rr`/`X`
+  halo brackets** (D21, host-staged device→host→MPI→host→device, no-op at np==1; GPU-aware = M5).
+- **`fesom_update_vel_kk`** + **`fesom_compute_hbar_kk`** (`src/fesom_momentum.cpp`) — a race-free
+  per-element map + an edge→node SCATTER (`atomic_add`, D22) + maps.
+**`eta_n` (substep 11) STAYS HOST** (a trivial nod2D map, SYNC_MAP row 11 — no new round-trip; the CG
+round-trip is what M4.2 closes). Driver: one shared IN rail (L28) + per-substep OUT `sync_host` before
+each halo + two **L30 re-pushes** (`d_eta` after its halo — update_vel reads it at HALO vertices; `uv`
+after its halo — compute_hbar reads it). **Gate — ALL GREEN**: `FESOM_KK_VERIFY=ssh` **Serial `max|Δ|==0`**
+(20 steps × 7 read-modify-write fields = 140 lines, 0 nonzero — capture-before, L26); pi==golden (np=1
+AND np=2 CMA-off — exercises the CG halo brackets + the per-iter `Allreduce` + the 2 scatters under MPI);
+all 12 keys together (eos…trdiff,ssh) = 0 on Serial; `ctest` 4/4; **SYNCCHECK np=1+np=2 clean +
+bit-identical**; **OpenMP climate-close** (NEW floor `T`≈1.8e-15 / `Av/Kv`≈2e-17 / `u/v`/`eta`≈1e-18 at
+step 20 — the 2 SSH scatters + the dot reduce; ≪ the ≲1e-12 budget, NO blow-up; SpMV/maps bit-identical);
+**CUDA (A100) climate-close at the UNCHANGED M2 budget** (job `25146872`: density 3.18e-12 stable, Av/Kv
+0.095 flips, u/v 1.8e-4/3.1e-5 — identical to M2.5/6/7) **+ a new `eta_n`≈9.4e-11** (the device CG reduce
++ scatters; bounded, no new class). **M4.2 acceptance** (1-yr CORE2 Serial bit-identical to
+`/scratch/a/a270088/m1_accept/cref`, job `25146822`): **RUNNING — confirm with `scripts/m1_accept_compare.sh`**
+(Serial device kernels proven bit-identical per-step → expected to reproduce cref; the C twins are
+UNCHANGED, only `_kk` twins added). Lesson **L41**. **The whole ocean step (substeps 1-14) now flows on
+the device** except the host `eta_n` map, the salinity floor (L39), and the ice step (M4.3). Tag
+`m2-ocean-device` still latest (M4.2 = no new tag until the §4 milestone). **⚠️ Run OUTPUT →
+`/work/ab0995/a270088/port2`, never `$HOME`.** **NEXT = M4.3 (sea-ice on device — the last per-step host
+compute, §3) OR M3.2 (CUDA CORE2 climate validation, now that the CG is on device so a GPU benchmark is
+fair) OR M4.1 (device global reductions) — ASK the user.** Read §0/§3/§5; M3.1/M2 detail follows.
+
+---
+
 **Session 14 (2026-05-26) — M3.1 COMPLETE: multi-GPU run configuration (rank→GPU device mapping).**
 The CUDA build now runs across multiple A100s, **one MPI rank ⇒ one GPU**, each rank bound to a
 DISTINCT device by its node-local rank (`MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)` →

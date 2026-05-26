@@ -19,12 +19,17 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
+#include "fesom_momentum.h"   // M4.2-b: C twins update_vel/compute_hbar for the §5 block verify
 
 #include <math.h>
 #include <stdio.h>
 #include <mpi.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include <Kokkos_Core.hpp>    // M4.2-b: device CG kernels (parallel_for / parallel_reduce / atomic)
+#include <string>             // M4.2-b: FESOM_KK_VERIFY backend name
+#include <algorithm>          // M4.2-b: verify snapshot/restore copies (host-only diagnostic)
 
 #include "fesom_halo.h"
 #include "fesom_partit.h"
@@ -533,4 +538,379 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     #undef EXCH
     #undef ALLREDUCE_SUM
     return iter;
+}
+
+/* ======================================================================== *
+ *  M4.2-b — DEVICE (Kokkos) twins of the §5 SSH block (substeps 7-8).        *
+ *                                                                            *
+ *  The CG keeps HOST loop control (the convergence scalars come from the     *
+ *  per-iteration MPI_Allreduce, which lives on the host) and launches one    *
+ *  device kernel per vector op:                                              *
+ *    - SpMV  App = A·p   = a per-ROW CSR GATHER (each output row reads its    *
+ *      own matrix row + gathers v at colind → race-free, the inner sum        *
+ *      sequential per row → Serial AND OpenMP bit-identical, like the M2      *
+ *      gathers; it is NOT a scatter).                                         *
+ *    - the dot products = the FIRST Kokkos::parallel_reduce in the port.      *
+ *      Serial reduces sequentially in row order == the C `for` sum → bit-     *
+ *      identical; OpenMP/CUDA use a tree reduction → climate-close (the FP    *
+ *      reduction associativity is the GPU non-determinism source here, D22    *
+ *      ladder). The scalar MPI_Allreduce on the result is UNCHANGED.          *
+ *    - the AXPYs / copies = race-free maps.                                   *
+ *  The per-iteration p / r / X halo exchanges stay HOST-STAGED (device→host→  *
+ *  MPI→host→device) as D21 brackets OWNED by the CG (the KPP/FCT pattern),    *
+ *  no-op at npes==1; GPU-aware MPI is deferred to M5. The driver owns the     *
+ *  IN/OUT rails (push ssh_rhs/d_eta in, sync_host d_eta out).                 *
+ * ======================================================================== */
+
+using DV  = fesom::Field::dev_view_t;
+using IDV = fesom::IntField::dev_view_t;
+
+/* y = A·v over owned rows [0,N): per-row CSR gather. Each row writes only y(row)
+ * and reads its own matrix row [rowptr(row),rowptr(row+1)) + gathers v at colind
+ * (which can reach into the halo → v must be halo-current before this call). The
+ * inner sum is sequential per row, exactly the C csr_matvec inner loop, so this is
+ * bit-identical on Serial AND OpenMP (race-free, no cross-thread reduction). */
+static void cg_spmv(IDV rowptr, IDV colind, DV vals, DV v, DV y, int N)
+{
+    Kokkos::parallel_for("fesom_cg_spmv", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int rstart = rowptr(row);
+            const int rend   = rowptr(row + 1);
+            for (int n = rstart; n < rend; ++n) s += vals(n) * v(colind(n));
+            y(row) = s;
+        });
+}
+
+/* Σ a(i)·b(i) over [0,N). The first parallel_reduce: Serial sums sequentially in
+ * index order == the C `for` loop → bit-identical; OpenMP/CUDA climate-close. */
+static real_t cg_dot(DV a, DV b, int N)
+{
+    real_t s = 0.0;
+    Kokkos::parallel_reduce("fesom_cg_dot", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int i, real_t &l) { l += a(i) * b(i); }, s);
+    return s;
+}
+
+/* (Σ x·y, Σ x·z) in one pass — the C's single sp0/sp1 loop (one fused reduce keeps
+ * the same per-accumulator order as the C, so Serial stays bit-identical). */
+static void cg_dot2(DV x, DV y, DV z, int N, real_t &d0, real_t &d1)
+{
+    real_t s0 = 0.0, s1 = 0.0;
+    Kokkos::parallel_reduce("fesom_cg_dot2", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int i, real_t &l0, real_t &l1) {
+            l0 += x(i) * y(i);
+            l1 += x(i) * z(i);
+        }, s0, s1);
+    d0 = s0; d1 = s1;
+}
+
+void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
+                                    struct fesom_dyn        *dyn)
+{
+    const int    N       = mesh->myDim_nod2D;
+    const int    N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    E       = mesh->myDim_edge2D;
+    const int    nl      = mesh->nl;
+    const real_t alpha           = (real_t)FESOM_PHASE1_ALPHA;
+    const real_t one_minus_alpha = 1.0 - alpha;
+
+    auto edges    = mesh->edges_fld.d();
+    auto edge_tri = mesh->edge_tri_fld.d();
+    auto ecd      = mesh->edge_cross_dxdy_fld.d();
+    auto ulev     = mesh->ulevels_fld.d();
+    auto nlev     = mesh->nlevels_fld.d();
+    auto uv       = dyn->uv_fld.d();
+    auto uv_rhs   = dyn->uv_rhs_fld.d();
+    auto helem    = mesh->helem_fld.d();
+    auto ssh_rhs     = dyn->ssh_rhs_fld.d();
+    auto ssh_rhs_old = dyn->ssh_rhs_old_fld.d();
+
+    /* zero ssh_rhs over the full local extent (the C memset over N_alloc). */
+    Kokkos::parallel_for("fesom_ssh_rhs_zero", Kokkos::RangePolicy<>(0, N_alloc),
+        KOKKOS_LAMBDA(const int n) { ssh_rhs(n) = 0.0; });
+
+    /* edge loop — EDGE→NODE SCATTER (atomic_add, D22). The per-edge level sums for c1/c2
+     * are sequential → deterministic; the scatter into ssh_rhs(n1)/(n2) uses atomic_add in
+     * natural edge order → Serial bit-identical, OpenMP/CUDA climate-close. */
+    Kokkos::parallel_for("fesom_ssh_rhs_edge", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int ed) {
+            int n1  = edges(2*ed + 0);
+            int n2  = edges(2*ed + 1);
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            real_t c1 = 0.0;
+            if (el1 >= 0) {
+                real_t dx1 = ecd(4*ed + 0);
+                real_t dy1 = ecd(4*ed + 1);
+                int nzmin = ulev(el1) - 1;
+                int nzmax = nlev(el1) - 1;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    real_t u  = uv    (FESOM_ELEMVEC(el1, nz, nl) + 0);
+                    real_t v  = uv    (FESOM_ELEMVEC(el1, nz, nl) + 1);
+                    real_t ur = uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 0);
+                    real_t vr = uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 1);
+                    real_t h  = helem (FESOM_ELEM3D(el1, nz, nl));
+                    c1 += alpha * ((v + vr) * dx1 - (u + ur) * dy1) * h;
+                }
+            }
+            real_t c2 = 0.0;
+            if (el2 >= 0) {
+                real_t dx2 = ecd(4*ed + 2);
+                real_t dy2 = ecd(4*ed + 3);
+                int nzmin = ulev(el2) - 1;
+                int nzmax = nlev(el2) - 1;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    real_t u  = uv    (FESOM_ELEMVEC(el2, nz, nl) + 0);
+                    real_t v  = uv    (FESOM_ELEMVEC(el2, nz, nl) + 1);
+                    real_t ur = uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                    real_t vr = uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                    real_t h  = helem (FESOM_ELEM3D(el2, nz, nl));
+                    c2 -= alpha * ((v + vr) * dx2 - (u + ur) * dy2) * h;
+                }
+            }
+            Kokkos::atomic_add(&ssh_rhs(n1),  (c1 + c2));
+            Kokkos::atomic_add(&ssh_rhs(n2), -(c1 + c2));    /* L32: parenthesise the negation */
+        });
+
+    /* linfs: ssh_rhs += (1-alpha)*ssh_rhs_old over OWNED rows (the C `for n in [0,N)`). */
+    Kokkos::parallel_for("fesom_ssh_rhs_linfs", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) { ssh_rhs(n) += one_minus_alpha * ssh_rhs_old(n); });
+
+    dyn->ssh_rhs_fld.modify_device();   /* driver sync_host()s before the nod2D halo */
+}
+
+int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
+                          fesom_solverinfo      *si,
+                          const struct fesom_mesh *mesh,
+                          struct fesom_dyn        *dyn)
+{
+    const int     N        = mesh->myDim_nod2D;
+    const real_t  soltol   = si->soltol;
+    fesom_partit *partit   = si->partit;
+    const int     parallel = (partit && partit->npes > 1);
+    const int     N_global = parallel ? mesh->nod2D : N;
+
+    /* device views (set-once CSR + the warm-start X / rhs / scratch vectors). */
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto vals   = S->values_fld.d();
+    auto prvals = S->pr_values_fld.d();
+    auto X   = dyn->d_eta_fld.d();
+    auto rhs = dyn->ssh_rhs_fld.d();
+    auto rr  = si->rr_fld.d();
+    auto zz  = si->zz_fld.d();
+    auto pp  = si->pp_fld.d();
+    auto App = si->App_fld.d();
+
+    /* CG-owned internal halo bracket (device→host→MPI→host→device); no-op at npes==1.
+     * The leading modify_device() captures the device-kernel write so sync_host() copies
+     * it; sync_device() at the end re-pushes the halo'd field for the next SpMV (D21). */
+    auto exch = [&](fesom::Field &f) {
+        if (parallel) {
+            f.modify_device(); f.sync_host();
+            fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+            f.modify_host();   f.sync_device();
+        }
+    };
+    #define ALLREDUCE_SUM(var) do { if (parallel) \
+        MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); \
+        } while (0)
+
+    /* Initial ‖rhs‖² + tolerance (solver.F90:142-154). rhs is read at OWNED rows only. */
+    real_t s_old = cg_dot(rhs, rhs, N);
+    ALLREDUCE_SUM(s_old);
+    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
+
+    if (s_old == 0.0) {
+        Kokkos::parallel_for("fesom_cg_zeroX", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { X(row) = 0.0; });
+        dyn->d_eta_fld.modify_device();
+        si->last_iters = 0;
+        return 0;
+    }
+
+    /* r0 = rhs - A·X. X must be halo-current before the SpMV gathers it at colind. */
+    exch(dyn->d_eta_fld);                            /* solver.F90:421 EXCH(X) */
+    cg_spmv(rowptr, colind, vals, X, rr, N);
+    Kokkos::parallel_for("fesom_cg_r0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
+    exch(si->rr_fld);                                /* solver.F90:424 EXCH(rr) */
+
+    /* z0 = M⁻¹ r0 ; pp = z0 */
+    cg_spmv(rowptr, colind, prvals, rr, zz, N);
+    Kokkos::parallel_for("fesom_cg_pp0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { pp(row) = zz(row); });
+
+    /* s_old = r0·z0 */
+    s_old = cg_dot(rr, zz, N);
+    ALLREDUCE_SUM(s_old);
+
+    int iter = 0;
+    int verbose         = (getenv("FESOM_VERBOSE_CG") != NULL);
+    int heartbeat_every = 100;
+    for (iter = 1; iter <= si->maxiter; ++iter) {
+        exch(si->pp_fld);                            /* solver.F90:442 EXCH(pp) */
+        cg_spmv(rowptr, colind, vals, pp, App, N);
+
+        real_t s_aux = cg_dot(pp, App, N);
+        ALLREDUCE_SUM(s_aux);
+        if (s_aux == 0.0 || s_aux != s_aux) {        /* NaN/zero check */
+            if (partit == NULL || partit->mype == 0) {
+                fprintf(stderr, "[fesom_ssh] CG_kk abort at iter %d: pp·App = %g (s_old=%g)\n",
+                        iter, (double)s_aux, (double)s_old); fflush(stderr);
+            }
+            FESOM_DIE("CG_kk: pp·App is %g — matrix singular or NaN propagated", s_aux);
+        }
+        const real_t al = s_old / s_aux;
+
+        Kokkos::parallel_for("fesom_cg_axpy", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                X (row) += al * pp (row);
+                rr(row) -= al * App(row);
+            });
+        exch(si->rr_fld);                            /* solver.F90:462 EXCH(rr) */
+
+        cg_spmv(rowptr, colind, prvals, rr, zz, N);
+
+        real_t sp0, sp1;
+        cg_dot2(rr, zz, rr, N, sp0, sp1);            /* sp0 = Σ rr·zz ; sp1 = Σ rr·rr */
+        ALLREDUCE_SUM(sp0);
+        ALLREDUCE_SUM(sp1);
+
+        real_t residual = sqrt(sp1 / (real_t)N_global);
+        if ((partit == NULL || partit->mype == 0)
+            && (verbose ? (iter <= 5 || iter % 50 == 0)
+                        : (iter % heartbeat_every == 0))) {
+            fprintf(stderr, "[fesom_ssh] CG_kk iter %4d: res=%.4e rtol=%.4e\n",
+                    iter, (double)residual, (double)rtol);
+            fflush(stderr);
+        }
+        if (residual < rtol) break;
+        if (residual != residual || residual > 1e30) {
+            if (partit == NULL || partit->mype == 0) {
+                fprintf(stderr, "[fesom_ssh] CG_kk abort at iter %d: residual=%g\n",
+                        iter, (double)residual); fflush(stderr);
+            }
+            FESOM_DIE("CG_kk residual diverged");
+        }
+
+        const real_t be = sp0 / s_old;
+        s_old = sp0;
+        Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
+    }
+    if (iter > si->maxiter) {
+        if (partit == NULL || partit->mype == 0) {
+            fprintf(stderr, "[fesom_ssh] CG_kk hit maxiter=%d without converging "
+                    "(last residual ~%.4e, rtol=%.4e)\n",
+                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+            fflush(stderr);
+        }
+        FESOM_DIE("CG_kk did not converge");
+    }
+    /* The C twin's exit EXCH(X) (solver.F90:507) is dropped: the driver does
+     * exchange_nod2D(d_eta) immediately after this returns (the same unchanged X), so the
+     * two are idempotent → bit-identical. X owned is device-current here; modify_device()
+     * lets the driver sync_host() it before that halo. */
+    dyn->d_eta_fld.modify_device();
+    si->last_iters = iter;
+    #undef ALLREDUCE_SUM
+    return iter;
+}
+
+/* FESOM_KK_VERIFY=ssh — capture-before (L26) over the seven §5 read-modify-write fields.
+ * The driver snapshots the pre-block host values; here we snapshot the KK result, restore
+ * the pre-values, run the C twins in order (compute_ssh_rhs → CG → update_vel → compute_hbar
+ * → eta_n), diff, then restore the KK production state. On Serial the device kernels run on
+ * the SAME memory as the C twins (host==device) with identical FP ops/order → max|Δ|==0;
+ * non-intrusive. (The CG scratch rr/zz/pp/App is overwritten by the C CG, then re-derived by
+ * the next step's device CG before being read — no production state depends on it here.) */
+void fesom_ssh_block_verify(const fesom_ssh_stiff   *S,
+                            fesom_solverinfo        *si,
+                            const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn,
+                            int step_n,
+                            const std::vector<real_t> &pre_ssh_rhs,
+                            const std::vector<real_t> &pre_d_eta,
+                            const std::vector<real_t> &pre_uv,
+                            const std::vector<real_t> &pre_ssh_rhs_old,
+                            const std::vector<real_t> &pre_hbar,
+                            const std::vector<real_t> &pre_hbar_old,
+                            const std::vector<real_t> &pre_eta_n)
+{
+    const int    nl      = mesh->nl;
+    const size_t Nn      = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
+    const size_t Nuv     = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D
+                                   + mesh->eXDim_elem2D) * (size_t)nl * 2;
+    /* snapshot the KK results (host mirrors hold them — the driver sync_host'd all seven). */
+    std::vector<real_t> kk_ssh_rhs    (dyn->ssh_rhs,     dyn->ssh_rhs     + Nn);
+    std::vector<real_t> kk_d_eta      (dyn->d_eta,       dyn->d_eta       + Nn);
+    std::vector<real_t> kk_uv         (dyn->uv,          dyn->uv          + Nuv);
+    std::vector<real_t> kk_ssh_rhs_old(dyn->ssh_rhs_old, dyn->ssh_rhs_old + Nn);
+    std::vector<real_t> kk_hbar       (mesh->hbar,       mesh->hbar       + Nn);
+    std::vector<real_t> kk_hbar_old   (mesh->hbar_old,   mesh->hbar_old   + Nn);
+    std::vector<real_t> kk_eta_n      (dyn->eta_n,       dyn->eta_n       + Nn);
+
+    /* restore the pre-block inputs the C twins read */
+    std::copy(pre_ssh_rhs.begin(),     pre_ssh_rhs.end(),     dyn->ssh_rhs);
+    std::copy(pre_d_eta.begin(),       pre_d_eta.end(),       dyn->d_eta);
+    std::copy(pre_uv.begin(),          pre_uv.end(),          dyn->uv);
+    std::copy(pre_ssh_rhs_old.begin(), pre_ssh_rhs_old.end(), dyn->ssh_rhs_old);
+    std::copy(pre_hbar.begin(),        pre_hbar.end(),        mesh->hbar);
+    std::copy(pre_hbar_old.begin(),    pre_hbar_old.end(),    mesh->hbar_old);
+    std::copy(pre_eta_n.begin(),       pre_eta_n.end(),       dyn->eta_n);
+
+    /* run the C twins (substeps 7-11). On Serial npes==1 → the internal halos are no-ops.
+     * (compute_hbar writes mesh->hbar/hbar_old through the non-const pointer members; the
+     * const on `mesh` applies to the pointer storage, not the pointee, so no cast needed.) */
+    fesom_compute_ssh_rhs_linfs(mesh, dyn);
+    fesom_ssh_solve_cg(S, si, mesh, dyn);
+    fesom_update_vel(mesh, dyn);
+    fesom_compute_hbar(mesh, dyn);
+    {   /* substep 11 eta_n inline (mirror fesom_step.cpp). */
+        const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
+        for (int n = 0; n < (int)Nn; ++n)
+            if (mesh->ulevels_nod2D[n] == 1)
+                dyn->eta_n[n] = alpha * mesh->hbar[n] + (1.0 - alpha) * mesh->hbar_old[n];
+    }
+
+    auto mx = [](const std::vector<real_t> &a, const real_t *b) {
+        double d = 0.0;
+        for (size_t i = 0; i < a.size(); ++i) {
+            double x = std::fabs((double)a[i] - (double)b[i]);
+            if (x > d) d = x;
+        }
+        return d;
+    };
+    double d_rhs = mx(kk_ssh_rhs,     dyn->ssh_rhs);
+    double d_de  = mx(kk_d_eta,       dyn->d_eta);
+    double d_uv  = mx(kk_uv,          dyn->uv);
+    double d_ro  = mx(kk_ssh_rhs_old, dyn->ssh_rhs_old);
+    double d_hb  = mx(kk_hbar,        mesh->hbar);
+    double d_hbo = mx(kk_hbar_old,    mesh->hbar_old);
+    double d_en  = mx(kk_eta_n,       dyn->eta_n);
+
+    /* restore the KK production state */
+    std::copy(kk_ssh_rhs.begin(),     kk_ssh_rhs.end(),     dyn->ssh_rhs);
+    std::copy(kk_d_eta.begin(),       kk_d_eta.end(),       dyn->d_eta);
+    std::copy(kk_uv.begin(),          kk_uv.end(),          dyn->uv);
+    std::copy(kk_ssh_rhs_old.begin(), kk_ssh_rhs_old.end(), dyn->ssh_rhs_old);
+    std::copy(kk_hbar.begin(),        kk_hbar.end(),        mesh->hbar);
+    std::copy(kk_hbar_old.begin(),    kk_hbar_old.end(),    mesh->hbar_old);
+    std::copy(kk_eta_n.begin(),       kk_eta_n.end(),       dyn->eta_n);
+
+    double dmax = d_rhs;
+    for (double v : {d_de, d_uv, d_ro, d_hb, d_hbo, d_en}) if (v > dmax) dmax = v;
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=ssh] step %d backend=%s  max|Δ|: ssh_rhs=%.3e d_eta=%.3e "
+                "uv=%.3e ssh_rhs_old=%.3e hbar=%.3e hbar_old=%.3e eta_n=%.3e\n",
+                step_n, backend.c_str(), d_rhs, d_de, d_uv, d_ro, d_hb, d_hbo, d_en);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=ssh] FAIL step %d: Serial must be bit-identical "
+                             "to the C twin (max|Δ|=%.3e)\n", step_n, dmax);
+        std::abort();
+    }
 }

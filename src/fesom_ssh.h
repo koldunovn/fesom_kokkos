@@ -3,6 +3,7 @@
 
 #include "fesom_types.h"
 #include "fesom_field.hpp"   // M4.2-a: DualView-backed storage for the CSR + CG vectors
+#include <vector>            // M4.2-b: FESOM_KK_VERIFY=ssh capture-before buffers
 
 struct fesom_mesh;
 struct fesom_dyn;
@@ -101,5 +102,46 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
                        fesom_solverinfo      *si,
                        const struct fesom_mesh *mesh,
                        struct fesom_dyn        *dyn);
+
+/*===========================================================================
+ * M4.2-b — DEVICE (Kokkos) twins of the §5 SSH block (substeps 7-8). The CG
+ * runs host loop control + device vector kernels (per-row CSR-gather SpMV,
+ * dot-product parallel_reduce, AXPY maps) and owns its per-iteration pp/rr/X
+ * halo brackets (D21). update_vel_kk/compute_hbar_kk live in fesom_momentum.cpp.
+ *===========================================================================*/
+
+/* compute_ssh_rhs_linfs on device: edge→node SCATTER (atomic_add, D22) + the
+ * (1-alpha)*ssh_rhs_old linfs map. Marks dyn->ssh_rhs modify_device(). */
+void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
+                                    struct fesom_dyn        *dyn);
+
+/* Preconditioned CG on device. Same numerics as fesom_ssh_solve_cg; the SpMV is
+ * a per-row CSR gather (race-free), the dots are Kokkos::parallel_reduce + the
+ * unchanged scalar MPI_Allreduce. Marks dyn->d_eta modify_device(). Returns iters. */
+int  fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
+                           fesom_solverinfo      *si,
+                           const struct fesom_mesh *mesh,
+                           struct fesom_dyn        *dyn);
+
+/*
+ * FESOM_KK_VERIFY=ssh gate: the §5 block (substeps 7-11) read-modify-writes
+ * ssh_rhs/d_eta/uv/ssh_rhs_old/hbar/hbar_old/eta_n, so this is the L26
+ * capture-before pattern over all seven. The driver snapshots the PRE-block
+ * values; here we snapshot the KK result, restore the pre-values, run the C
+ * twins (compute_ssh_rhs → CG → update_vel → compute_hbar → eta_n), diff, then
+ * restore the KK result. Non-intrusive; asserts max|Δ|==0 on Serial.
+ */
+void fesom_ssh_block_verify(const fesom_ssh_stiff   *S,
+                            fesom_solverinfo        *si,
+                            const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn,
+                            int step_n,
+                            const std::vector<real_t> &pre_ssh_rhs,
+                            const std::vector<real_t> &pre_d_eta,
+                            const std::vector<real_t> &pre_uv,
+                            const std::vector<real_t> &pre_ssh_rhs_old,
+                            const std::vector<real_t> &pre_hbar,
+                            const std::vector<real_t> &pre_hbar_old,
+                            const std::vector<real_t> &pre_eta_n);
 
 #endif /* FESOM_SSH_H */

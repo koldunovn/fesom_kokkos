@@ -578,13 +578,19 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - [ ] port `ocean_area` and per-step stat reductions; Serial bit-identical, OpenMP/GPU climate-close
 - [ ] verify
 
-### Task M4.2: SSH RHS + CG solver + velocity update + hbar on device (closes the mid-step gap)
-**Files:** Modify `src/fesom_ssh.cpp`, `src/fesom_step.cpp`
-- [ ] wrap CG vectors + stiffness CSR in `Field` (`r/p/Ap`, matrix) — deferred from M1
-- [ ] port `compute_ssh_rhs_linfs`, the CG (`SpMV + axpy + dot` via `parallel_reduce` +
-      `MPI_Allreduce`), `update_vel`, `compute_hbar` — this removes the M2 mid-step host
-      round-trip; Serial `max|Δ|==0`; document the GPU non-determinism source (dot-product order)
-- [ ] verify a year on Serial (bit-identical) + CUDA (climate-close)
+### Task M4.2: SSH RHS + CG solver + velocity update + hbar on device (closes the mid-step gap) — ✅ DONE
+**Files:** Modified `src/fesom_ssh.cpp`, `src/fesom_momentum.cpp`, `src/fesom_step.cpp` (+ `.h`)
+- [x] **M4.2-a** (`4de3230`) wrap CG vectors (`rr/zz/pp/App`) + stiffness CSR (`rowptr/colind/values/
+      pr_values`) in `Field` — deferred from M1; CSR pushed once in `fesom_ssh_preconditioner`. Bit-identical.
+- [x] **M4.2-b** port `compute_ssh_rhs_linfs_kk` (edge→node scatter), `ssh_solve_cg_kk` (host loop +
+      device SpMV-gather / dot `parallel_reduce` + `MPI_Allreduce` / AXPY maps; owns its `pp`/`rr`/`X`
+      halo brackets, D21), `update_vel_kk` (map), `compute_hbar_kk` (scatter + maps) — removes the §5
+      mid-step host round-trip. `eta_n` stays HOST (trivial map). Serial `max|Δ|==0` (`FESOM_KK_VERIFY=ssh`,
+      20×7 fields); **GPU non-determinism source documented = the dot-product reduction order (the first
+      `parallel_reduce`) + the 2 SSH scatters** (L41).
+- [x] gates: pi==golden (np=1 + np=2 CMA-off); `ctest` 4/4; SYNCCHECK np=1+np=2 clean; OpenMP
+      climate-close (`T`≈1.8e-15, ≪1e-12); CUDA climate-close at the unchanged M2 budget + `eta_n`≈9.4e-11
+- [~] 1-yr CORE2 Serial bit-identical to cref (job `25146822`, RUNNING) + CUDA smoke climate-close (done)
 
 ### Task M4.3: Sea ice (EVP / thermo / FCT) on device
 **Files:** Modify `src/fesom_ice_evp.cpp`, `src/fesom_ice_thermo.cpp`, `src/fesom_ice_fct.cpp`, `src/fesom_ice.cpp`

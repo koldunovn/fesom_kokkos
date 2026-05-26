@@ -130,6 +130,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_gm     = 0;   /* M2.5b substep 1b */
     static int s_verify_tradv  = 0;   /* M2.6 substep 13 (FCT) */
     static int s_verify_trdiff = 0;   /* M2.7 substep 13b (tracer diffusion) */
+    static int s_verify_ssh    = 0;   /* M4.2 substeps 7-11 (SSH RHS + CG + update_vel + hbar) */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -142,6 +143,7 @@ int fesom_timestep(int                          step_n,
         s_verify_gm  = (e && strstr(e, "gm"))  ? 1 : 0;       /* M2.5b: no substring collision (gm ⊄ any key) */
         s_verify_tradv = (e && strstr(e, "tradv")) ? 1 : 0;   /* M2.6: distinct token (no collision either way, L25) */
         s_verify_trdiff = (e && strstr(e, "trdiff")) ? 1 : 0; /* M2.7: distinct token — ⊄ tradv and tradv ⊄ trdiff (L25) */
+        s_verify_ssh = (e && strstr(e, "ssh")) ? 1 : 0;       /* M4.2: no substring collision (ssh ⊄ any key) */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -456,25 +458,71 @@ int fesom_timestep(int                          step_n,
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
-    /*  7. SSH RHS (linfs)  */
-    fesom_compute_ssh_rhs_linfs(mesh, dyn);
-    fesom_exchange_nod2D(dyn->ssh_rhs, p);   /* Fortran oce_ale.F90:1954 */
+    /*  7-10. The §5 SSH block — M4.2: ON THE DEVICE (closes the SYNC_MAP §5 mid-step
+     *  host CG round-trip; substeps 1-14 now flow on device except the trivial host eta_n
+     *  map + the ice step + the salinity floor). compute_ssh_rhs_kk (edge→node SCATTER) →
+     *  fesom_ssh_solve_cg_kk (per-row CSR-gather SpMV + dot-product parallel_reduce + the
+     *  unchanged scalar MPI_Allreduce, owning its pp/rr/X halo brackets) → update_vel_kk
+     *  (per-element map) → compute_hbar_kk (edge→node SCATTER + maps).
+     *
+     *  IN rail (L28 — sync EVERY input the §5 block reads that a host kernel/halo last
+     *  wrote): uv (Synced from substep 6; pushed for self-containment), uv_rhs (substep-6
+     *  sync_host + ELEM3D halo, L30), d_eta (last step's CG + halo — the CG warm start),
+     *  ssh_rhs_old (last step's compute_hbar + halo — the (1-α) term), helem (evolving mesh),
+     *  hbar (last step's compute_hbar + halo — compute_hbar reads it at [0,N_alloc) to save
+     *  hbar_old). The set-once stiffness CSR is device-current (pushed once in the
+     *  preconditioner) and the set-once mesh geometry from mesh_sync_geometry_device. On
+     *  Serial/OpenMP host==device so every sync is a no-op (run stays bit-identical). */
+    const int    Nn_ssh  = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const size_t Nuv_ssh = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D
+                                   + mesh->eXDim_elem2D) * (size_t)nl * 2;
+    std::vector<real_t> ssh_pre_rhs, ssh_pre_deta, ssh_pre_uv, ssh_pre_rhsold,
+                        ssh_pre_hbar, ssh_pre_hbarold, ssh_pre_etan;
+    if (s_verify_ssh) {   /* L26 capture-before: the seven read-modify-write outputs */
+        ssh_pre_rhs.assign   (dyn->ssh_rhs,     dyn->ssh_rhs     + Nn_ssh);
+        ssh_pre_deta.assign  (dyn->d_eta,       dyn->d_eta       + Nn_ssh);
+        ssh_pre_uv.assign    (dyn->uv,          dyn->uv          + Nuv_ssh);
+        ssh_pre_rhsold.assign(dyn->ssh_rhs_old, dyn->ssh_rhs_old + Nn_ssh);
+        ssh_pre_hbar.assign  (mesh->hbar,       mesh->hbar       + Nn_ssh);
+        ssh_pre_hbarold.assign(mesh->hbar_old,  mesh->hbar_old   + Nn_ssh);
+        ssh_pre_etan.assign  (dyn->eta_n,       dyn->eta_n       + Nn_ssh);
+    }
+    dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
+    dyn->uv_rhs_fld.modify_host();      dyn->uv_rhs_fld.sync_device();
+    dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
+    dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
+    mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
+    mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
 
-    /*  8. CG SSH solve  */
-    int cg_iters = fesom_ssh_solve_cg(ctx->stiff, ctx->solver, mesh, dyn);
-    /* fesom_ssh_solve_cg already exchanges its own X (= d_eta) at exit
-     * (Fortran solver.F90:279). For now we keep the explicit exchange here
-     * because the parallel CG modifications are slice 30e, not 30d. */
-    fesom_exchange_nod2D(dyn->d_eta, p);
+    /*  7. SSH RHS (linfs) — device. CG reads ssh_rhs at OWNED rows only, so no re-push
+     *     after the halo (the device owned ssh_rhs from the kernel stays current). */
+    fesom_compute_ssh_rhs_linfs_kk(mesh, dyn);
+    dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
+    fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
 
-    /*  9. velocity update with SSH-gradient correction  */
-    fesom_update_vel(mesh, dyn);
-    fesom_halo_exchange(dyn->uv_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);   /* M1.5 guarded (see §1) */
+    /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
+     *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
+    int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
+    dyn->d_eta_fld.sync_host();                            /* OUT: before the nod2D halo */
+    fesom_exchange_nod2D(dyn->d_eta_fld.h_checked(), p);   /* Fortran solver.F90:279 */
 
-    /* 10. transport-divergence → ssh_rhs_old, then hbar update  */
-    fesom_compute_hbar(mesh, dyn);
-    fesom_exchange_nod2D(dyn->ssh_rhs_old, p);   /* Fortran oce_ale.F90:2078 */
-    fesom_exchange_nod2D(mesh->hbar,       p);   /* Fortran oce_ale.F90:2102 */
+    /*  9. velocity update — device. update_vel reads d_eta at the 3 element vertices
+     *     (incl. HALO), so re-push d_eta after its halo (L30 cross-op re-push). */
+    dyn->d_eta_fld.modify_host(); dyn->d_eta_fld.sync_device();
+    fesom_update_vel_kk(mesh, dyn);
+    dyn->uv_fld.sync_host();                               /* OUT: before the elem3D halo */
+    fesom_halo_exchange(dyn->uv_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
+
+    /* 10. transport-divergence → ssh_rhs_old, then hbar update — device. compute_hbar reads
+     *     uv at edge_tri (interior elements), but uv was just halo'd on the host (line above),
+     *     so re-push it (L30) to keep the device copy coherent with the host. */
+    dyn->uv_fld.modify_host(); dyn->uv_fld.sync_device();
+    fesom_compute_hbar_kk(mesh, dyn);
+    dyn->ssh_rhs_old_fld.sync_host();                      /* OUT (3 fields) before the halos */
+    mesh->hbar_fld.sync_host();
+    mesh->hbar_old_fld.sync_host();
+    fesom_exchange_nod2D(dyn->ssh_rhs_old_fld.h_checked(), p);   /* Fortran oce_ale.F90:2078 */
+    fesom_exchange_nod2D(mesh->hbar_fld.h_checked(),       p);   /* Fortran oce_ale.F90:2102 */
 
     /* DEBUG (FESOM_DIAG_SSHSLV=<gid>): dump ssh_rhs / d_eta / hbar at one node,
        matching the Fortran [FSSH] format, to compare the implicit free-surface
@@ -560,6 +608,15 @@ int fesom_timestep(int                          step_n,
         }
     }
     /* eta_n already covers myDim+eDim because hbar/hbar_old are exchanged. */
+
+    /* M4.2 FESOM_KK_VERIFY=ssh — gate the whole §5 block (substeps 7-11) against the C
+     * twins. Runs AFTER eta_n so the host mirrors hold the full KK result; capture-before
+     * was taken at the top of substep 7. Serial max|Δ|==0 (the CG is deterministic; on
+     * Serial the device kernels run on the same memory with identical FP ops/order). */
+    if (s_verify_ssh)
+        fesom_ssh_block_verify(ctx->stiff, ctx->solver, mesh, dyn, step_n,
+                               ssh_pre_rhs, ssh_pre_deta, ssh_pre_uv, ssh_pre_rhsold,
+                               ssh_pre_hbar, ssh_pre_hbarold, ssh_pre_etan);
 
     /* 12. ALE step (linfs) — M2.5: device kernels. SYNC_MAP §2 row 12. Each kernel: IN rail
      *  (modify_host()+sync_device() the host-written/halo'd inputs, L28), device kernel

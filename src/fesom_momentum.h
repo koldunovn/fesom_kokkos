@@ -136,6 +136,12 @@ void fesom_impl_vert_visc_verify(const struct fesom_mesh    *mesh,
 void fesom_update_vel(const struct fesom_mesh *mesh,
                       struct fesom_dyn        *dyn);
 
+/* M4.2-b: DEVICE twin of update_vel — race-free per-element map (reads d_eta at
+ * the 3 vertices incl. HALO; the driver re-pushes d_eta after its halo, L30).
+ * Marks dyn->uv modify_device(). Serial AND OpenMP bit-identical (no scatter). */
+void fesom_update_vel_kk(const struct fesom_mesh *mesh,
+                         struct fesom_dyn        *dyn);
+
 /*
  * compute_hbar_ale — write transport-divergence into ssh_rhs_old, save
  * hbar_old=hbar, then update hbar = hbar_old + ssh_rhs_old*dt/areasvol.
@@ -146,6 +152,13 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
  */
 void fesom_compute_hbar(const struct fesom_mesh *mesh,
                         struct fesom_dyn        *dyn);
+
+/* M4.2-b: DEVICE twin of compute_hbar — edge→node SCATTER (atomic_add, D22) into
+ * ssh_rhs_old + the hbar_old/hbar maps. Marks ssh_rhs_old/hbar/hbar_old
+ * modify_device() (so mesh is NON-const, the ALE commit_thickness pattern). Serial
+ * bit-identical; OpenMP/CUDA climate-close (the scatter). */
+void fesom_compute_hbar_kk(struct fesom_mesh *mesh,
+                           struct fesom_dyn  *dyn);
 
 /*
  * Horizontal harmonic viscosity with easy backscatter (opt_visc=5).

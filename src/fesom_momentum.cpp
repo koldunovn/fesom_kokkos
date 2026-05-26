@@ -1053,6 +1053,50 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
 }
 
 /*===========================================================================
+ * fesom_update_vel_kk — M4.2-b DEVICE twin (substep 9). Race-free per-element
+ * map: each element writes only its own uv slots; reads d_eta at the 3 vertices
+ * (which can be HALO nodes → the driver re-pushes d_eta after its halo, L30),
+ * uv_rhs, gradient_sca. No scatter/reduce → Serial AND OpenMP bit-identical.
+ *===========================================================================*/
+void fesom_update_vel_kk(const struct fesom_mesh *mesh,
+                         struct fesom_dyn        *dyn)
+{
+    const int E  = mesh->myDim_elem2D;
+    const int nl = mesh->nl;
+    const real_t coef = -(real_t)FESOM_G * (real_t)FESOM_PHASE1_THETA
+                       * (real_t)FESOM_PHASE1_DT;
+
+    auto ulev   = mesh->ulevels_fld.d();
+    auto nlev   = mesh->nlevels_fld.d();
+    auto en     = mesh->elem_nodes_fld.d();
+    auto grad   = mesh->gradient_sca_fld.d();
+    auto d_eta  = dyn->d_eta_fld.d();
+    auto uv     = dyn->uv_fld.d();
+    auto uv_rhs = dyn->uv_rhs_fld.d();
+
+    Kokkos::parallel_for("fesom_update_vel", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int e) {
+            int nzmin = ulev(e) - 1;
+            int nzmax = nlev(e) - 1;
+            int n0 = en(3*e + 0);
+            int n1 = en(3*e + 1);
+            int n2 = en(3*e + 2);
+            real_t e0 = coef * d_eta(n0);
+            real_t e1 = coef * d_eta(n1);
+            real_t e2 = coef * d_eta(n2);
+            real_t Fx = grad(6*e + 0)*e0 + grad(6*e + 1)*e1 + grad(6*e + 2)*e2;
+            real_t Fy = grad(6*e + 3)*e0 + grad(6*e + 4)*e1 + grad(6*e + 5)*e2;
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                size_t k = FESOM_ELEMVEC(e, nz, nl);
+                uv(k + 0) += uv_rhs(k + 0) + Fx;
+                uv(k + 1) += uv_rhs(k + 1) + Fy;
+            }
+        });
+
+    dyn->uv_fld.modify_device();   /* driver sync_host()s before the elem3D halo */
+}
+
+/*===========================================================================
  * visc_filt_bcksct (oce_dyn.F90:278-426) — opt_visc=5 with easy backscatter
  *===========================================================================*/
 
@@ -1580,4 +1624,92 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
                        + dyn->ssh_rhs_old[n] * dt / area;
     }
     /* hbar then halo-exchanged in fesom_step.c after this returns. */
+}
+
+/*===========================================================================
+ * fesom_compute_hbar_kk — M4.2-b DEVICE twin (substep 10). Three launches
+ * (barrier-ordered, D20): (1) zero ssh_rhs_old + save hbar_old=hbar over the
+ * full local extent (the C memset + hbar_old loop, fused); (2) the edge→node
+ * SCATTER of the transport divergence into ssh_rhs_old (atomic_add, D22 — the
+ * per-edge level sum is sequential, the scatter in natural edge order → Serial
+ * bit-identical, OpenMP/CUDA climate-close); (3) the owned hbar update reading
+ * the just-saved hbar_old + just-scattered ssh_rhs_old. uv is read at edge_tri
+ * (interior elements) so its owned device copy from update_vel_kk is current —
+ * the driver re-pushes it (L30) since the line-472 halo wrote uv on the host.
+ *===========================================================================*/
+void fesom_compute_hbar_kk(struct fesom_mesh *mesh,
+                           struct fesom_dyn  *dyn)
+{
+    const int    N       = mesh->myDim_nod2D;
+    const int    N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    E       = mesh->myDim_edge2D;
+    const int    nl      = mesh->nl;
+    const real_t dt      = (real_t)FESOM_PHASE1_DT;
+
+    auto edges    = mesh->edges_fld.d();
+    auto edge_tri = mesh->edge_tri_fld.d();
+    auto ecd      = mesh->edge_cross_dxdy_fld.d();
+    auto ulev     = mesh->ulevels_fld.d();
+    auto nlev     = mesh->nlevels_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto uv       = dyn->uv_fld.d();
+    auto helem    = mesh->helem_fld.d();
+    auto ssh_rhs_old = dyn->ssh_rhs_old_fld.d();
+    auto hbar     = mesh->hbar_fld.d();
+    auto hbar_old = mesh->hbar_old_fld.d();
+
+    /* (1) reset ssh_rhs_old + hbar_old=hbar over the full local extent. */
+    Kokkos::parallel_for("fesom_hbar_pre", Kokkos::RangePolicy<>(0, N_alloc),
+        KOKKOS_LAMBDA(const int n) { ssh_rhs_old(n) = 0.0; hbar_old(n) = hbar(n); });
+
+    /* (2) edge loop — EDGE→NODE SCATTER (atomic_add, D22). */
+    Kokkos::parallel_for("fesom_hbar_edge", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int ed) {
+            int n1  = edges(2*ed + 0);
+            int n2  = edges(2*ed + 1);
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            real_t c1 = 0.0;
+            if (el1 >= 0) {
+                real_t dx1 = ecd(4*ed + 0);
+                real_t dy1 = ecd(4*ed + 1);
+                int nzmin = ulev(el1) - 1;
+                int nzmax = nlev(el1) - 1;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    real_t u = uv(FESOM_ELEMVEC(el1, nz, nl) + 0);
+                    real_t v = uv(FESOM_ELEMVEC(el1, nz, nl) + 1);
+                    real_t h = helem(FESOM_ELEM3D(el1, nz, nl));
+                    c1 += (v * dx1 - u * dy1) * h;
+                }
+            }
+            real_t c2 = 0.0;
+            if (el2 >= 0) {
+                real_t dx2 = ecd(4*ed + 2);
+                real_t dy2 = ecd(4*ed + 3);
+                int nzmin = ulev(el2) - 1;
+                int nzmax = nlev(el2) - 1;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    real_t u = uv(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                    real_t v = uv(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                    real_t h = helem(FESOM_ELEM3D(el2, nz, nl));
+                    c2 -= (v * dx2 - u * dy2) * h;
+                }
+            }
+            Kokkos::atomic_add(&ssh_rhs_old(n1),  (c1 + c2));
+            Kokkos::atomic_add(&ssh_rhs_old(n2), -(c1 + c2));   /* L32 */
+        });
+
+    /* (3) hbar update over OWNED nodes (the C `for n in [0,N)`). */
+    Kokkos::parallel_for("fesom_hbar_upd", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;                     /* cavity guard (C continue) */
+            int top = ulev_n(n) - 1;                        /* = 0 in Phase 1 */
+            real_t area = areasvol(FESOM_NODE3D(n, top, nl));
+            hbar(n) = hbar_old(n) + ssh_rhs_old(n) * dt / area;
+        });
+
+    dyn->ssh_rhs_old_fld.modify_device();
+    mesh->hbar_fld.modify_device();
+    mesh->hbar_old_fld.modify_device();
 }

@@ -83,11 +83,11 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 4 | ✅ **`compute_vel_rhs_kk` (M2.4 — DONE) — ⚠️AB2 eps=0.1; embeds `momentum_adv_scalar_kk` (scatter + internal halo)** | dyn `uv`, `uv_rhsAB` (read by part i; read-modify-write), `eta_n` (read at 3 vertices incl HALO), `w_e`; aux `pgf_x`/`pgf_y` (substep-2 device output, sync_host'd+halo'd); mesh `hnode` (evolving), set-once `gradient_sca`/`coriolis`/`elem_area`/`areasvol`/`edges`/`edge_tri`/`edge_cross_dxdy`/`nod_in_elem2D(_offsets)`/`elem_nodes`/levels | dyn `uv_rhs`, `uv_rhsAB`; scratch `uvnode_rhs` | **internal** nod3D `uvnode_rhs` (§6) then elem3D `uv_rhs`,`uv_rhsAB` | **implemented:** driver IN rail `modify_host()+sync_device()` on `uv`/`uv_rhsAB`/`eta_n`/`w_e`/`pgf_x`/`pgf_y`/`hnode` (all of them, L28); the AB2 `eps=0.1` is in the kernel; `momentum_adv_scalar_kk` scatters edge→node into `uvnode_rhs` via **`atomic_add`** (D22) and owns the **INTERNAL `uvnode_rhs` nod3D halo bracket** (D21, §6); kernel `mod_dev(uv_rhs,uv_rhsAB)`; driver `sync_host` both before the elem3D halos. Verify `vrhs` = L26 capture-before on `uv_rhsAB` (part i reads it; `uv_rhs` fully recomputed → not captured). |
 | 5 | ✅ **`visc_filt_bidiff_kk` (M2.4 — DONE; first SCATTER + internal halo)** | dyn `uv`, `uv_rhs` (read-modify-write); dyn `u_b`/`v_b` scratch (zeroed on device); set-once mesh `edge_tri`/`elem_area`/`ulevels`/`nlevels` | dyn `uv_rhs` | **internal** elem3D `u_b`/`v_b` (§6) then elem3D `uv_rhs` | **implemented:** driver IN rail `modify_host()+sync_device()` on `uv` + `uv_rhs` (L28); two edge→element stages scatter via **`Kokkos::atomic_add`** (D22 — Serial bit-identical, OpenMP/CUDA climate-close); the function owns the **INTERNAL Uc/Vc(=`u_b`/`v_b`) elem3D halo bracket** (D21, §6); kernel `mod_dev(uv_rhs)`; driver `sync_host(uv_rhs)` before the elem3D halo (via `h_checked`). Verify `vfilt` = L26 capture-before, FULL extent (scatter writes halo elems). |
 | 6 | ✅ **`impl_vert_visc_kk` (M2.4 — DONE, per-elem TDMA)** | dyn `uv_rhs` (read-modify-write), `uv`, `w_i` (read at the 3 vertices incl. HALO); aux `Av`; mesh `helem` (evolving), set-once `zbar`/`elem_nodes`/`ulevels`/`nlevels`; forcing `stress_surf` | dyn `uv_rhs` | elem3D `uv_rhs` | **implemented:** driver IN rail `modify_host()+sync_device()` on **all** of `uv_rhs`/`uv`/`w_i`/`Av`/`helem`/`stress_surf` (L28 — sync every input the body reads; the SYNC_MAP guess listed only `uv_rhs/Av/stress_surf`, but the body also reads `uv`, `w_i`, and the evolving `helem`); `forcing` const → localized `const_cast` for `stress_surf`. Kernel `mod_dev(uv_rhs)`; driver `sync_host(uv_rhs)` before the elem3D halo (via `h_checked`). Per-element TDMA → race-free, **Serial AND OpenMP bit-identical**. Verify `ivisc` = L26 capture-before (read-modify-write). |
-| 7 | `compute_ssh_rhs_linfs` (M4.2) | dyn `uv_rhs`,`d_eta`; mesh | dyn `ssh_rhs` | nod2D `ssh_rhs` | **mid-step host bracket — see §5** |
-| 8 | `ssh_solve_cg` (M4.2) — CG w/ `MPI_Allreduce` dots | mesh stiffness CSR; dyn `ssh_rhs` | dyn `d_eta` | nod2D `d_eta` | stays HOST through M2/M3 (§5); on device only at M4.2 |
-| 9 | `update_vel` (M2.4) | dyn `uv_rhs`,`d_eta`; mesh | dyn `uv` | elem3D `uv` | `→dev(uv_rhs,d_eta)`; `mod_dev(uv)`; `→host(uv)` before halo |
-| 10| `compute_hbar` (M4.2) | dyn `uv`; mesh `hbar`,`hbar_old` | dyn `ssh_rhs_old`; mesh `hbar` | nod2D `ssh_rhs_old`,`hbar` | part of the §5 bracket |
-| 11| `eta_n` inline | mesh `hbar`,`hbar_old`,`ulevels_nod2D` | dyn `eta_n` | (covered) | trivial; fold into M2.4 device region or keep host |
+| 7 | ✅ **`compute_ssh_rhs_linfs_kk` (M4.2 — DONE)** | dyn `uv`,`uv_rhs`,`ssh_rhs_old`; mesh `helem` + set-once `edges`/`edge_tri`/`edge_cross_dxdy`/levels | dyn `ssh_rhs` | nod2D `ssh_rhs` | **device EDGE→NODE SCATTER (`atomic_add`, D22) + the (1-α)`ssh_rhs_old` linfs map.** Driver IN rail (once, shared with 8-10) `modify_host()+sync_device()` on `uv`/`uv_rhs`/`d_eta`/`ssh_rhs_old`/`helem`/`hbar` (L28); `mod_dev(ssh_rhs)`; OUT `sync_host(ssh_rhs)` before the nod2D halo (`h_checked`). The CG reads `ssh_rhs` at OWNED rows only → no re-push after the halo. Serial bit-identical; OpenMP/CUDA climate-close (the scatter, ≈4e-11 abs / ≈1e-17 rel). |
+| 8 | ✅ **`ssh_solve_cg_kk` (M4.2 — DONE)** — CG w/ `MPI_Allreduce` dots | set-once stiffness CSR (`rowptr`/`colind`/`values`/`pr_values`, pushed once in the preconditioner); dyn `ssh_rhs`, `d_eta` (warm start); scratch `rr`/`zz`/`pp`/`App` | dyn `d_eta` | nod2D `d_eta` (driver, after) | **HOST loop control + DEVICE vector kernels.** SpMV = per-row CSR GATHER (race-free → Serial AND OpenMP bit-identical); dots = the FIRST `Kokkos::parallel_reduce` (Serial seq reduce == C → bit-identical; OpenMP/CUDA climate-close — the FP reduction assoc., the CG's GPU non-determinism source) + the unchanged scalar `MPI_Allreduce`; AXPYs = maps. **CG owns the per-iter `pp`/`rr`/`X` halo brackets** (D21, host-staged, no-op np==1). Exit `EXCH(X)` dropped (idempotent w/ the driver halo); ends `mod_dev(d_eta)`. Driver OUT `sync_host(d_eta)` + nod2D halo. |
+| 9 | ✅ **`update_vel_kk` (M4.2 — DONE)** | dyn `uv_rhs`,`d_eta` (re-pushed after its halo — read at the 3 vertices incl. HALO, L30); set-once `gradient_sca`/`elem_nodes`/levels | dyn `uv` | elem3D `uv` | **device race-free per-element map** (no scatter → Serial AND OpenMP bit-identical). Driver: `d_eta` `modify_host()+sync_device()` (L30 re-push) → `update_vel_kk` (`mod_dev(uv)`) → `sync_host(uv)` before the elem3D halo. |
+| 10| ✅ **`compute_hbar_kk` (M4.2 — DONE)** | dyn `uv` (re-pushed after its elem3D halo, reads it at interior `edge_tri`, L30); mesh `hbar` (read at [0,N_alloc)), `helem` + set-once `edges`/`edge_tri`/`edge_cross_dxdy`/`areasvol`/`ulevels_nod2D`/levels | dyn `ssh_rhs_old`; mesh `hbar`,`hbar_old` | nod2D `ssh_rhs_old`,`hbar` | **device EDGE→NODE SCATTER (`atomic_add`, D22) into `ssh_rhs_old` + the `hbar_old=hbar` / `hbar` update maps** (3 launches, barrier-ordered, D20). Driver: re-push `uv` → `compute_hbar_kk` (`mod_dev(ssh_rhs_old,hbar,hbar_old)`) → `sync_host` all 3 → halo `ssh_rhs_old`,`hbar`. Serial bit-identical; OpenMP/CUDA climate-close (the scatter). |
+| 11| `eta_n` inline — **STAYS HOST** (M4.2 decision, L41) | mesh `hbar`,`hbar_old` (host-current after row-10 OUT rails),`ulevels_nod2D` | dyn `eta_n` | (covered) | **Kept host** (row 11 sanctions it): trivial nod2D map reading `hbar`/`hbar_old` (`sync_host`'d for their halos anyway) → `eta_n` (next-step substep-4 IN rail pushes it to device regardless). No NEW round-trip — the CG round-trip (rows 7-10) is what M4.2 closes. The `FESOM_KK_VERIFY=ssh` block verify replicates this loop so it stays gated. |
 | 12| ✅ **ALE `thickness`/`vert_vel`/`cflz`/`wvel_split` (M2.5 — DONE)** | mesh `hnode` (12a), `helem` + dyn `uv` (+`fer_uv` gm) (12b), set-once `area`/`edges`/`edge_tri`/`edge_cross`/levels; `w`,`cfl_z` (re-read after each driver halo) | mesh `hnode_new` (12a); dyn `w`[,`fer_w` gm] (12b), `cfl_z` (12c), `w_e`,`w_i` (12d) | `w` nod3D[,`fer_w` gm], `cfl_z`, `w_e`, `w_i` (all DRIVER halos — no internal exchange) | **implemented (4 device kernels, each its own rail — NO internal halo, no D21):** 12a `thickness_linfs_kk` IN `modify_host()+sync_device(hnode)`, `mod_dev(hnode_new)`, OUT `sync_host(hnode_new)` (read on HOST by tracer adv/diff substeps 13/13b — see row note); 12b `vert_vel_linfs_kk` IN `uv`(+`fer_uv` if gm), `helem`, **EDGE→NODE SCATTER (`atomic_add`, D22) + per-node level cumsum**, `mod_dev(w[,fer_w])`, OUT `sync_host` before the nod3D halo (`h_checked`); 12c `compute_cflz_kk` IN re-push `w` (just halo'd) + no-op `sync_device(hnode_new)` (Synced from 12a), per-node OWN-column accumulation (NOT a scatter → bit-identical OpenMP), `mod_dev(cfl_z)`, OUT `sync_host`; 12d `compute_wvel_split_kk` (⚠️`use_wsplit=.false.`→`w_e=w,w_i=0`) IN re-push `cfl_z`, pure map, `mod_dev(w_e,w_i)`, OUT `sync_host` before the halos. ⚠️ **GM is ON in pi** → the `fer_*` branch is LIVE (Serial `fer_w` bit-identical, OpenMP climate-close), L34. |
 | 13a| ✅ **bolus add (gm) `fesom_gm_bolus_apply_kk(+1)` (M2.6-c — DONE, now ON DEVICE)** | dyn `fer_uv`,`fer_w` (device GM output, sync_host'd+halo'd in 1b/12b → re-push L30); dyn `uv`,`w`,`w_e` (host-current from update_vel/ALE) | dyn `uv`,`w`,`w_e` (+= fer, in place, device) | — | **device map (L36 — the M2.6-b FCT is now the device consumer of `uv`/`w_e`):** IN `modify_host()+sync_device()` on `uv`/`w`/`w_e`/`fer_uv`/`fer_w` (L28); kernel `uv += fer_uv` (elem), `w`,`w_e += fer_w` (node) over OWNED+HALO; `mod_dev(uv,w,w_e)`; OUT `sync_host(uv,w,w_e)` so the host mirrors the augmented velocity (the next-step substep-3 host readers + the `tradv` C twin which reads host `uv` need it, L38). `uv`/`w`/`w_e` then stay device-current (Synced, augmented) through the whole FCT region (FCT only READS them) until 13c restores them. Pure map → bit-identical Serial AND OpenMP. ⚠️ `feedback_bolus_divergence_balance` honoured (no per-cell clamp). |
 | 13(Redi)| ✅ **GM/Redi diffusion (M2.5b-c — DONE)** `diff_ver_part_redi_expl`/`diff_part_hor_redi` per tracer (T,S), between the host FCT calls | gm `slope_tapered`,`Ki`,`tr_xy`,`tr_z`; tracers `values`(post-FCT),`valuesold`; mesh `hnode`,`hnode_new`,`helem` + set-once `gradient_sca`/`areasvol`/`area`/`zbar`/`edge_*`/`elem_*`/`nod_in_elem2D`/levels | tracers `values` (+= Redi flux, in place) | (internal `tr_xy` elem2D-full, `tr_z` nod3D — see §6); driver `values` nod3D | **implemented (2 device kernels, ⚠️ GM ON L34):** shared IN rail (once) `modify_host()+sync_device()` on `slope_tapered`/`Ki` (re-push — diff_hor reads them at HALO edge-endpoints, L30) + `hnode`/`hnode_new`/`helem`; per-tracer IN `values`(host FCT wrote)/`valuesold` (L28). `diff_ver` = per-node gather + vd_flux → `+= values` (race-free map); `diff_hor` = build `tr_z` + edge→node SCATTER (`atomic_add`, D22) `+= values`. Each kernel OWNS its internal halo (D21): `diff_ver` exchanges `tr_xy`, `diff_hor` exchanges `tr_z` (`tr_xy` flows diff_ver→diff_hor device-current). `mod_dev(values)`; OUT `sync_host(values)` before the host nod3D halo (`h_checked`). `values` read-modify-write → L26 capture-before verify. **Serial bit-identical; OpenMP bit-identical too** (the pi-mesh Redi scatter didn't reorder-diverge; the only whole-run OpenMP floor is the M2.5 vert_vel scatter). |
@@ -201,6 +201,22 @@ CUDA climate-close at the unchanged budget. **The whole ocean step is now device
 1–6, 1b, 12, 13a/13/13(Redi)/13b/13c, 14 — the only host compute left is the §5 mid-step CG round-trip
 (M4.2) + the M4.1 reductions + the ice step.**
 
+**M4.2 put the §5 SSH block (substeps 7–10) on the device — the SYNC_MAP §5 mid-step host CG
+round-trip is CLOSED** (rows 7–10; see §5). `compute_ssh_rhs_linfs_kk` (edge→node scatter +
+linfs map) → `ssh_solve_cg_kk` (host loop control + device SpMV-gather / dot-`parallel_reduce` /
+AXPY kernels, owning its `pp`/`rr`/`X` halo brackets) → `update_vel_kk` (per-element map) →
+`compute_hbar_kk` (edge→node scatter + maps). The driver owns one shared IN rail (push
+`uv`/`uv_rhs`/`d_eta`/`ssh_rhs_old`/`helem`/`hbar`, L28) + per-substep OUT rails (`sync_host` before
+each halo) + the two L30 re-pushes (`d_eta` after its halo for update_vel's vertex reads; `uv` after
+its halo for compute_hbar). The set-once stiffness CSR is pushed once in `fesom_ssh_preconditioner`
+(M4.2-a). **`eta_n` (substep 11) stays HOST** (row 11) — a trivial nod2D map, no new round-trip. The
+dot-product `parallel_reduce` is the FIRST in the port → the CG's GPU non-determinism source (Serial
+bit-identical; OpenMP/CUDA climate-close, D22). Gate `FESOM_KK_VERIFY=ssh` (capture-before over the 7
+read-modify-write outputs): Serial 20×7 `max|Δ|=0`; pi==golden (np=1 + np=2 CMA-off); SYNCCHECK clean;
+OpenMP climate-close (whole-run floor `T`≈1.8e-15 / `Av/Kv`≈2e-17 / `u/v`/`eta`≈1e-18, ≪1e-12, the 2
+SSH scatters + the reduce). **Substeps 1–14 now flow on the device** except the host `eta_n` map, the
+salinity floor (row 13b), and the ice step (§3, M4.3). Lesson **L41**.
+
 ---
 
 ## 3. The sea-ice step — `fesom_ice_step` (`src/fesom_ice.cpp`; ported in M4.3)
@@ -245,20 +261,28 @@ be `→dev`. That is exactly where the SYNCCHECK forcing round-trip sits (§7). 
 
 ---
 
-## 5. The mid-step host round-trip (the CG SSH solver) — explicit
+## 5. The mid-step host round-trip (the CG SSH solver) — ✅ CLOSED at M4.2
 
-The SSH solve (substeps 7–10) is a **parallel CG with `MPI_Allreduce` dot products** and **stays on
-the host through M2 and M3** (ported only at M4.2). So while the ocean kernels around it are on the
-device (after M2), each step does a deliberate host round-trip *in the middle*:
+The SSH solve (substeps 7–10) WAS a **parallel CG with `MPI_Allreduce` dot products** that **stayed on
+the host through M2 and M3** — a deliberate device→host→device round-trip in the middle of the step.
+**M4.2 put it on the device** (`fesom_compute_ssh_rhs_linfs_kk` + `fesom_ssh_solve_cg_kk` +
+`fesom_update_vel_kk` + `fesom_compute_hbar_kk`), so the round-trip is gone: substeps 1–14 now flow on
+the device except the trivial host `eta_n` map (substep 11, row 11 below), the salinity floor (row 13b),
+and the ice step (§3, M4.3).
 
-```
-... momentum on device ... → sync_host(uv_rhs, d_eta)  → [host] compute_ssh_rhs → CG → update inputs
-                            → sync_device(uv, d_eta)    → ... device kernels resume (update_vel) ...
-```
-
-This is **expected, not a regression** (plan §M2 cross-cutting note). State it in the M2 acceptance.
-It disappears at M4.2 when the CG itself moves to device (the dot-product reduction order becomes the
-GPU non-determinism source there).
+The CG is **host loop control + device vector kernels**: the SpMV `App = A·p` is a per-ROW CSR GATHER
+(race-free → Serial AND OpenMP bit-identical), the dot products are the FIRST `Kokkos::parallel_reduce`
+(Serial sequential reduce == the C loop → bit-identical; OpenMP/CUDA climate-close — the **GPU
+non-determinism source for the CG**, the FP reduction associativity, D22 ladder), the AXPYs are maps,
+and the scalar `MPI_Allreduce` per iteration is unchanged. The per-iteration `pp`/`rr`/`X` halo
+exchanges are **D21 brackets OWNED by the CG** (host-staged device→host→MPI→host→device, no-op at
+np==1; GPU-aware MPI = M5). `compute_ssh_rhs` and `compute_hbar` are edge→node SCATTERS (`atomic_add`,
+D22), so M4.2 adds two scatters + the reduce to the OpenMP/CUDA climate-close budget (whole-run OpenMP
+floor rose to `T`≈1.8e-15 / `Av/Kv`≈2e-17 / `u/v`/`eta`≈1e-18 at step 20 — ≪ the ≲1e-12 budget, no
+blow-up). The driver owns the IN rail (push the block's inputs) + the OUT rails (`sync_host` before each
+halo); `d_eta` is re-pushed after its halo (update_vel reads it at HALO vertices, L30), `uv` after its
+halo (compute_hbar reads it, L30). Gate `FESOM_KK_VERIFY=ssh` (substeps 7–11, capture-before over all 7
+read-modify-write outputs): Serial `max|Δ|==0`. Lesson **L41**.
 
 ---
 
