@@ -72,12 +72,11 @@ void fesom_ice_mass_matrix_fill(fesom_ice                    *ice,
     /* (Re-)allocate to ssh_stiff->nnz, zero-initialised. Fortran allocates
      * with the same shape via mass_matrix=0 then accumulates. */
     if (ice->work.fct_massmatrix == NULL) {
-        ice->work.fct_massmatrix = (decltype(ice->work.fct_massmatrix))calloc((size_t)stiff->nnz, sizeof(real_t));
-        if (!ice->work.fct_massmatrix) {
-            fprintf(stderr, "fesom_ice_mass_matrix_fill: out of memory (nnz=%d)\n",
-                    stiff->nnz);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
+        // M1.4: Field owns the storage; raw ptr is a non-owning alias = field.h() (D12). .alloc
+        // zero-inits like calloc and aborts on OOM. The Field is released by fesom_ice_free's
+        // *ice = fesom_ice{}. The == NULL guard still works: the raw alias is NULL until alloc'd.
+        ice->work.fct_massmatrix_fld.alloc("ice.work.fct_massmatrix", (size_t)stiff->nnz);
+        ice->work.fct_massmatrix = ice->work.fct_massmatrix_fld.h();
     } else {
         memset(ice->work.fct_massmatrix, 0, (size_t)stiff->nnz * sizeof(real_t));
     }

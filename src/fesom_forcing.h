@@ -2,6 +2,7 @@
 #define FESOM_FORCING_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M1.4: DualView-backed storage for the persistent forcing arrays
 
 struct fesom_mesh;
 
@@ -44,6 +45,25 @@ typedef struct fesom_forcing {
        temperature tracer equation (oce_ale_tracer.F90:990). */
     real_t *chl;             /* [nod2D]        chlorophyll concentration            */
     real_t *sw_3d;           /* [nod2D * nl]   shortwave T-flux at interfaces        */
+
+    /* ===================== M1.4 · DualView data layer =========================
+     * Each persistent array above is OWNED by the matching fesom::Field below; the
+     * raw pointer is a NON-OWNING alias re-pointed at field.h() right after
+     * field.alloc() in fesom_forcing_alloc (the same pattern proven on the 28 mesh
+     * arrays in M1.2 + 37 dyn/aux/tracers arrays in M1.3, D12/D15). Sizes follow the
+     * halo-sized local extent (node = myDim+eDim, elem = myDim+eDim+eXDim) exactly
+     * as the original calloc (feedback_array_size_vs_reader_loop). These arrays are
+     * written each step through the raw alias (bulk/runoff/analytical/ice fluxes) by
+     * in-place value writes/memset — never re-pointed by a buffer swap — so the alias
+     * stays valid for the whole run. LayoutRight + host mirror == the C flat layout,
+     * so legacy forcing->X[...] keeps working unchanged → Serial stays bit-identical.
+     * No device sync at M1: nothing reads these on device yet (the step-driver sync
+     * discipline for this evolving state lands in M1.5/M2, D15). */
+    fesom::Field heat_flux_fld, water_flux_fld;
+    fesom::Field stress_node_surf_fld, stress_surf_fld;
+    fesom::Field runoff_fld, Ssurf_fld, virtual_salt_fld, relax_salt_fld;
+    fesom::Field Ch_atm_oce_fld, Ce_atm_oce_fld;
+    fesom::Field chl_fld, sw_3d_fld;
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);

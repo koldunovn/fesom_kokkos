@@ -2,8 +2,24 @@
 #define FESOM_ICE_TYPES_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M1.4: DualView-backed storage for the persistent sea-ice arrays
 
 /*
+ * M1.4 · DualView data layer (sea ice). Every persistent pointer array in the four
+ * structs below is OWNED by a matching fesom::Field/IntField member; the legacy raw
+ * pointer is kept as a NON-OWNING alias re-pointed at field.h() right after
+ * field.alloc() in fesom_ice_init (and fesom_ice_mass_matrix_fill for fct_massmatrix)
+ * — the same pattern proven on 28 mesh (M1.2, D12) + 37 dyn/aux/tracers (M1.3, D15)
+ * arrays. These structs are EMBEDDED BY VALUE in the stack-allocated `fesom_ice ice`
+ * (fesom_main.cpp:361), so default-construction runs every nested Field ctor and
+ * `*ice = fesom_ice{}` resets/releases them all (D13). The arrays are written each
+ * step through the raw alias by in-place value writes/memset — never re-pointed by a
+ * buffer swap (audited: all time-history updates such as values_old=values are
+ * element-wise copies) — so the aliases stay valid for the whole run. LayoutRight +
+ * host mirror == the C flat layout → legacy ice->X[...] and the FESOM_* macros keep
+ * working unchanged → Serial stays bit-identical. No device sync at M1 (nothing reads
+ * these on device yet; the EVP/thermo/FCT kernels move to device in M4.3, D15).
+ *
  * Mirror of Fortran T_ICE / T_ICE_DATA / T_ICE_WORK / T_ICE_THERMO from
  * MOD_ICE.F90. Scope cut for the C port (per docs/plans/20260425-sea-ice-port.md):
  *
@@ -32,6 +48,10 @@ typedef struct fesom_ice_data {
     real_t *dvalues;         /* increment / scratch    */
     real_t *valuesl;         /* low-order FCT solution */
     int     id;              /* 0..2, set at init      */
+
+    /* M1.4: Field owners; the raw ptrs above are non-owning aliases = field.h() (D12). */
+    fesom::Field values_fld, values_old_fld, values_rhs_fld;
+    fesom::Field values_div_rhs_fld, dvalues_fld, valuesl_fld;
 } fesom_ice_data;
 
 /*
@@ -56,6 +76,15 @@ typedef struct fesom_ice_work {
     real_t *ice_strength;
     real_t *inv_areamass;
     real_t *inv_mass;
+
+    /* M1.4: Field owners; the raw ptrs above are non-owning aliases = field.h() (D12).
+     * fct_massmatrix is alloc'd lazily in fesom_ice_mass_matrix_fill (sized stiff->nnz),
+     * the others in fesom_ice_init. */
+    fesom::Field fct_tmax_fld, fct_tmin_fld, fct_plus_fld, fct_minus_fld;
+    fesom::Field fct_fluxes_fld, fct_massmatrix_fld;
+    fesom::Field sigma11_fld, sigma12_fld, sigma22_fld;
+    fesom::Field eps11_fld, eps12_fld, eps22_fld;
+    fesom::Field ice_strength_fld, inv_areamass_fld, inv_mass_fld;
 } fesom_ice_work;
 
 /*
@@ -74,6 +103,10 @@ typedef struct fesom_ice_thermo {
     real_t *thdgr_old;
     real_t *ustar;
     real_t *apnd, *hpnd, *ipnd;          /* meltpond fields, zeroed; use_meltponds=false */
+
+    /* M1.4: Field owners for the per-node arrays above; raw ptrs = field.h() aliases (D12). */
+    fesom::Field t_skin_fld, thdgr_fld, thdgrsn_fld, thdgra_fld, thdgr_old_fld;
+    fesom::Field ustar_fld, apnd_fld, hpnd_fld, ipnd_fld;
 
     /* density and inverse (Fortran T_ICE_THERMO:53-57) */
     real_t rhoair,  inv_rhoair;
@@ -148,6 +181,16 @@ typedef struct fesom_ice {
 
     /* diagnostic ice/snow thicknesses h = m / max(a, 1e-3) (nodes) */
     real_t *h_ice, *h_snow;
+
+    /* M1.4: Field owners for the top-level node arrays above; raw ptrs = field.h() (D12). */
+    fesom::Field uice_fld, uice_rhs_fld, uice_old_fld;
+    fesom::Field vice_fld, vice_rhs_fld, vice_old_fld;
+    fesom::Field stress_atmice_x_fld, stress_iceoce_x_fld;
+    fesom::Field stress_atmice_y_fld, stress_iceoce_y_fld;
+    fesom::Field srfoce_temp_fld, srfoce_salt_fld, srfoce_ssh_fld;
+    fesom::Field srfoce_u_fld, srfoce_v_fld;
+    fesom::Field flx_fw_fld, flx_h_fld;
+    fesom::Field h_ice_fld, h_snow_fld;
 
     /* embedded substructs */
     fesom_ice_work   work;

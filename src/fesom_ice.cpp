@@ -32,23 +32,18 @@
  *   - dyngr/dyngrsn/dyngra (CMIP6 output-only).
  *   - atmcoupl substruct.
  *
- * Phase A: fct_massmatrix, inv_areamass, inv_mass left NULL — populated by
- * fesom_ice_setup -> fesom_ice_mass_matrix_fill in Phase E1.
+ * Phase A: fct_massmatrix left NULL — alloc'd lazily by fesom_ice_mass_matrix_fill.
  */
-static real_t *xcalloc(size_t n)
-{
-    real_t *p = (real_t *)calloc(n, sizeof(real_t));
-    FESOM_CHECK(p, "fesom_ice: out of memory (%zu doubles)", n);
-    return p;
-}
-
 void fesom_ice_init(fesom_ice           *ice,
                     struct fesom_partit *partit,
                     struct fesom_mesh   *mesh)
 {
     (void)partit; /* sizes come from mesh; partit kept in signature to mirror Fortran */
 
-    memset(ice, 0, sizeof(*ice));
+    // The struct (and its embedded data[]/work/thermo) holds fesom::Field members (DualView,
+    // non-trivial): a raw memset is UB (L13). Value-initialise instead — zeros every POD and
+    // leaves each nested Field an empty DualView (D13).
+    *ice = fesom_ice{};
 
     /* --- scalar defaults: rheology + dynamics (T_ICE:187-204; namelist.ice) --- */
     ice->pstar           = 30000.0;
@@ -117,77 +112,82 @@ void fesom_ice_init(fesom_ice           *ice,
     size_t e  = (size_t)E;
     size_t e3 = e * 3;
 
+    // M1.4: each Field owns its storage; the raw pointer is a non-owning alias = field.h()
+    // (D12). .alloc(label, count) takes the count in ELEMENTS (== the old xcalloc count) and
+    // zero-inits like calloc → Serial bit-identical. Halo-sized node (n) / element (e, e3) extents
+    // kept verbatim.
     /* --- velocities (T_ICE:132-133, ice_init:719-740) --- */
-    ice->uice            = xcalloc(n);
-    ice->uice_rhs        = xcalloc(n);
-    ice->uice_old        = xcalloc(n);
-    ice->vice            = xcalloc(n);
-    ice->vice_rhs        = xcalloc(n);
-    ice->vice_old        = xcalloc(n);
+    ice->uice_fld.alloc("ice.uice", n);                       ice->uice            = ice->uice_fld.h();
+    ice->uice_rhs_fld.alloc("ice.uice_rhs", n);               ice->uice_rhs        = ice->uice_rhs_fld.h();
+    ice->uice_old_fld.alloc("ice.uice_old", n);               ice->uice_old        = ice->uice_old_fld.h();
+    ice->vice_fld.alloc("ice.vice", n);                       ice->vice            = ice->vice_fld.h();
+    ice->vice_rhs_fld.alloc("ice.vice_rhs", n);               ice->vice_rhs        = ice->vice_rhs_fld.h();
+    ice->vice_old_fld.alloc("ice.vice_old", n);               ice->vice_old        = ice->vice_old_fld.h();
 
     /* --- stresses (T_ICE:136-137) --- */
-    ice->stress_atmice_x = xcalloc(n);
-    ice->stress_iceoce_x = xcalloc(n);
-    ice->stress_atmice_y = xcalloc(n);
-    ice->stress_iceoce_y = xcalloc(n);
+    ice->stress_atmice_x_fld.alloc("ice.stress_atmice_x", n); ice->stress_atmice_x = ice->stress_atmice_x_fld.h();
+    ice->stress_iceoce_x_fld.alloc("ice.stress_iceoce_x", n); ice->stress_iceoce_x = ice->stress_iceoce_x_fld.h();
+    ice->stress_atmice_y_fld.alloc("ice.stress_atmice_y", n); ice->stress_atmice_y = ice->stress_atmice_y_fld.h();
+    ice->stress_iceoce_y_fld.alloc("ice.stress_iceoce_y", n); ice->stress_iceoce_y = ice->stress_iceoce_y_fld.h();
 
     /* --- diagnostic h_ice/h_snow (T_ICE:150) --- */
-    ice->h_ice           = xcalloc(n);
-    ice->h_snow          = xcalloc(n);
+    ice->h_ice_fld.alloc("ice.h_ice", n);                     ice->h_ice           = ice->h_ice_fld.h();
+    ice->h_snow_fld.alloc("ice.h_snow", n);                   ice->h_snow          = ice->h_snow_fld.h();
 
     /* whichEVP != 0 aux fields intentionally NOT allocated (see header). */
 
     /* --- surface ocean state (T_ICE:140-142, ice_init:758-767) --- */
-    ice->srfoce_u    = xcalloc(n);
-    ice->srfoce_v    = xcalloc(n);
-    ice->srfoce_temp = xcalloc(n);
-    ice->srfoce_salt = xcalloc(n);
-    ice->srfoce_ssh  = xcalloc(n);
+    ice->srfoce_u_fld.alloc("ice.srfoce_u", n);               ice->srfoce_u    = ice->srfoce_u_fld.h();
+    ice->srfoce_v_fld.alloc("ice.srfoce_v", n);               ice->srfoce_v    = ice->srfoce_v_fld.h();
+    ice->srfoce_temp_fld.alloc("ice.srfoce_temp", n);         ice->srfoce_temp = ice->srfoce_temp_fld.h();
+    ice->srfoce_salt_fld.alloc("ice.srfoce_salt", n);         ice->srfoce_salt = ice->srfoce_salt_fld.h();
+    ice->srfoce_ssh_fld.alloc("ice.srfoce_ssh", n);           ice->srfoce_ssh  = ice->srfoce_ssh_fld.h();
 
     /* --- fluxes from thermodynamics (T_ICE:145, ice_init:769-772) --- */
-    ice->flx_fw      = xcalloc(n);
-    ice->flx_h       = xcalloc(n);
+    ice->flx_fw_fld.alloc("ice.flx_fw", n);                   ice->flx_fw      = ice->flx_fw_fld.h();
+    ice->flx_h_fld.alloc("ice.flx_h", n);                     ice->flx_h       = ice->flx_h_fld.h();
 
     /* --- ice tracers data[0..2] (ice_init:778-794) --- */
     for (int k = 0; k < FESOM_NUM_ICE_TRACERS; ++k) {
         fesom_ice_data *d = &ice->data[k];
-        d->id              = k;
-        d->values          = xcalloc(n);
-        d->values_old      = xcalloc(n);
-        d->values_rhs      = xcalloc(n);
-        d->values_div_rhs  = xcalloc(n);
-        d->dvalues         = xcalloc(n);
-        d->valuesl         = xcalloc(n);
+        d->id = k;
+        char lbl[48];
+        snprintf(lbl, sizeof lbl, "ice.data%d.values", k);         d->values_fld.alloc(lbl, n);          d->values         = d->values_fld.h();
+        snprintf(lbl, sizeof lbl, "ice.data%d.values_old", k);     d->values_old_fld.alloc(lbl, n);      d->values_old     = d->values_old_fld.h();
+        snprintf(lbl, sizeof lbl, "ice.data%d.values_rhs", k);     d->values_rhs_fld.alloc(lbl, n);      d->values_rhs     = d->values_rhs_fld.h();
+        snprintf(lbl, sizeof lbl, "ice.data%d.values_div_rhs", k); d->values_div_rhs_fld.alloc(lbl, n);  d->values_div_rhs = d->values_div_rhs_fld.h();
+        snprintf(lbl, sizeof lbl, "ice.data%d.dvalues", k);        d->dvalues_fld.alloc(lbl, n);         d->dvalues        = d->dvalues_fld.h();
+        snprintf(lbl, sizeof lbl, "ice.data%d.valuesl", k);        d->valuesl_fld.alloc(lbl, n);         d->valuesl        = d->valuesl_fld.h();
     }
 
     /* --- work arrays (T_ICE_WORK; ice_init:798-830) --- */
     fesom_ice_work *w = &ice->work;
-    w->fct_tmax        = xcalloc(n);
-    w->fct_tmin        = xcalloc(n);
-    w->fct_plus        = xcalloc(n);
-    w->fct_minus       = xcalloc(n);
-    w->fct_fluxes      = xcalloc(e3);            /* (elem_size, 3) → flat e*3 */
-    w->fct_massmatrix  = NULL;                   /* Phase E1: ice_mass_matrix_fill */
-    w->sigma11         = xcalloc(e);
-    w->sigma12         = xcalloc(e);
-    w->sigma22         = xcalloc(e);
-    w->eps11           = xcalloc(e);
-    w->eps12           = xcalloc(e);
-    w->eps22           = xcalloc(e);
-    w->ice_strength    = xcalloc(e);
-    w->inv_areamass    = xcalloc(n);             /* populated by EVPdynamics each step */
-    w->inv_mass        = xcalloc(n);             /* populated by EVPdynamics each step */
+    w->fct_tmax_fld.alloc("ice.work.fct_tmax", n);            w->fct_tmax        = w->fct_tmax_fld.h();
+    w->fct_tmin_fld.alloc("ice.work.fct_tmin", n);            w->fct_tmin        = w->fct_tmin_fld.h();
+    w->fct_plus_fld.alloc("ice.work.fct_plus", n);            w->fct_plus        = w->fct_plus_fld.h();
+    w->fct_minus_fld.alloc("ice.work.fct_minus", n);          w->fct_minus       = w->fct_minus_fld.h();
+    w->fct_fluxes_fld.alloc("ice.work.fct_fluxes", e3);       w->fct_fluxes      = w->fct_fluxes_fld.h();  /* (elem_size,3) → flat e*3 */
+    w->fct_massmatrix  = NULL;                   /* Phase E1: fesom_ice_mass_matrix_fill allocs the Field */
+    w->sigma11_fld.alloc("ice.work.sigma11", e);              w->sigma11         = w->sigma11_fld.h();
+    w->sigma12_fld.alloc("ice.work.sigma12", e);              w->sigma12         = w->sigma12_fld.h();
+    w->sigma22_fld.alloc("ice.work.sigma22", e);              w->sigma22         = w->sigma22_fld.h();
+    w->eps11_fld.alloc("ice.work.eps11", e);                  w->eps11           = w->eps11_fld.h();
+    w->eps12_fld.alloc("ice.work.eps12", e);                  w->eps12           = w->eps12_fld.h();
+    w->eps22_fld.alloc("ice.work.eps22", e);                  w->eps22           = w->eps22_fld.h();
+    w->ice_strength_fld.alloc("ice.work.ice_strength", e);    w->ice_strength    = w->ice_strength_fld.h();
+    w->inv_areamass_fld.alloc("ice.work.inv_areamass", n);    w->inv_areamass    = w->inv_areamass_fld.h();  /* populated by EVPdynamics each step */
+    w->inv_mass_fld.alloc("ice.work.inv_mass", n);            w->inv_mass        = w->inv_mass_fld.h();      /* populated by EVPdynamics each step */
 
     /* --- thermo per-node arrays (ice_init:834-853) --- */
-    th->ustar          = xcalloc(n);
-    th->t_skin         = xcalloc(n);
-    th->thdgr          = xcalloc(n);
-    th->thdgrsn        = xcalloc(n);
-    th->thdgra         = xcalloc(n);
-    th->thdgr_old      = xcalloc(n);
-    th->apnd           = xcalloc(n);
-    th->hpnd           = xcalloc(n);
-    th->ipnd           = xcalloc(n);
+    th->ustar_fld.alloc("ice.thermo.ustar", n);               th->ustar          = th->ustar_fld.h();
+    th->t_skin_fld.alloc("ice.thermo.t_skin", n);             th->t_skin         = th->t_skin_fld.h();
+    th->thdgr_fld.alloc("ice.thermo.thdgr", n);               th->thdgr          = th->thdgr_fld.h();
+    th->thdgrsn_fld.alloc("ice.thermo.thdgrsn", n);           th->thdgrsn        = th->thdgrsn_fld.h();
+    th->thdgra_fld.alloc("ice.thermo.thdgra", n);             th->thdgra         = th->thdgra_fld.h();
+    th->thdgr_old_fld.alloc("ice.thermo.thdgr_old", n);       th->thdgr_old      = th->thdgr_old_fld.h();
+    th->apnd_fld.alloc("ice.thermo.apnd", n);                 th->apnd           = th->apnd_fld.h();
+    th->hpnd_fld.alloc("ice.thermo.hpnd", n);                 th->hpnd           = th->hpnd_fld.h();
+    th->ipnd_fld.alloc("ice.thermo.ipnd", n);                 th->ipnd           = th->ipnd_fld.h();
 
     /*
      * --- Mesh boundary mask (mirrors MOD_ICE.F90:889-895) ---
@@ -461,38 +461,10 @@ void fesom_ice_step(int                            step,
 
 void fesom_ice_free(fesom_ice *ice)
 {
-    free(ice->uice);            free(ice->uice_rhs);  free(ice->uice_old);
-    free(ice->vice);            free(ice->vice_rhs);  free(ice->vice_old);
-    free(ice->stress_atmice_x); free(ice->stress_iceoce_x);
-    free(ice->stress_atmice_y); free(ice->stress_iceoce_y);
-    free(ice->h_ice);           free(ice->h_snow);
-    free(ice->srfoce_u);        free(ice->srfoce_v);
-    free(ice->srfoce_temp);     free(ice->srfoce_salt); free(ice->srfoce_ssh);
-    free(ice->flx_fw);          free(ice->flx_h);
-
-    for (int k = 0; k < FESOM_NUM_ICE_TRACERS; ++k) {
-        fesom_ice_data *d = &ice->data[k];
-        free(d->values);          free(d->values_old);
-        free(d->values_rhs);      free(d->values_div_rhs);
-        free(d->dvalues);         free(d->valuesl);
-    }
-
-    fesom_ice_work *w = &ice->work;
-    free(w->fct_tmax);    free(w->fct_tmin);
-    free(w->fct_plus);    free(w->fct_minus);
-    free(w->fct_fluxes);  free(w->fct_massmatrix);
-    free(w->sigma11);     free(w->sigma12);   free(w->sigma22);
-    free(w->eps11);       free(w->eps12);     free(w->eps22);
-    free(w->ice_strength);
-    free(w->inv_areamass); free(w->inv_mass);
-
-    fesom_ice_thermo *th = &ice->thermo;
-    free(th->ustar);      free(th->t_skin);
-    free(th->thdgr);      free(th->thdgrsn);  free(th->thdgra);
-    free(th->thdgr_old);
-    free(th->apnd);       free(th->hpnd);     free(th->ipnd);
-
-    /* mesh->bc_index_nod2D is owned by mesh; freed by fesom_mesh_free. */
-
-    memset(ice, 0, sizeof(*ice));
+    // Every array (incl. the embedded data[]/work/thermo sub-structs and the lazily-alloc'd
+    // work.fct_massmatrix) is now OWNED by a fesom::Field; the raw pointers are non-owning
+    // aliases, so they must NOT be free()d. `*ice = fesom_ice{}` releases every DualView (Kokkos
+    // refcounting) and zeros the PODs — the assignment IS the release (D13). Mirrors fesom_dyn_free.
+    // mesh->bc_index_nod2D is owned by mesh; freed by fesom_mesh_free.
+    *ice = fesom_ice{};
 }

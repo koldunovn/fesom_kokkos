@@ -305,10 +305,21 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
 **Files:**
 - Modify: `src/fesom_forcing.{h,cpp}`, `src/fesom_ice*.{h,cpp}` (ice state arrays) + call sites
 
-- [ ] convert forcing arrays (`stress_*`, `heat_flux`, `water_flux`, `virtual_salt`, …) —
-      honour halo-sized allocation (`feedback_array_size_vs_reader_loop`)
-- [ ] convert ice state (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work arrays)
-- [ ] verify Serial smoke == golden; `ctest` green — before M1.5
+- [x] convert all 12 `fesom_forcing` arrays (`heat_flux/water_flux/stress_node_surf/stress_surf/
+      runoff/Ssurf/virtual_salt/relax_salt/Ch_atm_oce/Ce_atm_oce/chl/sw_3d`) → `Field` — halo-sized
+      extents kept verbatim (`feedback_array_size_vs_reader_loop`)
+- [x] convert all 49 `fesom_ice` arrays → `Field`: top-level 19 (`uice*/vice*/stress_*/srfoce_*/
+      flx_*/h_ice/h_snow`), `data[3]`×6 (`values/values_old/values_rhs/values_div_rhs/dvalues/
+      valuesl`), `work`×15 (incl. `fct_massmatrix`, lazily alloc'd in `fesom_ice_fct.cpp`),
+      `thermo`×9 per-node (`ustar/t_skin/thdgr*/apnd/hpnd/ipnd`). Embedded-by-value sub-structs +
+      `data[3]` reset/release recursively via one `*ice = fesom_ice{}` (D16/L20)
+- [x] same M1.2/M1.3 pattern (D16): stack structs (`fesom_main.cpp:347/361`), raw alias = `field.h()`
+      set once (no pointer swaps — audited), `memset`→`*x=T{}` (D13), allocate-once/free-once, no
+      Field sync (EVP/thermo/FCT go to device in M4.3)
+- [x] **verify DONE**: Serial np=1 == golden bit-identical; `ctest` 4/4; **np=2 == `…m13_nocma` oracle
+      bit-identical** (CMA-off, L18 — exercises scatter + halo on the new Field-backed forcing/ice +
+      EVP/FCT); **CUDA np=1 (A100) == golden bit-identical** (M1 invariant: device does only deep_copy).
+      Bit-identical on the first gate run. — before M1.5
 
 ### Task M1.5: Sync discipline in the step driver + M1 acceptance
 
