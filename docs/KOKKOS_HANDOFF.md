@@ -8,50 +8,58 @@ branch `master`). Read this first, then `docs/plans/20260525-kokkos-port.md`,
 
 ## 0. TL;DR status
 
-- **M0 + M1.1–M1.5 ALL COMPLETE.** The C++/Kokkos build is bit-for-bit identical to the C golden on
-  **Serial, OpenMP, and CUDA**, and now also on a **full 1-yr CORE2 run** (Serial + OpenMP). At M1
-  there are **no device compute kernels** — Kokkos is initialised, the only device op anywhere is
-  `Kokkos::deep_copy` of `double`/`int` (bitwise-exact), so even CUDA is bit-identical.
-- **M1.1–M1.4 (data migration):** all **126 persistent state arrays** are `fesom::Field`/`IntField`
-  (`Kokkos::DualView<T*, LayoutRight>`)-backed — 28 `fesom_mesh` + 37 `fesom_dyn/aux/tracers` + 12
-  `fesom_forcing` + 49 `fesom_ice` — each with the legacy raw pointer kept as a non-owning
-  `field.h()` alias re-pointed once after `alloc()` (0 call sites changed). Only per-kernel scratch
-  (gm/kpp/ocean-tradv/ssh) remains, deferred to its M2/M4 kernel task.
-- **M1.5 (sync rails) DONE** (commit `e393bc7`): the host↔device sync discipline for the step driver,
-  WITHOUT moving any compute to the device. **Cadence = host-authoritative + LAZY device sync, no
-  eager per-step copies (D17)** — the per-kernel `sync_device(in)/modify_device(out)/sync_host(before
-  halo|I/O)` brackets are owned by each M2/M4 kernel task. M1.5 added only (a) `h_checked()` at
-  representative halo + the whole I/O-gather host entry points (pointer-identical to the raw alias
-  today) and (b) a **`-DFESOM_KK_SYNCCHECK`-only per-step host→device→host round-trip** in
-  `fesom_step`/`fesom_ice`/`fesom_main` — both compiled out / no-op in production. Deliverable:
-  **`docs/SYNC_MAP.md`** (the per-substep currency map). New: decision D17, lessons L21 (assert vs
-  NDEBUG), L22 (the rails are bit-identical by construction).
-- **M1 ACCEPTANCE PASSED** (`docs/M1_ACCEPTANCE.md`, commit `6f3f203` infra): a fresh **1-yr CORE2**
-  C-twin reference (none existed — M0.1 deferred it) at `/scratch/a/a270088/m1_accept/cref` (360-day,
-  dt=1800, 17280 steps, 256 ranks, monthly snaps), and **Kokkos Serial + OpenMP each reproduced it
-  ALL FIELDS BIT-IDENTICAL across all 13 snapshots.** No M1 perf penalty (Serial 1566 s ≈ C twin
-  1574 s — identical host code). **CUDA CORE2 deferred to M3.1** (needs the multi-GPU rank→device
-  mapping); M1 CUDA does zero device compute, so its data-layer identity is mesh-size-independent and
-  already proven on the pi smoke (A100, every milestone). **Tagged `m1-datalayer`.**
-- **NEXT: M2.1** — the FIRST device compute kernel (EOS / pressure_bv / sw_alpha_beta). This is where
-  CUDA bit-identity is **expected to first break** (fma contraction + libdevice transcendentals), and
-  where the validation model shifts from whole-run bit-identity to the per-kernel `FESOM_KK_VERIFY`
-  Serial `max|Δ|==0` gate + the GPU climate-close budget. See §3.
+- **M2.1 COMPLETE — the FIRST device compute kernels (EOS) are live.** `fesom_pressure_bv_kk` and
+  `fesom_compute_sw_alpha_beta_kk` (`src/fesom_eos.cpp`) are Kokkos `parallel_for` over owned nodes
+  (level loops inside the lambda; JM-EOS `KOKKOS_INLINE_FUNCTION` core with `Kokkos::sqrt`). They are
+  the production path from the step driver; the host C twins stay in-tree untouched as the oracle.
+  **The validation model has SHIFTED here** (this is the headline): no longer whole-run bit-identity
+  on every backend — instead **per-kernel `FESOM_KK_VERIFY=eos` Serial `max|Δ|==0`** + Serial/OpenMP
+  whole-run still == golden + **CUDA is now climate-close, NOT bit-identical** (expected; see below).
+- **M2.1 gate — ALL GREEN** (commits `1f0a5e4` flag, `e060473` kernels): `FESOM_KK_VERIFY=eos` all 20
+  pi steps Serial `max|Δ|==0` (density/hpressure/bvfreq/dbsfc/sw_α/sw_β + MLD1); Serial pi == golden
+  and **OpenMP == golden** (both bit-identical — EOS is a pure node map, no reduction, so OpenMP beats
+  the ≲1e-12 budget); `ctest` 4/4; np=2 (CMA-off) == `…m13_nocma` oracle; **SYNCCHECK build runs
+  clean** (the `modify_device→sync_host` rail now makes the `h_checked()` guards do real work — first
+  time the M1.5 plumbing exercised actual device authority) + bit-identical.
+- **CUDA (A100) — the expected first divergence, climate-close** (`runs/pi_check_cuda`): device fma +
+  libdevice `sqrt`/polynomial → `density_m_rho0` Δ≈3e-12 (STABLE across steps), `bvfreq` Δ≈3e-15;
+  `Av/Kv` Δ≈0.095 at ISOLATED nodes (mixing is a threshold function of stratification — a 1e-15
+  `bvfreq` nudge flips a `mo_convect`/KPP convective-adjustment branch; bounded, not growing);
+  `u/v`≈1e-4 by step 20 (slow drift). `diff_snap.py` prints "DIVERGENCE" for any non-zero diff — from
+  M2.1 on, CUDA divergence of THIS shape is a PASS (validation ladder D5). Quant reference saved in
+  project memory `reference-cuda-eos-divergence.md`. True CUDA climate acceptance is the 2-yr/5-yr run
+  (M3.2), not this pointwise smoke.
+- **Determinism knob:** M2.1 adopted **`-ffp-contract=off`** (host compiler; the M2 gate standard,
+  D18). It turned out a **codegen no-op on Levante baseline x86-64** (no `-mfma` in the target ISA →
+  nothing to contract), so the golden + np=2 oracle are byte-identical at the new flag — **no
+  re-capture needed** (L23). Kept anyway as the explicit/portable standard. The real fma divergence is
+  device-only (above).
+- **M0 + ALL of M1 remain COMPLETE** (tags `m0-baseline`, `m1-datalayer`): 126 persistent arrays
+  `fesom::Field`-backed; M1.5 lazy host-authoritative sync rails (D17, `docs/SYNC_MAP.md`); **M1
+  acceptance = 1-yr CORE2 Serial+OpenMP ALL FIELDS BIT-IDENTICAL** to `/scratch/a/a270088/m1_accept/cref`.
+  CUDA CORE2 still deferred to M3.1 (multi-GPU mapping). Only per-kernel scratch (gm/kpp/tradv/ssh)
+  remains un-migrated, each deferred to its own M2/M4 task (EOS had none — per-column temps are
+  lambda-local).
+- **NEXT: M2.2** — PP mixing: `compute_vel_nodes` (node gather), `pp_mixing`, `mo_convect`. See §3.
 
 ## 1. Git state
 
 ```
-HEAD  <handoff> docs: handoff → M1 complete / next M2.1   (this commit)
-      6f3f203   M1.5: add 1-yr CORE2 acceptance infrastructure (cref + Serial/OpenMP jobs, compare, README)
-      e393bc7   M1.5: sync rails + SYNCCHECK plumbing proof + docs/SYNC_MAP.md (host-authoritative, lazy)
-      efcfb4a   docs: handoff → M1.4 done / next M1.5
-      076a56d   M1.4: migrate fesom_forcing + sea-ice to fesom::Field (61 arrays)
-tag   m1-datalayer  → on this milestone (annotated; records the CORE2 acceptance result + CUDA disposition)
+HEAD  <handoff> docs: handoff → M2.1 done / next M2.2   (this commit)
+      e060473   M2.1: EOS on device — first Kokkos compute kernels (pressure_bv + sw_alpha_beta)
+      1f0a5e4   M2.1: adopt -ffp-contract=off (M2 determinism knob) + golden re-verify
+      e35e710   docs: sharpen M2.1 entry points in handoff
+      f45662a   docs: handoff → M1 COMPLETE / next M2.1
+      6f3f203   M1.5: add 1-yr CORE2 acceptance infrastructure
+tag   m1-datalayer  → end of M1 (annotated; CORE2 acceptance + CUDA disposition)
 tag   m0-baseline   → M0 (Serial+OpenMP+CUDA pi bit-identical)
 ```
-Oracles: pi golden `docs/reference/c_baseline_snapshots/pi`; np=2 scatter `/scratch/a/a270088/pi_np2_ref_m13_nocma`
-(CMA-off, L18; old `…_m12` is CMA-tainted); **1-yr CORE2 `/scratch/a/a270088/m1_accept/cref`**. Work
-tree clean. First checkout elsewhere needs `git submodule update --init --recursive`.
+No tag for M2.1 (the M2 milestone tag `m2-ocean-device` is at M2.7, after the whole ocean step is on
+device). Oracles: pi golden `docs/reference/c_baseline_snapshots/pi` (byte-identical at
+`-ffp-contract=off`, L23); np=2 scatter `/scratch/a/a270088/pi_np2_ref_m13_nocma` (CMA-off, L18; old
+`…_m12` CMA-tainted); **1-yr CORE2 `/scratch/a/a270088/m1_accept/cref`** (M1; not re-run at M2.1 — the
+per-kernel `FESOM_KK_VERIFY` gate + pi gate cover M2.1). CUDA smoke `runs/pi_check_cuda` is now
+climate-close, not a bit-identity oracle. Work tree clean. First checkout: `git submodule update --init --recursive`.
 
 ## 2. Build & run (full recipe in `docs/BUILD.md`; MPI caveat in `docs/reference/PROVENANCE.md`)
 
@@ -82,6 +90,10 @@ cmake -S . -B build-synccheck -DCMAKE_BUILD_TYPE=Release -DKokkos_ENABLE_SERIAL=
 cmake --build build-synccheck -j 16
 # run the pi smoke with it: must finish (no SYNCCHECK abort) AND stay bit-identical to the golden.
 
+# --- per-kernel gate (M2.1+): FESOM_KK_VERIFY=<kernel> runs the C twin beside the device kernel
+#     and asserts max|Δ|==0 on Serial. Substring match (eos,pp,...). Run on build-serial: ---
+FESOM_KK_VERIFY=eos ./build-serial/fesom_port <pi mesh> /tmp/pi_v 100 20 10    # expect all steps max|Δ|=0
+
 # --- CUDA (build ONLY the model target — nvcc slow; verify "Built target fesom_port" in the log, L17) ---
 source /sw/etc/profile.levante; module --force purge
 module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
@@ -89,6 +101,9 @@ export NVCC_WRAPPER_DEFAULT_COMPILER=g++
 cmake --build build-cuda --target fesom_port -j 16          # (build-cuda already configured)
 sbatch jobs/job_pi_smoke_gpu                                 # A100 pi smoke → runs/pi_check_cuda
 #   then: diff_snap.py docs/reference/c_baseline_snapshots/pi runs/pi_check_cuda
+#   ⚠️ from M2.1 CUDA is CLIMATE-CLOSE, not bit-identical (EOS on device): expect small bounded
+#   diffs (density~3e-12, Av/Kv~0.1 isolated threshold-flips), NOT "ALL FIELDS BIT-IDENTICAL".
+#   See project memory reference-cuda-eos-divergence.md for the expected shape.
 ```
 ⚠️ After any struct-LAYOUT change, `touch src/*` before building to kill stale `.o` (L18). The 4
 build dirs (`build-serial`, `build-omp`, `build-cuda`, `build-synccheck`) are already configured.
@@ -97,51 +112,48 @@ build dirs (`build-serial`, `build-omp`, `build-cuda`, `build-synccheck`) are al
 then `scripts/m1_accept_compare.sh` — see `docs/M1_ACCEPTANCE.md` (incl. the §ranks same-rank-count
 rule and the §CUDA / M3.1 deferral).
 
-## 3. THE NEXT TASK — M2.1: EOS / pressure_bv / sw_alpha_beta (the FIRST device kernel)
+## 3. THE NEXT TASK — M2.2: PP mixing (`compute_vel_nodes`, `pp_mixing`, `mo_convect`)
 
-Per plan §M2.1 + the M2 cross-cutting notes. **This is a different kind of task from all of M1** —
-the first compute moved onto the device. Expect the validation ladder to change here:
+Per plan §M2.2 + SYNC_MAP §2 rows 3. **The M2.1 EOS kernels are the template** — re-read
+`fesom_pressure_bv_kk`/`fesom_compute_sw_alpha_beta_kk` (`src/fesom_eos.cpp`) and the `fesom_step.cpp`
+substep-1 block as the worked pattern: entity-outer `parallel_for`/level-inner lambda, lambda-local
+scratch, `_kk` twin beside an untouched C twin, the driver-owns-the-rails split, the
+`FESOM_KK_VERIFY=<k>` snapshot/restore gate, decision **D19**.
 
-- **Entry points (`src/fesom_eos.cpp`, signatures in `src/fesom_eos.h`):** `fesom_pressure_bv`
-  (line 78) and `fesom_compute_sw_alpha_beta` (line 323) — both `(const fesom_tracers*, mesh, aux)`:
-  they READ `tracers->data[T/S].values` and WRITE `aux->{density_m_rho0,hpressure,bvfreq}` /
-  `{sw_alpha,sw_beta}` respectively (this read/write set IS the SYNC_MAP §1 rail). The EOS core is
-  `fesom_eos_jm_components` (line 15, the Jackett–McDougall EOS — `sqrt` at line 44 + the JM
-  polynomial; this is the first **GPU rounding/`Kokkos::sqrt`** check). `fesom_smooth_nod3D`
-  (line 226, the bvfreq smoother) has its own `malloc` scratch (`vol`/`work`) — wrap it in `Field`
-  (M1 scope note) if/when it moves to device, else it stays a host op between EOS and its consumers.
-- **Port** `fesom_pressure_bv` to a `parallel_for` over nodes with the level loop inside the lambda
-  (`Kokkos::` math throughout), then `fesom_compute_sw_alpha_beta`. Preserve every constant/loop
-  bound verbatim (re-read `docs/PORTING_LESSONS.md` first). Keep the C twin in-tree (dead-but-diffable)
-  until M2 closes.
-- **The per-kernel gate replaces whole-run bit-identity:** add `FESOM_KK_VERIFY=eos` — run the C twin
-  AND the Kokkos kernel on the same live state and assert `max|Δ|==0` on **Serial** (the in-binary
-  analogue of `exp1_compare_bidiff.py`). Serial must stay `max|Δ|==0`; OpenMP `Δ≲1e-12`; **CUDA is
-  expected to FIRST diverge here** (fma + libdevice ULPs) → acceptance becomes *climate-close*, not
-  bit-identical.
-- **Adopt `-ffp-contract=off` + RE-BASELINE the golden** (deferred from M0.3 explicitly to "when the
-  first kernel lands"): the captured golden was built fma=fast; the kernel-gate determinism knob is
-  `-ffp-contract=off`, so re-capture the pi golden (and note it in PROVENANCE) at that setting when
-  M2.1 lands. This is the M2 determinism foundation — do it as part of M2.1.
-- **Wire the SYNC_MAP §1/§2 rails for EOS** (now they go live): `sync_device(tracers T/S)` before the
-  kernel; `modify_device(density_m_rho0, hpressure, bvfreq, sw_alpha, sw_beta)` after; `sync_host()`
-  those 5 before their halo exchanges (the `h_checked()` guards at `fesom_step.cpp:78,80` will then
-  bite a missing sync under `-DFESOM_KK_SYNCCHECK`). Wrap any EOS scratch in `Field`. Update the
-  `docs/SYNC_MAP.md` row for substep 1 (drop `[H]`) in the same commit.
-- **Gate**: per-change pi gate (§2) stays green on Serial (== re-baselined golden); `FESOM_KK_VERIFY=eos`
-  Serial `max|Δ|==0`; CUDA builds + runs (now climate-close). Commit per step; append lessons.
+- **Entry points (`src/fesom_pp.cpp`):** `fesom_compute_vel_nodes` (L28), `fesom_pp_mixing` (L85),
+  `fesom_mo_convect` (L152). Call sites in `src/fesom_step.cpp`: `compute_vel_nodes` L198 (always-on),
+  `pp_mixing` L206 (only the `FESOM_MIX_SCHEME=PP` branch — KPP is the default at L204), `mo_convect`
+  L211 (always-on, after either scheme).
+- **`compute_vel_nodes`** = a node gather over the `nod_in_elem2D` CSR (reads `dyn->uv` at the
+  surrounding elements, writes `dyn->uvnode[node]`) → `parallel_for` over nodes, accumulate-into-a-
+  local-then-write — **race-free** (each node writes only its own slot). Halo `uvnode` nod3D after.
+- **`pp_mixing`** (Pacanowski–Philander): 3 loops, ⚠️ **preserve the loop-2-before-loop-3 ordering**
+  (a real dependency, not cosmetic). Reads `aux->bvfreq`, `dyn->uvnode`, tracers, forcing; writes
+  `aux->Kv` (node), `aux->Av` (elem). Halos `Kv` nod3D + `Av` elem3D.
+- **`mo_convect`** (convective adjustment): reads `aux->bvfreq,Kv,Av`; writes `aux->Kv,Av`. Halos as
+  above. It is the first **device** reader of `bvfreq` AFTER the host `smooth_nod3D` — so its input
+  rail must `modify_host()+sync_device()` `bvfreq` (smooth wrote it on host), and likely `Kv/Av` too.
+- **Gate**: `FESOM_KK_VERIFY=pp` Serial `max|Δ|==0` — note PP is opt-in, so run the verify with
+  `FESOM_MIX_SCHEME=PP`. The DEFAULT pi gate (KPP) exercises `compute_vel_nodes`+`mo_convect` on the
+  golden path → Serial pi must stay == golden + OpenMP == golden; CUDA climate-close. `ctest` 4/4;
+  np=2 (CMA-off) == oracle; SYNCCHECK clean. Commit per step; append lessons (D/L) in the same commit.
 
 (Optional, if asked: **M3.1 multi-GPU mapping** to unblock the CUDA CORE2 acceptance row — small
 `--kokkos-num-devices`/local-rank→device work + re-run cref/serial at a GPU rank count, §CUDA.)
 
 ## 4. Key paths
 
-- Plan: `docs/plans/20260525-kokkos-port.md` (you are entering §M2.1) · Kokkos lessons:
-  `docs/KOKKOS_PORTING_LESSONS.md` (D1–D17, L1–L22) · Fortran→C traps: `docs/PORTING_LESSONS.md`
+- Plan: `docs/plans/20260525-kokkos-port.md` (you are entering §M2.2; §M2.1 ticked) · Kokkos lessons:
+  `docs/KOKKOS_PORTING_LESSONS.md` (D1–D19, L1–L24) · Fortran→C traps: `docs/PORTING_LESSONS.md`
   (dt=1800 AB2 eps=0.1, tracer stride nl, halo bounds) · **Sync map: `docs/SYNC_MAP.md`** · Acceptance:
   `docs/M1_ACCEPTANCE.md` · Build: `docs/BUILD.md` · Provenance/MPI: `docs/reference/PROVENANCE.md`
+- **Device-kernel worked example (the M2 template, D19): `src/fesom_eos.cpp`** —
+  `fesom_pressure_bv_kk`/`fesom_compute_sw_alpha_beta_kk` (`parallel_for`, lambda-local scratch, `_kk`
+  twin + untouched C twin), the `fesom_eos_verify` `FESOM_KK_VERIFY=eos` gate, and the substep-1 rail
+  block in `src/fesom_step.cpp` (driver IN `modify_host+sync_device`, kernel `mod_dev`, driver
+  `sync_host`, halos via `h_checked`).
 - `Field`: `src/fesom_field.hpp` (incl. `h_checked()` + the `Auth` tag) · its test `tests/test_field.cpp`
-  · migration worked examples `src/fesom_{mesh,dyn,aux,tracers,forcing,ice*}.{h,cpp}` ·
+  · data-migration worked examples `src/fesom_{mesh,dyn,aux,tracers,forcing,ice*}.{h,cpp}` ·
   `mesh_sync_geometry_device` (the one-shot `modify_host()+sync_device()` example, L14) · SYNCCHECK
   round-trips: end of `fesom_timestep` (`fesom_step.cpp`), `fesom_ice_step`, before `fesom_timestep` (`fesom_main.cpp`)
 - C twin (the bit-identity oracle): `/home/a/a270088/port2/fesom2_port/src` (SHA `75de623`), built bin
@@ -153,37 +165,39 @@ the first compute moved onto the device. Expect the validation ladder to change 
 ## 5. NEXT-SESSION PROMPT (paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
-> `git log --oneline -8` to orient. **M0 + ALL of M1 are COMPLETE and tagged `m1-datalayer`**: the
-> C++/Kokkos build is bit-for-bit identical to the C twin on Serial/OpenMP/CUDA (pi) AND on a full
-> **1-yr CORE2** run (Serial+OpenMP, ALL FIELDS BIT-IDENTICAL across 13 monthly snapshots). All 126
-> persistent arrays are `fesom::Field`-backed; the M1.5 sync rails are laid (host-authoritative +
-> lazy, D17; `docs/SYNC_MAP.md`) and proven via `-DFESOM_KK_SYNCCHECK`. CUDA CORE2 is deferred to
-> M3.1 (multi-GPU mapping; M1 CUDA does no device compute → identity is pi-proven and mesh-independent).
+> `git log --oneline -8` to orient. **M0 + ALL of M1 (tag `m1-datalayer`) + M2.1 are COMPLETE.**
+> M2.1 landed the **first device compute kernels** — the EOS (`fesom_pressure_bv_kk`,
+> `fesom_compute_sw_alpha_beta_kk`). The validation model has shifted: Serial/OpenMP stay
+> bit-identical to the golden, the per-kernel **`FESOM_KK_VERIFY=eos` gate is Serial `max|Δ|==0`**
+> (all 20 pi steps), and **CUDA is now climate-close, NOT bit-identical** (density Δ≈3e-12 stable,
+> Av/Kv≈0.1 isolated threshold-flips — the expected first device divergence, D5). `-ffp-contract=off`
+> is adopted (D18; a no-op on baseline x86-64 so the golden is unchanged, L23). SYNCCHECK now does
+> real work (the EOS `modify_device→sync_host` rail) and runs clean.
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run §2 incl. SYNCCHECK + acceptance, the M2.1 task §3)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M2.1; all of M1 is ticked)
-> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← the per-substep host/device currency map (substep 1 = EOS = your first device kernel; §9 kernel-author checklist)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D17, L1–L22) — APPEND every session
-> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride nl, halo bounds) — re-read before touching a kernel
-> - `/home/a/a270088/port_kokkos/src/fesom_eos.cpp` + `src/fesom_eos.h` (the M2.1 kernels: `fesom_pressure_bv` L78, `fesom_compute_sw_alpha_beta` L323, EOS core `fesom_eos_jm_components` L15), `src/fesom_field.hpp` (`Field::d()` device view for the kernel), `src/fesom_step.cpp` (the EOS call sites + the `h_checked()` guards at L78/L80)
-> - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/`
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, the **M2.2 task §3**)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M2.2; §M2.1 ticked)
+> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device currency map (substep 1=EOS DONE is the worked rail; substep 3 = your M2.2 kernels; §9 kernel-author checklist)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D19, L1–L24; **D19 = the M2 kernel-port template**) — APPEND every session
+> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride nl, halo bounds; ⚠️ pp_mixing loop-2-before-loop-3) — re-read before touching a kernel
+> - **TEMPLATE: `/home/a/a270088/port_kokkos/src/fesom_eos.cpp`** (`fesom_pressure_bv_kk`, `fesom_compute_sw_alpha_beta_kk`, `fesom_eos_verify`) + the substep-1 block in `src/fesom_step.cpp` (the driver sync rails) — copy this shape for M2.2
+> - M2.2 targets: `src/fesom_pp.cpp` (`fesom_compute_vel_nodes` L28, `fesom_pp_mixing` L85, `fesom_mo_convect` L152); call sites `src/fesom_step.cpp` L198/L206/L211
+> - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = what climate-close looks like)
 >
-> GOAL — **M2.1: the first device compute kernel** (EOS / `fesom_pressure_bv` / `compute_sw_alpha_beta`).
-> Port them to `parallel_for` over nodes (level loop in the lambda; `Kokkos::` math for the JM-EOS
-> `pow`/`sqrt`). Add an in-binary **`FESOM_KK_VERIFY=eos`** mode that runs the C twin AND the Kokkos
-> kernel on the same state and asserts `max|Δ|==0` on **Serial** (keep the C twin in-tree, dead-but-
-> diffable). **Adopt `-ffp-contract=off` and RE-BASELINE the pi golden** (deferred from M0.3 to "when
-> the first kernel lands" — the kernel-gate determinism knob). Wire the SYNC_MAP §1 rails for EOS
-> (sync_device T/S in; modify_device the 5 aux outputs; sync_host before their halos — the
-> `fesom_step.cpp:78/80` `h_checked()` guards will catch a missing sync under SYNCCHECK). Wrap any EOS
-> scratch in `Field`. **CUDA bit-identity is EXPECTED to first break here** (fma/transcendentals) →
-> acceptance becomes climate-close on CUDA, still `max|Δ|==0` on Serial.
+> GOAL — **M2.2: PP mixing on device.** Port `fesom_compute_vel_nodes` (node gather over
+> `nod_in_elem2D` → `dyn->uvnode`; accumulate-local-then-write, race-free), `fesom_pp_mixing`
+> (⚠️ preserve the loop-2-before-loop-3 order; writes `aux->Kv` node + `aux->Av` elem), and
+> `fesom_mo_convect` (convective adjustment; first device reader of `bvfreq` after the host
+> `smooth_nod3D` → its input rail must `modify_host()+sync_device()` bvfreq). Each gets a `_kk` twin
+> beside its untouched C twin (D19) and an in-binary **`FESOM_KK_VERIFY=pp`** gate (`max|Δ|==0` on
+> Serial; PP is opt-in so run the verify with `FESOM_MIX_SCHEME=PP`). Wire SYNC_MAP §2 row-3 rails
+> in the driver (inputs `→dev`, outputs `mod_dev`, `→host` before halos via `h_checked`). The default
+> pi gate (KPP) exercises `compute_vel_nodes`+`mo_convect` on the golden path.
 >
-> GATE: Serial pi smoke == the (re-baselined) golden + `ctest` 4/4 + np=2 (CMA-off!) == oracle;
-> `FESOM_KK_VERIFY=eos` Serial `max|Δ|==0`; CUDA builds (`--target fesom_port`, L17) + pi smoke runs
-> (climate-close, no longer bit-identical). Recipe in §2. Append every decision/lesson to
-> `docs/KOKKOS_PORTING_LESSONS.md` in the SAME commit; commit per step.
+> GATE: Serial pi smoke == golden + `ctest` 4/4 + np=2 (CMA-off!) == `…m13_nocma` oracle;
+> `FESOM_KK_VERIFY=pp` Serial `max|Δ|==0`; OpenMP == golden; SYNCCHECK clean; CUDA builds
+> (`--target fesom_port`, L17) + pi smoke runs (climate-close). Recipe in §2. Append every
+> decision/lesson to `docs/KOKKOS_PORTING_LESSONS.md` in the SAME commit; commit per step.
 >
 > INVARIANTS: never simplify physics; preserve every constant/loop bound verbatim. The Serial backend
 > stays the bit-identity oracle (`max|Δ|==0` vs the C twin) for every kernel. C twin oracle:
