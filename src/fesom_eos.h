@@ -45,6 +45,18 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
                        struct fesom_aux           *aux);
 
 /*
+ * M2.1 DEVICE kernel twin of fesom_pressure_bv (Kokkos parallel_for over owned
+ * nodes; level loops inside the lambda; verbatim arithmetic). Production path
+ * from M2.1. Requires its inputs (tracers T/S, mesh hnode) device-current — the
+ * step driver's EOS input rail (sync_device) supplies that; marks its aux
+ * outputs modify_device(). See docs/SYNC_MAP.md §1. The host C twin above stays
+ * in-tree as the FESOM_KK_VERIFY=eos oracle until M2 closes.
+ */
+void fesom_pressure_bv_kk(const struct fesom_tracers *tracers,
+                          const struct fesom_mesh    *mesh,
+                          struct fesom_aux           *aux);
+
+/*
  * Area-weighted node-patch horizontal smoother — port of smooth_nod3D
  * (gen_support.F90:99-198). Smooths `arr` [(myDim+eDim)*nl] in place with
  * `n_smooth` sweeps, each an element-patch area-weighted average followed by a
@@ -79,5 +91,23 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
 void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
                                  const struct fesom_mesh    *mesh,
                                  struct fesom_aux           *aux);
+
+/* M2.1 DEVICE kernel twin of fesom_compute_sw_alpha_beta (Kokkos parallel_for).
+ * Production path; marks sw_alpha/sw_beta modify_device(). See docs/SYNC_MAP.md §1. */
+void fesom_compute_sw_alpha_beta_kk(const struct fesom_tracers *tracers,
+                                    const struct fesom_mesh    *mesh,
+                                    struct fesom_aux           *aux);
+
+/*
+ * FESOM_KK_VERIFY=eos in-binary per-kernel gate: runs the host C twins and diffs
+ * them against the Kokkos production result already in aux, reporting max|Δ| per
+ * field and asserting max|Δ|==0 on the Serial backend. Diagnostic only (env-gated),
+ * and non-intrusive — it restores the Kokkos result into aux before returning.
+ * Call AFTER the *_kk kernels + their output sync_host(). step_n is for the log.
+ */
+void fesom_eos_verify(const struct fesom_tracers *tracers,
+                      const struct fesom_mesh    *mesh,
+                      struct fesom_aux           *aux,
+                      int step_n);
 
 #endif /* FESOM_EOS_H */

@@ -8,12 +8,15 @@
 #SBATCH -o /home/a/a270088/port_kokkos/runs/pi_gpu.%j.out
 #SBATCH -e /home/a/a270088/port_kokkos/runs/pi_gpu.%j.err
 #
-# M0 CUDA bit-identity smoke: run the CUDA full-model build on an A100 over the pi mesh,
-# same args as the golden capture (dt=100, 20 steps, snap_every=10, analytical forcing).
-# At M0 NO compute kernels are on the device (all host C-code; Kokkos::Cuda is initialised
-# but runs no parallel_for), so the result must be BIT-IDENTICAL to the C/Serial golden.
+# CUDA pi smoke: run the CUDA full-model build on an A100 over the pi mesh, same args as the
+# golden capture (dt=100, 20 steps, snap_every=10, analytical forcing).
+# NOTE (M2.1+): the EOS kernels (fesom_pressure_bv_kk, sw_alpha_beta_kk) now run ON THE DEVICE,
+# so the result is NO LONGER bit-identical to the Serial golden — it is climate-close (device fma
+# + libdevice sqrt/polynomial ULPs, by design; validation ladder D5). Expect small non-zero diffs
+# in density/bvfreq/sw_* and the fields they feed (rho/hp etc.); they must stay tiny, not blow up.
+# (Through M1 this smoke WAS bit-identical — no device compute then.)
 # Build build-cuda on a login node first (docs/BUILD.md), then: sbatch jobs/job_pi_smoke_gpu
-# Gate afterwards on the login node:
+# Inspect afterwards on the login node (expect small diffs, NOT "BIT-IDENTICAL"):
 #   python scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi runs/pi_check_cuda
 
 ROOT=/home/a/a270088/port_kokkos

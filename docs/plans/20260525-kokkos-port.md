@@ -377,12 +377,22 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - Modify: `src/fesom_eos.cpp` (`fesom_pressure_bv`, `fesom_compute_sw_alpha_beta`),
   `src/fesom_step.cpp` (dispatch + verify hook)
 
-- [ ] port `fesom_pressure_bv` to a `parallel_for` over nodes, level loop in the lambda;
-      `Kokkos::` math for `pow/sqrt` (JM-EOS) — first check of transcendental portability
-- [ ] port `compute_sw_alpha_beta`
-- [ ] add `FESOM_KK_VERIFY=eos` mode: run C twin + Kokkos on the same state, assert `max|Δ|==0` (Serial)
-- [ ] keep the C twin in-tree (dead-but-diffable) until M2 closes
-- [ ] verify: Serial smoke still == golden; OpenMP Δ ≲ 1e-12; CUDA runs — before M2.2
+- [x] `fesom_pressure_bv_kk`: `parallel_for` over owned nodes, level loops inside the lambda;
+      JM-EOS core as a `KOKKOS_INLINE_FUNCTION` (`Kokkos::sqrt`), per-column temporaries lambda-local
+- [x] `fesom_compute_sw_alpha_beta_kk` (`Kokkos::fabs`; pure polynomial map)
+- [x] `FESOM_KK_VERIFY=eos`: runs the host C twin alongside the device kernel on the same live
+      state, reports per-field max|Δ|, asserts `max|Δ|==0` on Serial; non-intrusive (restores the
+      KK result). **All 20 pi steps `max|Δ|==0`** (density/hpressure/bvfreq/dbsfc/sw_α/sw_β + MLD1)
+- [x] C twins (`fesom_pressure_bv`/`fesom_compute_sw_alpha_beta`/`fesom_eos_jm_components`) kept
+      in-tree, untouched, dead-but-diffable until M2 closes (still used at `fesom_main.cpp:468` init)
+- [x] SYNC_MAP §1 rails wired (driver IN `modify_host+sync_device` on T/S/hnode; kernel `mod_dev`
+      outputs; driver `sync_host` all 7 before halos; halos + smoother via `h_checked`); `docs/SYNC_MAP.md`
+      substep-1 row updated; `-ffp-contract=off` adopted + golden re-verified (D18/L23, commit `1f0a5e4`)
+- [x] **verified**: Serial pi == golden (bit-identical, full 20-step `diff_snap`); **OpenMP also
+      bit-identical** (pure map, no reduction — beats the ≲1e-12 budget); `ctest` 4/4; np=2 (CMA-off)
+      == `…m13_nocma` oracle; SYNCCHECK build clean (guard now does real work) + bit-identical;
+      **CUDA (A100) builds + runs + climate-close** (density Δ≈3e-12 stable; Av/Kv ≈0.095 isolated
+      threshold-flips, bounded; no blow-up — the expected first CUDA divergence, D5) — → M2.2
 
 ### Task M2.2: PP mixing (`compute_vel_nodes` gather, `pp_mixing`, `mo_convect`)
 

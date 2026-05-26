@@ -25,6 +25,7 @@
 #include "fesom_tracers.h"
 
 #include <stdlib.h>
+#include <cstring>   /* strstr — FESOM_KK_VERIFY substring match (M2.1) */
 
 #ifdef FESOM_KK_SYNCCHECK
 /* M1.5 plumbing proof (docs/SYNC_MAP.md §"Proving the rails"). Bounce a representative set of the
@@ -113,28 +114,64 @@ int fesom_timestep(int                          step_n,
         s_mix_env_loaded = 1;
     }
 
-    /*  1. EOS + hydrostatic pressure + N²  */
-    fesom_pressure_bv(tracers, mesh, aux);
+    /* M2.1 per-kernel gate: FESOM_KK_VERIFY=eos runs the host C twin alongside the Kokkos EOS
+     * kernels and asserts max|Δ|==0 on Serial (the in-binary exp1_compare_bidiff). Substring match
+     * so FESOM_KK_VERIFY=eos,pp,... works. Cached like the other env knobs. */
+    static int s_verify_loaded = 0;
+    static int s_verify_eos    = 0;
+    if (!s_verify_loaded) {
+        const char *e = getenv("FESOM_KK_VERIFY");
+        s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
+        s_verify_loaded = 1;
+    }
+
+    /*  1. EOS + hydrostatic pressure + N² — M2.1: the FIRST device kernels.
+     *  SYNC_MAP §1 INPUT rail: tracers T/S and mesh hnode are host-written via the raw alias each
+     *  step, which the DualView cannot see (L14), so mark them host-dirty and push to the device
+     *  before the kernels. Mesh Z/ulevels/nlevels are set-once + already device-current
+     *  (mesh_sync_geometry_device). On Serial/OpenMP host==device so every sync below is a no-op
+     *  (run stays bit-identical); the rail only moves bytes on CUDA. */
+    {
+        auto &tT = tracers->data[FESOM_TRACER_T].values_fld;
+        auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
+        tT.modify_host(); tT.sync_device();
+        tS.modify_host(); tS.sync_device();
+        mesh->hnode_fld.modify_host(); mesh->hnode_fld.sync_device();
+    }
+    fesom_pressure_bv_kk(tracers, mesh, aux);   /* device: density_m_rho0/hpressure/bvfreq/dbsfc/MLD1 */
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
      * Mirror of Fortran oce_ale.F90:3475 sw_alpha_beta. */
-    fesom_compute_sw_alpha_beta(tracers, mesh, aux);
+    fesom_compute_sw_alpha_beta_kk(tracers, mesh, aux);   /* device: sw_alpha/sw_beta */
+    /* SYNC_MAP §1 OUTPUT rail: the kernels marked these modify_device(); pull them to the host
+     * before the host halo exchanges + smooth_nod3D + the GM/PP/KPP consumers that read via the raw
+     * alias. dbsfc has no halo but KPP bldepth reads it on host; MLD1_ind has no halo but GM
+     * init_Redi_GM reads it on host — sync both here too. (No-ops on Serial/OpenMP.) */
+    aux->density_m_rho0_fld.sync_host();
+    aux->hpressure_fld.sync_host();
+    aux->bvfreq_fld.sync_host();
+    aux->sw_alpha_fld.sync_host();
+    aux->sw_beta_fld.sync_host();
+    aux->dbsfc_fld.sync_host();
+    aux->MLD1_ind_fld.sync_host();
+    /* In-binary per-kernel gate (Serial max|Δ|==0); non-intrusive (restores the Kokkos result).
+     * Reads aux host-current (just synced above). */
+    if (s_verify_eos) fesom_eos_verify(tracers, mesh, aux, step_n);
     /* exchange the per-node 3D outputs (Fortran oce_ale_pressure_bv.F90:2844-).
-     * M1.5: representative host entry points routed through Field::h_checked() — pointer-identical
-     * to the raw alias today (so the production build is unchanged), but under -DFESOM_KK_SYNCCHECK
-     * it aborts if the field is device-authoritative and un-synced before this halo read. When EOS
-     * moves to the device (M2.1) these halos will require a sync_host() first; the guard catches a
-     * forgotten one (docs/SYNC_MAP.md §1). h() retained where the routing isn't illustrated. */
+     * All five EOS-output halos now read through Field::h_checked(): pointer-identical to the raw
+     * alias (production unchanged), but under -DFESOM_KK_SYNCCHECK each aborts if the field is still
+     * device-authoritative — i.e. if the output sync_host() above were forgotten now that EOS runs
+     * on the device (docs/SYNC_MAP.md §1). */
     fesom_exchange_nod3D(aux->density_m_rho0_fld.h_checked(), nl, p);
-    fesom_exchange_nod3D(aux->hpressure,      nl, p);
+    fesom_exchange_nod3D(aux->hpressure_fld.h_checked(),      nl, p);
     fesom_exchange_nod3D(aux->bvfreq_fld.h_checked(),         nl, p);
-    fesom_exchange_nod3D(aux->sw_alpha,       nl, p);
-    fesom_exchange_nod3D(aux->sw_beta,        nl, p);
+    fesom_exchange_nod3D(aux->sw_alpha_fld.h_checked(),       nl, p);
+    fesom_exchange_nod3D(aux->sw_beta_fld.h_checked(),        nl, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
      * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). The exchange above
      * populated the halo bvfreq the sweep reads (Fortran fills bvfreq on
      * myDim+eDim then smooths); fesom_smooth_nod3D re-exchanges after. Must precede
      * every bvfreq consumer (GM, PP/KPP, mo_convect). */
-    fesom_smooth_nod3D(aux->bvfreq, nl, 1, mesh, p);
+    fesom_smooth_nod3D(aux->bvfreq_fld.h_checked(), nl, 1, mesh, p);
 
     /*  1b. GM/Redi prerequisites + per-step coefficient builder +
      *      streamfunction solve + bolus velocity reconstruction

@@ -74,7 +74,7 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 
 | # | Kernel (M2 task) | Reads | Writes | Halo after | M2/M4 sync to add |
 |---|---|---|---|---|---|
-| 1 | `pressure_bv`, `sw_alpha_beta` (M2.1) | tracers T/S `values`; mesh `zbar/Z`, geometry | aux `density_m_rho0`, `hpressure`, `bvfreq`, `sw_alpha`, `sw_beta` | nod3D ×5, then `smooth_nod3D(bvfreq)` | `→dev(T,S)`; `mod_dev(density,hpressure,bvfreq,sw_*)`; `→host` the 5 before the halos |
+| 1 | ✅ **`pressure_bv_kk`, `sw_alpha_beta_kk` (M2.1 — DONE, first device kernels)** | tracers T/S `values`; mesh `hnode`, `Z`, set-once `ulevels/nlevels_nod2D` | aux `density_m_rho0`, `hpressure`, `bvfreq`, `dbsfc`, `MLD1_ind`, `sw_alpha`, `sw_beta` | nod3D ×5 (density/hpressure/bvfreq/sw_α/sw_β), then `smooth_nod3D(bvfreq)` | **implemented:** driver IN rail `modify_host()+sync_device()` on `T,S,hnode` (host-written via raw alias, L14; `Z/ulevels/nlevels` already device-current from the one-shot push); kernels `mod_dev` their outputs; driver `sync_host()` all 7 outputs (incl. non-halo `dbsfc`→KPP, `MLD1_ind`→GM) before the halos; all 5 halo reads + `smooth_nod3D` routed through `h_checked()` |
 | 1b| GM/Redi prereq (M2.5b) `sigma_xy`/`neutral_slope`/`init_redi_gm`/`fer_solve_gamma`/`fer_gamma2vel` | aux `density`,`sw_*`; tracers; mesh | gm scratch (`fer_K/C/gamma/...`), dyn `fer_uv` | (internal) | `→dev` aux+tracers; `mod_dev(fer_uv,fer_w)`; wrap gm scratch in `Field` (deferred from M1) |
 | 2 | `pressure_force_linfs_fullcell` (M2.4) | aux `density_m_rho0`,`hpressure`; mesh | aux `pgf_x`,`pgf_y` | elem3D ×2 | `→dev(density,hpressure)`; `mod_dev(pgf_x,pgf_y)`; `→host(pgf_*)` before halos |
 | 3 | `compute_vel_nodes` (M2.2) | dyn `uv`; mesh `nod_in_elem2D` CSR | dyn `uvnode` | nod3D `uvnode` | `→dev(uv)`; `mod_dev(uvnode)`; `→host(uvnode)` before halo |
@@ -95,9 +95,14 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 13c| bolus sub (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (restore) | — | mirror of 13a |
 | 14| `ale_commit_thickness` (M2.5) | mesh `hnode_new` | mesh `hnode`,`helem` | `hnode` nod3D, `helem` elem3D | `→dev(hnode_new)`; `mod_dev(hnode,helem)`; `→host` before halos |
 
-At M1 the whole column is `[H]`. The **`h_checked()` guards** are installed at the §1 (density,
-bvfreq), §9 (uv) and §13-T (values) halos in `fesom_step.cpp` as worked examples; the rest are
-added as each kernel lands.
+At M1 the whole column was `[H]`. **M2.1 landed substep 1 (EOS) — the first LIVE rail:** its
+inputs are pushed to the device and its outputs round-trip back to the host before the halos, so
+substep 1 is the worked example of the §9 checklist in action (the rest of the column is still
+`[H]` until its kernel lands). The **`h_checked()` guards** at the §1 halos (all 5 EOS outputs +
+`smooth_nod3D`) now actually transition `Device→Synced` each step under `-DFESOM_KK_SYNCCHECK` and
+would abort if the output `sync_host()` were dropped — verified: the SYNCCHECK pi smoke runs clean
+(no abort) and bit-identical. The §9 (uv) and §13-T (values) guards remain installed as forward
+worked examples until M2.2/M2.6 wire their rails.
 
 ---
 
