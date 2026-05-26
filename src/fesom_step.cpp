@@ -123,11 +123,13 @@ int fesom_timestep(int                          step_n,
     static int s_verify_pp     = 0;
     static int s_verify_kpp    = 0;
     static int s_verify_pgf    = 0;   /* M2.4 substep 2 */
+    static int s_verify_ivisc  = 0;   /* M2.4 substep 6 */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
         s_verify_kpp = (e && strstr(e, "kpp")) ? 1 : 0;   /* safe: kpp is not a substring of pp */
         s_verify_pgf = (e && strstr(e, "pgf")) ? 1 : 0;   /* M2.4: no substring collision */
+        s_verify_ivisc = (e && strstr(e, "ivisc")) ? 1 : 0;   /* M2.4: distinct from vfilt */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -316,9 +318,30 @@ int fesom_timestep(int                          step_n,
      * reads through the TDMA SpMV. */
     fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);
 
-    /*  6. implicit vertical viscosity TDMA  */
-    fesom_impl_vert_visc(mesh, aux, forcing, dyn);
-    fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);
+    /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
+     *  SYNC_MAP §2 row 6. IN rail: sync ALL inputs explicitly (L28) — uv_rhs (the
+     *  read-modify-write target; host-written by visc_filt_bidiff + halo, substep 5),
+     *  uv (last step's update_vel + halo + bolus), Av (KPP/PP device output, sync_host'd
+     *  + halo'd substep 3), helem (evolving mesh, last step's commit + halo — NOT in the
+     *  one-shot push), w_i (read at the 3 vertices incl. HALO nodes — w_e/w_i halo'd
+     *  substep 12 of the prev step), forcing stress_surf (host-produced in main; const →
+     *  localized const_cast). zbar + elem_nodes/ulevels/nlevels are set-once device-current. */
+    std::vector<real_t> ivv_uv_rhs_in;
+    if (s_verify_ivisc) {
+        const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;
+        ivv_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before */
+    }
+    dyn->uv_rhs_fld.modify_host(); dyn->uv_rhs_fld.sync_device();
+    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
+    aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
+    mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
+    {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
+        fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();   }
+    fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
+    dyn->uv_rhs_fld.sync_host();                        /* OUT rail: before the elem3D halo */
+    if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
+    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  7. SSH RHS (linfs)  */
     fesom_compute_ssh_rhs_linfs(mesh, dyn);

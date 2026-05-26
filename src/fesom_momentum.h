@@ -61,6 +61,34 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
                           struct fesom_dyn           *dyn);
 
 /*
+ * M2.4 DEVICE kernel twin of fesom_impl_vert_visc — a per-element TDMA: a
+ * Kokkos parallel_for over owned elements with the tridiagonal forward-elim +
+ * back-sub sequential in level INSIDE the lambda, per-column scratch
+ * (zbar_n/Z_n/a/b/c/ur/vr/cp/up/vp, each [64]) lambda-local (the EOS bulk_*[64]
+ * pattern). Each element solves only its own (u,v) columns → race-free, so Serial
+ * AND OpenMP are bit-identical (no scatter/reduction). INPUTS uv_rhs/uv/Av/helem/
+ * stress_surf/w_i must be device-current (driver IN rail, all synced explicitly,
+ * L28); marks uv_rhs modify_device(). See docs/SYNC_MAP.md §2 row 6.
+ */
+void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
+                             const struct fesom_aux     *aux,
+                             const struct fesom_forcing *forcing,
+                             struct fesom_dyn           *dyn);
+
+/*
+ * FESOM_KK_VERIFY=ivisc gate. impl_vert_visc READ-MODIFY-WRITES uv_rhs (reads it to
+ * build the RHS, overwrites it with the TDMA solution), so this is the L26
+ * capture-before pattern: the driver snapshots the PRE-kernel uv_rhs (uv_rhs_in)
+ * before the IN rail; here we snapshot the Kokkos result, restore uv_rhs_in, run
+ * the C twin, diff, restore the Kokkos result. Non-intrusive; max|Δ|==0 on Serial.
+ */
+void fesom_impl_vert_visc_verify(const struct fesom_mesh    *mesh,
+                                 const struct fesom_aux     *aux,
+                                 const struct fesom_forcing *forcing,
+                                 struct fesom_dyn           *dyn,
+                                 int step_n, const real_t *uv_rhs_in);
+
+/*
  * update_vel — apply SSH-gradient correction and add uv_rhs to uv:
  *   uv += uv_rhs - g*theta*dt * grad(d_eta)
  */

@@ -12,9 +12,14 @@
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 
+#include <Kokkos_Core.hpp>   // M2.4: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>            // M2.4: FESOM_KK_VERIFY snapshot buffers (host-only diagnostic)
+#include <string>
+#include <algorithm>
+#include <cstdio>
 
 /*===========================================================================
  * compute_vel_rhs (oce_ale_vel_rhs.F90:35-328)
@@ -459,6 +464,246 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
             dyn->uv_rhs[FESOM_ELEMVEC(e, nz, nl) + 0] = ur[nz];
             dyn->uv_rhs[FESOM_ELEMVEC(e, nz, nl) + 1] = vr[nz];
         }
+    }
+}
+
+/*--- impl_vert_visc — DEVICE kernel (M2.4): per-element TDMA -------------------
+ * Kokkos parallel_for over owned elements; the tridiagonal coefficient build, the
+ * "solve-for-du" conversion, and the Thomas forward-elim + back-sub all run
+ * SEQUENTIALLY IN LEVEL inside the lambda. Each element solves only its own (u,v)
+ * columns → NO cross-element race, so the Serial range == the C-twin loop AND
+ * OpenMP is bit-identical (no scatter/reduction). The per-column scratch
+ * (zbar_n/Z_n/a/b/c/ur/vr/cp/up/vp, each [64]) is lambda-local stack — per-thread
+ * local memory on device (≈ 5 KB/thread, slow-first accepted), exactly the EOS
+ * bulk_*[64] pattern. nl ≤ 48 in Phase 1 so the [64] cap is safe (the C twin's
+ * FESOM_CHECK is host-only; dropped here as in the EOS kernel). `sqrt`→`Kokkos::sqrt`
+ * (host backend == libm IEEE sqrt → Serial bit-identical; CUDA libdevice). Every
+ * constant/bound/association is a verbatim copy of fesom_impl_vert_visc above.
+ *
+ * SYNC contract (SYNC_MAP §2 row 6): INPUTS uv_rhs (read-modify-write), uv, Av (the
+ * KPP/PP device output, sync_host'd+halo'd in substep 3), helem (evolving mesh — NOT
+ * set-once), w_i (read at the 3 vertices incl. halo), forcing stress_surf are pushed
+ * device-current by the driver IN rail (all of them, L28); zbar + elem_nodes/ulevels/
+ * nlevels are set-once device-current. OUTPUT uv_rhs marked modify_device(); the driver
+ * sync_host()s it before the elem3D halo.
+ */
+void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
+                             const struct fesom_aux     *aux,
+                             const struct fesom_forcing *forcing,
+                             struct fesom_dyn           *dyn)
+{
+    const int    E              = mesh->myDim_elem2D;
+    const int    nl             = mesh->nl;
+    const real_t dt             = (real_t)FESOM_PHASE1_DT;
+    const real_t Cd             = (real_t)FESOM_PHASE1_C_D;
+    const real_t inv_density_0  = 1.0 / (real_t)FESOM_DENSITY_0;
+
+    auto ulev   = mesh->ulevels_fld.d();
+    auto nlev   = mesh->nlevels_fld.d();
+    auto elnod  = mesh->elem_nodes_fld.d();
+    auto zbar   = mesh->zbar_fld.d();
+    auto helem  = mesh->helem_fld.d();
+    auto Av     = aux->Av_fld.d();
+    auto uv_rhs = dyn->uv_rhs_fld.d();
+    auto uv     = dyn->uv_fld.d();
+    auto w_i    = dyn->w_i_fld.d();
+    auto stress = forcing->stress_surf_fld.d();
+
+    Kokkos::parallel_for("fesom_impl_vert_visc", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int e) {
+            int nzmin = ulev(e) - 1;
+            int nzmax = nlev(e) - 1;
+            if (nzmax - nzmin < 1) return;          /* C twin: continue */
+
+            int n0 = elnod(3*e + 0);
+            int n1 = elnod(3*e + 1);
+            int n2 = elnod(3*e + 2);
+
+            real_t zbar_n[64], Z_n[64];
+            real_t a[64], b[64], c[64];
+            real_t ur[64], vr[64];
+            real_t cp[64], up[64], vp[64];
+
+            /* Build zbar_n and Z_n from helem upward (lines 3167-3179). */
+            for (int k = 0; k <= nzmax; ++k) zbar_n[k] = 0.0;
+            for (int k = 0; k < nzmax; ++k)  Z_n[k]   = 0.0;
+            zbar_n[nzmax]   = zbar(nzmax);
+            Z_n[nzmax - 1]  = zbar_n[nzmax]
+                            + helem(FESOM_ELEM3D(e, nzmax - 1, nl)) / 2.0;
+            for (int nz = nzmax - 1; nz >= nzmin + 1; --nz) {
+                zbar_n[nz]   = zbar_n[nz + 1] + helem(FESOM_ELEM3D(e, nz,     nl));
+                Z_n[nz - 1]  = zbar_n[nz]     + helem(FESOM_ELEM3D(e, nz - 1, nl)) / 2.0;
+            }
+            zbar_n[nzmin] = zbar_n[nzmin + 1] + helem(FESOM_ELEM3D(e, nzmin, nl));
+
+            /* Tridiagonal coefficients: regular interior (lines 3185-3198). */
+            for (int nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                real_t zinv = dt / (zbar_n[nz] - zbar_n[nz + 1]);
+                a[nz] = -Av(FESOM_ELEM3D(e, nz,     nl)) / (Z_n[nz - 1] - Z_n[nz]) * zinv;
+                c[nz] = -Av(FESOM_ELEM3D(e, nz + 1, nl)) / (Z_n[nz] - Z_n[nz + 1]) * zinv;
+                b[nz] = -a[nz] - c[nz] + 1.0;
+                real_t wu = (w_i(FESOM_NODE3D(n0, nz,     nl))
+                           + w_i(FESOM_NODE3D(n1, nz,     nl))
+                           + w_i(FESOM_NODE3D(n2, nz,     nl))) / 3.0;
+                real_t wd = (w_i(FESOM_NODE3D(n0, nz + 1, nl))
+                           + w_i(FESOM_NODE3D(n1, nz + 1, nl))
+                           + w_i(FESOM_NODE3D(n2, nz + 1, nl))) / 3.0;
+                a[nz] = a[nz] + (wu < 0.0 ? wu : 0.0) * zinv;
+                b[nz] = b[nz] + (wu > 0.0 ? wu : 0.0) * zinv;
+                b[nz] = b[nz] - (wd < 0.0 ? wd : 0.0) * zinv;
+                c[nz] = c[nz] - (wd > 0.0 ? wd : 0.0) * zinv;
+            }
+
+            /* Bottom row (lines 3200-3208). */
+            {
+                int nz = nzmax - 1;
+                real_t zinv = dt / (zbar_n[nz] - zbar_n[nz + 1]);
+                a[nz] = -Av(FESOM_ELEM3D(e, nz, nl)) / (Z_n[nz - 1] - Z_n[nz]) * zinv;
+                b[nz] = -a[nz] + 1.0;
+                c[nz] = 0.0;
+                real_t wu = (w_i(FESOM_NODE3D(n0, nz, nl))
+                           + w_i(FESOM_NODE3D(n1, nz, nl))
+                           + w_i(FESOM_NODE3D(n2, nz, nl))) / 3.0;
+                a[nz] = a[nz] + (wu < 0.0 ? wu : 0.0) * zinv;
+                b[nz] = b[nz] + (wu > 0.0 ? wu : 0.0) * zinv;
+            }
+
+            /* Surface row (lines 3215-3231); zinv_top kept for the wind-stress RHS use. */
+            real_t zinv_top = dt / (zbar_n[nzmin] - zbar_n[nzmin + 1]);
+            {
+                int nz = nzmin;
+                c[nz] = -Av(FESOM_ELEM3D(e, nz + 1, nl)) / (Z_n[nz] - Z_n[nz + 1]) * zinv_top;
+                a[nz] = 0.0;
+                b[nz] = -c[nz] + 1.0;
+                real_t wu = (w_i(FESOM_NODE3D(n0, nz,     nl))
+                           + w_i(FESOM_NODE3D(n1, nz,     nl))
+                           + w_i(FESOM_NODE3D(n2, nz,     nl))) / 3.0;
+                real_t wd = (w_i(FESOM_NODE3D(n0, nz + 1, nl))
+                           + w_i(FESOM_NODE3D(n1, nz + 1, nl))
+                           + w_i(FESOM_NODE3D(n2, nz + 1, nl))) / 3.0;
+                b[nz] = b[nz] + wu * zinv_top;
+                b[nz] = b[nz] - (wd < 0.0 ? wd : 0.0) * zinv_top;
+                c[nz] = c[nz] - (wd > 0.0 ? wd : 0.0) * zinv_top;
+            }
+
+            /* Build RHS from current uv_rhs (lines 3238-3245). */
+            for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                ur[nz] = uv_rhs(FESOM_ELEMVEC(e, nz, nl) + 0);
+                vr[nz] = uv_rhs(FESOM_ELEMVEC(e, nz, nl) + 1);
+            }
+
+            /* Surface forcing (wind stress); element wind stress at index 2*e. */
+            ur[nzmin] += zinv_top * stress(2*e + 0) * inv_density_0;
+            vr[nzmin] += zinv_top * stress(2*e + 1) * inv_density_0;
+
+            /* Bottom drag (lines 3267-3272). */
+            real_t zinv_bot = dt / (zbar_n[nzmax - 1] - zbar_n[nzmax]);
+            {
+                int nz = nzmax - 1;
+                real_t u_bot = uv(FESOM_ELEMVEC(e, nz, nl) + 0);
+                real_t v_bot = uv(FESOM_ELEMVEC(e, nz, nl) + 1);
+                real_t spd   = Kokkos::sqrt(u_bot * u_bot + v_bot * v_bot);
+                real_t friction = -Cd * spd;
+                ur[nz] += zinv_bot * friction * u_bot;
+                vr[nz] += zinv_bot * friction * v_bot;
+            }
+
+            /* Convert "solve for u_new" to "solve for du = u_new - u_old"
+               (lines 3282-3292). */
+            for (int nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                real_t u_up = uv(FESOM_ELEMVEC(e, nz - 1, nl) + 0);
+                real_t v_up = uv(FESOM_ELEMVEC(e, nz - 1, nl) + 1);
+                real_t u_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 0);
+                real_t v_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 1);
+                real_t u_dn = uv(FESOM_ELEMVEC(e, nz + 1, nl) + 0);
+                real_t v_dn = uv(FESOM_ELEMVEC(e, nz + 1, nl) + 1);
+                ur[nz] -= a[nz]*u_up + (b[nz] - 1.0)*u_th + c[nz]*u_dn;
+                vr[nz] -= a[nz]*v_up + (b[nz] - 1.0)*v_th + c[nz]*v_dn;
+            }
+            {
+                int nz = nzmin;
+                real_t u_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 0);
+                real_t v_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 1);
+                real_t u_dn = uv(FESOM_ELEMVEC(e, nz + 1, nl) + 0);
+                real_t v_dn = uv(FESOM_ELEMVEC(e, nz + 1, nl) + 1);
+                ur[nz] -= (b[nz] - 1.0)*u_th + c[nz]*u_dn;
+                vr[nz] -= (b[nz] - 1.0)*v_th + c[nz]*v_dn;
+            }
+            {
+                int nz = nzmax - 1;
+                real_t u_up = uv(FESOM_ELEMVEC(e, nz - 1, nl) + 0);
+                real_t v_up = uv(FESOM_ELEMVEC(e, nz - 1, nl) + 1);
+                real_t u_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 0);
+                real_t v_th = uv(FESOM_ELEMVEC(e, nz,     nl) + 1);
+                ur[nz] -= a[nz]*u_up + (b[nz] - 1.0)*u_th;
+                vr[nz] -= a[nz]*v_up + (b[nz] - 1.0)*v_th;
+            }
+
+            /* Thomas algorithm forward sweep (lines 3301-3312). */
+            cp[nzmin] = c[nzmin] / b[nzmin];
+            up[nzmin] = ur[nzmin] / b[nzmin];
+            vp[nzmin] = vr[nzmin] / b[nzmin];
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                real_t m = b[nz] - cp[nz - 1] * a[nz];
+                cp[nz] = c[nz] / m;
+                up[nz] = (ur[nz] - up[nz - 1] * a[nz]) / m;
+                vp[nz] = (vr[nz] - vp[nz - 1] * a[nz]) / m;
+            }
+            /* Back substitution (lines 3314-3322). */
+            ur[nzmax - 1] = up[nzmax - 1];
+            vr[nzmax - 1] = vp[nzmax - 1];
+            for (int nz = nzmax - 2; nz >= nzmin; --nz) {
+                ur[nz] = up[nz] - cp[nz] * ur[nz + 1];
+                vr[nz] = vp[nz] - cp[nz] * vr[nz + 1];
+            }
+
+            /* Write back into uv_rhs (lines 3328-3331). */
+            for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                uv_rhs(FESOM_ELEMVEC(e, nz, nl) + 0) = ur[nz];
+                uv_rhs(FESOM_ELEMVEC(e, nz, nl) + 1) = vr[nz];
+            }
+        });
+
+    dyn->uv_rhs_fld.modify_device();   /* driver sync_host()s before the elem3D halo */
+}
+
+/*--- FESOM_KK_VERIFY=ivisc (M2.4) --------------------------------------------
+ * impl_vert_visc READ-MODIFY-WRITES uv_rhs (reads it to build the RHS, overwrites
+ * with the TDMA solution), so the C-twin oracle needs the PRE-kernel uv_rhs —
+ * the L26 capture-before pattern (cf. mo_convect). The driver captures uv_rhs_in
+ * before the IN rail; here: snapshot the KK result, restore uv_rhs_in, run the C
+ * twin (reads the restored uv_rhs + the intact uv/Av/stress/w_i/helem), diff,
+ * restore KK. The diff covers the owned uv_rhs [0, myDim_elem2D*nl*2); levels the
+ * kernel leaves untouched match by construction (both keep uv_rhs_in there).
+ * Non-intrusive; asserts max|Δ|==0 on Serial.
+ */
+void fesom_impl_vert_visc_verify(const struct fesom_mesh    *mesh,
+                                 const struct fesom_aux     *aux,
+                                 const struct fesom_forcing *forcing,
+                                 struct fesom_dyn           *dyn,
+                                 int step_n, const real_t *uv_rhs_in)
+{
+    const int nl = mesh->nl;
+    const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;     /* owned uv_rhs */
+
+    std::vector<real_t> kk_uv_rhs(dyn->uv_rhs, dyn->uv_rhs + nvec);      /* KK result (host-synced) */
+    std::copy(uv_rhs_in, uv_rhs_in + nvec, dyn->uv_rhs);                 /* restore the pre-kernel input */
+    fesom_impl_vert_visc(mesh, aux, forcing, dyn);                       /* C twin runs on the input */
+    double dmax = 0.0;
+    for (size_t i = 0; i < nvec; ++i) {
+        double d = std::fabs((double)kk_uv_rhs[i] - (double)dyn->uv_rhs[i]);
+        if (d > dmax) dmax = d;
+    }
+    std::copy(kk_uv_rhs.begin(), kk_uv_rhs.end(), dyn->uv_rhs);          /* restore KK */
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=ivisc] step %d backend=%s  max|Δ|: uv_rhs=%.3e\n",
+                step_n, backend.c_str(), dmax);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=ivisc] FAIL: Serial must be bit-identical to the C twin "
+                             "(max|Δ|=%.3e)\n", dmax);
+        std::abort();
     }
 }
 
