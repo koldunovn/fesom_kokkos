@@ -423,14 +423,23 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Modify: `src/fesom_kpp.cpp` (1046 LoC), `src/fesom_step.cpp`
 
-- [ ] wrap KPP scratch arrays in `Field` (`blmc/ghats`, working profiles) — deferred from M1
-- [ ] port `bldepth/blmix/enhance/combine/wscale/ri_iwmix` etc. as node-parallel kernels;
-      `Kokkos::` math throughout; preserve the `bvfreq` smoothing + bottom-pad fixes
-- [ ] ⚠️ KPP does **6 internal `fesom_exchange_*`** (`fesom_step.c:116` notes this) — add a
-      `sync_host`→halo→`sync_device` bracket at **each** of the 6, as explicit checkboxes; these
-      are M5 candidates for on-device pack/unpack but stay host round-trips here
-- [ ] `FESOM_KK_VERIFY=kpp` Serial `max|Δ|==0` (cross-check vs `kpp_*_xcheck.py` reference dumps)
-- [ ] verify backends — before M2.4
+- [x] **wrapped all 15 KPP scratch arrays in `Field`** (`diffK/viscA/blmc/ghats/dVsq/dkm1/hbl/bfsfc/
+      caseA/stable/ustar/Bo/kbl/wmt/wst`) — M2.3a (`7c55255`), the D12/D16 pattern; pure data-layer,
+      bit-identical. `wmt/wst` set-once → one-shot device push in `fesom_kpp_init`
+- [x] **ported `ri_iwmix`/`bldepth`/`blmix`/`enhance`/`combine`/`viscAE` + the `prestep` as
+      node/elem-parallel `parallel_for`s** (M2.3b, `61a4816`); `kpp_wscale` → a templated
+      `KOKKOS_INLINE_FUNCTION` over the `wmt/wst` device Views; `Kokkos::` math; bvfreq smoothing +
+      bottom-pad preserved verbatim. Multi-launch where an inter-stage dependency needs the barrier (D20)
+- [x] ⚠️ KPP's **internal exchanges = 2 bracket points** (7 `fesom_exchange_nod3D`): `smooth_blmc`
+      (blmc×3 + 3-sweep smoother) + the pre-elem-average (diffK×2/ghats/viscA). Each bracketed
+      `modify_device→sync_host→halo+smooth (h_checked)→modify_host→sync_device` **inside**
+      `fesom_kpp_mixing_kk` (D21 — the kernel owns its exchanges' syncs; the driver owns IN/OUT)
+- [x] `FESOM_KK_VERIFY=kpp` Serial `max|Δ|==0` all 20 pi steps (Kv, Av) — bit-identical first complete
+      run (L29). IN rail syncs ALL 11 inputs explicitly (L28: the Serial gate can't catch a missing one)
+- [x] **verified** (`61a4816`): Serial pi (KPP) == golden (np=1 + np=2 CMA-off); OpenMP == golden;
+      `ctest` 4/4; **SYNCCHECK clean + bit-identical** (internal-bracket + Kv/Av-halo guards transition
+      `Device→Synced`); **CUDA (A100) builds + runs + climate-close** at the unchanged M2.1 budget
+      (Av/Kv ≈0.095 same threshold-flip nodes; no new divergence class, D5) — → M2.4
 
 ### Task M2.4: PGF + momentum RHS + viscosity + implicit vertical viscosity
 
