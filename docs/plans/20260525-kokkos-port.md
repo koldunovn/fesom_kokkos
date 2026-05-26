@@ -543,9 +543,11 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       shortwave penetration + Redi K33; salinity floor kept HOST (L36/L39). Serial `trdiff` 40×`max|Δ|=0`,
       pi==golden (np=1 + np=2 CMA-off), ctest 4/4, SYNCCHECK clean, OpenMP bit-identical, CUDA built.
 - [x] `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`
-- [ ] **M2 acceptance**: full ocean step (minus CG/reductions/ice) on device; Serial 1-yr CORE2
-      bit-identical to C; CUDA 1-yr runs (slow) and is physical. Tag `m2-ocean-device` — before M3
-      *(in progress: acceptance job 25138814 queued on `compute`; GPU smoke 25138812 on `gpu-devel`)*
+- [x] **M2 acceptance**: full ocean step (minus CG/reductions/ice) on device; **Serial 1-yr CORE2
+      bit-identical to C** — job 25138814, all 13 monthly snapshots ALL FIELDS BIT-IDENTICAL to
+      `/scratch/a/a270088/m1_accept/cref` (real JRA55 forcing → exercises the `bc_surface_kk` flux
+      path the pi smoke can't). **Tag `m2-ocean-device`.** CUDA 1-yr CORE2 deferred to M3.2 (only the
+      pi smoke ran on A100 here, climate-close at the unchanged budget); multi-GPU mapping is M3.1.
 
 ## ───────────── M3 · Climate validation on GPU ─────────────
 *Goal: prove the CUDA build reproduces the Fortran climate within the Fortran↔C budget.*

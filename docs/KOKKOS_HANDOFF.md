@@ -1,16 +1,21 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 12 (2026-05-26) — M2.6 COMPLETE (FCT tracer advection + the GM bolus on device — the whole
-ocean substep 13 advection is now device-resident).** Three commits: `d210025` (M2.6-a: Field-wrap the
-12 FCT scratch arrays, bit-identical), `706cd5e` (M2.6-b: `fesom_tracer_advect_one_fct_kk` — the MFCT
-3rd-order H + QR4C V flux-corrected transport, the largest single ported function: ~24 launches owning
-its **3** internal-exchange D21 brackets + **3** edge→node `atomic_add` scatters), `3380108` (M2.6-c:
-`fesom_gm_bolus_apply_kk` — the bolus add/sub moved to device, the L36 deferral resolved now that the
-device FCT consumes `uv`/`w_e`). The FCT landed **Serial bit-identical on the first complete run**
-(`FESOM_KK_VERIFY=tradv` 40 lines `max|Δ|==0`); ⚠️ **both dt=1800 tracer traps preserved** — AB2
-`eps=0.1` (init_AB) and the MFCT gradient-from-`values`/flux-from-`valuesAB` split
-(feedback_mfct_gradient_from_values). OpenMP/CUDA climate-close at the **unchanged M2.5 budget** (the 3
-FCT scatters + the bolus map added no new divergence class on the pi mesh). Repo:
+**Session 13 (2026-05-26) — M2.7 COMPLETE + M2 MILESTONE ACCEPTED (tag `m2-ocean-device`). The whole
+ocean step is now device-resident on the bit-identity oracle.** Commit `6e98fb3` (M2.7:
+`fesom_impl_vert_diff_tracers_kk` — the implicit vertical tracer-diffusion TDMA, the LAST host ocean
+compute in substep 13b, on the device). Per-node TDMA (the L31 `impl_vert_visc`/`fer_solve_gamma` shape
+— the whole Thomas solve sequential in level inside the per-node lambda over 8×`[NL_MAX]` scratch; each
+node owns its column → **race-free, NO scatter → Serial AND OpenMP bit-identical**) + the surface
+heat/water-flux BC (`bc_surface_kk`, a templated `KOKKOS_INLINE_FUNCTION` over the 4 forcing Views) +
+shortwave penetration + the Redi K33 `Ty/Ty1` augmentation (gm-only, empty `dev_view_t` captured when
+`gm==NULL`). **The salinity floor STAYS HOST** (L36/L39 — idempotent clamp; the only device consumer is
+next-step EOS via its own IN-rail re-sync). Landed **Serial bit-identical on the first complete run**
+(`FESOM_KK_VERIFY=trdiff` 40 lines `max|Δ|==0`; all 11 keys together = 460 lines, 0 nonzero).
+**M2 ACCEPTANCE PASSED**: the 1-yr CORE2 Serial run (job 25138814, 27 min, 256 ranks) reproduced all
+**13** monthly snapshots **ALL FIELDS BIT-IDENTICAL** to `/scratch/a/a270088/m1_accept/cref` (real
+JRA55 forcing → exercises the `bc_surface_kk` flux path the zero-flux pi smoke can't) → **tag
+`m2-ocean-device`**. OpenMP bit-identical (no `temp`/`salt` class); CUDA (A100) pi smoke climate-close
+at the **unchanged M2.5/M2.6 budget** (density 3.18e-12 stable, no new divergence class). Repo:
 `/home/a/a270088/port_kokkos` (git, branch `master`). Read this first, then
 `docs/plans/20260525-kokkos-port.md`, `docs/KOKKOS_PORTING_LESSONS.md`, `docs/SYNC_MAP.md`,
 **`docs/SCATTER_STRATEGY.md`**, and the project memory in
@@ -18,6 +23,35 @@ FCT scatters + the bolus map added no new divergence class on the pi mesh). Repo
 
 ## 0. TL;DR status
 
+- **M2.7 COMPLETE + M2 MILESTONE ACCEPTED — tracer diffusion on device; the WHOLE ocean step is now
+  device-resident on Serial** (commit `6e98fb3`; tag `m2-ocean-device`).
+  - **`fesom_impl_vert_diff_tracers_kk`** (`src/fesom_tracer_diff.cpp`, substep 13b) — the implicit
+    vertical tracer-diffusion TDMA (T then S), the LAST host ocean compute. Per-node TDMA (the L31
+    `impl_vert_visc`/`fer_solve_gamma` shape — Thomas sweep sequential in level inside the per-node
+    lambda over 8×`[NL_MAX]` scratch; each node its OWN column → race-free, NO scatter → **Serial AND
+    OpenMP bit-identical**) + the surface heat/water-flux BC (`bc_surface_kk`, a templated
+    `KOKKOS_INLINE_FUNCTION` over the 4 forcing Views) + shortwave penetration + the Redi K33 `Ty/Ty1`
+    augmentation (gm-only; `slope_tapered`/`Ki` captured as default-empty `dev_view_t` when `gm==NULL`,
+    indexed only under the captured `gm_on` int — the first kernel whose gm-dependence lives INSIDE
+    the lambda). Driver IN rail syncs every input the body reads (L28; `forcing` `const`→localized
+    `const_cast`); `values` read-modify-write → `FESOM_KK_VERIFY=trdiff` = L26 capture-before (T AND S).
+  - **The salinity floor STAYS HOST** (L36/L39): idempotent clamp over myDim+eDim; the only device
+    consumer of clamped S is next-step substep-1 EOS via its own IN-rail re-sync — moving it would be a
+    pure round-trip. The device trdiff OUT-rail `sync_host` + the host halo+clamp leaving `values`
+    Synced-but-silently-host-modified is the SAME shape the host trdiff had; only trdiff itself moved.
+  - **M2.7 gate — ALL GREEN**: `FESOM_KK_VERIFY=trdiff` **Serial `max|Δ|==0`** (40 lines = 20 steps ×
+    T,S); all 11 keys together = **460 lines, 0 nonzero**; Serial pi == golden (np=1 **and** np=2
+    CMA-off); `ctest` 4/4; **SYNCCHECK clean + bit-identical**; **OpenMP bit-identical** for the kernel
+    (per-node TDMA is race-free → no `temp`/`salt` divergence; whole-run floor stays the M2.5 vert_vel
+    `w`≈3.4e-21 / `u`≈2.2e-19 — M2.7 added no scatter); **CUDA (A100) pi smoke climate-close** at the
+    UNCHANGED M2.5/M2.6 budget (job `25138812`: density 3.18e-12 STABLE, Av/Kv 0.095 flips, u/v
+    1.8e-4/3.1e-5, pgf ~8e-18, new T/S ULPs 1.9e-11/3.6e-14 feeding the same stable density; **no new
+    divergence class**, D5).
+  - **M2 ACCEPTANCE — PASSED → tag `m2-ocean-device`**: the 1-yr CORE2 **Serial** run (`job 25138814`,
+    256 ranks / 2 `compute` nodes, 27 min, real JRA55 forcing) reproduced **all 13 monthly snapshots
+    ALL FIELDS BIT-IDENTICAL** to `/scratch/a/a270088/m1_accept/cref` (`scripts/m1_accept_compare.sh`).
+    The full ocean step minus the §5 mid-step CG (M4.2) + the M4.1 reductions + the ice step is now
+    device-resident. **CUDA CORE2 stays deferred to M3.1/M3.2** (multi-GPU rank→device mapping).
 - **M2.6 COMPLETE — FCT tracer advection + GM bolus on device** (commits `d210025` wrap, `706cd5e` FCT,
   `3380108` bolus). Ocean **substep 13 is now a DEVICE ISLAND**: bolus-add → FCT(T) → Redi(T) → FCT(S)
   → Redi(S) → [host tracer-diff 13b + sfloor, M2.7] → bolus-sub.
@@ -174,21 +208,32 @@ FCT scatters + the bolus map added no new divergence class on the pi mesh). Repo
   CUDA CORE2 still deferred to M3.1 (multi-GPU mapping). Per-kernel scratch (gm/tradv/ssh) remains
   un-migrated, each deferred to its own M2/M4 task (EOS/PP/momentum had none; **KPP's is done — M2.3a**;
   GM/FCT/CG scratch still pending their M2.5b/M2.6/M4.2 tasks).
-- **NEXT: M2.7** — tracer diffusion (`fesom_impl_vert_diff_tracers`, `src/fesom_tracer_diff.cpp:338`,
-  substep 13b) = per-node TDMA (the L31/`impl_vert_visc`/`fer_solve_gamma` shape) + the surface
-  heat/water-flux BC + the salinity floor (the host loop right after, `src/fesom_step.cpp`). Then **M2
-  acceptance**: the full ocean step (minus the §5 CG + reductions + ice) is on device — run the **1-yr
-  CORE2 Serial bit-identical** gate vs `/scratch/a/a270088/m1_accept/cref` and **tag `m2-ocean-device`**.
-  `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`. See §3.
+- **NEXT: M3.1 or M4.2 (ASK the user — they are independent and either can go first).**
+  - **M4.2 — SSH RHS + CG solver on device** (closes the §5 mid-step host round-trip): the last
+    per-step host compute on the golden path besides the ice step. `compute_ssh_rhs` + the CG iteration
+    (the SpMV `App`, the dot-products → M4.1 reductions, the AXPYs) move to device so substeps 1–14
+    flow without the mid-step device→host→device bounce. **This is the prerequisite for a FAIR
+    multi-GPU CORE2 benchmark** — today the CG round-trips every step, which would dominate GPU
+    runtime. Pairs with M4.1 (device global reductions).
+  - **M3.1 — GPU run configuration (multi-GPU MPI mapping)**: map MPI ranks → GPUs (1 rank/GPU, 4/node
+    on Levante `gpu`), pick `dist_<#gpus>` CORE2 partitions, `cudaSetDevice` via local-rank. Unblocks
+    the CUDA CORE2 acceptance row (M3.2: 2-yr/5-yr GPU climate validation vs `fortran_pp_2yr`). NOTE
+    the GPU-sizing reasoning recorded this session: CORE2 (~127k surface nodes, ~4M wet 3D pts) is
+    bandwidth-bound → ~1 A100 ≈ the 2-node/256-rank CPU job; CORE2 is too small to scale past ~1–2
+    GPUs (the real lever is higher-res meshes). A fair benchmark wants M4.2 done first.
+  - The whole-ocean-step device residency is COMPLETE (M2 done); the remaining host compute is the §5
+    CG + M4.1 reductions + the ice step (M5?). See §3 for the chosen task's detail.
 
 ## 1. Git state
 
 ```
-HEAD  <handoff> docs: handoff → M2.6 done / next M2.7   (this commit)
+HEAD  <handoff> docs: handoff → M2.7 done + M2 accepted / tag m2-ocean-device   (this commit)
+tag   m2-ocean-device → M2 (whole ocean step device-resident; 1-yr CORE2 Serial bit-identical) ← on 6e98fb3
+      6e98fb3   M2.7: implicit vertical tracer diffusion on device (fesom_impl_vert_diff_tracers_kk)
+      217073e   docs: handoff → M2.6 done (FCT advection + GM bolus on device) / next M2.7
       3380108   M2.6-c: GM bolus velocity add/sub on device (fesom_gm_bolus_apply_kk)
       706cd5e   M2.6-b: FCT tracer advection on device (fesom_tracer_advect_one_fct_kk)
       d210025   M2.6-a: Field-wrap the FCT tracer-advection scratch arrays (data layer)
-      6f7ac45   docs: handoff → M2.5b done (GM/Redi on device) / next M2.6 (FCT)
       4bccd69   M2.5b-c: GM/Redi tracer diffusion on device (diff_ver + diff_hor)
       ab57fd6   M2.5b-b: substep-1b GM chain on device (sigma_xy/.../fer_gamma2vel)
       8645824   M2.5b-a: Field-wrap the GM scratch arrays (data layer, bit-identical)
@@ -199,10 +244,9 @@ HEAD  <handoff> docs: handoff → M2.6 done / next M2.7   (this commit)
 tag   m1-datalayer  → end of M1 (annotated; CORE2 acceptance + CUDA disposition)
 tag   m0-baseline   → M0 (Serial+OpenMP+CUDA pi bit-identical)
 ```
-No tag for M2.1–M2.5b (the M2 milestone tag `m2-ocean-device` lands at M2.7, after the whole ocean step
-is on device). CUDA smoke `runs/pi_check_cuda` (M2.5b-c job `25136248`) is climate-close, not a bit oracle.
-No tag for M2.1/M2.2/M2.3 (the M2 milestone tag `m2-ocean-device` is at M2.7, after the whole ocean
-step is on device). Oracles: pi golden `docs/reference/c_baseline_snapshots/pi` (byte-identical at
+`m2-ocean-device` is the M2 milestone tag (annotated, on `6e98fb3`): the whole ocean step is
+device-resident and the 1-yr CORE2 Serial run is bit-identical to the C twin. No intermediate tag for
+M2.1–M2.6 (this single tag covers the whole ocean step). Oracles: pi golden `docs/reference/c_baseline_snapshots/pi` (byte-identical at
 `-ffp-contract=off`, L23); np=2 scatter `/scratch/a/a270088/pi_np2_ref_m13_nocma` (CMA-off, L18; old
 `…_m12` CMA-tainted); **1-yr CORE2 `/scratch/a/a270088/m1_accept/cref`** (M1; not re-run at M2.1–M2.3 —
 the per-kernel `FESOM_KK_VERIFY` gate + pi gate cover them). CUDA smoke `runs/pi_check_cuda` is now
@@ -249,8 +293,12 @@ FESOM_KK_VERIFY=eos,pgf,vrhs,vfilt,ivisc,pp,kpp,ale,gm,tradv ./build-serial/feso
 
 # --- CUDA (build ONLY the model target — nvcc slow; verify "Built target fesom_port" in the log, L17) ---
 source /sw/etc/profile.levante; module --force purge
+# ⚠️ --force purge leaves sticky netcdf-c/cdo/ncview/git loaded on the login shell → the build's
+# netcdf-c/4.8.1 CONFLICTS and nvhpc never loads (nvcc not found → Error 127). Unload them first:
+module unload netcdf-c cdo ncview git 2>/dev/null
 module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
 export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+which nvcc   # sanity: must resolve (…/nvhpc-24.7-…/compilers/bin/nvcc), else the load failed
 cmake --build build-cuda --target fesom_port -j 16          # (build-cuda already configured)
 sbatch jobs/job_pi_smoke_gpu                                 # A100 pi smoke → runs/pi_check_cuda
 #   then: diff_snap.py docs/reference/c_baseline_snapshots/pi runs/pi_check_cuda
@@ -268,35 +316,42 @@ build dirs (`build-serial`, `build-omp`, `build-cuda`, `build-synccheck`) are al
 then `scripts/m1_accept_compare.sh` — see `docs/M1_ACCEPTANCE.md` (incl. the §ranks same-rank-count
 rule and the §CUDA / M3.1 deferral).
 
-## 3. THE NEXT TASK — M2.7: tracer diffusion (per-node TDMA) + M2 acceptance (tag `m2-ocean-device`)
+## 3. THE NEXT TASK — M3.1 or M4.2 (ASK the user; independent, either can go first)
 
-Per plan §M2.7. The LAST ocean compute kernel left on the host in substep 13. In
-**`src/fesom_tracer_diff.cpp`** (`fesom_impl_vert_diff_tracers`, line 338) + `src/fesom_step.cpp`
-substep-13b rails (the `if (!nt_dif_skip)` block + the salinity floor right after it). It runs **every
-step on the golden path** (implicit vertical tracer diffusion, both T and S). ⚠️ **derive each stage's
-shape from the C BODY (L33)** — re-read **D19–D22, L26/L28/L31** (the **per-node TDMA** is the
-`impl_vert_visc`/`fer_solve_gamma` shape — sequential Thomas sweep inside the per-node lambda over
-`[NL_MAX]` column scratch, race-free → Serial AND OpenMP bit-identical) and **`docs/SYNC_MAP.md` row 13b**.
+M2 is DONE: the whole ocean step (substeps 1–6, 1b, 12, 13a/13/13(Redi)/13b/13c, 14) is device-resident
+and tag `m2-ocean-device` is placed. The remaining per-step host compute on the golden path is the §5
+mid-step CG round-trip + the M4.1 global reductions + the ice step. Two candidate next tasks:
 
-Steps (verify key `trdiff` — check no substring collision with eos/pp/kpp/pgf/ivisc/vfilt/vrhs/ale/gm/tradv, L25):
-- **M2.7 — port `impl_vert_diff_tracers`** (per-node TDMA) + the surface heat/water-flux BC + (if it's a
-  separate routine) the Redi K33 diagonal. `_kk` twin beside the C twin (D19), per tracer (T,S). Read the
-  C body for the exact inputs (`tracers` `values`, `aux` `Kv`, `forcing` heat/water flux, mesh `hnode`/
-  `hnode_new`/`area`/levels + `del_ttf`?) and sync EVERY one in the driver IN rail (L28). The **salinity
-  floor** (the host loop in `src/fesom_step.cpp` after 13b) can stay host or move with it — it reads/writes
-  `values` (`S` only); decide from whether a device consumer follows (L36). `values` is read-modify-write
-  → verify = L26 capture-before. `forcing` is `const` in the driver → localized `const_cast` (D21/L31).
-- **Gate** (recipe §2): `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0`; Serial pi == golden (np=1 + np=2
-  CMA-off vs `…m13_nocma`); `ctest` 4/4; SYNCCHECK clean; **OpenMP bit-identical** (per-node TDMA is
-  race-free, no scatter); CUDA builds + climate-close. Commit; append the lesson + update SYNC_MAP row 13b.
-- **M2 ACCEPTANCE** (the milestone gate): the full ocean step (minus the §5 mid-step CG + the M4.1
-  reductions + the ice step) is now on device. Run the **1-yr CORE2 Serial bit-identical** gate vs
-  `/scratch/a/a270088/m1_accept/cref` (`sbatch jobs/job_m1accept_serial`, then `scripts/m1_accept_compare.sh`
-  — see `docs/M1_ACCEPTANCE.md`); it must reproduce all 13 snapshots ALL FIELDS BIT-IDENTICAL. **Tag
-  `m2-ocean-device`.** (CUDA CORE2 stays deferred to M3.1 — multi-GPU rank→device mapping.)
+**Option A — M4.2: SSH RHS + CG solver on device** (plan §M4.2; closes the §5 round-trip).
+- `compute_ssh_rhs` (`src/fesom_ssh.cpp`?) + the CG iteration in `src/fesom_cg.cpp`(?): the SpMV `App`
+  (the SSH stiffness matrix-vector, an edge/elem→node scatter, D22), the dot-products (→ M4.1 device
+  reductions: `Kokkos::parallel_reduce` + an `MPI_Allreduce` on the scalar), the AXPYs (maps). The
+  matrix is set-once (build once on host, push to device). Per-step: RHS → CG loop entirely on device,
+  only the per-iteration scalar `Allreduce` touches the host.
+- **Why this likely first:** it is the prerequisite for a FAIR multi-GPU CORE2 benchmark — today the CG
+  round-trips device→host→device every step (SYNC_MAP §5), which on GPU is a PCIe stall that would
+  dominate. Until M4.2, a CUDA CORE2 timing is measuring transfers, not kernels.
+- Gate: a new `FESOM_KK_VERIFY=cg`(?) Serial `max|Δ|==0` (the CG is deterministic → bit-identical on
+  Serial; the reduction order must match the C — derive from the body, L33); pi == golden (np=1 + np=2);
+  the CG dot-product reduction is the first `parallel_reduce` → watch associativity on OpenMP/CUDA (D22
+  ladder — likely climate-close, not bit-identical, on the threaded/GPU backends).
 
-After M2.7 / M2: **M3.1** (GPU run config / multi-GPU MPI mapping → unblock the CUDA CORE2 acceptance row)
-or **M4.2** (SSH RHS + CG solver on device — closes the §5 mid-step host round-trip). (Optional, ask.)
+**Option B — M3.1: GPU run configuration (multi-GPU MPI mapping)** (plan §M3.1; unblocks M3.2).
+- Map MPI ranks → GPUs: 1 rank/GPU, 4/node on Levante `gpu`; `cudaSetDevice(local_rank)` (Kokkos
+  `--kokkos-device-id` or `Kokkos::initialize` with the device-id from `MPI_COMM_TYPE_SHARED` local
+  rank); pick the `dist_<#gpus>` CORE2 partition. Short multi-GPU smoke on `gpu-devel`; doc `docs/RUN_GPU.md`.
+- Then **M3.2**: 2-yr/5-yr CUDA CORE2 climate validation vs `/scratch/a/a270088/fortran_pp_2yr` (+ KPP
+  ref) — SST/SSS RMS within the Fortran↔C budget; document the GPU↔CPU budget in `docs/GPU_FIDELITY.md`.
+- **GPU-sizing note (recorded this session):** CORE2 is ~127k surface nodes × 48 levels (~4M wet 3D
+  pts), bandwidth-bound → **~1 A100 ≈ the 2-node/256-rank CPU job**; CORE2 is too small to scale past
+  ~1–2 GPUs (occupancy/halo-bound) — the real multi-GPU lever is higher-res meshes. M3.2 measures the
+  real number. A fair benchmark wants M4.2 (the §5 CG) done first.
+
+Standing invariants for either: Serial backend is the bit-identity oracle (`max|Δ|==0` vs the C twin);
+OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); CUDA = climate-close
+(≈ Fortran↔C). Per-kernel `FESOM_KK_VERIFY` gate + pi == golden (np=1 **and** np=2 CMA-off) + `ctest`
+4/4 + SYNCCHECK clean every step; append the lesson to `docs/KOKKOS_PORTING_LESSONS.md` + update
+`docs/SYNC_MAP.md` in the SAME commit; commit per step.
 
 ## 4. Key paths
 
@@ -334,51 +389,50 @@ or **M4.2** (SSH RHS + CG solver on device — closes the §5 mid-step host roun
 ## 5. NEXT-SESSION PROMPT (paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
-> `git log --oneline -10` to orient. **M0 + ALL of M1 (tag `m1-datalayer`) + M2.1 (EOS) + M2.2 (PP) +
-> M2.3 (KPP) + M2.4 (PGF/momentum/viscosity/impl-vert-visc) + M2.5 (ALE) + M2.5b (GM/Redi) + M2.6 (FCT
-> tracer advection + GM bolus) are COMPLETE.** M2.6 (commits `d210025` wrap, `706cd5e` FCT, `3380108`
-> bolus) put the **FCT tracer advection** on the device: `fesom_tracer_advect_one_fct_kk` — the MFCT
-> 3rd-order H + QR4C V flux-corrected transport, the largest single ported function (~24 `parallel_for`
-> launches in ONE function owning its **3** internal-exchange D21 brackets (`fct_LO` nod3D, `tr_xy`
-> `ELEM2D_FULL` at stride **nl**, `fct_plus`+`fct_minus` nod3D) + **3** edge→node `atomic_add` SCATTERS,
-> D22), per tracer (T,S). ⚠️ **both dt=1800 tracer traps preserved** — AB2 `eps=0.1` (init_AB) and the MFCT
-> element gradient from `values` vs flux from `valuesAB` (`feedback_mfct_gradient_from_values`); the Zalesak
-> a3+a4 fused to column-local scratch (L37). M2.6-c moved the **GM bolus add/sub to device**
-> (`fesom_gm_bolus_apply_kk`, the L36 deferral resolved — the FCT is now the device consumer of `uv`/`w_e`;
-> the 13a add `sync_host`s `uv`/`w`/`w_e` so the host mirrors the augmented velocity for the `tradv` C twin
-> + the next-step host readers, L38). Landed **Serial bit-identical on the first complete run**. Validation
-> model: per-kernel **`FESOM_KK_VERIFY=<k>` gate is Serial `max|Δ|==0`** (M2.6 key `tradv`, 40 lines = 20
-> steps × T,S); OpenMP/CUDA climate-close at the **unchanged M2.5 budget** (the 3 FCT scatters + the bolus
-> map added no new divergence class on pi; CUDA density Δ≈3.18e-12, u/v≈3.72e-4/5.87e-5, D5). SYNCCHECK clean.
+> `git log --oneline -10` to orient. **M0 + ALL of M1 (tag `m1-datalayer`) + ALL of M2 (M2.1 EOS, M2.2
+> PP, M2.3 KPP, M2.4 PGF/momentum/viscosity/impl-vert-visc, M2.5 ALE, M2.5b GM/Redi, M2.6 FCT advection +
+> bolus, M2.7 tracer diffusion) are COMPLETE — tag `m2-ocean-device`.** The WHOLE ocean step (substeps
+> 1–6, 1b, 12, 13a/13/13(Redi)/13b/13c, 14) is device-resident. M2.7 (commit `6e98fb3`) put the implicit
+> vertical tracer-diffusion TDMA (`fesom_impl_vert_diff_tracers_kk`, the LAST host ocean compute) on the
+> device: per-node TDMA (the L31 `impl_vert_visc`/`fer_solve_gamma` shape — Thomas sweep sequential in
+> level inside the per-node lambda over 8×`[NL_MAX]` scratch, race-free, NO scatter → Serial AND OpenMP
+> bit-identical) + `bc_surface_kk` (templated `KOKKOS_INLINE_FUNCTION`) + shortwave penetration + the Redi
+> K33 augmentation (gm-only, empty `dev_view_t` captured when `gm==NULL`); the **salinity floor STAYS
+> HOST** (L36/L39). **M2 ACCEPTANCE PASSED**: 1-yr CORE2 Serial (job 25138814) reproduced all 13 monthly
+> snapshots ALL FIELDS BIT-IDENTICAL to `/scratch/a/a270088/m1_accept/cref`. Validation model: per-kernel
+> **`FESOM_KK_VERIFY=<k>` Serial `max|Δ|==0`** (keys eos/pp/kpp/pgf/vrhs/vfilt/ivisc/ale/gm/tradv/**trdiff**;
+> all 11 together = 460 lines, 0 nonzero); OpenMP bit-identical for race-free kernels / climate-close for
+> the scatter/reduce ones (D22); CUDA climate-close at the unchanged budget (density 3.18e-12, D5).
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, the **M2.7 task §3**)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M2.7; §M2.1–§M2.6 ticked)
-> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6, 1b, 12/13a/13(FCT)/13(Redi)/13c/14 DONE are the worked rails; **row 13b (tracer-diff) is your M2.7**; **§6 = intra-kernel exchanges**; **§5 = the mid-step CG host round-trip**; §9 kernel-author checklist)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L38; **D19/D20 = template; D21 = internal-exchange bracket; D22 = scatter/atomic_add; L25 = verify-token collision; L26 = capture-before; L28 = sync ALL inputs; L31 = per-node TDMA (the M2.7 shape); L33 = derive shape from the BODY; L37 = the FCT pipeline; L38 = the bolus + verify-can't-catch-its-own-input**) — APPEND every session
-> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps — tracer stride `nl`; halo bounds; module-default scalars carry physics; the S-floor intent
-> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22** (context only — tracer-diff has NO scatter; the per-node TDMA is race-free)
-> - **THE FILE TO PORT: `/home/a/a270088/port_kokkos/src/fesom_tracer_diff.cpp`** (`fesom_impl_vert_diff_tracers`, line 338 — read the BODY, L33) · call sites in `src/fesom_step.cpp` (substep-13b `if (!nt_dif_skip)` block + the salinity-floor host loop right after) · Fortran ground truth `/home/a/a270088/port2/fesom2/src/oce_ale_tracer.F90` (`diff_tracers_ale` / the implicit vertical solve) — grep the routine names
-> - build/run/VERIFY/SYNCCHECK recipe = handoff **§2** (and `/home/a/a270088/port_kokkos/docs/BUILD.md`); meshes/oracles/C-twin-bin = handoff **§4 Key paths**; M2 acceptance recipe = `docs/M1_ACCEPTANCE.md`
-> - **TEMPLATE: the per-node TDMA shape = `impl_vert_visc_kk` (`src/fesom_momentum.cpp`) + `fer_solve_gamma_kk` (`src/fesom_gm.cpp`)** — Thomas sweep sequential in level INSIDE the per-node lambda over `[NL_MAX]` column scratch, race-free → Serial AND OpenMP bit-identical (L31). The L26 capture-before verify = `fesom_tracer_fct_verify` / `fesom_gm_redi_verify`. Driver rails: the substep blocks in `src/fesom_step.cpp` (D19 IN/OUT, L28 sync ALL inputs, `forcing` `const`→`const_cast` D21)
-> - M2.7 target — `fesom_impl_vert_diff_tracers` (per-node TDMA) + surface heat/water-flux BC + the salinity floor; per tracer (T,S). ⚠️ derive the device-input set from the C body (L33/L28); `values` read-modify-write → L26 capture-before. Then **M2 ACCEPTANCE** = 1-yr CORE2 Serial bit-identical + tag `m2-ocean-device`
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, **the next-task CHOICE §3 — ASK the user: M4.2 or M3.1**)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (§M2 all ticked; you are entering §M3 or §M4)
+> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6, 1b, 12/13a/13/13(Redi)/13b/13c/14 ALL DONE; **§5 = the mid-step CG host round-trip = M4.2**; §6 = intra-kernel exchanges; §9 kernel-author checklist)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L39; **D19/D20 = leaf-kernel template; D21 = internal-exchange bracket; D22 = scatter/atomic_add (the CG dot-product will be the first `parallel_reduce`); L25 = verify-token collision; L26 = capture-before; L28 = sync ALL inputs; L31 = per-node TDMA; L33 = derive shape from the BODY; L39 = M2.7 tracer-diff + the L36 host-vs-device decision**) — APPEND every session
+> - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride `nl`, halo bounds, module-default scalars carry physics)
+> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22** (atomic_add scatters; relevant for M4.2's SpMV `App` + the dot-product reduction)
+> - build/run/VERIFY/SYNCCHECK recipe = handoff **§2** (and `docs/BUILD.md`); meshes/oracles/C-twin-bin = handoff **§4 Key paths**; CORE2 acceptance recipe = `docs/M1_ACCEPTANCE.md`
+> - **TEMPLATE: the M2 device kernels** — `src/fesom_eos.cpp`/`fesom_pp.cpp`/`fesom_kpp.cpp`/`fesom_momentum.cpp`/`fesom_gm.cpp`/`fesom_tracer_adv.cpp`/`fesom_tracer_diff.cpp` (leaf kernels + verifies) + the substep rails in `src/fesom_step.cpp` (D19 IN/OUT, L28 sync ALL inputs, `forcing` `const`→`const_cast`, L26 capture-before for read-modify-write)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = what climate-close looks like)
 >
-> GOAL — **M2.7: tracer diffusion** (`fesom_impl_vert_diff_tracers`, substep 13b, the LAST host ocean
-> kernel → on the golden path, runs every step; Serial pi must stay `== golden`). Port it as a `_kk` twin
-> (D19), per tracer (T,S): the **per-node implicit vertical TDMA** (the `impl_vert_visc`/`fer_solve_gamma`
-> shape — Thomas sweep sequential in level inside the per-node lambda over `[NL_MAX]` scratch, race-free →
-> Serial AND OpenMP bit-identical, NO scatter) + the surface heat/water-flux BC + the salinity floor. The
-> driver IN rail syncs EVERY input the body reads (L28; `forcing` `const`→`const_cast`); `values` is
-> read-modify-write → `FESOM_KK_VERIFY=trdiff` = L26 capture-before. Then **M2 ACCEPTANCE**: 1-yr CORE2
-> Serial bit-identical vs `/scratch/a/a270088/m1_accept/cref`; **tag `m2-ocean-device`**.
+> GOAL — **pick the next task with the user (handoff §3): M4.2 (SSH RHS + CG solver on device — closes
+> the §5 mid-step host round-trip; the prerequisite for a fair multi-GPU benchmark) OR M3.1 (GPU run
+> config / multi-GPU MPI→device mapping → unblocks the M3.2 CUDA CORE2 climate validation).** They are
+> independent; M4.2 is the stronger "before GPU perf" choice. Whichever: port the C twin to a `_kk` twin
+> (D19), derive the device-input set from the BODY (L33), sync EVERY input (L28), read-modify-write →
+> L26 capture-before; new `FESOM_KK_VERIFY` key (collision-free, L25). The CG dot-product is the first
+> `parallel_reduce` → watch reduction-order associativity (D22 ladder; Serial bit-identical, threaded/GPU
+> likely climate-close).
 >
-> GATE: `FESOM_KK_VERIFY=trdiff` Serial `max|Δ|==0` (check the key is collision-free vs eos/pp/kpp/pgf/
-> ivisc/vfilt/vrhs/ale/gm/tradv, L25). Plus Serial pi smoke == golden + `ctest` 4/4 + np=2 (CMA-off!) ==
-> `…m13_nocma` oracle; **OpenMP bit-identical** (per-node TDMA is race-free); SYNCCHECK clean; CUDA builds
-> (`--target fesom_port`, L17) + pi smoke runs (climate-close). Recipe in §2. Append the lesson to
-> `docs/KOKKOS_PORTING_LESSONS.md` + update SYNC_MAP row 13b in the SAME commit; commit per step.
+> GATE (every step): new `FESOM_KK_VERIFY=<k>` Serial `max|Δ|==0`; Serial pi smoke == golden (np=1 AND
+> np=2 CMA-off vs `/scratch/a/a270088/pi_np2_ref_m13_nocma` — set `OMPI_MCA_btl_vader_single_copy_mechanism=none`
+> FIRST, L18); `ctest` 4/4; SYNCCHECK clean; OpenMP (bit-identical if race-free, else climate-close);
+> CUDA builds (`--target fesom_port`, L17 — and `module --force purge` leaves sticky netcdf-c loaded on
+> the login node, so `module unload netcdf-c cdo ncview git` BEFORE the build module load) + pi smoke
+> climate-close. Recipe §2. Append the lesson to `docs/KOKKOS_PORTING_LESSONS.md` + update `docs/SYNC_MAP.md`
+> in the SAME commit; commit per step.
 >
-> INVARIANTS: never simplify physics; preserve every constant/loop bound verbatim. The Serial backend
-> stays the bit-identity oracle (`max|Δ|==0` vs the C twin) for every kernel. C twin oracle:
+> INVARIANTS: never simplify physics; preserve every constant/loop bound verbatim (the dt=1800 traps are
+> decisive). The Serial backend stays the bit-identity oracle (`max|Δ|==0` vs the C twin) for every kernel;
+> OpenMP = climate-identical; CUDA = climate-close (≈ Fortran↔C). C twin oracle:
 > `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623). First fresh checkout: `git submodule update --init --recursive`.
