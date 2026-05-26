@@ -125,6 +125,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_pgf    = 0;   /* M2.4 substep 2 */
     static int s_verify_ivisc  = 0;   /* M2.4 substep 6 */
     static int s_verify_vfilt  = 0;   /* M2.4 substep 5 */
+    static int s_verify_vrhs   = 0;   /* M2.4 substep 4 */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -132,6 +133,7 @@ int fesom_timestep(int                          step_n,
         s_verify_pgf = (e && strstr(e, "pgf")) ? 1 : 0;   /* M2.4: no substring collision */
         s_verify_ivisc = (e && strstr(e, "ivisc")) ? 1 : 0;   /* M2.4: distinct from vfilt */
         s_verify_vfilt = (e && strstr(e, "vfilt")) ? 1 : 0;   /* M2.4: distinct from ivisc */
+        s_verify_vrhs = (e && strstr(e, "vrhs")) ? 1 : 0;     /* M2.4: no substring collision */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -306,11 +308,35 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
     fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
 
-    /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF)  */
-    fesom_compute_vel_rhs(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
-    /* uv_rhs needed by visc_filt_bcksct on halo elements */
-    fesom_halo_exchange(dyn->uv_rhs,   FESOM_HALO_ELEM3D, nl, 2, p);
-    fesom_halo_exchange(dyn->uv_rhsAB, FESOM_HALO_ELEM3D, nl, 2, p);
+    /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF) — M2.4: device kernel.
+     *  ⚠️ AB2 eps=0.1 preserved in the kernel (PORTING_LESSONS §1, the dt=1800 trap).
+     *  compute_vel_rhs embeds momentum_adv_scalar: an edge→node SCATTER (atomic_add, D22)
+     *  + an INTERNAL uvnode_rhs nod3D halo (D21, owned by the kernel). SYNC_MAP §2 row 4 + §6.
+     *  IN rail (L28): uv, uv_rhsAB (part i reads it; the read-modify-write target), eta_n (SSH
+     *  grad, read at 3 vertices incl halo), pgf_x/pgf_y (substep-2 device output sync_host'd +
+     *  halo'd), w_e (vert adv), the evolving mesh hnode (vert adv). uvnode_rhs is device scratch;
+     *  set-once mesh (gradient_sca/coriolis/elem_area/areasvol/edges/edge_tri/edge_cross/
+     *  nod_in_elem2D/elem_nodes/levels) device-current. */
+    std::vector<real_t> vrhs_uv_rhsAB_in;
+    if (s_verify_vrhs) {
+        const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;
+        vrhs_uv_rhsAB_in.assign(dyn->uv_rhsAB, dyn->uv_rhsAB + nvec);   /* L26 capture-before (part i reads it) */
+    }
+    dyn->uv_fld.modify_host();       dyn->uv_fld.sync_device();
+    dyn->uv_rhsAB_fld.modify_host(); dyn->uv_rhsAB_fld.sync_device();
+    dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
+    dyn->w_e_fld.modify_host();      dyn->w_e_fld.sync_device();
+    aux->pgf_x_fld.modify_host();    aux->pgf_x_fld.sync_device();
+    aux->pgf_y_fld.modify_host();    aux->pgf_y_fld.sync_device();
+    mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
+    fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
+    dyn->uv_rhs_fld.sync_host();     /* OUT rail: before the elem3D halos */
+    dyn->uv_rhsAB_fld.sync_host();
+    if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
+                                                    vrhs_uv_rhsAB_in.data());
+    /* uv_rhs needed by visc_filt_bidiff on halo elements */
+    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(),   FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_halo_exchange(dyn->uv_rhsAB_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
      *     CORE2 runs opt_visc=7; the ∇⁴ damps grid-scale 2Δx modes that opt_visc=5 lets

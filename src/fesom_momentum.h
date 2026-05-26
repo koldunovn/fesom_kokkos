@@ -42,12 +42,53 @@ void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
                            struct fesom_partit     *partit);
 
 /*
+ * M2.4 DEVICE kernel twin of fesom_compute_vel_rhs. ⚠️ Preserves the AB2 eps=0.1
+ * stabilization offset (the dt=1800 trap, PORTING_LESSONS §1) — ab1=-(0.5+eps),
+ * ab2=(1.5+eps). The per-element Coriolis/SSH-grad/PGF parts and the final AB2
+ * assembly are race-free (each element owns its uv_rhs/uv_rhsAB column); IN BETWEEN
+ * it calls fesom_momentum_adv_scalar_kk, which contains an edge→node SCATTER
+ * (atomic_add, D22) and an INTERNAL uvnode_rhs halo (D21). INPUTS uv/uv_rhsAB/eta_n/
+ * pgf/w_e/hnode device-current (driver IN rail); marks uv_rhs/uv_rhsAB modify_device().
+ * See docs/SYNC_MAP.md §2 row 4 + §6.
+ */
+void fesom_compute_vel_rhs_kk(const struct fesom_mesh *mesh,
+                              const struct fesom_aux  *aux,
+                              struct fesom_dyn        *dyn,
+                              int                      is_first_step,
+                              struct fesom_partit     *partit);
+
+/*
  * momentum_adv_scalar (momadv_opt=2) — momentum advection on scalar control
  * volumes; adds ke_adv into uv_rhsAB. Called from compute_vel_rhs.
  */
 void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
                                struct fesom_dyn        *dyn,
                                struct fesom_partit     *partit);
+
+/*
+ * M2.4 DEVICE kernel twin of fesom_momentum_adv_scalar. Five stages: (1) vertical
+ * advection (per-node gather, race-free), (2) horizontal advection (edge→NODE
+ * SCATTER → atomic_add, D22), (3) /areasvol (per-node, race-free), (4) the INTERNAL
+ * uvnode_rhs nod3D halo (D21 bracket, owned here), (5) vertex→element uv_rhsAB +=
+ * (per-element gather, race-free). Called by fesom_compute_vel_rhs_kk between its
+ * Coriolis store and the AB2 assembly; operates on device-current inputs.
+ */
+void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
+                                  struct fesom_dyn        *dyn,
+                                  struct fesom_partit     *partit);
+
+/*
+ * FESOM_KK_VERIFY=vrhs gate. compute_vel_rhs reads uv_rhsAB (part i) then overwrites
+ * it (+momentum_adv +=), so the L26 capture-before pattern on uv_rhsAB (uv_rhs is fully
+ * recomputed → not captured). The driver snapshots the PRE-kernel uv_rhsAB (uv_rhsAB_in)
+ * before the IN rail; here snapshot the Kokkos uv_rhs+uv_rhsAB, restore uv_rhsAB_in, run
+ * the C twin, diff both, restore Kokkos. Non-intrusive; max|Δ|==0 on Serial.
+ */
+void fesom_compute_vel_rhs_verify(const struct fesom_mesh *mesh,
+                                  const struct fesom_aux  *aux,
+                                  struct fesom_dyn        *dyn,
+                                  int is_first_step, struct fesom_partit *partit,
+                                  int step_n, const real_t *uv_rhsAB_in);
 
 /*
  * impl_vert_visc_ale — implicit vertical viscosity TDMA + wind stress + bottom

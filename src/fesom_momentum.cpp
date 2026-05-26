@@ -275,6 +275,312 @@ void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- momentum_adv_scalar — DEVICE kernel (M2.4) ------------------------------
+ * Five stages mirroring the C twin (momadv_opt=2), each a parallel_for; the launch
+ * barriers give the inter-stage ordering (D20). Stages 1/3/5 are race-free (each
+ * entity writes only its own slot — a private gather); stage 2 is an EDGE→NODE
+ * SCATTER ported with Kokkos::atomic_add (D22 — Serial bit-identical in edge order,
+ * OpenMP/CUDA climate-close). Stage 4 is the INTERNAL uvnode_rhs nod3D halo bracket
+ * (D21, owned here). Per-stage scratch (wu/wv, un1/un2, each [64]) is lambda-local.
+ * Every bound/constant/association is a verbatim copy of fesom_momentum_adv_scalar.
+ */
+void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
+                                  struct fesom_dyn        *dyn,
+                                  struct fesom_partit     *partit)
+{
+    const int nl       = mesh->nl;
+    const int Nmy      = mesh->myDim_nod2D;
+    const int Emy_edge = mesh->myDim_edge2D;
+    const int Emy      = mesh->myDim_elem2D;
+    const int my       = mesh->myDim_nod2D;
+
+    auto uv         = dyn->uv_fld.d();
+    auto un         = dyn->uvnode_rhs_fld.d();
+    auto we         = dyn->w_e_fld.d();
+    auto uv_rhsAB   = dyn->uv_rhsAB_fld.d();
+    auto ulev_n     = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n     = mesh->nlevels_nod2D_fld.d();
+    auto ulev_e     = mesh->ulevels_fld.d();
+    auto nlev_e     = mesh->nlevels_fld.d();
+    auto area       = mesh->elem_area_fld.d();
+    auto nie        = mesh->nod_in_elem2D_fld.d();
+    auto nie_off    = mesh->nod_in_elem2D_offsets_fld.d();
+    auto hnode      = mesh->hnode_fld.d();
+    auto edges      = mesh->edges_fld.d();
+    auto edge_tri   = mesh->edge_tri_fld.d();
+    auto edge_cross = mesh->edge_cross_dxdy_fld.d();
+    auto areasvol   = mesh->areasvol_fld.d();
+    auto elnod      = mesh->elem_nodes_fld.d();
+
+    /* 1. vertical advection: w·du/dz at vertices (Fortran 369-420). Private gather. */
+    Kokkos::parallel_for("fesom_momadv_vert", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int ul = ulev_n(n) - 1;
+            int bl = nlev_n(n) - 2;
+            real_t wu[64], wv[64];
+            for (int j = 0; j <= bl + 1; ++j) { wu[j] = 0.0; wv[j] = 0.0; }
+            int b = nie_off(n), e = nie_off(n + 1);
+            for (int k = b; k < e; ++k) {
+                int el  = nie(k);
+                int ule = ulev_e(el) - 1;
+                int ble = nlev_e(el) - 2;
+                real_t a = area(el);
+                if (ule == 0) {
+                    wu[0] += uv(FESOM_ELEMVEC(el, 0, nl) + 0) * a;
+                    wv[0] += uv(FESOM_ELEMVEC(el, 0, nl) + 1) * a;
+                }
+                for (int j = ule + 1; j <= ble; ++j) {
+                    wu[j] += 0.5 * (uv(FESOM_ELEMVEC(el, j, nl) + 0) + uv(FESOM_ELEMVEC(el, j - 1, nl) + 0)) * a;
+                    wv[j] += 0.5 * (uv(FESOM_ELEMVEC(el, j, nl) + 1) + uv(FESOM_ELEMVEC(el, j - 1, nl) + 1)) * a;
+                }
+            }
+            for (int j = ul; j <= bl; ++j) {
+                real_t w = we(FESOM_NODE3D(n, j, nl));
+                wu[j] *= w; wv[j] *= w;
+            }
+            for (int nz = 0; nz < nl - 1; ++nz) {
+                un(FESOM_ELEMVEC(n, nz, nl) + 0) = 0.0;
+                un(FESOM_ELEMVEC(n, nz, nl) + 1) = 0.0;
+            }
+            for (int nz = ul; nz <= bl; ++nz) {
+                real_t h3 = 3.0 * hnode(FESOM_NODE3D(n, nz, nl));
+                un(FESOM_ELEMVEC(n, nz, nl) + 0) = -(wu[nz] - wu[nz + 1]) / h3;
+                un(FESOM_ELEMVEC(n, nz, nl) + 1) = -(wv[nz] - wv[nz + 1]) / h3;
+            }
+        });
+
+    /* 2. horizontal advection via edge loop (Fortran 427-544) — EDGE→NODE SCATTER (atomic_add).
+       The C re-evaluates the same `un1*uv[el1] + un2*uv[el2]` for the n1 (+=) and n2 (-=) writes;
+       the n2 atomic adds its negation (a - X == a + (-X), IEEE-exact). */
+    Kokkos::parallel_for("fesom_momadv_horiz", Kokkos::RangePolicy<>(0, Emy_edge),
+        KOKKOS_LAMBDA(const int ed) {
+            int n1 = edges(2*ed + 0), n2 = edges(2*ed + 1);
+            int el1 = edge_tri(2*ed + 0), el2 = edge_tri(2*ed + 1);
+            if (el1 < 0) return;
+            int ul1 = ulev_e(el1) - 1, bl1 = nlev_e(el1) - 2;
+            real_t dx1 = edge_cross(4*ed + 0), dy1 = edge_cross(4*ed + 1);
+            real_t un1[64], un2[64];
+            if (el2 >= 0) {
+                int ul2 = ulev_e(el2) - 1, bl2 = nlev_e(el2) - 2;
+                real_t dx2 = edge_cross(4*ed + 2), dy2 = edge_cross(4*ed + 3);
+                int lo = ul1 < ul2 ? ul1 : ul2, hi = bl1 > bl2 ? bl1 : bl2;
+                for (int nz = lo; nz <= hi; ++nz) { un1[nz] = 0.0; un2[nz] = 0.0; }
+                for (int nz = ul1; nz <= bl1; ++nz)
+                    un1[nz] =  uv(FESOM_ELEMVEC(el1,nz,nl)+1)*dx1 - uv(FESOM_ELEMVEC(el1,nz,nl)+0)*dy1;
+                for (int nz = ul2; nz <= bl2; ++nz)
+                    un2[nz] = -uv(FESOM_ELEMVEC(el2,nz,nl)+1)*dx2 + uv(FESOM_ELEMVEC(el2,nz,nl)+0)*dy2;
+                if (n1 < my)
+                    for (int nz = lo; nz <= hi; ++nz) {
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+0),
+                            un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+0) + un2[nz]*uv(FESOM_ELEMVEC(el2,nz,nl)+0));
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+1),
+                            un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+1) + un2[nz]*uv(FESOM_ELEMVEC(el2,nz,nl)+1));
+                    }
+                if (n2 < my)
+                    for (int nz = lo; nz <= hi; ++nz) {
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+0),
+                            -(un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+0) + un2[nz]*uv(FESOM_ELEMVEC(el2,nz,nl)+0)));
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+1),
+                            -(un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+1) + un2[nz]*uv(FESOM_ELEMVEC(el2,nz,nl)+1)));
+                    }
+            } else {     /* boundary edge — only el1 contributes */
+                for (int nz = ul1; nz <= bl1; ++nz)
+                    un1[nz] = uv(FESOM_ELEMVEC(el1,nz,nl)+1)*dx1 - uv(FESOM_ELEMVEC(el1,nz,nl)+0)*dy1;
+                if (n1 < my)
+                    for (int nz = ul1; nz <= bl1; ++nz) {
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+0), un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+0));
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+1), un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+1));
+                    }
+                if (n2 < my)
+                    for (int nz = ul1; nz <= bl1; ++nz) {
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+0), -(un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+0)));
+                        Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+1), -(un1[nz]*uv(FESOM_ELEMVEC(el1,nz,nl)+1)));
+                    }
+            }
+        });
+
+    /* 3. divide by scalar control-volume area (Fortran 550-555). Per-node, race-free. */
+    Kokkos::parallel_for("fesom_momadv_area", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int ul = ulev_n(n) - 1, bl = nlev_n(n) - 2;
+            for (int nz = ul; nz <= bl; ++nz) {
+                real_t inv = 1.0 / areasvol(FESOM_NODE3D(n, nz, nl));
+                un(FESOM_ELEMVEC(n,nz,nl)+0) *= inv;
+                un(FESOM_ELEMVEC(n,nz,nl)+1) *= inv;
+            }
+        });
+
+    /* 4. exchange uvnode_rhs (Fortran 559) — INTERNAL nod3D halo bracket (D21).
+       Device-compute → sync_host → halo (h_checked) → sync_device → device-compute.
+       Exchange unconditional like the C twin (a no-op at np=1); round-trip no-op on Serial. */
+    dyn->uvnode_rhs_fld.modify_device();
+    dyn->uvnode_rhs_fld.sync_host();
+    fesom_halo_exchange(dyn->uvnode_rhs_fld.h_checked(), FESOM_HALO_NOD3D, nl, 2, partit);
+    dyn->uvnode_rhs_fld.modify_host();
+    dyn->uvnode_rhs_fld.sync_device();
+
+    /* 5. vertex → element: uv_rhsAB += elem_area·mean(3 vertices) (Fortran 565-573).
+       Per-element gather (each element writes only its own uv_rhsAB) → race-free, no atomic. */
+    Kokkos::parallel_for("fesom_momadv_v2e", Kokkos::RangePolicy<>(0, Emy),
+        KOKKOS_LAMBDA(const int el) {
+            int ul = ulev_e(el) - 1, bl = nlev_e(el) - 2;
+            int v0 = elnod(3*el+0), v1 = elnod(3*el+1), v2 = elnod(3*el+2);
+            real_t a = area(el);
+            for (int nz = ul; nz <= bl; ++nz) {
+                uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+0) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+0)
+                    + un(FESOM_ELEMVEC(v1,nz,nl)+0) + un(FESOM_ELEMVEC(v2,nz,nl)+0)) / 3.0;
+                uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+1) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+1)
+                    + un(FESOM_ELEMVEC(v1,nz,nl)+1) + un(FESOM_ELEMVEC(v2,nz,nl)+1)) / 3.0;
+            }
+        });
+}
+
+/*--- compute_vel_rhs — DEVICE kernel (M2.4) ----------------------------------
+ * ⚠️ AB2 eps=0.1 (PORTING_LESSONS §1, the dt=1800 stabilization offset) preserved
+ * verbatim: ab1=-(0.5+eps), ab2=(1.5+eps). Two race-free per-element parallel_fors
+ * (the Coriolis/SSH-grad/PGF body, then the AB2 assembly) bracket the device
+ * momentum-advection call (fesom_momentum_adv_scalar_kk, which holds the edge scatter
+ * + the internal uvnode_rhs halo). uv_rhs/uv_rhsAB stay device-resident across the
+ * three pieces (launch barriers order them). Every constant/bound/association is a
+ * verbatim copy of fesom_compute_vel_rhs. SYNC: INPUTS device-current (driver IN rail);
+ * marks uv_rhs/uv_rhsAB modify_device().
+ */
+void fesom_compute_vel_rhs_kk(const struct fesom_mesh *mesh,
+                              const struct fesom_aux  *aux,
+                              struct fesom_dyn        *dyn,
+                              int                      is_first_step,
+                              struct fesom_partit     *partit)
+{
+    const int E    = mesh->myDim_elem2D;
+    const int nl   = mesh->nl;
+    const real_t g  = (real_t)FESOM_G;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+    const real_t eps = 0.1;                  /* AB2 stabilization offset (PORTING_LESSONS §1) */
+    const real_t ab1 = -(0.5 + eps);
+    const real_t ab2 =  (1.5 + eps);
+
+    auto ulev     = mesh->ulevels_fld.d();
+    auto nlev     = mesh->nlevels_fld.d();
+    auto elnod    = mesh->elem_nodes_fld.d();
+    auto gradsca  = mesh->gradient_sca_fld.d();
+    auto area     = mesh->elem_area_fld.d();
+    auto coriolis = mesh->coriolis_fld.d();
+    auto uv       = dyn->uv_fld.d();
+    auto uv_rhs   = dyn->uv_rhs_fld.d();
+    auto uv_rhsAB = dyn->uv_rhsAB_fld.d();
+    auto eta_n    = dyn->eta_n_fld.d();
+    auto pgf_x    = aux->pgf_x_fld.d();
+    auto pgf_y    = aux->pgf_y_fld.d();
+
+    /* Per-element: (i) AB history shift, (ii) SSH grad + PGF, (iii) store Coriolis. Race-free. */
+    Kokkos::parallel_for("fesom_vel_rhs_elem", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int e) {
+            int nzmin = ulev(e) - 1;
+            int nzmax = nlev(e) - 1;
+            int n0 = elnod(3*e + 0);
+            int n1 = elnod(3*e + 1);
+            int n2 = elnod(3*e + 2);
+
+            for (int nz = nzmin; nz < nzmax; ++nz) {            /* (i) AB history shift */
+                size_t k = FESOM_ELEMVEC(e, nz, nl);
+                uv_rhs(k + 0) = ab1 * uv_rhsAB(k + 0);
+                uv_rhs(k + 1) = ab1 * uv_rhsAB(k + 1);
+            }
+
+            real_t pre0 = -g * eta_n(n0);
+            real_t pre1 = -g * eta_n(n1);
+            real_t pre2 = -g * eta_n(n2);
+            real_t gs0 = gradsca(6*e+0), gs1 = gradsca(6*e+1), gs2 = gradsca(6*e+2);
+            real_t gs3 = gradsca(6*e+3), gs4 = gradsca(6*e+4), gs5 = gradsca(6*e+5);
+            real_t Fx = gs0*pre0 + gs1*pre1 + gs2*pre2;
+            real_t Fy = gs3*pre0 + gs4*pre1 + gs5*pre2;
+            real_t areav = area(e);
+            real_t ff    = coriolis(e) * areav;
+
+            for (int nz = nzmin; nz < nzmax; ++nz) {            /* (ii) and (iii) */
+                size_t k   = FESOM_ELEMVEC(e, nz, nl);
+                size_t kel = FESOM_ELEM3D(e, nz, nl);
+                real_t pgfx = pgf_x(kel);
+                real_t pgfy = pgf_y(kel);
+                uv_rhs(k + 0) += (Fx - pgfx) * areav;
+                uv_rhs(k + 1) += (Fy - pgfy) * areav;
+                real_t u = uv(k + 0);
+                real_t v = uv(k + 1);
+                uv_rhsAB(k + 0) =  v * ff;
+                uv_rhsAB(k + 1) = -u * ff;
+            }
+        });
+
+    /* Momentum advection (momadv_opt=2): adds ke_adv into uv_rhsAB (device; edge scatter
+       + internal uvnode_rhs halo, D21). uv_rhsAB stays device-resident across this. */
+    fesom_momentum_adv_scalar_kk(mesh, dyn, partit);
+
+    /* Final assembly with ff_step (1.0 on the first step to match Fortran's lfirst). Race-free. */
+    const real_t ff_step = is_first_step ? 1.0 : ab2;
+    Kokkos::parallel_for("fesom_vel_rhs_assembly", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int e) {
+            int nzmin = ulev(e) - 1;
+            int nzmax = nlev(e) - 1;
+            real_t inv_area = 1.0 / area(e);
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                size_t k = FESOM_ELEMVEC(e, nz, nl);
+                uv_rhs(k + 0) = dt * (uv_rhs(k + 0) + uv_rhsAB(k + 0) * ff_step) * inv_area;
+                uv_rhs(k + 1) = dt * (uv_rhs(k + 1) + uv_rhsAB(k + 1) * ff_step) * inv_area;
+            }
+        });
+
+    dyn->uv_rhs_fld.modify_device();
+    dyn->uv_rhsAB_fld.modify_device();
+}
+
+/*--- FESOM_KK_VERIFY=vrhs (M2.4) ---------------------------------------------
+ * compute_vel_rhs reads uv_rhsAB (part i) then overwrites it (part iii + momentum_adv
+ * +=), so the L26 capture-before is on uv_rhsAB only — uv_rhs is fully recomputed from
+ * uv_rhsAB + intact inputs (never read as a pre-existing input), so it needs no restore.
+ * The driver captures the PRE-kernel uv_rhsAB (uv_rhsAB_in, owned). Here: snapshot the
+ * Kokkos uv_rhs + uv_rhsAB, restore uv_rhsAB_in, run the C twin (recomputes both from the
+ * restored uv_rhsAB + intact uv/eta_n/pgf/w_e/hnode), diff both over the owned region,
+ * restore Kokkos. Non-intrusive; max|Δ|==0 on Serial.
+ */
+void fesom_compute_vel_rhs_verify(const struct fesom_mesh *mesh,
+                                  const struct fesom_aux  *aux,
+                                  struct fesom_dyn        *dyn,
+                                  int is_first_step, struct fesom_partit *partit,
+                                  int step_n, const real_t *uv_rhsAB_in)
+{
+    const int nl = mesh->nl;
+    const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;   /* owned elements */
+
+    std::vector<real_t> kk_uv_rhs  (dyn->uv_rhs,   dyn->uv_rhs   + nvec);
+    std::vector<real_t> kk_uv_rhsAB(dyn->uv_rhsAB, dyn->uv_rhsAB + nvec);
+    std::copy(uv_rhsAB_in, uv_rhsAB_in + nvec, dyn->uv_rhsAB);          /* restore the input part i reads */
+    fesom_compute_vel_rhs(mesh, aux, dyn, is_first_step, partit);       /* C twin */
+
+    auto maxdiff = [](const std::vector<real_t> &kk, const real_t *c, size_t n) -> double {
+        double m = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = std::fabs((double)kk[i] - (double)c[i]);
+            if (d > m) m = d;
+        }
+        return m;
+    };
+    double d_rhs = maxdiff(kk_uv_rhs,   dyn->uv_rhs,   nvec);
+    double d_AB  = maxdiff(kk_uv_rhsAB, dyn->uv_rhsAB, nvec);
+    std::copy(kk_uv_rhs.begin(),   kk_uv_rhs.end(),   dyn->uv_rhs);     /* restore KK */
+    std::copy(kk_uv_rhsAB.begin(), kk_uv_rhsAB.end(), dyn->uv_rhsAB);
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    const double dmax = std::max(d_rhs, d_AB);
+    std::printf("[FESOM_KK_VERIFY=vrhs] step %d backend=%s  max|Δ|: uv_rhs=%.3e uv_rhsAB=%.3e\n",
+                step_n, backend.c_str(), d_rhs, d_AB);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=vrhs] FAIL: Serial must be bit-identical to the C twin "
+                             "(max|Δ|=%.3e)\n", dmax);
+        std::abort();
+    }
+}
+
 /*===========================================================================
  * impl_vert_visc_ale (oce_ale.F90:3124-3335)
  *
