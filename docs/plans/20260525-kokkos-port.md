@@ -136,8 +136,9 @@ the Serial (and, since no kernels are on-device yet, CUDA) run is bit-identical 
 - [x] record the C reference git SHA (`75de623`) in `docs/reference/C_PORT_SOURCE_SHA.txt` + PROVENANCE.md
 - [x] write `docs/reference/PROVENANCE.md` (reference cmds + the login-node MPI override)
 - [x] `diff_snap.py` sanity: golden-vs-golden → "ALL FIELDS BIT-IDENTICAL", exit 0 (harness works)
-- ➕ [ ] (deferred) CORE2 16-rank ~50-step golden ref — needs a compute-node SLURM job; capture
-      before M3, not required for the M0 Serial gate
+- ➕ [x] CORE2 C-twin reference captured at M1.5 (superseding the deferred 16-rank stub): a full
+      **1-yr CORE2, 256-rank, dt=1800** reference at `/scratch/a/a270088/m1_accept/cref` (the M1
+      acceptance oracle; `jobs/job_m1accept_cref`). Serial+OpenMP reproduce it bit-identically
 
 ### Task M0.2: Vendor Kokkos 4.4.1 as a submodule, built in-tree (ICON's approach)
 
@@ -342,10 +343,13 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
       the mid-step CG host round-trip, and the M2/M4 kernel-author checklist)
 - [x] per-change gate GREEN (commit `<M1.5>`): Serial np=1 == golden; ctest 4/4; np=2 (CMA-off) ==
       `…m13_nocma` oracle; SYNCCHECK np=1+np=2 == golden (no abort); **CUDA np=1 (A100) == golden**
-- [ ] ⚠️ **M1 acceptance (milestone gate, separate from the per-change gate — IN PROGRESS):**
-      Serial+OpenMP+CUDA each run a **1-yr CORE2** bit-identical to a C-twin reference (compute still
-      on host). No CORE2 C reference existed (M0.1 deferred it) → must generate it first. Multi-hour
-      SLURM. **Tag `m1-datalayer` only after acceptance passes** — before M2
+- [x] **M1 acceptance PASSED** (jobs `25126935/6/7`, `docs/M1_ACCEPTANCE.md`): **1-yr CORE2**
+      (360-day, dt=1800, 17280 steps, 256 ranks, monthly snaps) generated a fresh **C-twin reference**
+      (none existed — M0.1 deferred it) and **Kokkos Serial + OpenMP each reproduced it ALL FIELDS
+      BIT-IDENTICAL across all 13 snapshots**. Wall time Serial 1566 s ≈ C twin 1574 s (no M1
+      overhead — identical host code). **CUDA CORE2 deferred to M3.1** (multi-GPU rank→device
+      mapping); M1 CUDA does zero device compute → its data-layer identity is mesh-independent and
+      already proven on the pi smoke (A100). **Tagged `m1-datalayer`.** → M2.1
 
 ## ───────────── M2 · Ocean hot-path kernels on device ─────────────
 *Goal: convert leaf compute kernels to `parallel_for`, one (group) per task, each gated
