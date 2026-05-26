@@ -405,8 +405,9 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > the scatter/reduce ones (D22); CUDA climate-close at the unchanged budget (density 3.18e-12, D5).
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run+VERIFY+SYNCCHECK §2, **the next-task CHOICE §3 — ASK the user: M4.2 or M3.1**)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (§M2 all ticked; you are entering §M3 or §M4)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run/CUDA recipe §2 incl. the **sticky-module unload fix**, the **M3.1 detail §3**)
+> - **THE FILE TO EDIT: `src/fesom_main.cpp:286-288`** (`Kokkos::initialize` after `MPI_Init` — the device-id hook) + `src/fesom_partit.cpp` (`build_dist_dir` → `dist_<npes>` loader) + `jobs/job_pi_smoke_gpu` (1-GPU template → clone for multi-GPU)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (§M2 all ticked; you are at §M3.1, then §M3.2)
 > - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6, 1b, 12/13a/13/13(Redi)/13b/13c/14 ALL DONE; **§5 = the mid-step CG host round-trip = M4.2**; §6 = intra-kernel exchanges; §9 kernel-author checklist)
 > - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L39; **D19/D20 = leaf-kernel template; D21 = internal-exchange bracket; D22 = scatter/atomic_add (the CG dot-product will be the first `parallel_reduce`); L25 = verify-token collision; L26 = capture-before; L28 = sync ALL inputs; L31 = per-node TDMA; L33 = derive shape from the BODY; L39 = M2.7 tracer-diff + the L36 host-vs-device decision**) — APPEND every session
 > - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride `nl`, halo bounds, module-default scalars carry physics)
@@ -415,24 +416,51 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > - **TEMPLATE: the M2 device kernels** — `src/fesom_eos.cpp`/`fesom_pp.cpp`/`fesom_kpp.cpp`/`fesom_momentum.cpp`/`fesom_gm.cpp`/`fesom_tracer_adv.cpp`/`fesom_tracer_diff.cpp` (leaf kernels + verifies) + the substep rails in `src/fesom_step.cpp` (D19 IN/OUT, L28 sync ALL inputs, `forcing` `const`→`const_cast`, L26 capture-before for read-modify-write)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = what climate-close looks like)
 >
-> GOAL — **pick the next task with the user (handoff §3): M4.2 (SSH RHS + CG solver on device — closes
-> the §5 mid-step host round-trip; the prerequisite for a fair multi-GPU benchmark) OR M3.1 (GPU run
-> config / multi-GPU MPI→device mapping → unblocks the M3.2 CUDA CORE2 climate validation).** They are
-> independent; M4.2 is the stronger "before GPU perf" choice. Whichever: port the C twin to a `_kk` twin
-> (D19), derive the device-input set from the BODY (L33), sync EVERY input (L28), read-modify-write →
-> L26 capture-before; new `FESOM_KK_VERIFY` key (collision-free, L25). The CG dot-product is the first
-> `parallel_reduce` → watch reduction-order associativity (D22 ladder; Serial bit-identical, threaded/GPU
-> likely climate-close).
+> THIS SESSION = **M3.1: GPU run configuration (multi-GPU MPI→device mapping)** — the user chose M3.1 (M4.2
+> = SSH/CG on device is the task after). RUN-CONFIG work, **NOT new kernels → no `FESOM_KK_VERIFY` gate.**
+> Goal: run the existing CUDA build across multiple A100s (**1 MPI rank ⇒ 1 GPU**), confirm it completes +
+> is physical + stays climate-close, and write `docs/RUN_GPU.md`. Unblocks M3.2 (2-yr/5-yr CUDA CORE2 climate
+> validation vs `/scratch/a/a270088/fortran_pp_2yr`).
 >
-> GATE (every step): new `FESOM_KK_VERIFY=<k>` Serial `max|Δ|==0`; Serial pi smoke == golden (np=1 AND
-> np=2 CMA-off vs `/scratch/a/a270088/pi_np2_ref_m13_nocma` — set `OMPI_MCA_btl_vader_single_copy_mechanism=none`
-> FIRST, L18); `ctest` 4/4; SYNCCHECK clean; OpenMP (bit-identical if race-free, else climate-close);
-> CUDA builds (`--target fesom_port`, L17 — and `module --force purge` leaves sticky netcdf-c loaded on
-> the login node, so `module unload netcdf-c cdo ncview git` BEFORE the build module load) + pi smoke
-> climate-close. Recipe §2. Append the lesson to `docs/KOKKOS_PORTING_LESSONS.md` + update `docs/SYNC_MAP.md`
-> in the SAME commit; commit per step.
+> CORE CHANGE — **`src/fesom_main.cpp:286-288`**: `Kokkos::initialize(argc,argv)` is already placed AFTER
+> `MPI_Init` with the comment "lets it pick a device per local rank later" — that "later" is this task.
+> Derive the NODE-LOCAL rank (`MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,
+> &shm)` → `MPI_Comm_rank(shm,&local_rank)`; fallback `getenv("SLURM_LOCALID")`), then
+> `Kokkos::InitializationSettings s; s.set_device_id(local_rank); Kokkos::initialize(s);` (Kokkos 4.4 API).
+> The `argc/argv` form makes EVERY rank grab GPU 0 — that's the bug. No-op for Serial/OpenMP (ignore
+> device_id); guard npes==1. **Re-run the M2 Serial gates after** (all `FESOM_KK_VERIFY` keys, pi==golden
+> np=1+np=2 CMA-off, `ctest` 4/4, SYNCCHECK) to prove no CPU regression.
 >
-> INVARIANTS: never simplify physics; preserve every constant/loop bound verbatim (the dt=1800 traps are
-> decisive). The Serial backend stays the bit-identity oracle (`max|Δ|==0` vs the C twin) for every kernel;
-> OpenMP = climate-identical; CUDA = climate-close (≈ Fortran↔C). C twin oracle:
+> KEY INSIGHT — correctness should follow from the mapping ALONE: every halo (`fesom_exchange_*`) runs on
+> HOST pointers (`h_checked()`) and the rails already `sync_host` before each halo + `sync_device` after,
+> so multi-GPU halos stage device→host→MPI→host→device with REGULAR (non-GPU-aware) MPI — no kernel
+> changes. GPU-aware MPI (device-pointer halos, the throughput optimisation) is DEFERRED (M5/perf).
+>
+> PARTITIONS: CORE2 `dist_{8,16,32,64,72,144,256,288,432,512,864}`; pi `dist_{2,8}`. Levante `gpu`/
+> `gpu-devel` = 4× A100/node. Smoke ladder: (1) **pi `dist_2`** = 2 ranks/2 GPUs on ONE `gpu-devel` node
+> (proves binding + 2-GPU halos); (2) **CORE2 `dist_8`** = 8 ranks/8 GPUs (2 `gpu` nodes). Write
+> `jobs/job_gpu_multi_*` from `job_pi_smoke_gpu`: `--gres=gpu:4 --ntasks-per-node=4 --nodes=N`, `srun` the
+> `build-cuda` binary. ⚠️ the `OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader` override is a single-rank/LOGIN-node
+> hack — for multi-rank on `gpu` compute nodes use the STANDARD UCX/IB transport (don't force self,vader).
+>
+> GATE (M3.1 — CUDA, NO bit-identity): the multi-GPU run COMPLETES (exit 0), is PHYSICAL (T/S sane, no
+> blow-up), each rank binds a DISTINCT GPU (print Kokkos device id per rank / `nvidia-smi` → 0,1,2,3 not
+> all-0), and is climate-close — pi `dist_2` diff vs `docs/reference/c_baseline_snapshots/pi` (expect the
+> unchanged CUDA budget density~3e-12; "DIVERGENCE" is a PASS, D5; NOT "BIT-IDENTICAL"). `diff_snap.py`
+> takes DIRECTORIES (L19). Write `docs/RUN_GPU.md` (rank→GPU mapping, partition choice, launch recipe, the
+> perf caveat below). Commit; append lesson **L40** + note in the handoff in the SAME commit.
+>
+> GPU-SIZING context (from M2): CORE2 = 127k surface nodes × 48 levels (~4M wet 3D pts), bandwidth-bound →
+> ~1 A100 ≈ the 2-node/256-rank CPU job; too small to scale past ~1–2 GPUs (the real lever is higher-res
+> meshes). A FAIR perf benchmark wants **M4.2** (the §5 CG round-trip on device) first — note in RUN_GPU.md.
+> M3.1 = correctness/binding; M3.2 = climate validation; perf parity is later.
+>
+> BUILD (recipe §2): `source /sw/etc/profile.levante; module --force purge; module unload netcdf-c cdo
+> ncview git; module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 openmpi/4.1.2-gcc-11.2.0
+> netcdf-c/4.8.1-gcc-11.2.0; export NVCC_WRAPPER_DEFAULT_COMPILER=g++; which nvcc` (must resolve);
+> `cmake --build build-cuda --target fesom_port -j 16` (verify "Built target fesom_port", L17). `mkdir -p`
+> the out-dir before running (L15).
+>
+> INVARIANTS: never simplify physics; the Serial backend stays the bit-identity oracle (don't regress it
+> with the device-id change); CUDA = climate-close (≈ Fortran↔C). C twin oracle:
 > `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623). First fresh checkout: `git submodule update --init --recursive`.
