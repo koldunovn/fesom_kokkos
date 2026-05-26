@@ -447,14 +447,28 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - Modify: `src/fesom_aux.cpp` (PGF), `src/fesom_momentum.cpp` (`compute_vel_rhs`,
   `visc_filt_bidiff`, `impl_vert_visc`), `src/fesom_step.cpp`
 
-- [ ] port `pressure_force_linfs_fullcell` (element-parallel)
-- [ ] port `compute_vel_rhs` — **preserve AB2 `eps=0.1`** (the dt=1800 trap, `PORTING_LESSONS §1`)
-- [ ] port `visc_filt_bidiff` (biharmonic; element-parallel; reuse the `exp1_compare_bidiff.py` idea)
-- [ ] port `impl_vert_visc` (per-element TDMA: parallel over element, sequential sweep in level)
-- [ ] **leave `compute_ssh_rhs_linfs`, `ssh_solve_cg`, `update_vel`, `compute_hbar` on host**
-      (steps 7–10) until M4.2 — they bracket the CG; bridge with `sync_host` before
-      `compute_ssh_rhs` and `sync_device` after `update_vel` (the expected mid-step round-trip)
-- [ ] `FESOM_KK_VERIFY` Serial `max|Δ|==0` for each; backends verified — before M2.5
+- [x] port `pressure_force_linfs_fullcell` (`fesom_pressure_force_linfs_fullcell_kk`, M2.4a `07094b5`):
+      clean per-element map, EOS-style. INPUT rail re-pushes `hpressure` (the L27/L30 device→host(halo)→
+      device hand-off — reads it at the element's 3 HALO vertices). `FESOM_KK_VERIFY=pgf`
+- [x] port `compute_vel_rhs` (M2.4d `4e5c8ba`) — **AB2 `eps=0.1` preserved** (the dt=1800 trap). The
+      MOST composite kernel: it embeds `momentum_adv_scalar_kk` (an edge→node **scatter** via
+      `atomic_add` D22 + an internal `uvnode_rhs` halo D21) between two race-free element maps. 7
+      `parallel_for`s + 1 halo bracket. `FESOM_KK_VERIFY=vrhs` (capture-before on `uv_rhsAB`)
+- [x] port `visc_filt_bidiff` (M2.4c `5fde72c`): biharmonic ∇⁴, the **first SCATTER kernel** — two
+      edge→element stages via `Kokkos::atomic_add` (**D22**, `docs/SCATTER_STRATEGY.md`) around an
+      internal `Uc/Vc` elem3D halo (D21). `FESOM_KK_VERIFY=vfilt` (capture-before, full extent)
+- [x] port `impl_vert_visc` (M2.4b `8a419e0`, per-element TDMA: parallel over element, the Thomas
+      sweep sequential in level inside the lambda, per-column `[64]` scratch). Race-free → Serial AND
+      OpenMP bit-identical. `FESOM_KK_VERIFY=ivisc` (capture-before, read-modify-write `uv_rhs`)
+- [x] **left `compute_ssh_rhs_linfs`, `ssh_solve_cg`, `update_vel`, `compute_hbar` on host**
+      (steps 7–10) — the mid-step round-trip is bridged: substep 6's OUT `sync_host(uv_rhs)` feeds the
+      host CG (steps 7–10); the next step's substep-3 `compute_vel_nodes` IN rail re-`sync_device`s `uv`
+      after the host `update_vel`. No extra code needed (the existing per-kernel rails compose) — SYNC_MAP §5
+- [x] `FESOM_KK_VERIFY` Serial `max|Δ|==0` for each (all 20 pi steps; **all 7 M2 keys simultaneously =
+      160 lines, 0 non-zero**); backends verified — Serial pi == golden (np=1 + np=2 CMA-off vs
+      `…m13_nocma`); **OpenMP climate-close** (max |Δ|=8.3e-25 in `v`, the first non-bit-identical OpenMP
+      — the expected D22 scatter regime change, ≪ the ≲1e-12 budget); SYNCCHECK clean + bit-identical;
+      CUDA builds + pi smoke climate-close. → M2.5
 
 ### Task M2.5: ALE thickness / vertical velocity / CFLz / wsplit
 
