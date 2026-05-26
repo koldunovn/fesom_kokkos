@@ -1,0 +1,43 @@
+#!/bin/bash
+# M1 ACCEPTANCE — step 3/4: Kokkos OpenMP backend. Same CORE2 1-yr config AND SAME 256-rank layout
+# as cref/serial — bit-identity is only guaranteed at a FIXED rank count (halo + CG-reduction order
+# differ across rank counts; that is why the D14 gate compares same-rank-count). At M1 NO parallel_for
+# runs, so the OpenMP backend executes the identical single-threaded host C-code as Serial → expected
+# bit-identical; OMP_NUM_THREADS is moot here (threads are unused until M2). True multi-thread
+# climate-identity is a separate check once kernels land. See docs/M1_ACCEPTANCE.md §ranks.
+#SBATCH --job-name=m1acc_omp
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=128
+#SBATCH --ntasks=256
+#SBATCH --time=03:00:00
+#SBATCH -A ab0995
+#SBATCH -o /scratch/a/a270088/m1_accept/omp/slurm.%j.out
+#SBATCH -e /scratch/a/a270088/m1_accept/omp/slurm.%j.err
+
+set -u
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+export OMP_NUM_THREADS=1          # M1: parallel_for unused → 1 thread keeps it apples-to-apples vs Serial
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=17280
+SNAP_EVERY=1440
+JRA55_YEAR=1958
+export FESOM_PRINT_EVERY=1000
+
+BIN=/home/a/a270088/port_kokkos/build-omp/fesom_port
+OUT_DIR=/scratch/a/a270088/m1_accept/omp
+mkdir -p "$OUT_DIR"
+
+echo "=== M1 acceptance KOKKOS OpenMP (OMP_NUM_THREADS=$OMP_NUM_THREADS, 256 ranks) — $(date) ==="
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+grep -m1 "Kokkos backend" "$OUT_DIR/run.log"
+tail -20 "$OUT_DIR/run.log"; tail -10 "$OUT_DIR/run.err"
+exit $EC

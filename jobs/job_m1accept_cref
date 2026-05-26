@@ -1,0 +1,45 @@
+#!/bin/bash
+# M1 ACCEPTANCE — step 1/4: the C-twin REFERENCE (the bit-identity oracle).
+# Runs the validated C port (the twin, SHA 75de623) on 1 model year of CORE2 at dt=1800.
+# The three Kokkos backends (Serial/OpenMP/CUDA) must each reproduce these snapshots
+# byte-for-byte (compute is still on host at M1 → all backends are expected bit-identical).
+# Config is SHARED with job_m1accept_{serial,omp} — keep MESH/DT/NSTEPS/SNAP_EVERY/PHC/YEAR/NRANKS
+# IDENTICAL across all four, or the snapshot filenames + gather won't line up.
+#SBATCH --job-name=m1acc_cref
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=128
+#SBATCH --ntasks=256
+#SBATCH --time=03:00:00
+#SBATCH -A ab0995
+#SBATCH -o /scratch/a/a270088/m1_accept/cref/slurm.%j.out
+#SBATCH -e /scratch/a/a270088/m1_accept/cref/slurm.%j.err
+
+set -u
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh   # the C twin's OWN runtime env (its link libs)
+ulimit -s 204800
+
+# ----- shared acceptance config (MUST match the Kokkos jobs) -------------------------------
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=17280          # 360-day model year at dt=1800 (360*86400/1800)
+SNAP_EVERY=1440       # monthly snapshot (30 days) → 12 snaps + step 0; ~600 MB/run
+JRA55_YEAR=1958
+export FESOM_PRINT_EVERY=1000
+# (NRANKS=256 is fixed by the #SBATCH --ntasks above; dist_256 partition exists.)
+# -------------------------------------------------------------------------------------------
+
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port   # the C twin
+OUT_DIR=/scratch/a/a270088/m1_accept/cref
+mkdir -p "$OUT_DIR"
+
+echo "=== M1 acceptance C-REFERENCE — $(date) ==="
+echo "BIN=$BIN  MESH=$MESH  DT=$DT  NSTEPS=$NSTEPS  SNAP_EVERY=$SNAP_EVERY  NRANKS=256"
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+tail -20 "$OUT_DIR/run.log"; tail -10 "$OUT_DIR/run.err"
+exit $EC
