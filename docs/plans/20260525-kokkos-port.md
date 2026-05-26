@@ -475,9 +475,17 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Modify: `src/fesom_ale.cpp`, `src/fesom_step.cpp`
 
-- [ ] port `ale_thickness_linfs`, `ale_vert_vel_linfs` (+ `fer_w` accumulator), `compute_cflz`,
-      `compute_wvel_split` (preserve `use_wsplit=.false.` behaviour), `commit_thickness`
-- [ ] `FESOM_KK_VERIFY=ale` Serial `max|Δ|==0`; backends — before M2.5b
+- [x] port `ale_thickness_linfs`, `ale_vert_vel_linfs` (+ `fer_w` accumulator), `compute_cflz`,
+      `compute_wvel_split` (preserve `use_wsplit=.false.` behaviour), `commit_thickness` (commit
+      `d6937f1`). Shapes (L34): thickness/commit/cflz/wvel_split = race-free maps (bit-identical
+      Serial+OpenMP); `vert_vel` = edge→node SCATTER (`atomic_add`, D22) + per-node level cumsum.
+      ⚠️ **GM is ON in pi** (not off as the handoff said) → the `fer_w` accumulator is LIVE; the `gm_on`
+      branch ported verbatim + `if(gm)` `fer_uv`/`fer_w` rails keep pi==golden. No internal halo (no D21).
+- [x] `FESOM_KK_VERIFY=ale` Serial `max|Δ|==0` (all 5 kernels, 20 steps, 0 non-zero); Serial pi ==
+      golden (np=1 + np=2 CMA-off); `ctest` 4/4; SYNCCHECK clean + bit-identical; **OpenMP** = 4 maps
+      bit-identical + `vert_vel` climate-close (~1e-21, D22); **CUDA (A100)** climate-close at the
+      **unchanged M2.1/M2.4 budget** (density 3.18e-12, Av/Kv 0.095 flips, u/v 3.7e-4/5.9e-5, no new
+      divergence class, D5) — → M2.5b
 
 ### Task M2.5b: GM/Redi (sigma_xy, neutral_slope, streamfunction, bolus, horizontal Redi)
 
