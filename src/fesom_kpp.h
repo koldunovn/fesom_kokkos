@@ -2,6 +2,7 @@
 #define FESOM_KPP_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M2.3: DualView-backed storage for the KPP scratch (deferred from M1)
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -86,6 +87,18 @@ typedef struct fesom_kpp {
     real_t cg;          /* eqn 20 nonlocal-transport coefficient */
     real_t deltaz;      /* zehat table step */
     real_t deltau;      /* ustar table step */
+
+    /* M2.3: each persistent array above is OWNED by the matching fesom::Field/IntField
+     * below; the raw pointer is a NON-OWNING alias re-pointed at field.h() right after
+     * field.alloc() in fesom_kpp_alloc (the M1.2/D12 pattern). The KPP scratch is
+     * recomputed in place every step through the raw alias (no buffer swap), so the alias
+     * stays valid for the whole run. wmt/wst are set-once (built in fesom_kpp_init →
+     * one-shot modify_host()+sync_device(), like the mesh geometry). The device _kk
+     * kernels (M2.3) read/write the .d() views; the host C twins read the .h() alias. */
+    fesom::Field    diffK_fld, viscA_fld, blmc_fld, ghats_fld, dVsq_fld;
+    fesom::Field    dkm1_fld, hbl_fld, bfsfc_fld, caseA_fld, stable_fld, ustar_fld, Bo_fld;
+    fesom::IntField kbl_fld;
+    fesom::Field    wmt_fld, wst_fld;
 } fesom_kpp;
 
 void fesom_kpp_alloc(fesom_kpp *k, const struct fesom_mesh *mesh, int num_tracers);

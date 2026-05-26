@@ -70,7 +70,8 @@ static int s_kpp_call = 0;
  *===========================================================================*/
 void fesom_kpp_alloc(fesom_kpp *k, const struct fesom_mesh *mesh, int num_tracers)
 {
-    memset(k, 0, sizeof(*k));
+    // Field members (DualView) make a raw memset UB (L13); value-initialise instead (D13).
+    *k = fesom_kpp{};
     int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     int nl = mesh->nl;
     k->n_nod       = N;
@@ -81,37 +82,32 @@ void fesom_kpp_alloc(fesom_kpp *k, const struct fesom_mesh *mesh, int num_tracer
     size_t n_nl1  = (size_t)N * (size_t)(nl - 1);
     size_t tbl    = (size_t)(FESOM_KPP_NNI + 2) * (size_t)(FESOM_KPP_NNJ + 2);
 
-    k->diffK  = (decltype(k->diffK))calloc((size_t)num_tracers * n_nl, sizeof(real_t));
-    k->viscA  = (decltype(k->viscA))calloc(n_nl,                       sizeof(real_t));
-    k->blmc   = (decltype(k->blmc))calloc((size_t)3 * n_nl,           sizeof(real_t));
-    k->ghats  = (decltype(k->ghats))calloc(n_nl1,                      sizeof(real_t));
-    k->dVsq   = (decltype(k->dVsq))calloc(n_nl,                       sizeof(real_t));
+    // M2.3: Field owns storage; raw ptr = non-owning alias = field.h() set once (D12). .alloc count
+    // is in ELEMENTS (== the old calloc count) and zero-inits like calloc → Serial bit-identical.
+    k->diffK_fld.alloc("kpp.diffK", (size_t)num_tracers * n_nl); k->diffK  = k->diffK_fld.h();
+    k->viscA_fld.alloc("kpp.viscA", n_nl);                       k->viscA  = k->viscA_fld.h();
+    k->blmc_fld.alloc("kpp.blmc", (size_t)3 * n_nl);             k->blmc   = k->blmc_fld.h();
+    k->ghats_fld.alloc("kpp.ghats", n_nl1);                      k->ghats  = k->ghats_fld.h();
+    k->dVsq_fld.alloc("kpp.dVsq", n_nl);                         k->dVsq   = k->dVsq_fld.h();
 
-    k->dkm1   = (decltype(k->dkm1))calloc((size_t)3 * (size_t)N,      sizeof(real_t));
-    k->hbl    = (decltype(k->hbl))calloc((size_t)N,                  sizeof(real_t));
-    k->bfsfc  = (decltype(k->bfsfc))calloc((size_t)N,                  sizeof(real_t));
-    k->caseA  = (decltype(k->caseA))calloc((size_t)N,                  sizeof(real_t));
-    k->stable = (decltype(k->stable))calloc((size_t)N,                  sizeof(real_t));
-    k->ustar  = (decltype(k->ustar))calloc((size_t)N,                  sizeof(real_t));
-    k->Bo     = (decltype(k->Bo))calloc((size_t)N,                  sizeof(real_t));
-    k->kbl    = (decltype(k->kbl))calloc((size_t)N,                  sizeof(int));
+    k->dkm1_fld.alloc("kpp.dkm1", (size_t)3 * (size_t)N);        k->dkm1   = k->dkm1_fld.h();
+    k->hbl_fld.alloc("kpp.hbl", (size_t)N);                      k->hbl    = k->hbl_fld.h();
+    k->bfsfc_fld.alloc("kpp.bfsfc", (size_t)N);                  k->bfsfc  = k->bfsfc_fld.h();
+    k->caseA_fld.alloc("kpp.caseA", (size_t)N);                  k->caseA  = k->caseA_fld.h();
+    k->stable_fld.alloc("kpp.stable", (size_t)N);                k->stable = k->stable_fld.h();
+    k->ustar_fld.alloc("kpp.ustar", (size_t)N);                  k->ustar  = k->ustar_fld.h();
+    k->Bo_fld.alloc("kpp.Bo", (size_t)N);                        k->Bo     = k->Bo_fld.h();
+    k->kbl_fld.alloc("kpp.kbl", (size_t)N);                      k->kbl    = k->kbl_fld.h();
 
-    k->wmt    = (decltype(k->wmt))calloc(tbl,                        sizeof(real_t));
-    k->wst    = (decltype(k->wst))calloc(tbl,                        sizeof(real_t));
-
-    FESOM_CHECK(k->diffK && k->viscA && k->blmc && k->ghats && k->dVsq
-             && k->dkm1 && k->hbl && k->bfsfc && k->caseA && k->stable
-             && k->ustar && k->Bo && k->kbl && k->wmt && k->wst,
-             "fesom_kpp alloc: out of memory");
+    k->wmt_fld.alloc("kpp.wmt", tbl);                            k->wmt    = k->wmt_fld.h();
+    k->wst_fld.alloc("kpp.wst", tbl);                            k->wst    = k->wst_fld.h();
 }
 
 void fesom_kpp_free(fesom_kpp *k)
 {
-    free(k->diffK);  free(k->viscA);  free(k->blmc);  free(k->ghats);
-    free(k->dVsq);   free(k->dkm1);   free(k->hbl);   free(k->bfsfc);
-    free(k->caseA);  free(k->stable); free(k->ustar); free(k->Bo);
-    free(k->kbl);    free(k->wmt);    free(k->wst);
-    memset(k, 0, sizeof(*k));
+    // *k = fesom_kpp{} releases every Field (assigns an empty DualView → drops the refcount/frees)
+    // and zeros the PODs (D13/L13); no per-array free (the raw ptrs are non-owning aliases).
+    *k = fesom_kpp{};
 }
 
 /*===========================================================================
