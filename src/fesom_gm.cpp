@@ -15,10 +15,15 @@
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
 
+#include <Kokkos_Core.hpp>   // M2.5b: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>            // M2.5b: FESOM_KK_VERIFY snapshot buffers (host-only diagnostic)
+#include <string>
+#include <algorithm>
+#include <cstdio>
 
 enum { NL_MAX = 64 };          /* matches the cap used in fesom_eos / momentum */
 
@@ -1057,4 +1062,622 @@ void fesom_fer_gamma2vel(struct fesom_dyn *dyn,
     if (partit && partit->npes > 1) {
         fesom_halo_exchange(dyn->fer_uv, FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
     }
+}
+
+/*===========================================================================
+ * M2.5b — DEVICE (Kokkos) twins of the substep-1b GM chain. Each is a verbatim
+ * parallel_for port of its C twin above; every constant / loop bound / ODM95 +
+ * GMzexp tapering association is copied EXACTLY (no-simplification rule, the
+ * GM/Redi numerics knobs in docs/PORTING_LESSONS). The kernels do PURE compute +
+ * modify_device(); the DRIVER (fesom_step.cpp substep 1b) owns the IN rail
+ * (sync_device all inputs, L28), the per-kernel sync_host + halo (the C twins'
+ * internal exchanges move to the driver, the ALE/M2.5 pattern — none of these is
+ * a D21 internal bracket), and the one re-push (fer_gamma → fer_gamma2vel, which
+ * reads it at HALO vertices, L30). All five are race-free MAPS/GATHERS/per-node
+ * TDMAs (each entity owns its output column) → Serial AND OpenMP bit-identical
+ * (no scatter, no reduction — unlike vert_vel/visc_filt). NL_MAX stack scratch is
+ * lambda-local (slow device-local memory, slow-first accepted, the EOS/L31 shape).
+ *===========================================================================*/
+
+/*--- compute_sigma_xy — DEVICE (substep 1b) ---------------------------------
+ * Per-node gather: density gradient on neutral surfaces, area-weighted over the
+ * surrounding elements. Each node owns its sigma_xy[n,:,:] slab → race-free. */
+void fesom_compute_sigma_xy_kk(struct fesom_aux           *aux,
+                               const struct fesom_tracers *tracers,
+                               const struct fesom_mesh    *mesh,
+                               fesom_gm                   *gm)
+{
+    const int  nl       = mesh->nl;
+    const int  myDim    = mesh->myDim_nod2D;
+    const real_t rho_ref = (real_t)FESOM_DENSITY_0;
+    FESOM_CHECK(nl <= NL_MAX, "sigma_xy_kk: nl %d > NL_MAX", nl);
+
+    auto T          = tracers->data[FESOM_TRACER_T].values_fld.d();
+    auto S          = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto alpha      = aux->sw_alpha_fld.d();
+    auto beta       = aux->sw_beta_fld.d();
+    auto sxy        = gm->sigma_xy_fld.d();
+    auto nlev_n     = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n     = mesh->ulevels_nod2D_fld.d();
+    auto nlev_e     = mesh->nlevels_fld.d();
+    auto ulev_e     = mesh->ulevels_fld.d();
+    auto off        = mesh->nod_in_elem2D_offsets_fld.d();
+    auto nie        = mesh->nod_in_elem2D_fld.d();
+    auto grad       = mesh->gradient_sca_fld.d();
+    auto elnod      = mesh->elem_nodes_fld.d();
+    auto earea      = mesh->elem_area_fld.d();
+
+    Kokkos::parallel_for("fesom_gm_sigma_xy", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            int nle_node = nlev_n(n) - 1;       /* exclusive */
+            int ule_node = ulev_n(n) - 1;       /* 0-based   */
+            if (nle_node <= ule_node) return;   /* dry */
+
+            real_t tx[NL_MAX], ty[NL_MAX], sx[NL_MAX], sy[NL_MAX], vol[NL_MAX];
+            for (int nz = ule_node; nz < nle_node; ++nz) {
+                tx[nz] = ty[nz] = sx[nz] = sy[nz] = vol[nz] = 0.0;
+            }
+
+            int o0 = off(n);
+            int o1 = off(n + 1);
+            for (int k = o0; k < o1; ++k) {
+                int el = nie(k);
+                int nle = nlev_e(el) - 1;       /* exclusive  */
+                int ule = ulev_e(el) - 1;       /* 0-based    */
+                real_t g0 = grad(6*el + 0), g1 = grad(6*el + 1), g2 = grad(6*el + 2);
+                real_t g3 = grad(6*el + 3), g4 = grad(6*el + 4), g5 = grad(6*el + 5);
+                int v0 = elnod(3*el + 0);
+                int v1 = elnod(3*el + 1);
+                int v2 = elnod(3*el + 2);
+                real_t a = earea(el);
+
+                for (int nz = ule; nz < nle; ++nz) {
+                    /* Tracer T/S stored with stride nl (NOT nl-1). */
+                    size_t i0 = (size_t)v0 * nl + nz;
+                    size_t i1 = (size_t)v1 * nl + nz;
+                    size_t i2 = (size_t)v2 * nl + nz;
+                    if (nz < ule_node || nz >= nle_node) continue;
+
+                    vol[nz] += a;
+                    tx[nz] += (g0*T(i0) + g1*T(i1) + g2*T(i2)) * a;
+                    ty[nz] += (g3*T(i0) + g4*T(i1) + g5*T(i2)) * a;
+                    sx[nz] += (g0*S(i0) + g1*S(i1) + g2*S(i2)) * a;
+                    sy[nz] += (g3*S(i0) + g4*S(i1) + g5*S(i2)) * a;
+                }
+            }
+
+            for (int nz = ule_node; nz < nle_node; ++nz) {
+                real_t inv_vol = (vol[nz] > 0.0) ? 1.0 / vol[nz] : 0.0;
+                real_t a = alpha((size_t)n * nl + nz);
+                real_t b = beta ((size_t)n * nl + nz);
+                sxy((size_t)n * nl * 2 + nz * 2 + 0) =
+                    (-a * tx[nz] + b * sx[nz]) * inv_vol * rho_ref;
+                sxy((size_t)n * nl * 2 + nz * 2 + 1) =
+                    (-a * ty[nz] + b * sy[nz]) * inv_vol * rho_ref;
+            }
+        });
+
+    gm->sigma_xy_fld.modify_device();
+}
+
+/*--- compute_neutral_slope — DEVICE (substep 1b) ----------------------------
+ * Per-node: neutral_slope = sigma_xy/N², ODM95 c1 tapering, slope_tapered.
+ * Active config: scaling_ODM95=.true. (c1), scaling_LDD97=.false. (c2≡1),
+ * Fer_GM ∧ Redi ∧ Redi_Ktaper → fer_tapfac=c1, slope_tapered=ns*sqrt(c1). */
+void fesom_compute_neutral_slope_kk(struct fesom_aux        *aux,
+                                    const struct fesom_mesh *mesh,
+                                    fesom_gm                *gm)
+{
+    const int    nl       = mesh->nl;
+    const int    nl1      = nl - 1;
+    const int    myDim    = mesh->myDim_nod2D;
+    const real_t g        = (real_t)FESOM_G;
+    const real_t rho_ref  = (real_t)FESOM_DENSITY_0;
+    const real_t eps      = 5.0e-6;
+    const real_t eps_sq   = eps * eps;
+    const real_t ODM95_Scr = 0.2e-2;
+    const real_t ODM95_Sd  = 1.0e-3;
+    FESOM_CHECK(nl <= NL_MAX, "neutral_slope_kk: nl %d > NL_MAX", nl);
+
+    auto bvfreq = aux->bvfreq_fld.d();
+    auto sxy    = gm->sigma_xy_fld.d();
+    auto ns     = gm->neutral_slope_fld.d();
+    auto st     = gm->slope_tapered_fld.d();
+    auto tf     = gm->fer_tapfac_fld.d();
+    auto nlev_n = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+
+    Kokkos::parallel_for("fesom_gm_neutral_slope", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            int nle = nlev_n(n) - 1;       /* exclusive index for slopes */
+            int ule = ulev_n(n) - 1;       /* 0-based */
+
+            /* Zero slope_tapered over the full nz range (Fortran line 2979). */
+            for (int nz = 0; nz < nl1; ++nz) {
+                st((size_t)n * nl1 * 3 + nz * 3 + 0) = 0.0;
+                st((size_t)n * nl1 * 3 + nz * 3 + 1) = 0.0;
+                st((size_t)n * nl1 * 3 + nz * 3 + 2) = 0.0;
+            }
+
+            if (nle <= ule) return;
+
+            /* Pass 1: neutral_slope from sigma_xy / N². */
+            for (int nz = ule; nz < nle; ++nz) {
+                real_t bv_sum = bvfreq((size_t)n * nl + nz)
+                              + bvfreq((size_t)n * nl + (nz + 1));
+                real_t denom  = (bv_sum > eps_sq) ? bv_sum : eps_sq;
+                real_t ro_z_inv = 2.0 * g / rho_ref / denom;
+
+                real_t sx = sxy((size_t)n * nl * 2 + nz * 2 + 0) * ro_z_inv;
+                real_t sy = sxy((size_t)n * nl * 2 + nz * 2 + 1) * ro_z_inv;
+                real_t sm = Kokkos::sqrt(sx*sx + sy*sy);
+                ns((size_t)n * nl1 * 3 + nz * 3 + 0) = sx;
+                ns((size_t)n * nl1 * 3 + nz * 3 + 1) = sy;
+                ns((size_t)n * nl1 * 3 + nz * 3 + 2) = sm;
+            }
+
+            /* Pass 2: ODM95 tapering c1. */
+            real_t c1[NL_MAX];
+            for (int nz = 0; nz < nl1; ++nz) c1[nz] = 1.0;
+            for (int nz = ule; nz < nle; ++nz) {
+                real_t sm = ns((size_t)n * nl1 * 3 + nz * 3 + 2);
+                real_t v = 0.5 * (1.0 + Kokkos::tanh((ODM95_Scr - sm) / ODM95_Sd));
+                real_t bv0 = bvfreq((size_t)n * nl + nz);
+                real_t bv1 = bvfreq((size_t)n * nl + (nz + 1));
+                if (bv0 <= 0.0 || bv1 <= 0.0) v = 0.0;
+                c1[nz] = v;
+            }
+
+            /* Pass 3: combine c1*c2 (c2≡1) → fer_tapfac=c1, slope_tapered=ns*sqrt(c1). */
+            for (int nz = ule; nz < nle; ++nz) {
+                real_t cc = c1[nz];                          /* c1 * c2 = c1 */
+                tf((size_t)n * nl + nz) = cc;
+                real_t s = Kokkos::sqrt(cc);
+                real_t sx = ns((size_t)n * nl1 * 3 + nz * 3 + 0);
+                real_t sy = ns((size_t)n * nl1 * 3 + nz * 3 + 1);
+                real_t sm = ns((size_t)n * nl1 * 3 + nz * 3 + 2);
+                st((size_t)n * nl1 * 3 + nz * 3 + 0) = sx * s;
+                st((size_t)n * nl1 * 3 + nz * 3 + 1) = sy * s;
+                st((size_t)n * nl1 * 3 + nz * 3 + 2) = sm * s;
+            }
+        });
+
+    gm->neutral_slope_fld.modify_device();
+    gm->slope_tapered_fld.modify_device();
+    gm->fer_tapfac_fld.modify_device();
+}
+
+/*--- init_redi_gm — DEVICE (substep 1b) -------------------------------------
+ * Two per-node parallel_fors (D20 launch barrier orders pass-3's read of the
+ * pass-1 fer_K[nzmin]). Active sub-features only (default namelist.oce):
+ * Fer_GM=T, Redi=T, scaling_resolution=T(order 2), scaling_GMzexp=T,
+ * Redi_Ktaper=T. ⚠️ every constant + the GMzexp depth-exp + the ODM95 sqrt-taper
+ * copied verbatim. Each node owns its fer_K/Ki/fer_C/fer_scal column → race-free. */
+void fesom_init_redi_gm_kk(struct fesom_aux        *aux,
+                           const struct fesom_mesh *mesh,
+                           fesom_gm                *gm)
+{
+    const int    nl       = mesh->nl;
+    const int    myDim    = mesh->myDim_nod2D;
+    const real_t pi       = 3.14159265358979323846;
+
+    /* Active-config namelist constants. */
+    const real_t K_GM_max     = 1000.0;
+    const real_t K_GM_min     = 2.0;
+    const real_t K_GM_cmin    = 0.1;
+    const real_t K_GM_cm      = 3.0;
+    const real_t Redi_Kmin    = 100.0;
+    const real_t Redi_Kmax    = K_GM_max;     /* auto-sync */
+    const real_t GMzexp_zref  = 500.0;
+    const real_t GMzexp_smin  = 0.6;
+    const real_t refscalresol = 100000.0;     /* 100 km */
+    const real_t inv_refscalresol_sq = 1.0 / (refscalresol * refscalresol);
+    FESOM_CHECK(nl <= NL_MAX, "init_redi_gm_kk: nl %d > NL_MAX", nl);
+
+    auto bvfreq    = aux->bvfreq_fld.d();
+    auto hnode_new = mesh->hnode_new_fld.d();
+    auto area      = mesh->area_fld.d();
+    auto zbar_3d_n = mesh->zbar_3d_n_fld.d();
+    auto fer_scal  = gm->fer_scal_fld.d();
+    auto fer_K     = gm->fer_K_fld.d();
+    auto fer_C     = gm->fer_C_fld.d();
+    auto Ki        = gm->Ki_fld.d();
+    auto tf        = gm->fer_tapfac_fld.d();
+    auto nlev_min  = mesh->nlevels_nod2D_min_fld.d();
+    auto ulev_max  = mesh->ulevels_nod2D_max_fld.d();
+    auto nlev_n    = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n    = mesh->ulevels_nod2D_fld.d();
+
+    /* --- Pass 1: F1(x,y) per-node scalar (+ inline Redi=GM sync). --------- */
+    Kokkos::parallel_for("fesom_gm_init_redi_p1", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmax = nlev_min(n) - 1;   /* exclusive */
+            int nzmin = ulev_max(n) - 1;   /* 0-based */
+
+            real_t cm_sum = 0.0;
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t bv0 = bvfreq((size_t)n * nl + nz);
+                real_t bv1 = bvfreq((size_t)n * nl + (nz + 1));
+                real_t v0 = (bv0 > 0.0) ? Kokkos::sqrt(bv0) : 0.0;
+                real_t v1 = (bv1 > 0.0) ? Kokkos::sqrt(bv1) : 0.0;
+                cm_sum += hnode_new((size_t)n * nl + nz) * 0.5 * (v0 + v1);
+            }
+            real_t cm = cm_sum / pi / K_GM_cm;
+            if (cm < K_GM_cmin) cm = K_GM_cmin;
+
+            real_t area_n = area((size_t)n * nl + 0);   /* surface CV area */
+            real_t scaling = Kokkos::sqrt(area_n * inv_refscalresol_sq * 2.0);
+            if (scaling > 1.0) scaling = 1.0;
+
+            fer_scal(n) = scaling;
+
+            real_t k_top = scaling * K_GM_max;
+            if (k_top < K_GM_min) k_top = K_GM_min;
+            fer_K((size_t)n * nl + nzmin) = k_top;
+            fer_C(n) = cm * cm;
+
+            /* Pass 2 (inline): Redi = GM sync. */
+            real_t ki_top = scaling * Redi_Kmax;
+            if (ki_top < K_GM_min) ki_top = K_GM_min;
+            Ki((size_t)n * nl + nzmin) = ki_top;
+        });
+
+    /* --- Pass 3: F2(z) per-node, per-level vertical scaling. -------------- */
+    Kokkos::parallel_for("fesom_gm_init_redi_p3", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmax = nlev_n(n) - 1;       /* exclusive */
+            int nzmin = ulev_n(n) - 1;       /* 0-based */
+
+            real_t zscaling[NL_MAX];
+            for (int nz = 0; nz < nl; ++nz) zscaling[nz] = 1.0;
+            for (int nz = nzmin; nz <= nzmax; ++nz) {
+                real_t z = zbar_3d_n((size_t)n * nl + nz);
+                real_t v = GMzexp_smin
+                         + (1.0 - GMzexp_smin) * Kokkos::exp(-Kokkos::fabs(z) / GMzexp_zref);
+                if (v > 1.0)          v = 1.0;
+                if (v < GMzexp_smin)  v = GMzexp_smin;
+                zscaling[nz] = v;
+            }
+
+            /* Apply F2 to fer_K (Fer_GM). */
+            real_t k_top = fer_K((size_t)n * nl + nzmin);
+            for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+                fer_K((size_t)n * nl + nz) = k_top * zscaling[nz];
+            }
+            fer_K((size_t)n * nl + nzmin) = k_top * zscaling[nzmin];
+
+            /* Apply F2 to Ki (Redi). */
+            real_t ki_top = Ki((size_t)n * nl + nzmin);
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                Ki((size_t)n * nl + nz) =
+                    ki_top * 0.5 * (zscaling[nz] + zscaling[nz + 1]);
+            }
+            Ki((size_t)n * nl + nzmin) =
+                ki_top * 0.5 * (zscaling[nzmin] + zscaling[nzmin + 1]);
+
+            /* Redi_Ktaper = true. */
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t tff = tf((size_t)n * nl + nz);
+                real_t s  = Kokkos::sqrt(tff);
+                real_t k  = Ki((size_t)n * nl + nz);
+                Ki((size_t)n * nl + nz) = k * s + Redi_Kmin * Kokkos::fabs(s - 1.0);
+            }
+        });
+
+    gm->fer_scal_fld.modify_device();
+    gm->fer_K_fld.modify_device();
+    gm->fer_C_fld.modify_device();
+    gm->Ki_fld.modify_device();
+}
+
+/*--- fer_solve_gamma — DEVICE (substep 1b): per-node 1D TDMA ----------------
+ * Solves ∂z(C·∂z Γ) − N²·Γ = (g/ρ₀)·∇σ·K_GM(z) for the two horizontal
+ * components together. The whole Thomas sweep runs SEQUENTIALLY in level INSIDE
+ * the per-node lambda over NL_MAX stack scratch (the L31/impl_vert_visc shape) →
+ * race-free, Serial AND OpenMP bit-identical. Verbatim copy of fesom_fer_solve_gamma. */
+void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
+                              const struct fesom_mesh *mesh,
+                              fesom_gm                *gm)
+{
+    const int    nl       = mesh->nl;
+    const int    myDim    = mesh->myDim_nod2D;
+    const real_t g        = (real_t)FESOM_G;
+    const real_t rho_ref  = (real_t)FESOM_DENSITY_0;
+    FESOM_CHECK(nl <= NL_MAX, "fer_solve_gamma_kk: nl %d > NL_MAX", nl);
+
+    auto bvfreq    = aux->bvfreq_fld.d();
+    auto zbar      = mesh->zbar_fld.d();
+    auto hnode_new = mesh->hnode_new_fld.d();
+    auto fer_C     = gm->fer_C_fld.d();
+    auto fer_K     = gm->fer_K_fld.d();
+    auto sxy       = gm->sigma_xy_fld.d();
+    auto fer_gamma = gm->fer_gamma_fld.d();
+    auto nlev_min  = mesh->nlevels_nod2D_min_fld.d();
+    auto ulev_max  = mesh->ulevels_nod2D_max_fld.d();
+    auto nlev_n    = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n    = mesh->ulevels_nod2D_fld.d();
+
+    Kokkos::parallel_for("fesom_gm_fer_solve_gamma", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            real_t zbar_n[NL_MAX], Z_n[NL_MAX];
+            real_t a[NL_MAX], b[NL_MAX], c[NL_MAX];
+            real_t cp[NL_MAX], tp_x[NL_MAX], tp_y[NL_MAX];
+            real_t tr_x[NL_MAX], tr_y[NL_MAX];
+
+            /* Outer bounds. 0-based throughout. */
+            int nzmax_o = nlev_n(n) - 1;     /* index of bottom interface */
+            int nzmin_o = ulev_n(n) - 1;     /* = 0 in our config       */
+            if (nzmax_o <= nzmin_o + 1) return;   /* degenerate column */
+
+            /* Build zbar_n, Z_n on [nzmin_o, nzmax_o]. */
+            for (int nz = 0; nz < nl; ++nz) { zbar_n[nz] = 0.0; Z_n[nz] = 0.0; }
+            zbar_n[nzmax_o] = zbar(nzmax_o);
+            Z_n[nzmax_o - 1] = zbar_n[nzmax_o]
+                             + hnode_new((size_t)n * nl + (nzmax_o - 1)) * 0.5;
+            for (int nz = nzmax_o - 1; nz >= nzmin_o + 1; --nz) {
+                zbar_n[nz]    = zbar_n[nz + 1]
+                              + hnode_new((size_t)n * nl + nz);
+                Z_n[nz - 1]   = zbar_n[nz]
+                              + hnode_new((size_t)n * nl + (nz - 1)) * 0.5;
+            }
+            zbar_n[nzmin_o] = zbar_n[nzmin_o + 1]
+                            + hnode_new((size_t)n * nl + nzmin_o);
+
+            /* Inner bounds for TDMA. */
+            int nzmax = nlev_min(n) - 1;
+            int nzmin = ulev_max(n) - 1;
+            if (nzmax <= nzmin + 1) {
+                for (int nz = 0; nz < nl; ++nz) {
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+                }
+                return;
+            }
+
+            /* Top boundary (Dirichlet). */
+            a[nzmin] = 0.0; c[nzmin] = 0.0; b[nzmin] = 1.0;
+
+            real_t zinv2 = 1.0 / (zbar_n[nzmin] - zbar_n[nzmin + 1]);
+
+            /* Body. */
+            const real_t fc = fer_C(n);
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                real_t zinv1 = zinv2;
+                zinv2 = 1.0 / (zbar_n[nz] - zbar_n[nz + 1]);
+                real_t zinv  = 1.0 / (Z_n[nz - 1] - Z_n[nz]);
+                a[nz] = fc * zinv1 * zinv;
+                c[nz] = fc * zinv2 * zinv;
+                real_t bv = bvfreq((size_t)n * nl + nz);
+                if (bv < 1.0e-8) bv = 1.0e-8;
+                b[nz] = -a[nz] - c[nz] - bv;
+            }
+
+            /* Bottom boundary (Dirichlet). */
+            a[nzmax] = 0.0; c[nzmax] = 0.0; b[nzmax] = 1.0;
+
+            /* RHS. */
+            const real_t r = g / rho_ref;
+            for (int nz = 0; nz < nl; ++nz) { tr_x[nz] = 0.0; tr_y[nz] = 0.0; }
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                real_t sx_up = sxy((size_t)n * nl * 2 + (nz - 1) * 2 + 0);
+                real_t sx_dn = sxy((size_t)n * nl * 2 + nz       * 2 + 0);
+                real_t sy_up = sxy((size_t)n * nl * 2 + (nz - 1) * 2 + 1);
+                real_t sy_dn = sxy((size_t)n * nl * 2 + nz       * 2 + 1);
+                real_t k = fer_K((size_t)n * nl + nz);
+                tr_x[nz] = r * 0.5 * (sx_up + sx_dn) * k;
+                tr_y[nz] = r * 0.5 * (sy_up + sy_dn) * k;
+            }
+
+            /* Thomas sweep. */
+            cp[nzmin]   = c[nzmin]   / b[nzmin];
+            tp_x[nzmin] = tr_x[nzmin] / b[nzmin];
+            tp_y[nzmin] = tr_y[nzmin] / b[nzmin];
+            for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+                real_t m = b[nz] - cp[nz - 1] * a[nz];
+                cp  [nz] = c[nz] / m;
+                tp_x[nz] = (tr_x[nz] - tp_x[nz - 1] * a[nz]) / m;
+                tp_y[nz] = (tr_y[nz] - tp_y[nz - 1] * a[nz]) / m;
+            }
+
+            /* Back-substitution into fer_gamma. Zero outside [nzmin, nzmax]. */
+            for (int nz = 0; nz < nl; ++nz) {
+                fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
+                fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+            }
+            fer_gamma((size_t)n * nl * 2 + nzmax * 2 + 0) = tp_x[nzmax];
+            fer_gamma((size_t)n * nl * 2 + nzmax * 2 + 1) = tp_y[nzmax];
+            for (int nz = nzmax - 1; nz >= nzmin; --nz) {
+                real_t gx_below = fer_gamma((size_t)n * nl * 2 + (nz + 1) * 2 + 0);
+                real_t gy_below = fer_gamma((size_t)n * nl * 2 + (nz + 1) * 2 + 1);
+                fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = tp_x[nz] - cp[nz] * gx_below;
+                fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = tp_y[nz] - cp[nz] * gy_below;
+            }
+        });
+
+    gm->fer_gamma_fld.modify_device();
+}
+
+/*--- fer_gamma2vel — DEVICE (substep 1b) ------------------------------------
+ * Per-element reconstruction of the bolus velocity from the streamfunction
+ * differences across vertical interfaces. Reads fer_gamma at the 3 vertices
+ * (which can be HALO nodes → the driver re-pushes the halo'd fer_gamma to the
+ * device before this kernel, L30). Each element owns its fer_uv slot → race-free. */
+void fesom_fer_gamma2vel_kk(struct fesom_dyn        *dyn,
+                            const struct fesom_mesh *mesh,
+                            const fesom_gm          *gm)
+{
+    const int  nl      = mesh->nl;
+    const int  myDim_e = mesh->myDim_elem2D;
+    const real_t onethird = 1.0 / 3.0;
+
+    auto fer_uv    = dyn->fer_uv_fld.d();
+    auto fer_gamma = gm->fer_gamma_fld.d();
+    auto helem     = mesh->helem_fld.d();
+    auto elnod     = mesh->elem_nodes_fld.d();
+    auto nlev_e    = mesh->nlevels_fld.d();
+    auto ulev_e    = mesh->ulevels_fld.d();
+
+    Kokkos::parallel_for("fesom_gm_fer_gamma2vel", Kokkos::RangePolicy<>(0, myDim_e),
+        KOKKOS_LAMBDA(const int el) {
+            int v0 = elnod(3*el + 0);
+            int v1 = elnod(3*el + 1);
+            int v2 = elnod(3*el + 2);
+            int nzmax = nlev_e(el) - 1;       /* nl1 = layer count */
+            int nzmin = ulev_e(el) - 1;       /* 0-based */
+
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t h = helem((size_t)el * nl + nz);
+                if (!(h > 0.0)) continue;            /* dry / sentinel layer */
+                real_t zinv = onethird / h;
+
+                real_t gx_top = fer_gamma((size_t)v0 * nl * 2 + nz       * 2 + 0)
+                              + fer_gamma((size_t)v1 * nl * 2 + nz       * 2 + 0)
+                              + fer_gamma((size_t)v2 * nl * 2 + nz       * 2 + 0);
+                real_t gx_bot = fer_gamma((size_t)v0 * nl * 2 + (nz + 1) * 2 + 0)
+                              + fer_gamma((size_t)v1 * nl * 2 + (nz + 1) * 2 + 0)
+                              + fer_gamma((size_t)v2 * nl * 2 + (nz + 1) * 2 + 0);
+                real_t gy_top = fer_gamma((size_t)v0 * nl * 2 + nz       * 2 + 1)
+                              + fer_gamma((size_t)v1 * nl * 2 + nz       * 2 + 1)
+                              + fer_gamma((size_t)v2 * nl * 2 + nz       * 2 + 1);
+                real_t gy_bot = fer_gamma((size_t)v0 * nl * 2 + (nz + 1) * 2 + 1)
+                              + fer_gamma((size_t)v1 * nl * 2 + (nz + 1) * 2 + 1)
+                              + fer_gamma((size_t)v2 * nl * 2 + (nz + 1) * 2 + 1);
+
+                fer_uv((size_t)el * nl * 2 + nz * 2 + 0) = (gx_top - gx_bot) * zinv;
+                fer_uv((size_t)el * nl * 2 + nz * 2 + 1) = (gy_top - gy_bot) * zinv;
+            }
+        });
+
+    dyn->fer_uv_fld.modify_device();
+}
+
+/*===========================================================================
+ * M2.5b — FESOM_KK_VERIFY=gm gates. Each runs the untouched C twin beside the
+ * device result on the same live state, reports per-field max|Δ|, and asserts
+ * max|Δ|==0 on Serial (the bit-identity oracle). Non-intrusive: snapshots the KK
+ * result (raw alias, host-current after the driver per-kernel sync_host), runs
+ * the C twin (overwriting the raw alias — incl. its own internal halo, a no-op at
+ * np=1), diffs, restores KK. No L26 capture-before is needed for ANY substep-1b
+ * kernel — every output is a FULL overwrite derived from inputs the kernel does
+ * not modify, so the C twin recomputes from the same intact state (EOS-style gate).
+ * The C twins are run in the SAME chain order as the kernels (each reads the
+ * KK-produced upstream state, which is bit-identical to the C twin's), so verifying
+ * each kernel independently is sound.
+ *===========================================================================*/
+
+static double fesom_gm_maxdiff_(const std::vector<real_t> &kk, const real_t *c, size_t n)
+{
+    double m = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        double d = std::fabs((double)kk[i] - (double)c[i]);
+        if (d > m) m = d;
+    }
+    return m;
+}
+
+static void fesom_gm_verify_report_(int step_n, const char *what, double dmax)
+{
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=gm] FAIL (%s) step %d: Serial must be bit-identical "
+                             "to the C twin (max|Δ|=%.3e)\n", what, step_n, dmax);
+        std::abort();
+    }
+}
+
+void fesom_gm_sigma_xy_verify(struct fesom_aux *aux, const struct fesom_tracers *tracers,
+                              const struct fesom_mesh *mesh, fesom_gm *gm,
+                              struct fesom_partit *partit, int step_n)
+{
+    const int nl = mesh->nl;
+    const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl * 2;
+    std::vector<real_t> kk(gm->sigma_xy, gm->sigma_xy + total);
+    fesom_compute_sigma_xy(aux, tracers, mesh, gm, partit);             /* C twin */
+    double d = fesom_gm_maxdiff_(kk, gm->sigma_xy, total);
+    std::copy(kk.begin(), kk.end(), gm->sigma_xy);                      /* restore KK */
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: sigma_xy=%.3e\n",
+                step_n, std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), d);
+    fesom_gm_verify_report_(step_n, "sigma_xy", d);
+}
+
+void fesom_gm_neutral_slope_verify(struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                                   fesom_gm *gm, struct fesom_partit *partit, int step_n)
+{
+    const int nl = mesh->nl;
+    const int nl1 = nl - 1;
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const size_t t3 = (size_t)N * (size_t)nl1 * 3;
+    const size_t tnl = (size_t)N * (size_t)nl;
+    std::vector<real_t> kk_ns(gm->neutral_slope, gm->neutral_slope + t3);
+    std::vector<real_t> kk_st(gm->slope_tapered, gm->slope_tapered + t3);
+    std::vector<real_t> kk_tf(gm->fer_tapfac,    gm->fer_tapfac    + tnl);
+    fesom_compute_neutral_slope(aux, mesh, gm, partit);                 /* C twin */
+    double d_ns = fesom_gm_maxdiff_(kk_ns, gm->neutral_slope, t3);
+    double d_st = fesom_gm_maxdiff_(kk_st, gm->slope_tapered, t3);
+    double d_tf = fesom_gm_maxdiff_(kk_tf, gm->fer_tapfac,    tnl);
+    std::copy(kk_ns.begin(), kk_ns.end(), gm->neutral_slope);           /* restore KK */
+    std::copy(kk_st.begin(), kk_st.end(), gm->slope_tapered);
+    std::copy(kk_tf.begin(), kk_tf.end(), gm->fer_tapfac);
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: neutral_slope=%.3e "
+                "slope_tapered=%.3e fer_tapfac=%.3e\n", step_n,
+                std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), d_ns, d_st, d_tf);
+    fesom_gm_verify_report_(step_n, "neutral_slope", std::max(d_ns, std::max(d_st, d_tf)));
+}
+
+void fesom_gm_init_redi_verify(struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                               fesom_gm *gm, struct fesom_partit *partit, int step_n)
+{
+    const int nl = mesh->nl;
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const size_t tnl = (size_t)N * (size_t)nl;
+    const size_t tn  = (size_t)N;
+    std::vector<real_t> kk_scal(gm->fer_scal, gm->fer_scal + tn);
+    std::vector<real_t> kk_K(gm->fer_K, gm->fer_K + tnl);
+    std::vector<real_t> kk_C(gm->fer_C, gm->fer_C + tn);
+    std::vector<real_t> kk_Ki(gm->Ki, gm->Ki + tnl);
+    fesom_init_redi_gm(aux, mesh, gm, partit);                          /* C twin */
+    double d_scal = fesom_gm_maxdiff_(kk_scal, gm->fer_scal, tn);
+    double d_K    = fesom_gm_maxdiff_(kk_K,    gm->fer_K,    tnl);
+    double d_C    = fesom_gm_maxdiff_(kk_C,    gm->fer_C,    tn);
+    double d_Ki   = fesom_gm_maxdiff_(kk_Ki,   gm->Ki,       tnl);
+    std::copy(kk_scal.begin(), kk_scal.end(), gm->fer_scal);            /* restore KK */
+    std::copy(kk_K.begin(),    kk_K.end(),    gm->fer_K);
+    std::copy(kk_C.begin(),    kk_C.end(),    gm->fer_C);
+    std::copy(kk_Ki.begin(),   kk_Ki.end(),   gm->Ki);
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: fer_scal=%.3e fer_K=%.3e "
+                "fer_C=%.3e Ki=%.3e\n", step_n,
+                std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), d_scal, d_K, d_C, d_Ki);
+    fesom_gm_verify_report_(step_n, "init_redi_gm",
+                            std::max(std::max(d_scal, d_K), std::max(d_C, d_Ki)));
+}
+
+void fesom_gm_solve_gamma_verify(const struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                                 fesom_gm *gm, struct fesom_partit *partit, int step_n)
+{
+    const int nl = mesh->nl;
+    const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl * 2;
+    std::vector<real_t> kk(gm->fer_gamma, gm->fer_gamma + total);
+    fesom_fer_solve_gamma(aux, mesh, gm, partit);                       /* C twin */
+    double d = fesom_gm_maxdiff_(kk, gm->fer_gamma, total);
+    std::copy(kk.begin(), kk.end(), gm->fer_gamma);                     /* restore KK */
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: fer_gamma=%.3e\n",
+                step_n, std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), d);
+    fesom_gm_verify_report_(step_n, "fer_solve_gamma", d);
+}
+
+void fesom_gm_gamma2vel_verify(struct fesom_dyn *dyn, const struct fesom_mesh *mesh,
+                               const fesom_gm *gm, struct fesom_partit *partit, int step_n)
+{
+    const int nl = mesh->nl;
+    /* fer_gamma2vel writes OWNED elements [0, myDim_elem2D); the halo is exchange-
+     * filled (no-op at np=1). Diff the owned compute extent. */
+    const size_t total = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;
+    std::vector<real_t> kk(dyn->fer_uv, dyn->fer_uv + total);
+    fesom_fer_gamma2vel(dyn, mesh, gm, partit);                         /* C twin */
+    double d = fesom_gm_maxdiff_(kk, dyn->fer_uv, total);
+    std::copy(kk.begin(), kk.end(), dyn->fer_uv);                       /* restore KK */
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: fer_uv=%.3e\n",
+                step_n, std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), d);
+    fesom_gm_verify_report_(step_n, "fer_gamma2vel", d);
 }

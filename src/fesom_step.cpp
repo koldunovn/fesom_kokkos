@@ -127,6 +127,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_vfilt  = 0;   /* M2.4 substep 5 */
     static int s_verify_vrhs   = 0;   /* M2.4 substep 4 */
     static int s_verify_ale    = 0;   /* M2.5 substeps 12/14 */
+    static int s_verify_gm     = 0;   /* M2.5b substep 1b */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -136,6 +137,7 @@ int fesom_timestep(int                          step_n,
         s_verify_vfilt = (e && strstr(e, "vfilt")) ? 1 : 0;   /* M2.4: distinct from ivisc */
         s_verify_vrhs = (e && strstr(e, "vrhs")) ? 1 : 0;     /* M2.4: no substring collision */
         s_verify_ale = (e && strstr(e, "ale")) ? 1 : 0;       /* M2.5: no substring collision */
+        s_verify_gm  = (e && strstr(e, "gm"))  ? 1 : 0;       /* M2.5b: no substring collision (gm ⊄ any key) */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -196,18 +198,80 @@ int fesom_timestep(int                          step_n,
      * every bvfreq consumer (GM, PP/KPP, mo_convect). */
     fesom_smooth_nod3D(aux->bvfreq_fld.h_checked(), nl, 1, mesh, p);
 
-    /*  1b. GM/Redi prerequisites + per-step coefficient builder +
-     *      streamfunction solve + bolus velocity reconstruction
-     *      (Phases G2b + G3 + G4). Outputs sigma_xy / neutral_slope /
-     *      slope_tapered / fer_tapfac / fer_K / fer_C / Ki / fer_gamma /
-     *      dyn->fer_uv. Still no readers (G5 / G6 / G7 will plumb the
-     *      tracer-side use). G8 will gate this block under gmredi_on. */
+    /*  1b. GM/Redi prerequisites + per-step coefficient builder + streamfunction
+     *      solve + bolus velocity reconstruction — M2.5b: device kernels.
+     *      SYNC_MAP §2 row 1b. ⚠️ GM is ON by default in the pi smoke (s_no_gmredi=0,
+     *      L34), so this whole chain runs every step on the golden path. Outputs
+     *      sigma_xy / neutral_slope / slope_tapered / fer_tapfac / fer_K / fer_C /
+     *      Ki / fer_gamma / dyn->fer_uv. fer_uv feeds the DEVICE vert_vel (substep
+     *      12b) + the bolus add (13a); slope_tapered/Ki feed the Redi (substep 13).
+     *
+     *      The five kernels flow DEVICE→DEVICE (each reads its upstream's OWNED
+     *      output on the device); the C twins' internal halos move to the driver
+     *      (the ALE/M2.5 pattern — none of these is a D21 internal bracket). Only
+     *      fer_gamma is re-pushed to the device (fer_gamma2vel reads it at HALO
+     *      vertices, L30). All five are race-free maps/gathers/per-node TDMAs →
+     *      Serial AND OpenMP bit-identical (no scatter). On Serial/OpenMP host==
+     *      device so every sync is a no-op. */
     if (gm) {
-        fesom_compute_sigma_xy     (aux, tracers, mesh, gm, p);
-        fesom_compute_neutral_slope(aux,           mesh, gm, p);
-        fesom_init_redi_gm         (aux,           mesh, gm, p);
-        fesom_fer_solve_gamma      (aux,           mesh, gm, p);
-        fesom_fer_gamma2vel        (dyn,           mesh, gm, p);
+        const int nl1 = nl - 1;
+        /* IN rail (L28 — sync every input the chain reads that a host op last touched):
+         * bvfreq = the L27 device→host(smooth_nod3D)→device hand-off (substep 1);
+         * sw_alpha/sw_beta were halo'd on the host (substep 1); T/S were pushed by the
+         * substep-1 EOS rail + unchanged, re-pushed here for self-containment; hnode_new
+         * (last step's 12a) + helem (last step's 14) are evolving mesh, host-current. */
+        aux->bvfreq_fld.modify_host();   aux->bvfreq_fld.sync_device();
+        aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
+        aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
+        {
+            auto &tT = tracers->data[FESOM_TRACER_T].values_fld;
+            auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
+            tT.modify_host(); tT.sync_device();
+            tS.modify_host(); tS.sync_device();
+        }
+        mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device();
+        mesh->helem_fld.modify_host();     mesh->helem_fld.sync_device();
+
+        /* (G2b) density gradient on neutral surfaces. */
+        fesom_compute_sigma_xy_kk(aux, tracers, mesh, gm);
+        gm->sigma_xy_fld.sync_host();
+        if (s_verify_gm) fesom_gm_sigma_xy_verify(aux, tracers, mesh, gm, p, step_n);
+        fesom_halo_exchange(gm->sigma_xy_fld.h_checked(), FESOM_HALO_NOD2D, nl, 2, p);
+
+        /* (G2b) neutral slope + ODM95 tapering. */
+        fesom_compute_neutral_slope_kk(aux, mesh, gm);
+        gm->neutral_slope_fld.sync_host();
+        gm->slope_tapered_fld.sync_host();
+        gm->fer_tapfac_fld.sync_host();   /* read by init_redi (owned) + the verify; not halo'd */
+        if (s_verify_gm) fesom_gm_neutral_slope_verify(aux, mesh, gm, p, step_n);
+        fesom_halo_exchange(gm->neutral_slope_fld.h_checked(), FESOM_HALO_NOD2D, nl1, 3, p);
+        fesom_halo_exchange(gm->slope_tapered_fld.h_checked(), FESOM_HALO_NOD2D, nl1, 3, p);
+
+        /* (G3) per-step GM/Redi coefficient builder. */
+        fesom_init_redi_gm_kk(aux, mesh, gm);
+        gm->fer_scal_fld.sync_host();
+        gm->fer_K_fld.sync_host();
+        gm->fer_C_fld.sync_host();
+        gm->Ki_fld.sync_host();
+        if (s_verify_gm) fesom_gm_init_redi_verify(aux, mesh, gm, p, step_n);
+        fesom_exchange_nod2D(gm->fer_C_fld.h_checked(), p);
+        fesom_halo_exchange(gm->fer_K_fld.h_checked(), FESOM_HALO_NOD2D, nl, 1, p);
+        fesom_halo_exchange(gm->Ki_fld.h_checked(),    FESOM_HALO_NOD2D, nl, 1, p);
+
+        /* (G4) streamfunction solve (per-node TDMA). */
+        fesom_fer_solve_gamma_kk(aux, mesh, gm);
+        gm->fer_gamma_fld.sync_host();
+        if (s_verify_gm) fesom_gm_solve_gamma_verify(aux, mesh, gm, p, step_n);
+        fesom_halo_exchange(gm->fer_gamma_fld.h_checked(), FESOM_HALO_NOD2D, nl, 2, p);
+        /* fer_gamma2vel reads fer_gamma at HALO vertices → re-push the halo'd host
+         * values to the device (L30, the bvfreq/hpressure cross-op pattern). */
+        gm->fer_gamma_fld.modify_host(); gm->fer_gamma_fld.sync_device();
+
+        /* (G4) bolus velocity reconstruction (vertex→element). */
+        fesom_fer_gamma2vel_kk(dyn, mesh, gm);
+        dyn->fer_uv_fld.sync_host();
+        if (s_verify_gm) fesom_gm_gamma2vel_verify(dyn, mesh, gm, p, step_n);
+        fesom_halo_exchange(dyn->fer_uv_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl, 2, p);
     }
 
     /*  2. PGF (linfs + full cells) — M2.4: device kernel.

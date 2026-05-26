@@ -99,6 +99,41 @@ void fesom_fer_gamma2vel         (struct fesom_dyn         *dyn,
                                   const fesom_gm           *gm,
                                   struct fesom_partit      *partit);
 
+/* --- M2.5b: DEVICE (Kokkos) twins of the substep-1b GM chain ----------------
+ * Pure compute + modify_device(); the step driver owns the IN rail, the per-kernel
+ * sync_host + halo, and the fer_gamma re-push (L30). The host C twins above stay
+ * in-tree as the FESOM_KK_VERIFY=gm oracle until M2 closes. Inputs must be
+ * device-current (the substep-1b IN rail supplies that, L28). */
+void fesom_compute_sigma_xy_kk     (struct fesom_aux           *aux,
+                                    const struct fesom_tracers *tracers,
+                                    const struct fesom_mesh    *mesh,
+                                    fesom_gm                   *gm);
+void fesom_compute_neutral_slope_kk(struct fesom_aux           *aux,
+                                    const struct fesom_mesh    *mesh,
+                                    fesom_gm                   *gm);
+void fesom_init_redi_gm_kk         (struct fesom_aux           *aux,
+                                    const struct fesom_mesh    *mesh,
+                                    fesom_gm                   *gm);
+void fesom_fer_solve_gamma_kk      (const struct fesom_aux     *aux,
+                                    const struct fesom_mesh    *mesh,
+                                    fesom_gm                   *gm);
+void fesom_fer_gamma2vel_kk        (struct fesom_dyn           *dyn,
+                                    const struct fesom_mesh    *mesh,
+                                    const fesom_gm             *gm);
+
+/* --- M2.5b: FESOM_KK_VERIFY=gm per-kernel gates (Serial max|Δ|==0) ---------- */
+void fesom_gm_sigma_xy_verify     (struct fesom_aux *aux, const struct fesom_tracers *tracers,
+                                   const struct fesom_mesh *mesh, fesom_gm *gm,
+                                   struct fesom_partit *partit, int step_n);
+void fesom_gm_neutral_slope_verify(struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                                   fesom_gm *gm, struct fesom_partit *partit, int step_n);
+void fesom_gm_init_redi_verify    (struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                                   fesom_gm *gm, struct fesom_partit *partit, int step_n);
+void fesom_gm_solve_gamma_verify  (const struct fesom_aux *aux, const struct fesom_mesh *mesh,
+                                   fesom_gm *gm, struct fesom_partit *partit, int step_n);
+void fesom_gm_gamma2vel_verify    (struct fesom_dyn *dyn, const struct fesom_mesh *mesh,
+                                   const fesom_gm *gm, struct fesom_partit *partit, int step_n);
+
 /* --- Phase G7a: vertical-explicit Redi (oce_ale_tracer.F90:1086-1169)
  *
  * Adds the off-diagonal Redi tensor's vertical projection to T values
