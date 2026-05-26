@@ -1,0 +1,234 @@
+# FESOM2 Kokkos port — host↔device SYNC MAP
+
+**What this is.** The per-substep map of which memory space (host / device) is *authoritative*
+for each persistent field as a timestep runs, and where a host↔device `deep_copy` (a `Field`
+`sync_host`/`sync_device`) must sit. It is the GPU analogue of, and runs in lock-step with, the
+**MPI halo-exchange map** that is already inlined as comments in `src/fesom_step.cpp`. Every place
+the halo map says "exchange field X here" is also a place the sync map must say "X must be
+host-current here" (halo pack/unpack is a host operation until M5).
+
+**Status at M1 (this milestone).** *All compute is still on the host.* No `parallel_for` runs on
+the device; the only device operation anywhere is `Kokkos::deep_copy` of `double`/`int`, which is
+bitwise-exact. Therefore **every field is host-authoritative at every substep**, and the map below
+is, today, uniformly "host". The value of writing it now is that it (a) fixes the *contract* the
+M2/M4 kernel tasks implement field-by-field, and (b) is *executable* — the `-DFESOM_KK_SYNCCHECK`
+build (see §7) walks these rails every step and aborts if the contract is ever violated.
+
+Read with: `docs/plans/20260525-kokkos-port.md` (§M1.5, §M2 cross-cutting notes), the halo cheat
+sheet in `src/fesom_step.cpp`, and `docs/KOKKOS_PORTING_LESSONS.md` (D17, L14, L21, L22).
+
+---
+
+## 0. The cadence decision (D17) — host-authoritative + lazy device sync
+
+The reviewable question for M1.5 was: *how often does the evolving state (dyn / tracers / forcing /
+ice) round-trip host↔device?* The decision, for the correctness phase (M1–M4):
+
+> **Host-authoritative, synced lazily by the first device kernel that needs each field — never
+> eager per-step blanket copies.** A field moves to the device only when the *specific* kernel that
+> consumes it is ported (M2/M4); that kernel's task adds the `sync_device(inputs)` before it and
+> `modify_device(outputs)` after it. Until then the field is never copied, so the data layer adds
+> **zero** host↔device traffic and the run stays bit-identical on every backend.
+
+Why not eager copies now: a per-step `sync_device` of all 126 fields would be (a) pure dead weight
+at M1 (nothing reads them on device), (b) a maintenance trap — the copies would have to be deleted
+and re-placed at the true kernel boundaries in M2 anyway, and (c) it would mask, not expose, the
+real M2 sync work. The **set-once mesh geometry is the one exception**: it is pushed to the device
+*once* after `compute_metrics` (`mesh_sync_geometry_device`, §8) because it never changes again.
+
+Consequence for the M2/M4 kernel author: **the sync points are owned by the kernel task, not by a
+central per-step copy.** This map tells you, per substep, exactly which inputs must be device-current
+before your kernel and which outputs you must mark `modify_device` after it.
+
+---
+
+## 1. How to read this map — currency states & the contract
+
+Each `Field` carries an authoritative-space tag (`Synced` / `Host` / `Device`), set by
+`modify_host()` / `modify_device()` and cleared to `Synced` by a matching `sync_*` (see
+`src/fesom_field.hpp`).
+
+The contract every ported substep must honour (the "rails"):
+
+| Situation | Required call(s) | Why |
+|---|---|---|
+| Host kernel wrote field via the raw alias `f.h()` | `f.modify_host()` afterwards | The DualView cannot see writes through the raw pointer (**L14**); without this, a later `sync_device` is a silent no-op and the device keeps stale data |
+| About to run a **device** kernel that reads field | `f.sync_device()` before it | Pull host writes onto the device (bitwise `deep_copy`; no-op if already current) |
+| A **device** kernel wrote field | `f.modify_device()` after it | Mark device newer so a later `sync_host` actually copies |
+| About to **halo-exchange / I/O-gather / run a legacy host kernel** that reads field | `f.sync_host()` before it (and read via `f.h_checked()`) | Halo pack/unpack and the snapshot gather are host code; reading host while the device is authoritative is the stale-read bug the guard traps |
+
+`h_checked()` is `h()` plus, under `-DFESOM_KK_SYNCCHECK`, an abort if the field is
+device-authoritative — install it at host entry points so a *missing* `sync_host()` aborts at the
+read instead of silently corrupting output. At M1 it never fires (everything is host/synced); it
+earns its keep from M2 on.
+
+**Notation below:** `[H]` = host-authoritative at M1 (the whole map today). `→dev(X)` /
+`mod_dev(X)` / `→host(X)` are the calls the *future* device port of that substep must add. "halo X"
+reproduces the existing MPI exchange (host) — it implies `→host(X)` once X lives on the device.
+
+---
+
+## 2. The ocean step — `fesom_timestep` (`src/fesom_step.cpp`)
+
+Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout is `[entity*nl+lev]`.
+
+| # | Kernel (M2 task) | Reads | Writes | Halo after | M2/M4 sync to add |
+|---|---|---|---|---|---|
+| 1 | `pressure_bv`, `sw_alpha_beta` (M2.1) | tracers T/S `values`; mesh `zbar/Z`, geometry | aux `density_m_rho0`, `hpressure`, `bvfreq`, `sw_alpha`, `sw_beta` | nod3D ×5, then `smooth_nod3D(bvfreq)` | `→dev(T,S)`; `mod_dev(density,hpressure,bvfreq,sw_*)`; `→host` the 5 before the halos |
+| 1b| GM/Redi prereq (M2.5b) `sigma_xy`/`neutral_slope`/`init_redi_gm`/`fer_solve_gamma`/`fer_gamma2vel` | aux `density`,`sw_*`; tracers; mesh | gm scratch (`fer_K/C/gamma/...`), dyn `fer_uv` | (internal) | `→dev` aux+tracers; `mod_dev(fer_uv,fer_w)`; wrap gm scratch in `Field` (deferred from M1) |
+| 2 | `pressure_force_linfs_fullcell` (M2.4) | aux `density_m_rho0`,`hpressure`; mesh | aux `pgf_x`,`pgf_y` | elem3D ×2 | `→dev(density,hpressure)`; `mod_dev(pgf_x,pgf_y)`; `→host(pgf_*)` before halos |
+| 3 | `compute_vel_nodes` (M2.2) | dyn `uv`; mesh `nod_in_elem2D` CSR | dyn `uvnode` | nod3D `uvnode` | `→dev(uv)`; `mod_dev(uvnode)`; `→host(uvnode)` before halo |
+| 3 | **KPP** `kpp_mixing` (M2.3) *or* PP `pp_mixing` (M2.2) | aux `bvfreq`, dyn `uvnode`, tracers, forcing | aux `Av` (elem), `Kv` (node) | KPP: **6 internal exchanges** (see §6); PP: `Kv` nod3D, `Av` elem3D | bracket each of KPP's 6: `→host`→halo→`→dev`; `mod_dev(Av,Kv)`; wrap KPP scratch in `Field` |
+| 3 | `mo_convect` (M2.2) | aux `bvfreq`,`Kv`,`Av` | aux `Kv`,`Av` | `Kv` nod3D, `Av` elem3D | `→dev(bvfreq,Kv,Av)`; `mod_dev(Kv,Av)`; `→host` before halos |
+| 4 | `compute_vel_rhs` (M2.4) — **AB2 eps=0.1** | dyn `uv`,`uv_rhsAB`,`eta_n`; aux `pgf`; mesh | dyn `uv_rhs`,`uv_rhsAB` | elem3D `uv_rhs`,`uv_rhsAB` | `→dev(uv,uv_rhsAB,eta_n,pgf)`; `mod_dev(uv_rhs,uv_rhsAB)`; `→host` before halos |
+| 5 | `visc_filt_bidiff` (M2.4) | dyn `uv`,`uv_rhs`; mesh | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv,uv_rhs)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
+| 6 | `impl_vert_visc` (M2.4, per-elem TDMA) | dyn `uv_rhs`; aux `Av`; forcing `stress_surf` | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv_rhs,Av,stress_surf)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
+| 7 | `compute_ssh_rhs_linfs` (M4.2) | dyn `uv_rhs`,`d_eta`; mesh | dyn `ssh_rhs` | nod2D `ssh_rhs` | **mid-step host bracket — see §5** |
+| 8 | `ssh_solve_cg` (M4.2) — CG w/ `MPI_Allreduce` dots | mesh stiffness CSR; dyn `ssh_rhs` | dyn `d_eta` | nod2D `d_eta` | stays HOST through M2/M3 (§5); on device only at M4.2 |
+| 9 | `update_vel` (M2.4) | dyn `uv_rhs`,`d_eta`; mesh | dyn `uv` | elem3D `uv` | `→dev(uv_rhs,d_eta)`; `mod_dev(uv)`; `→host(uv)` before halo |
+| 10| `compute_hbar` (M4.2) | dyn `uv`; mesh `hbar`,`hbar_old` | dyn `ssh_rhs_old`; mesh `hbar` | nod2D `ssh_rhs_old`,`hbar` | part of the §5 bracket |
+| 11| `eta_n` inline | mesh `hbar`,`hbar_old`,`ulevels_nod2D` | dyn `eta_n` | (covered) | trivial; fold into M2.4 device region or keep host |
+| 12| ALE `thickness`/`vert_vel`/`cflz`/`wvel_split` (M2.5) | mesh `hnode*`,`helem`; dyn `w*` | mesh `hnode_new`; dyn `w`,`w_e`,`w_i`,`cfl_z`,`fer_w` | `w` nod3D, `fer_w` (gm), `cfl_z`, `w_e`, `w_i` | `→dev` thickness inputs; `mod_dev(w,w_e,w_i,cfl_z)`; `→host` before each halo |
+| 13a| bolus add (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (in place) | — | `→dev(fer_uv,fer_w)`; `mod_dev(uv,w,w_e)` — honour `feedback_bolus_divergence_balance` |
+| 13| FCT tracer advection T,S (M2.6) — **AB2 eps=0.1** | dyn `uv`,`w*`; tracers; mesh | tracers `values` (T then S) | nod3D `values` per tracer | **FCT pipeline has internal exchanges — see §6**; wrap FCT scratch in `Field`; `mod_dev(values)` |
+| 13b| `impl_vert_diff_tracers` (M2.7, per-node TDMA) + S-floor | tracers; aux `Kv`; forcing fluxes | tracers `values` | nod3D `values` ×2 | `→dev(values,Kv,fluxes)`; `mod_dev(values)`; `→host(values)` before halos |
+| 13c| bolus sub (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (restore) | — | mirror of 13a |
+| 14| `ale_commit_thickness` (M2.5) | mesh `hnode_new` | mesh `hnode`,`helem` | `hnode` nod3D, `helem` elem3D | `→dev(hnode_new)`; `mod_dev(hnode,helem)`; `→host` before halos |
+
+At M1 the whole column is `[H]`. The **`h_checked()` guards** are installed at the §1 (density,
+bvfreq), §9 (uv) and §13-T (values) halos in `fesom_step.cpp` as worked examples; the rest are
+added as each kernel lands.
+
+---
+
+## 3. The sea-ice step — `fesom_ice_step` (`src/fesom_ice.cpp`; ported in M4.3)
+
+Runs *before* the ocean step each iteration (it overwrites `heat_flux`/`water_flux` the ocean step
+consumes). Currency at M1: `[H]` throughout.
+
+| Sub | Kernel | Reads | Writes | M4.3 sync to add |
+|---|---|---|---|---|
+| ocean2ice | `fesom_ocean2ice` | dyn surface `uv`, tracers SST/SSS, `eta` | ice `srfoce_u/v/temp/salt/ssh` | `→dev` ocean surface; `mod_dev(srfoce_*)` |
+| EVP | `fesom_ice_evp_dynamics` (whichEVP=0) | ice `srfoce_*`,`stress_atmice_*`, work, mesh | ice `uice/vice`, work `sigma*/eps*/inv_*` | internal exchanges → bracket each; `mod_dev(uice,vice)` |
+| FCT | `ice_tg_rhs` + `ice_fct_solve` | ice `uice/vice`, `data[*].values`, work `fct_*`, stiffness | ice `data[*].values*` | internal exchanges (§6 pattern); wrap `fct_massmatrix`+work; `mod_dev(values)` |
+| cut_off | `fesom_ice_cut_off` | ice `data[*].values` | ice `data[*].values` (clamp) | `→dev`/`mod_dev(values)` |
+| thermo | `fesom_ice_thermodynamics` + `oce_fluxes` | ice state, forcing, jra, sr | ice `thermo.*`, `flx_*`; forcing `heat_flux`,`water_flux`,`virtual_salt`,`relax_salt` | `→dev`; `mod_dev(flx_*, forcing fluxes)`; `→host(forcing)` before the ocean step reads them |
+| diag | `h_ice`/`h_snow` | ice `data[AICE/MICE/MSNOW].values` | ice `h_ice`,`h_snow` | `mod_dev(h_ice,h_snow)` |
+
+---
+
+## 4. The main loop — forcing producers + I/O (`src/fesom_main.cpp`)
+
+Per iteration, *before* `fesom_timestep`, these host producers finalise the surface forcing (an
+**input** to the ocean step):
+
+1. `jra55_step_cal` + `bulk_compute` → forcing `stress_*`, `heat_flux`, `water_flux`, `Ch/Ce_atm_oce`.
+2. `sss_runoff_step_cal` → forcing `runoff`, `relax_salt`, `Ssurf`.
+3. env knobs (`NO_WIND`/`NO_HFLUX`/`FREEZE_TS`) — host memsets of *array data* via the raw alias
+   (these stay unchanged; they zero `double`s, never touch `Field` internals — L20).
+4. `fesom_ice_step` (§3) — overwrites `heat_flux`/`water_flux`/`virtual_salt`/`relax_salt`.
+5. `ice_oce_fluxes_mom` → forcing `stress_surf` (ice-ocean drag).
+6. shortwave `cal_shortwave_rad` → forcing `chl`, `sw_3d`.
+
+→ **Rail:** all six are host producers, so before the (future device) ocean step the forcing must
+be `→dev`. That is exactly where the SYNCCHECK forcing round-trip sits (§7). Currency: `[H]`.
+
+**I/O is a host read** of the device-backed state:
+- `fesom_io_step` (monthly-mean accumulation) and `fesom_io_write_snapshot` (gather → rank-0
+  serial-netcdf) read tracers/dyn/aux/ice on the host. The snapshot gather block in
+  `src/fesom_io.cpp` is fully routed through `h_checked()` as the worked I/O example.
+- **Rail:** from M2 on, `sync_host()` every gathered field before I/O. I/O cadence (monthly /
+  snapshot) is far coarser than the step, so this is cheap; do it lazily at the I/O call, not
+  per step.
+
+---
+
+## 5. The mid-step host round-trip (the CG SSH solver) — explicit
+
+The SSH solve (substeps 7–10) is a **parallel CG with `MPI_Allreduce` dot products** and **stays on
+the host through M2 and M3** (ported only at M4.2). So while the ocean kernels around it are on the
+device (after M2), each step does a deliberate host round-trip *in the middle*:
+
+```
+... momentum on device ... → sync_host(uv_rhs, d_eta)  → [host] compute_ssh_rhs → CG → update inputs
+                            → sync_device(uv, d_eta)    → ... device kernels resume (update_vel) ...
+```
+
+This is **expected, not a regression** (plan §M2 cross-cutting note). State it in the M2 acceptance.
+It disappears at M4.2 when the CG itself moves to device (the dot-product reduction order becomes the
+GPU non-determinism source there).
+
+---
+
+## 6. Intra-kernel exchanges — the map is per-*substep*, not per-top-level-kernel
+
+Two ported routines do `fesom_exchange_*` **inside** themselves; each internal exchange is a host
+operation and needs its own `sync_host → halo → sync_device` bracket (these are explicit checkboxes
+in the M2.3 / M2.6 / M4.3 tasks):
+
+- **KPP** (`fesom_kpp_mixing`, M2.3) performs **6 internal halo exchanges** (`fesom_step.c:116`
+  notes this). On device each becomes: device-compute → `sync_host` → halo → `sync_device` →
+  device-compute. Candidates for on-device pack/unpack in M5; host round-trips until then.
+- **FCT pipeline** (`tracer_advect_one_fct`, M2.6; and the ice FCT, M4.3) interleaves low/high-order
+  flux assembly with exchanges. Same bracket per internal exchange. The edge→node flux scatter is a
+  separate decision (`docs/SCATTER_STRATEGY.md`, M2.6): Serial keeps natural edge order
+  (`max|Δ|==0`); GPU uses `atomic_add`; edge-coloring (if ever) is GPU-only.
+
+---
+
+## 7. Proving the rails — `-DFESOM_KK_SYNCCHECK` (M1.5 deliverable test)
+
+Built green & gated this milestone (`build-synccheck`, Serial Release + `-DFESOM_KK_SYNCCHECK=ON`).
+Two mechanisms, both **compiled out** in the default/production build (so the production run is
+byte-for-byte the non-SYNCCHECK run — verified bit-identical to the golden on the pi smoke, np=1 and
+np=2):
+
+1. **Per-step coherence round-trip.** At the end of `fesom_timestep` (ocean), the end of
+   `fesom_ice_step` (ice), and before `fesom_timestep` (forcing), a representative set of evolving
+   Fields is bounced **host → device → host**:
+   `modify_host(); sync_device(); modify_device(); sync_host();`. `modify_host()` first because the
+   host wrote them via the raw alias this step (L14); `modify_device()` models the future device
+   kernel that will write them. On Serial/OpenMP host==device so it is a no-op; on CUDA each leg is a
+   bitwise-exact `deep_copy`, so **the host bytes are unchanged and the run stays bit-identical**.
+   This exercises the exact `deep_copy` path and flag-transition logic the M2 rails will use, every
+   step, on the real model state — before any compute moves to the device.
+2. **`h_checked()` at host entry points.** A few representative halo exchanges in `fesom_step.cpp`
+   (density, bvfreq, uv, T-values) and the **entire snapshot gather** in `fesom_io.cpp` read through
+   `Field::h_checked()` instead of the raw alias. Pointer-identical today; under SYNCCHECK each
+   aborts if the field is device-authoritative when the host reads it. At M1 they never fire (the
+   round-trip leaves every field `Synced`, and nothing else sets `Device`), which **is** the proof
+   that M1 is uniformly host-authoritative — exactly what this map asserts. From M2, a forgotten
+   `sync_host()` before a halo/I/O read aborts at the read site.
+
+Result this milestone: SYNCCHECK build runs the pi smoke to completion (np=1 **and** np=2),
+**no guard fires**, output **ALL FIELDS BIT-IDENTICAL** to the golden.
+
+> Note: the SYNCCHECK guard uses `fprintf`+`abort`, **not** `assert()`, because the diagnostic build
+> must be `-O3` Release (to match the golden bit-for-bit) and Release defines `NDEBUG`, which would
+> silently disable an `assert()` exactly in the build that matters (L21).
+
+---
+
+## 8. Already done — the set-once mesh geometry
+
+`mesh_sync_geometry_device` (`src/fesom_mesh.cpp`) pushes the 33 set-once geometry/connectivity
+Fields to the device **once**, right after `compute_metrics`, with `modify_host(); sync_device();`
+per field (L14). These never change again, so they need no per-step sync — the M2 kernels read them
+device-current for free. The time-evolving mesh state (`hnode/hnode_new/helem/hbar/hbar_old`) is
+**not** in that one-shot push; it follows the per-step lazy rails above (substeps 10, 12, 14).
+
+---
+
+## 9. M2/M4 kernel-author checklist (what your task adds to this map)
+
+When you port substep *K* to a device `parallel_for`:
+
+1. **Inputs:** `sync_device()` each field *K* reads that a *host* kernel last wrote (skip ones
+   already device-current from an earlier device kernel this step — that's the point of lazy sync).
+2. **Outputs:** `modify_device()` each field *K* writes.
+3. **Before its halo / I/O / a downstream host kernel:** `sync_host()` the field and read it through
+   `h_checked()`.
+4. **Intra-kernel exchanges** (KPP ×6, FCT): bracket each (§6).
+5. **Scratch:** wrap *K*'s own scratch arrays in `Field` (deferred from M1 per the plan scope note).
+6. Update this file's row for *K* (drop `[H]`, record the actual calls) **in the same commit**, and
+   keep the SYNCCHECK build green.

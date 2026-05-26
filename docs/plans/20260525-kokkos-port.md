@@ -327,13 +327,25 @@ keeps host/device coherent. No compute moves to device yet → all backends stay
 - Modify: `src/fesom_step.cpp`, `src/fesom_ice.cpp`, `src/fesom_main.cpp`
 - Create: `docs/SYNC_MAP.md` (per-substep host/device currency map — mirrors the halo map)
 
-- [ ] add coarse-but-correct sync: before a (future) device kernel `sync_device` its inputs;
-      after, `modify_device`; before halo/I/O/legacy-host-kernel, `sync_host`. At M1 all compute
-      is still host, so the map starts as "host authoritative"; this task lays the rails
-- [ ] exercise a no-op device round-trip each step under `FESOM_KK_SYNCCHECK` to prove plumbing
-- [ ] document the map in `docs/SYNC_MAP.md` (the deliverable/test for this task)
-- [ ] **M1 acceptance**: Serial+OpenMP+CUDA all run a **1-yr CORE2** bit-identical to the C
-      reference (compute still on host); tag `m1-datalayer` — before M2
+- [x] add coarse-but-correct sync rails (D17): **cadence = host-authoritative + LAZY device sync,
+      NO eager per-step copies** — the per-kernel `sync_device(in)→modify_device(out)→sync_host(before
+      halo/I/O)` brackets are owned by each M2/M4 kernel task (set-once geometry stays the one eager
+      exception). M1.5 adds only `h_checked()` at representative halo/I/O host entry points
+      (`fesom_step.cpp` density/bvfreq/uv/T-values + the whole `fesom_io.cpp` snapshot gather) —
+      pointer-identical to the raw alias today, so production is unchanged (L22)
+- [x] exercise a no-op device round-trip each step under `-DFESOM_KK_SYNCCHECK` (per-step H→D→H bounce
+      in `fesom_step`/`fesom_ice`/`fesom_main`; `build-synccheck` Serial Release): pi smoke np=1 **and**
+      np=2 (CMA-off) run to completion, **no guard fired**, **ALL FIELDS BIT-IDENTICAL** to golden →
+      proves M1 is uniformly host-authoritative. Guard is `fprintf`+`abort`, not `assert` (NDEBUG, L21)
+- [x] document the map in `docs/SYNC_MAP.md` (per-substep currency map mirroring the halo cheat sheet:
+      ocean 14 substeps + ice + main forcing/IO, incl. KPP's 6 internal exchanges, the FCT pipeline,
+      the mid-step CG host round-trip, and the M2/M4 kernel-author checklist)
+- [x] per-change gate GREEN (commit `<M1.5>`): Serial np=1 == golden; ctest 4/4; np=2 (CMA-off) ==
+      `…m13_nocma` oracle; SYNCCHECK np=1+np=2 == golden (no abort); **CUDA np=1 (A100) == golden**
+- [ ] ⚠️ **M1 acceptance (milestone gate, separate from the per-change gate — IN PROGRESS):**
+      Serial+OpenMP+CUDA each run a **1-yr CORE2** bit-identical to a C-twin reference (compute still
+      on host). No CORE2 C reference existed (M0.1 deferred it) → must generate it first. Multi-hour
+      SLURM. **Tag `m1-datalayer` only after acceptance passes** — before M2
 
 ## ───────────── M2 · Ocean hot-path kernels on device ─────────────
 *Goal: convert leaf compute kernels to `parallel_for`, one (group) per task, each gated

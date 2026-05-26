@@ -359,26 +359,31 @@ void fesom_io_write_snapshot(const char                  *path,
     gather_elem_int(mesh->nlevels,       1, &gp, g_nlev_elem, comm);
 
     /* ---- Gather state fields --------------------------------------- */
-    gather_node(tracers->data[FESOM_TRACER_T].values, nl, &gp, g_T,  comm);
-    gather_node(tracers->data[FESOM_TRACER_S].values, nl, &gp, g_S,  comm);
-    gather_node(dyn->eta_n,                            1, &gp, g_eta, comm);
-    gather_node(dyn->w,                               nl, &gp, g_w,  comm);
-    gather_elem(dyn->uv,                            nl*2, &gp, g_uv, comm);
-    gather_node(aux->density_m_rho0,                  nl, &gp, g_dens, comm);
-    gather_node(aux->bvfreq,                          nl, &gp, g_bv,   comm);
-    gather_elem(aux->pgf_x,                           nl, &gp, g_pgfx, comm);
-    gather_elem(aux->pgf_y,                           nl, &gp, g_pgfy, comm);
-    gather_node(aux->Kv,                              nl, &gp, g_Kv,   comm);
-    gather_elem(aux->Av,                              nl, &gp, g_Av,   comm);
+    /* M1.5: the snapshot gather is a HOST read of device-backed state — route every source through
+     * Field::h_checked() (pointer-identical to the raw alias today, so the snapshot bytes are
+     * unchanged) so that under -DFESOM_KK_SYNCCHECK it aborts if any field is still
+     * device-authoritative when I/O reads it. From M2 on, the step driver must sync_host() these
+     * before this call; the guard catches a missing sync (docs/SYNC_MAP.md §4, §7). */
+    gather_node(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, &gp, g_T,  comm);
+    gather_node(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, &gp, g_S,  comm);
+    gather_node(dyn->eta_n_fld.h_checked(),            1, &gp, g_eta, comm);
+    gather_node(dyn->w_fld.h_checked(),               nl, &gp, g_w,  comm);
+    gather_elem(dyn->uv_fld.h_checked(),            nl*2, &gp, g_uv, comm);
+    gather_node(aux->density_m_rho0_fld.h_checked(),  nl, &gp, g_dens, comm);
+    gather_node(aux->bvfreq_fld.h_checked(),          nl, &gp, g_bv,   comm);
+    gather_elem(aux->pgf_x_fld.h_checked(),           nl, &gp, g_pgfx, comm);
+    gather_elem(aux->pgf_y_fld.h_checked(),           nl, &gp, g_pgfy, comm);
+    gather_node(aux->Kv_fld.h_checked(),              nl, &gp, g_Kv,   comm);
+    gather_elem(aux->Av_fld.h_checked(),              nl, &gp, g_Av,   comm);
 
     if (ice) {
-        gather_node(ice->data[FESOM_ICE_AICE].values,  1, &gp, g_aice,  comm);
-        gather_node(ice->data[FESOM_ICE_MICE].values,  1, &gp, g_mice,  comm);
-        gather_node(ice->data[FESOM_ICE_MSNOW].values, 1, &gp, g_msnow, comm);
-        gather_node(ice->uice,   1, &gp, g_uice,  comm);
-        gather_node(ice->vice,   1, &gp, g_vice,  comm);
-        gather_node(ice->h_ice,  1, &gp, g_hice,  comm);
-        gather_node(ice->h_snow, 1, &gp, g_hsnow, comm);
+        gather_node(ice->data[FESOM_ICE_AICE].values_fld.h_checked(),  1, &gp, g_aice,  comm);
+        gather_node(ice->data[FESOM_ICE_MICE].values_fld.h_checked(),  1, &gp, g_mice,  comm);
+        gather_node(ice->data[FESOM_ICE_MSNOW].values_fld.h_checked(), 1, &gp, g_msnow, comm);
+        gather_node(ice->uice_fld.h_checked(),   1, &gp, g_uice,  comm);
+        gather_node(ice->vice_fld.h_checked(),   1, &gp, g_vice,  comm);
+        gather_node(ice->h_ice_fld.h_checked(),  1, &gp, g_hice,  comm);
+        gather_node(ice->h_snow_fld.h_checked(), 1, &gp, g_hsnow, comm);
     }
 
     /* Non-rank-0 ranks are done. */

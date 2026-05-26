@@ -33,7 +33,8 @@
 #include <Kokkos_DualView.hpp>
 #include <cstddef>
 #ifdef FESOM_KK_SYNCCHECK
-#  include <cassert>
+#  include <cstdio>
+#  include <cstdlib>
 #endif
 
 namespace fesom {
@@ -73,13 +74,21 @@ public:
     void sync_host()     { dv_.sync_host();   if (auth_ == Auth::Device) auth_ = Auth::Synced; }
     void sync_device()   { dv_.sync_device(); if (auth_ == Auth::Host)   auth_ = Auth::Synced; }
 
-    // HOST pointer WITH a currency assertion under -DFESOM_KK_SYNCCHECK. Routing halo/I/O/legacy
-    // host reads through this traps a stale-host access (device authoritative and un-synced) at the
+    // HOST pointer WITH a currency check under -DFESOM_KK_SYNCCHECK. Routing halo/I/O/legacy host
+    // reads through this traps a stale-host access (device authoritative and un-synced) at the
     // access site instead of silently corrupting the field. Zero-cost when the macro is off.
+    //
+    // The check is a self-contained fprintf+abort, NOT assert(): the SYNCCHECK build must be -O3
+    // Release to compare bit-for-bit against the golden, and Release defines NDEBUG, which would
+    // silently neuter an assert() exactly in the build that matters (lesson L21). The check then
+    // depends only on FESOM_KK_SYNCCHECK, never on NDEBUG.
     T* h_checked() const {
 #ifdef FESOM_KK_SYNCCHECK
-        assert(auth_ != Auth::Device &&
-               "fesom::Field: host read while DEVICE is authoritative -- missing sync_host()");
+        if (auth_ == Auth::Device) {
+            std::fprintf(stderr, "fesom::Field SYNCCHECK: host read while DEVICE is authoritative "
+                                 "-- missing sync_host()\n");
+            std::abort();
+        }
 #endif
         return h();
     }

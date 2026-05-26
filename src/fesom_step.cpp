@@ -26,6 +26,50 @@
 
 #include <stdlib.h>
 
+#ifdef FESOM_KK_SYNCCHECK
+/* M1.5 plumbing proof (docs/SYNC_MAP.md §"Proving the rails"). Bounce a representative set of the
+ * ocean step's evolving-state Fields through a host->device->host round-trip at the END of the
+ * step, after every host kernel has written them via the raw alias. The host writes are invisible
+ * to the DualView modify-flags (L14), so modify_host() FIRST; modify_device() then models the M2
+ * device kernel that will write each field. On Serial/OpenMP host==device so all four calls are
+ * no-ops; on CUDA each sync is a bitwise-exact deep_copy of double, so the host bytes are unchanged
+ * and the run stays bit-identical (the SYNCCHECK build is gated bit-for-bit vs the golden). After
+ * the round-trip every Field is back in the Synced state, so the next step's halo/I/O h_checked()
+ * reads never see a Device-authoritative field at M1 — exactly the invariant the guards assert.
+ * Compiled out entirely when the macro is off. */
+#define FESOM_KK_BOUNCE(f) do { (f).modify_host(); (f).sync_device(); \
+                                (f).modify_device(); (f).sync_host(); } while (0)
+static void ocean_synccheck_roundtrip(struct fesom_dyn     *dyn,
+                                      struct fesom_tracers *tracers,
+                                      struct fesom_aux     *aux)
+{
+    /* dyn — element-vector (uv), node-3D (w/w_e/w_i), node-2D (eta/ssh) size classes */
+    FESOM_KK_BOUNCE(dyn->uv_fld);
+    FESOM_KK_BOUNCE(dyn->w_fld);
+    FESOM_KK_BOUNCE(dyn->w_e_fld);
+    FESOM_KK_BOUNCE(dyn->w_i_fld);
+    FESOM_KK_BOUNCE(dyn->uvnode_fld);
+    FESOM_KK_BOUNCE(dyn->eta_n_fld);
+    FESOM_KK_BOUNCE(dyn->d_eta_fld);
+    FESOM_KK_BOUNCE(dyn->ssh_rhs_fld);
+    FESOM_KK_BOUNCE(dyn->ssh_rhs_old_fld);
+    /* tracers — the active T and S channels (stride nl) */
+    FESOM_KK_BOUNCE(tracers->data[FESOM_TRACER_T].values_fld);
+    FESOM_KK_BOUNCE(tracers->data[FESOM_TRACER_S].values_fld);
+    /* aux — EOS + mixing outputs (node-3D) and PGF (element-3D) */
+    FESOM_KK_BOUNCE(aux->density_m_rho0_fld);
+    FESOM_KK_BOUNCE(aux->hpressure_fld);
+    FESOM_KK_BOUNCE(aux->bvfreq_fld);
+    FESOM_KK_BOUNCE(aux->sw_alpha_fld);
+    FESOM_KK_BOUNCE(aux->sw_beta_fld);
+    FESOM_KK_BOUNCE(aux->Kv_fld);
+    FESOM_KK_BOUNCE(aux->Av_fld);
+    FESOM_KK_BOUNCE(aux->pgf_x_fld);
+    FESOM_KK_BOUNCE(aux->pgf_y_fld);
+}
+#undef FESOM_KK_BOUNCE
+#endif
+
 int fesom_timestep(int                          step_n,
                    const fesom_step_ctx        *ctx,
                    struct fesom_mesh           *mesh,
@@ -74,10 +118,15 @@ int fesom_timestep(int                          step_n,
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
      * Mirror of Fortran oce_ale.F90:3475 sw_alpha_beta. */
     fesom_compute_sw_alpha_beta(tracers, mesh, aux);
-    /* exchange the per-node 3D outputs (Fortran oce_ale_pressure_bv.F90:2844-) */
-    fesom_exchange_nod3D(aux->density_m_rho0, nl, p);
+    /* exchange the per-node 3D outputs (Fortran oce_ale_pressure_bv.F90:2844-).
+     * M1.5: representative host entry points routed through Field::h_checked() — pointer-identical
+     * to the raw alias today (so the production build is unchanged), but under -DFESOM_KK_SYNCCHECK
+     * it aborts if the field is device-authoritative and un-synced before this halo read. When EOS
+     * moves to the device (M2.1) these halos will require a sync_host() first; the guard catches a
+     * forgotten one (docs/SYNC_MAP.md §1). h() retained where the routing isn't illustrated. */
+    fesom_exchange_nod3D(aux->density_m_rho0_fld.h_checked(), nl, p);
     fesom_exchange_nod3D(aux->hpressure,      nl, p);
-    fesom_exchange_nod3D(aux->bvfreq,         nl, p);
+    fesom_exchange_nod3D(aux->bvfreq_fld.h_checked(),         nl, p);
     fesom_exchange_nod3D(aux->sw_alpha,       nl, p);
     fesom_exchange_nod3D(aux->sw_beta,        nl, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
@@ -157,7 +206,7 @@ int fesom_timestep(int                          step_n,
 
     /*  9. velocity update with SSH-gradient correction  */
     fesom_update_vel(mesh, dyn);
-    fesom_halo_exchange(dyn->uv, FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_halo_exchange(dyn->uv_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);   /* M1.5 guarded (see §1) */
 
     /* 10. transport-divergence → ssh_rhs_old, then hbar update  */
     fesom_compute_hbar(mesh, dyn);
@@ -305,7 +354,7 @@ int fesom_timestep(int                          step_n,
             /* G7b reuses gm->tr_xy + builds gm->tr_z + horizontal Redi flux. */
             fesom_diff_part_hor_redi    (FESOM_TRACER_T, gm, aux, mesh, tracers, p);
         }
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);   /* M1.5 guarded */
 
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
         if (gm) {
@@ -399,6 +448,11 @@ int fesom_timestep(int                          step_n,
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */
+
+#ifdef FESOM_KK_SYNCCHECK
+    /* M1.5: exercise the host<->device rails on this step's ocean state (no-op in production). */
+    ocean_synccheck_roundtrip(dyn, tracers, aux);
+#endif
 
     return cg_iters;
 }

@@ -69,6 +69,19 @@ add_executable(fesom_port ${FESOM_SRC})
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
 target_link_libraries(fesom_port PRIVATE Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CXX)
 
+# M1.5 diagnostic: per-step host<->device Field coherence round-trip + h_checked() guards at the
+# halo/I/O host entry points (see docs/SYNC_MAP.md). When ON, fesom::Field::h_checked() aborts on a
+# stale-host read and the step driver bounces the evolving state H->D->H every step to exercise the
+# rails before any real device compute exists. Both are compiled out when OFF (default), so the
+# production build is unchanged. Build the diagnostic as a SEPARATE -O3 Release dir so it still
+# matches the golden bit-for-bit: cmake -S . -B build-synccheck -DKokkos_ENABLE_SERIAL=ON
+#   -DCMAKE_BUILD_TYPE=Release -DFESOM_KK_SYNCCHECK=ON   (the guard is NDEBUG-independent — L21).
+option(FESOM_KK_SYNCCHECK "Assert Field host/device coherence + per-step round-trip (diagnostic)" OFF)
+if(FESOM_KK_SYNCCHECK)
+  target_compile_definitions(fesom_port PRIVATE FESOM_KK_SYNCCHECK)
+  message(STATUS "FESOM_KK_SYNCCHECK ON — Field coherence guards + per-step round-trip enabled")
+endif()
+
 # --- Tests (compiled as C++ to match the now-C++ model objects' linkage) --------------------
 enable_testing()
 

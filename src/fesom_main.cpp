@@ -35,6 +35,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef FESOM_KK_SYNCCHECK
+/* M1.5 plumbing proof (docs/SYNC_MAP.md §0). The surface forcing is an INPUT to the (future device)
+ * ocean step: it is finalized each iteration by bulk + ice fluxes + ice-ocean momentum + shortwave,
+ * all on host via the raw alias. Bounce the principal fluxes host->device->host right before
+ * fesom_timestep — modelling "sync the kernel's inputs to the device first". modify_host() captures
+ * the host writes (invisible to the flags, L14); the empty (unallocated) Fields bounce as harmless
+ * 0-extent deep_copies. No-op on Serial/OpenMP, bitwise-exact on CUDA. Compiled out when off. */
+#define FESOM_KK_BOUNCE(f) do { (f).modify_host(); (f).sync_device(); \
+                                (f).modify_device(); (f).sync_host(); } while (0)
+static void forcing_synccheck_roundtrip(fesom_forcing *forcing)
+{
+    FESOM_KK_BOUNCE(forcing->heat_flux_fld);
+    FESOM_KK_BOUNCE(forcing->water_flux_fld);
+    FESOM_KK_BOUNCE(forcing->stress_surf_fld);
+    FESOM_KK_BOUNCE(forcing->stress_node_surf_fld);
+    FESOM_KK_BOUNCE(forcing->virtual_salt_fld);
+    FESOM_KK_BOUNCE(forcing->relax_salt_fld);
+    FESOM_KK_BOUNCE(forcing->sw_3d_fld);
+}
+#undef FESOM_KK_BOUNCE
+#endif
+
 static void print_sanity(const fesom_mesh *m)
 {
     /*
@@ -1032,6 +1054,10 @@ skip_rest_state:
             if (mpi.mype == 0) {
                 fprintf(stderr, "[step %d] entering fesom_timestep\n", n);
             }
+#ifdef FESOM_KK_SYNCCHECK
+            /* M1.5: sync the ocean step's forcing inputs to the device first (no-op in production). */
+            forcing_synccheck_roundtrip(&forcing);
+#endif
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
             if (mpi.mype == 0) {

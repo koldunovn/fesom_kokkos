@@ -15,6 +15,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef FESOM_KK_SYNCCHECK
+/* M1.5 plumbing proof (docs/SYNC_MAP.md §4). Bounce a representative set of the sea-ice step's
+ * evolving-state Fields host->device->host after the host EVP/FCT/thermo kernels have written them
+ * via the raw alias. modify_host() first (the writes bypass the DualView flags, L14); modify_device()
+ * models the M4.3 device ice kernel. No-op on Serial/OpenMP, bitwise-exact deep_copy on CUDA -> the
+ * run stays bit-identical. Compiled out when the macro is off. */
+#define FESOM_KK_BOUNCE(f) do { (f).modify_host(); (f).sync_device(); \
+                                (f).modify_device(); (f).sync_host(); } while (0)
+static void ice_synccheck_roundtrip(fesom_ice *ice)
+{
+    FESOM_KK_BOUNCE(ice->uice_fld);
+    FESOM_KK_BOUNCE(ice->vice_fld);
+    FESOM_KK_BOUNCE(ice->h_ice_fld);
+    FESOM_KK_BOUNCE(ice->h_snow_fld);
+    FESOM_KK_BOUNCE(ice->stress_iceoce_x_fld);
+    FESOM_KK_BOUNCE(ice->stress_iceoce_y_fld);
+    for (int k = 0; k < FESOM_NUM_ICE_TRACERS; ++k)
+        FESOM_KK_BOUNCE(ice->data[k].values_fld);
+}
+#undef FESOM_KK_BOUNCE
+#endif
+
 /*
  * fesom_ice_init — mirror of Fortran ice_init (MOD_ICE.F90:572).
  *
@@ -457,6 +479,11 @@ void fesom_ice_step(int                            step,
             break;
         }
     }
+
+#ifdef FESOM_KK_SYNCCHECK
+    /* M1.5: exercise the host<->device rails on this step's ice state (no-op in production). */
+    ice_synccheck_roundtrip(ice);
+#endif
 }
 
 void fesom_ice_free(fesom_ice *ice)
