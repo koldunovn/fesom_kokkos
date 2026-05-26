@@ -1,6 +1,6 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 4 (2026-05-26) — M1.3 complete (commit `d42c7cc`).** Repo: `/home/a/a270088/port_kokkos` (git). Read this first, then
+**Session 5 (2026-05-26) — M1.4 complete (commit `076a56d`).** Repo: `/home/a/a270088/port_kokkos` (git). Read this first, then
 `docs/plans/20260525-kokkos-port.md`, `docs/KOKKOS_PORTING_LESSONS.md`, and the project memory
 in `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
 
@@ -34,17 +34,27 @@ in `~/.claude/projects/-home-a-a270088-port-kokkos/memory/`.
   address-dependent gather), NOT the port** — the per-step OWNED state is byte-identical. The np=2
   gate now requires `OMPI_MCA_btl_vader_single_copy_mechanism=none` (recipe §2) and a regenerated
   oracle (`pi_np2_ref_m13_nocma`). New decision D15; lessons L18 (vader-CMA), L19 (diff_snap dirs-only).
-- **NEXT: M1.4** — migrate `fesom_forcing` + sea-ice structs to `Field` (same alias pattern; honour
-  halo-sized allocation `feedback_array_size_vs_reader_loop`). Serial must stay bit-identical.
+- **M1.4 DONE** (commit `076a56d`): **all 12 `fesom_forcing` + 49 `fesom_ice` persistent arrays are
+  now `Field`-backed** (top-level 19 + `data[3]`×6 + `work`×15 incl. `fct_massmatrix` + `thermo`×9;
+  same alias pattern, D16). Embedded-by-value sub-structs + the `data[3]` array reset/release
+  recursively via one `*ice = fesom_ice{}`; `fct_massmatrix` migrated at its lazy foreign call site
+  in `fesom_ice_fct.cpp`. **Bit-identical on the first gate run**: Serial np=1 == golden, np=2
+  (CMA-off) == `…m13_nocma` oracle (exercises scatter+halo on Field-backed forcing/ice + EVP/FCT),
+  ctest 4/4, **CUDA np=1 (A100) == golden**. New decision D16, lesson L20. **This completes the M1
+  persistent-state migration** (mesh+dyn+aux+tracers+forcing+ice = 28+37+61 = 126 arrays); only the
+  gm/kpp/ocean-tradv/ssh per-kernel scratch remains (deferred to its M2/M4 kernel task).
+- **NEXT: M1.5** — sync discipline in the step driver + M1 acceptance (`docs/SYNC_MAP.md`; 1-yr
+  CORE2 bit-identical on Serial+OpenMP+CUDA; tag `m1-datalayer`). At M1 all compute is still host
+  → the map starts "host authoritative"; this task lays the rails for the M2 device kernels.
 
 ## 1. Git state
 
 ```
-HEAD     d42c7cc M1.3: migrate fesom_dyn/aux/tracers to fesom::Field (37 arrays); resolve np=2 vader-CMA gate artifact
+HEAD     076a56d M1.4: migrate fesom_forcing + sea-ice to fesom::Field (61 arrays)   (+ this handoff commit on top)
+1c444d8  docs: phantom-multi-rank-divergence debugging ladder + np=1-not-sufficient
+6d00b2b  docs: handoff → M1.3 done / next M1.4
+d42c7cc  M1.3: migrate fesom_dyn/aux/tracers to fesom::Field (37 arrays); resolve np=2 vader-CMA gate artifact
 e2dc45e  M1.2 Wave 3: migrate bc_index_nod2D — fesom_mesh fully Field-backed; M1.2 complete
-01edc20  build: keep full CUDA build green — exclude host-only C unit tests (nvcc .c)
-0229fff  M1.2 Wave 2: migrate scatter-touched fesom_mesh arrays to fesom::Field
-5f5cb04  M1.2 Wave 1: back set-once fesom_mesh geometry+state with fesom::Field
 2c960bc  M0 DONE: cast void* allocs, drop -fpermissive — CUDA full model bit-identical on A100  (tag m0-baseline)
 ```
 (np=2 scatter oracle: **`/scratch/a/a270088/pi_np2_ref_m13_nocma`** — captured CMA-off, L18; the
@@ -89,55 +99,59 @@ sbatch jobs/job_pi_smoke_gpu                       # A100 pi smoke → runs/pi_c
 GPU unit test: `sbatch … --wrap "… ./build-cuda/test_field"` (see git history for the exact wrap),
 or just run `test_field` inside any `gpu-devel` allocation.
 
-## 3. THE NEXT TASK — M1.4: migrate `fesom_forcing` + sea-ice structs to `Field`
+## 3. THE NEXT TASK — M1.5: sync discipline in the step driver + M1 acceptance
 
-Per plan §M1.4. **Reuse the exact M1.2/M1.3 pattern** (now proven on 28 mesh + 37 dyn/aux/tracers
-arrays): `Field`/`IntField` member per persistent array; raw ptr = non-owning `field.h()` alias
-re-pointed after `.alloc`; `memset(s,0,sizeof)` → `*s = T{}` (D13); allocate-once/free-once. Honour
-**halo-sized allocation** (`feedback_array_size_vs_reader_loop`). Check the structs are
-stack/`new` (Field ctors run), not `malloc`'d (L13). Convert forcing (`stress_*`, `heat_flux`,
-`water_flux`, `virtual_salt`, …) and ice state (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work).
-**Gate** exactly as M1.3 below — and note the **np=2 gate needs
-`OMPI_MCA_btl_vader_single_copy_mechanism=none`** vs `pi_np2_ref_m13_nocma` (L18).
+Per plan §M1.5. **This is the last M1 task and it's a DIFFERENT KIND of task** — not array
+migration (M1.2–M1.4 already backed all 126 persistent arrays with `Field`), but laying the
+host↔device **sync rails** the M2 device kernels will use, plus the M1 acceptance run + tag.
+Deliverable = `docs/SYNC_MAP.md` (the per-substep host/device currency map, mirroring the halo map).
 
-⚠️ **M1.3 is DONE** — the rest of this section documents the M1.3 method (reuse it for M1.4):
+- **Lay the coarse sync rails** in `src/fesom_step.cpp` / `fesom_ice.cpp` / `fesom_main.cpp`: the
+  contract is *before a (future) device kernel `sync_device()` its inputs; after it `modify_device()`
+  its outputs; before halo/I/O/legacy-host-kernel `sync_host()`*. **At M1 all compute is still on
+  host**, so the map is "host authoritative" everywhere and these calls are no-ops on Serial/OpenMP
+  (host==device) and bitwise-exact `deep_copy`s on CUDA — so **the run must STAY bit-identical**.
+  Recall L14: a host write through the raw alias is invisible to the DualView flags, so a real
+  `sync_device` needs a preceding `modify_host()`; the M1.2 mesh did this once in
+  `mesh_sync_geometry_device`. The set-once geometry is already synced; this task decides the
+  cadence for the *evolving* state (dyn/tracers/forcing/ice) — likely a documented "synced lazily by
+  the first M2 kernel that needs it" rather than eager per-step copies.
+- **Prove the plumbing**: exercise a no-op device round-trip each step under `-DFESOM_KK_SYNCCHECK`
+  (the `Auth` tag + `h_checked()` already exist in `fesom_field.hpp`) to assert host/device coherence
+  without yet moving compute. Route a few host entry points (halo pack/unpack, I/O gather) through
+  `h_checked()` as the proof.
+- **Write `docs/SYNC_MAP.md`** — the deliverable/test for this task.
+- **M1 acceptance**: Serial + OpenMP + CUDA all run a **1-yr CORE2** bit-identical to the C reference
+  (compute still on host) — this is a multi-hour SLURM job (CORE2 mesh `/pool/data/AWICM/FESOM2/
+  MESHES_FESOM2.1/core2`, account `ab0995`); the pi smoke is NOT sufficient for acceptance. Then
+  **tag `m1-datalayer`** → M2 (first device compute kernel, M2.1 EOS, where CUDA bit-identity is
+  expected to FIRST break — fma/transcendentals).
 
-Per plan §M1.3. **Reuse the exact M1.2 pattern** (now proven on 28 mesh arrays):
-- Add a `fesom::Field`/`IntField` member per persistent array in `src/fesom_{dyn,aux,tracers}.{h,cpp}`;
-  keep the legacy `real_t*`/`int*` member as a **non-owning alias re-pointed at `field.h()`** right
-  after `field.alloc(label, n)` (count in **elements**) — do NOT touch call sites (D12).
-- Replace `calloc/malloc` with `.alloc`; in the struct's `free`/`init`, replace
-  `memset(s,0,sizeof)` with `*s = T{}` (D13/L13) and drop the per-array `free()` (the assignment
-  releases every Field). If a struct is `malloc`'d (not a stack/`new` object), it must instead be
-  constructed — check (`grep -nE 'malloc.*sizeof.*(dyn|aux|tracers)'`), since `malloc` skips Field
-  ctors (L13).
-- Arrays to convert: **dyn** `uv/uv_rhs/uv_rhsAB/w/w_e/w_i/eta_n/d_eta/ssh_rhs*/uvnode*/cfl_z`;
-  **aux** `density_m_rho0/hpressure/bvfreq/sw_alpha/sw_beta/Kv/Av/pgf_x/pgf_y/…`; **tracers**
-  `tracers->data[*].values` — ⚠️ honour the **stride `nl`** (`feedback_tracer_stride_nl`,
-  `PORTING_LESSONS §5`): index with `FESOM_NODE3D`, alloc `N*nl` elements.
-- ⚠️ **Per-kernel scratch arrays (GM/KPP/FCT/tracer-diff/CG `fer_*`, `blmc`, `r/p/Ap`, …) are NOT
-  migrated in M1** — each is wrapped inside its own M2/M4 task (plan scope note).
-- After the producing routine fills a Field on host via the alias, the **device copy needs
-  `modify_host()` then `sync_device()`** or it stays stale (L14) — but at M1 nothing reads the
-  device, so for now follow M1.2: a single `sync_device` pass once the data is set, where one exists.
-- If you add a new model `#include` of `fesom_field.hpp`-bearing headers to a file built by a
-  CUDA-excluded unit test, mind L17 (nvcc rejects `.c` sources).
-
-**Gate (recipe §2): Serial np=1 == golden + np=2 (dist_2) == oracle + `ctest` 4/4; then a CUDA
-np=1 smoke (`sbatch jobs/job_pi_smoke_gpu`) bit-identical.** Then M1.4 (forcing/ice), M1.5 (sync map
-+ 1-yr CORE2 acceptance, tag `m1-datalayer`).
+**Gate (recipe §2) for every code change in M1.5: Serial np=1 == golden + np=2 (CMA-off!) ==
+`pi_np2_ref_m13_nocma` oracle + `ctest` 4/4; then CUDA np=1 smoke (`sbatch jobs/job_pi_smoke_gpu`)
+bit-identical.** (The 1-yr CORE2 acceptance is the milestone gate, separate from the per-change pi gate.)
 
 **Invariant for all of M1:** the only device op is `deep_copy` of `double`/`int` (bitwise-exact) and
 NO compute kernel runs on device → Serial+OpenMP+CUDA all stay bit-identical. A stray device
-`parallel_for`/fill is a bug.
+`parallel_for`/fill is a bug. (M1.5 ADDS `sync_*` calls but still NO `parallel_for`.)
+
+**The M1.2–M1.4 migration pattern (for the M2/M4 per-kernel scratch arrays still to come):**
+`Field`/`IntField` member per persistent array; legacy raw ptr = **non-owning `field.h()` alias**
+re-pointed right after `field.alloc(label, n)` (count in **elements**) — do NOT touch call sites
+(D12). `calloc/malloc`→`.alloc`; `memset(s,0,sizeof)`→`*s = T{}` (D13/L13); drop per-array `free()`
+(the assignment releases every Field). First **audit** (D15/D16): the owning struct must be a
+stack/`new` object (Field ctors run; `malloc` skips them, L13), and the array must be updated
+in-place (no pointer swaps) so the alias stays valid. Embedded-by-value sub-structs + arrays-of-
+structs reset/release recursively via one `*x = T{}` (D16/L20). Mind L17 (nvcc rejects `.c` sources
+— don't pull `fesom_field.hpp` into a CUDA-excluded `.c` unit test).
 
 **Always:** gate every step on Serial bit-identity vs the C twin; never simplify physics; and
 **append every decision/lesson to `docs/KOKKOS_PORTING_LESSONS.md` in the same commit**.
 
 ## 4. Key paths
 
-- Plan: `docs/plans/20260525-kokkos-port.md` · Lessons: `docs/KOKKOS_PORTING_LESSONS.md` (D1–D14,
-  L1–L17) · C-port lessons: `docs/PORTING_LESSONS.md` · Build: `docs/BUILD.md` · Provenance/golden +
+- Plan: `docs/plans/20260525-kokkos-port.md` · Lessons: `docs/KOKKOS_PORTING_LESSONS.md` (D1–D16,
+  L1–L20) · C-port lessons: `docs/PORTING_LESSONS.md` · Build: `docs/BUILD.md` · Provenance/golden +
   MPI override: `docs/reference/PROVENANCE.md`
 - Field primitive: `src/fesom_field.hpp` · its test: `tests/test_field.cpp` · **M1.2 mesh migration
   as the worked example of the pattern**: `src/fesom_mesh.{h,cpp}` (raw alias = `field.h()`; alloc
@@ -151,42 +165,49 @@ NO compute kernel runs on device → Serial+OpenMP+CUDA all stay bit-identical. 
 ## 5. NEXT-SESSION PROMPT (paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
-> `git log --oneline -8` to orient. **M0 + M1.1 + M1.2 + M1.3 are complete**: Serial+CUDA builds are
-> bit-for-bit identical to the C golden; `fesom::Field` (DualView wrapper) exists; and **all 28
-> `fesom_mesh` + 37 `fesom_dyn`/`fesom_aux`/`fesom_tracers` persistent arrays are now
-> `Field`/`IntField`-backed** with the raw pointer kept as a non-owning `field.h()` alias (0 call
-> sites changed). Serial np=1 + np=2 (CMA-off) + CUDA np=1 all ALL FIELDS BIT-IDENTICAL; ctest 4/4.
-> Work tree clean (HEAD `d42c7cc`).
+> `git log --oneline -8` to orient. **M0 + M1.1 + M1.2 + M1.3 + M1.4 are complete**: Serial+CUDA
+> builds are bit-for-bit identical to the C golden; `fesom::Field` (DualView wrapper) exists; and
+> **ALL 126 persistent arrays (28 `fesom_mesh` + 37 `fesom_dyn`/`aux`/`tracers` + 12 `fesom_forcing`
+> + 49 `fesom_ice`) are now `Field`/`IntField`-backed** with the raw pointer kept as a non-owning
+> `field.h()` alias (0 call sites changed). The M1 persistent-state data-layer migration is DONE;
+> only per-kernel scratch (gm/kpp/ocean-tradv/ssh) remains, deferred to its M2/M4 kernel task. Serial
+> np=1 + np=2 (CMA-off) + CUDA np=1 all ALL FIELDS BIT-IDENTICAL; ctest 4/4. Work tree clean
+> (HEAD = M1.4 commit `076a56d` + handoff commit).
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status, build/run recipes §2 incl. the **np=2 vader-CMA gate fix**, the M1.4 task §3)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M1.4; §M1.3 is ticked with done-notes)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D15, L1–L19) — APPEND every session
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status, build/run recipes §2 incl. the **np=2 vader-CMA gate fix**, the M1.5 task §3)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (you are at §M1.5; §M1.2–§M1.4 are ticked with done-notes)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D16, L1–L20) — APPEND every session
 > - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps, **tracer stride nl**, halo bounds)
-> - `/home/a/a270088/port_kokkos/src/fesom_{mesh,dyn,aux,tracers}.{h,cpp}`  ← **worked examples of the migration pattern** (Field member + raw alias = `field.h()`; `*x = T{}`)
-> - `/home/a/a270088/port_kokkos/src/fesom_field.hpp` + `tests/test_field.cpp`; GPU smoke `jobs/job_pi_smoke_gpu`
+> - `/home/a/a270088/port_kokkos/src/fesom_field.hpp` + `tests/test_field.cpp`  ← the `Field` type (incl. the `Auth`/`h_checked()` SYNCCHECK mechanism M1.5 uses) + GPU smoke `jobs/job_pi_smoke_gpu`
+> - `/home/a/a270088/port_kokkos/src/fesom_{mesh,dyn,aux,tracers,forcing,ice*}.{h,cpp}`  ← **worked examples of the migration pattern** (Field member + raw alias = `field.h()`; `*x = T{}`); `mesh_sync_geometry_device` is the existing `modify_host()`+`sync_device()` example (L14)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/`
 >
-> GOAL: **M1.4 — back the persistent `fesom_forcing` + sea-ice (`fesom_ice*`) arrays with
-> `fesom::Field`/`IntField`** (per plan §M1.4 + handoff §3), reusing the M1.2/M1.3 pattern verbatim:
-> add a Field member per array, keep the raw pointer as a `field.h()` alias re-pointed after `.alloc`,
-> do NOT rewrite call sites; `memset(s,0,sizeof)` → `*s = T{}` (D13; first check the structs are
-> stack/`new`, not `malloc`'d — Field has a non-trivial ctor, L13; and audit for pointer swaps as in
-> M1.3/D15). Convert forcing (`stress_*`, `heat_flux`, `water_flux`, `virtual_salt`, …) honouring
-> **halo-sized allocation** (`feedback_array_size_vs_reader_loop`) and ice state
-> (`a_ice/m_ice/m_snow/u_ice/v_ice` + EVP/FCT work). Per-kernel scratch (GM/KPP/FCT/tracer-diff/CG) is
-> NOT migrated in M1. Then M1.5 (sync map + 1-yr CORE2 acceptance, tag `m1-datalayer`).
+> GOAL: **M1.5 — sync discipline in the step driver + M1 acceptance** (per plan §M1.5 + handoff §3).
+> NOT array migration (that's done). Lay the coarse host↔device **sync rails** in
+> `fesom_step.cpp`/`fesom_ice.cpp`/`fesom_main.cpp` (before a future device kernel `sync_device()`
+> inputs; after, `modify_device()` outputs; before halo/I/O/legacy-host `sync_host()`) — at M1 all
+> compute is still host so the map is "host authoritative" everywhere and the run **must stay
+> bit-identical** (no-op on Serial/OpenMP, bitwise `deep_copy` on CUDA; recall L14: a real
+> `sync_device` needs a preceding `modify_host()`). Exercise a no-op device round-trip per step under
+> `-DFESOM_KK_SYNCCHECK` to prove coherence (route halo/I/O host reads through `h_checked()`). Write
+> the deliverable **`docs/SYNC_MAP.md`**. Then the **M1 acceptance**: Serial+OpenMP+CUDA each run a
+> **1-yr CORE2 bit-identical** to the C reference (a multi-hour SLURM job — the pi smoke is NOT
+> sufficient), and **tag `m1-datalayer`**. NO `parallel_for` yet (the first device compute kernel is
+> M2.1, where CUDA bit-identity is expected to first break).
 >
-> GATE every step (recipe §2): `mkdir -p /tmp/pi_check`, Serial pi smoke
+> GATE every code change (recipe §2): `mkdir -p /tmp/pi_check`, Serial pi smoke
 > `./build-serial/fesom_port .../meshes/pi /tmp/pi_check 100 20 10` then `…/nereus/bin/python
 > scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi /tmp/pi_check` must print ALL FIELDS
 > BIT-IDENTICAL; `ctest` 4/4; **the np=2 gate — `export OMPI_MCA_btl_vader_single_copy_mechanism=none`
 > first (L18!) — vs `/scratch/a/a270088/pi_np2_ref_m13_nocma`** (`diff_snap.py` takes DIRECTORIES, L19);
-> CUDA bit-identity via `sbatch jobs/job_pi_smoke_gpu` (build `--target fesom_port`, L17).
+> CUDA bit-identity via `sbatch jobs/job_pi_smoke_gpu` (build `--target fesom_port`, L17). The 1-yr
+> CORE2 run is the separate M1-acceptance milestone gate.
 >
-> ⚠️ If a gate "diverges": first rule out the **vader-CMA artifact (L18)** — dump the OWNED state
-> right after the producing kernel; if byte-identical across builds, the divergence is in the
-> snapshot `MPI_Gatherv`/transport, not the port (cost the M1.3 session hours).
+> ⚠️ If a gate "diverges": first rule out the **vader-CMA artifact (L18 / the §C debugging ladder)** —
+> rebuild after `touch src/*` (kill stale `.o` after any layout change), then dump the OWNED state
+> right after the producing kernel and `cmp` across builds; if byte-identical, the divergence is in
+> the snapshot `MPI_Gatherv`/transport, not the port (cost the M1.3 session hours).
 >
 > INVARIANTS: M1 moves NO compute to the device (deep_copy of double/int only → all backends stay
 > bit-identical; a stray device `parallel_for`/fill is a bug). Never simplify physics; preserve every
