@@ -23,11 +23,13 @@ ulimit -s 204800
 MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2          # 16 ranks → reads dist_16
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 DT=1800
-NSTEPS=120
-SNAP_EVERY=120
+NSTEPS=60
+SNAP_EVERY=60
 JRA55_YEAR=1958
-export FESOM_PRINT_EVERY=40
-export FESOM_KK_VERIFY=icemap
+export FESOM_PRINT_EVERY=20
+# All ice device kernels so far: M4.3a maps (icemap) + M4.3b EVP (evp). The evp verify runs
+# the whole C EVP (120 subcycles) beside the device EVP each step -> short NSTEPS.
+export FESOM_KK_VERIFY=evp,icemap
 
 BIN=/home/a/a270088/port_kokkos/build-serial/fesom_port
 OUT_DIR=/scratch/a/a270088/m43a_verify

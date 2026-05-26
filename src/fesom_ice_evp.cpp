@@ -5,9 +5,13 @@
 #include "fesom_partit.h"
 #include "fesom_types.h"
 
+#include <Kokkos_Core.hpp>   // M4.3b: device EVP kernels (parallel_for + atomic_add scatters)
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string>            // M4.3b: FESOM_KK_VERIFY backend name
+#include <algorithm>         // M4.3b: verify snapshot/restore copies
+#include <vector>
 
 /* --- debug-only dumps for multi-rank EVP divergence diagnosis ---
  * Gated by FESOM_EVP_DUMP_DIR env var. When unset, every dump call is one
@@ -454,4 +458,282 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
     }
 
     (void)u_old; (void)v_old;  /* saved per-iter for downstream diagnostics; not used here */
+}
+
+/* ======================================================================== *
+ *  M4.3b — DEVICE (Kokkos) twin of the EVP dynamics. The 120-subcycle        *
+ *  rheology island is the CG/M4.2 pattern: HOST loop control + DEVICE        *
+ *  per-subcycle kernels (stress_tensor / stress2rhs / save-old / velocity-   *
+ *  update) + the per-subcycle uice/vice halo bracket (host-staged, D21).     *
+ *  Setup Steps 1-4 are 4 device kernels. Step 3 + stress2rhs Loop 2 are      *
+ *  element→node SCATTERS (atomic_add, D22 → Serial bit-identical, OpenMP/    *
+ *  CUDA climate-close); the rest are race-free maps/per-element. The coastal *
+ *  BC stays the verbatim C edge loop on the HOST, folded into the halo       *
+ *  bracket's host phase (it needs partit->myList_edge2D which is not device- *
+ *  backed; at np>1 the halo round-trips uice/vice anyway → free. A device    *
+ *  boundary-node mask is an M5 perf note for np=1 single-GPU).               *
+ * ======================================================================== */
+
+void fesom_ice_stress_tensor_kk(fesom_ice *ice, struct fesom_mesh *mesh)
+{
+    const int    E       = mesh->myDim_elem2D;
+    const real_t vale    = 1.0 / (ice->ellipse * ice->ellipse);
+    const real_t dte     = ice->ice_dt / (real_t)ice->evp_rheol_steps;
+    const real_t det1    = 1.0 / (1.0 + 0.5 * ice->Tevp_inv * dte);
+    const real_t det2    = det1;
+    const real_t dmin_p  = ice->delta_min;
+    const real_t Tevp    = ice->Tevp_inv;
+    auto u_ice = ice->uice_fld.d(); auto v_ice = ice->vice_fld.d();
+    auto eps11 = ice->work.eps11_fld.d(); auto eps12 = ice->work.eps12_fld.d(); auto eps22 = ice->work.eps22_fld.d();
+    auto s11   = ice->work.sigma11_fld.d(); auto s12 = ice->work.sigma12_fld.d(); auto s22 = ice->work.sigma22_fld.d();
+    auto istr  = ice->work.ice_strength_fld.d();
+    auto en    = mesh->elem_nodes_fld.d(); auto gs = mesh->gradient_sca_fld.d();
+    auto mf    = mesh->metric_factor_fld.d(); auto ulev = mesh->ulevels_fld.d();
+
+    Kokkos::parallel_for("ice_stress_tensor", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int el) {
+            if (ulev(el) > 1)       return;     /* cavity */
+            if (istr(el) <= 0.0)    return;     /* ice-free */
+            const int n0 = en(3*el+0), n1 = en(3*el+1), n2 = en(3*el+2);
+            const int g = 6*el;
+            const real_t mfac = mf(el);
+            const real_t U0=u_ice(n0),U1=u_ice(n1),U2=u_ice(n2);
+            const real_t V0=v_ice(n0),V1=v_ice(n1),V2=v_ice(n2);
+            const real_t e11 = gs(g+0)*U0 + gs(g+1)*U1 + gs(g+2)*U2 - mfac*(V0+V1+V2)/3.0;
+            const real_t e22 = gs(g+3)*V0 + gs(g+4)*V1 + gs(g+5)*V2;
+            const real_t e12 = 0.5*( gs(g+3)*U0+gs(g+4)*U1+gs(g+5)*U2
+                                   + gs(g+0)*V0+gs(g+1)*V1+gs(g+2)*V2
+                                   + mfac*(U0+U1+U2)/3.0);
+            eps11(el)=e11; eps22(el)=e22; eps12(el)=e12;
+            const real_t delta = Kokkos::sqrt((e11*e11+e22*e22)*(1.0+vale)
+                                             + 4.0*vale*e12*e12 + 2.0*e11*e22*(1.0-vale));
+            const real_t dmin = (delta > dmin_p) ? delta : dmin_p;
+            real_t zeta = istr(el)/dmin; zeta *= Tevp;
+            const real_t r1 = zeta*(e11+e22) - istr(el)*Tevp;
+            const real_t r2 = zeta*(e11-e22)*vale;
+            const real_t r3 = zeta*e12*vale;
+            const real_t si1 = det1*(s11(el)+s22(el)+dte*r1);
+            const real_t si2 = det2*(s11(el)-s22(el)+dte*r2);
+            s12(el) = det2*(s12(el)+dte*r3);
+            s11(el) = 0.5*(si1+si2);
+            s22(el) = 0.5*(si1-si2);
+        });
+    ice->work.eps11_fld.modify_device(); ice->work.eps12_fld.modify_device(); ice->work.eps22_fld.modify_device();
+    ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device(); ice->work.sigma22_fld.modify_device();
+}
+
+void fesom_ice_stress2rhs_kk(fesom_ice *ice, struct fesom_mesh *mesh)
+{
+    const int    myDim = mesh->myDim_nod2D;
+    const int    E     = mesh->myDim_elem2D;
+    const real_t val3  = 1.0/3.0;
+    auto u_rhs = ice->uice_rhs_fld.d(); auto v_rhs = ice->vice_rhs_fld.d();
+    auto s11 = ice->work.sigma11_fld.d(); auto s12 = ice->work.sigma12_fld.d(); auto s22 = ice->work.sigma22_fld.d();
+    auto rhs_a = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    auto rhs_m = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    auto inv_am = ice->work.inv_areamass_fld.d(); auto istr = ice->work.ice_strength_fld.d();
+    auto en = mesh->elem_nodes_fld.d(); auto ea = mesh->elem_area_fld.d();
+    auto mf = mesh->metric_factor_fld.d(); auto gs = mesh->gradient_sca_fld.d();
+    auto ulev = mesh->ulevels_fld.d(); auto ulev_n = mesh->ulevels_nod2D_fld.d();
+
+    /* Loop 1: zero rhs over OWNED only (the C bound; halo rhs is scattered-but-unused). */
+    Kokkos::parallel_for("ice_s2rhs_zero", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) { u_rhs(n)=0.0; v_rhs(n)=0.0; });
+    /* Loop 2: element→node SCATTER (atomic_add, D22). */
+    Kokkos::parallel_for("ice_s2rhs_scatter", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int el) {
+            if (ulev(el) > 1)    return;
+            if (istr(el) <= 0.0) return;
+            const real_t a = ea(el), mfac = mf(el);
+            const real_t S11=s11(el), S12=s12(el), S22=s22(el);
+            const int g = 6*el;
+            for (int k = 0; k < 3; ++k) {
+                const int n = en(3*el+k);
+                Kokkos::atomic_add(&u_rhs(n), -(a*(S11*gs(g+k) + S12*gs(g+k+3) + S12*val3*mfac)));
+                Kokkos::atomic_add(&v_rhs(n), -(a*(S12*gs(g+k) + S22*gs(g+k+3) - S11*val3*mfac)));
+            }
+        });
+    /* Loop 3: per-node finalisation over OWNED. */
+    Kokkos::parallel_for("ice_s2rhs_final", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;
+            if (inv_am(n) > 0.0) {
+                u_rhs(n) = u_rhs(n)*inv_am(n) + rhs_a(n);
+                v_rhs(n) = v_rhs(n)*inv_am(n) + rhs_m(n);
+            } else { u_rhs(n)=0.0; v_rhs(n)=0.0; }
+        });
+    ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
+}
+
+void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
+                               struct fesom_partit  *partit,
+                               struct fesom_mesh    *mesh)
+{
+    const int    N      = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    myDim  = mesh->myDim_nod2D;
+    const int    E      = mesh->myDim_elem2D;
+    const int    nl     = mesh->nl;
+    const real_t rdt    = ice->ice_dt / (real_t)ice->evp_rheol_steps;
+    const real_t ax     = cos(ice->theta_io);
+    const real_t ay     = sin(ice->theta_io);
+    const real_t rhoice = ice->thermo.rhoice;
+    const real_t rhosno = ice->thermo.rhosno;
+    const real_t pstar  = ice->pstar;
+    const real_t c_pres = ice->c_pressure;
+    const real_t cd     = ice->cd_oce_ice;
+    const real_t rho0   = (real_t)FESOM_DENSITY_0;
+
+    auto a_ice = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snw = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    auto rhs_a = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    auto rhs_m = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    auto u_ice = ice->uice_fld.d();   auto v_ice = ice->vice_fld.d();
+    auto u_w   = ice->srfoce_u_fld.d(); auto v_w = ice->srfoce_v_fld.d();
+    auto elev  = ice->srfoce_ssh_fld.d();
+    auto sax   = ice->stress_atmice_x_fld.d(); auto say = ice->stress_atmice_y_fld.d();
+    auto inv_am = ice->work.inv_areamass_fld.d(); auto inv_m = ice->work.inv_mass_fld.d();
+    auto istr   = ice->work.ice_strength_fld.d();
+    auto u_rhs  = ice->uice_rhs_fld.d(); auto v_rhs = ice->vice_rhs_fld.d();
+    auto en   = mesh->elem_nodes_fld.d(); auto gs = mesh->gradient_sca_fld.d();
+    auto ea   = mesh->elem_area_fld.d();  auto area = mesh->area_fld.d();
+    auto cor  = mesh->coriolis_node_fld.d();
+    auto ulev = mesh->ulevels_fld.d();    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+
+    /* Step 1: zero inv_areamass/inv_mass/rhs_a/rhs_m over [0,N) (halo included). */
+    Kokkos::parallel_for("ice_evp_step1", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) { inv_am(n)=0.0; inv_m(n)=0.0; rhs_a(n)=0.0; rhs_m(n)=0.0; });
+
+    /* Step 2: per-node mass + inverse-area-mass over OWNED. */
+    Kokkos::parallel_for("ice_evp_step2", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;
+            const real_t mpa = rhoice*m_ice(n) + rhosno*m_snw(n);
+            if (mpa > 1.0e-3) inv_am(n) = 1.0 / (area(n*nl + 0) * mpa);
+            else              inv_am(n) = 0.0;
+            if (a_ice(n) < 0.01) inv_m(n) = 0.0;
+            else {
+                real_t m = mpa / a_ice(n);
+                if (m < 9.0) m = 9.0;
+                inv_m(n) = 1.0 / m;
+            }
+        });
+
+    /* Step 3: per-element ice_strength + the elevation-gradient rhs SCATTER (atomic_add, D22). */
+    Kokkos::parallel_for("ice_evp_step3", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int el) {
+            istr(el) = 0.0;
+            if (ulev(el) > 1) return;
+            const int n0 = en(3*el+0), n1 = en(3*el+1), n2 = en(3*el+2);
+            if (m_ice(n0)<=0.0||m_ice(n1)<=0.0||m_ice(n2)<=0.0
+             || a_ice(n0)<=0.0||a_ice(n1)<=0.0||a_ice(n2)<=0.0) return;   /* ice_strength stays 0 */
+            const real_t msum = (m_ice(n0)+m_ice(n1)+m_ice(n2))/3.0;
+            const real_t asum = (a_ice(n0)+a_ice(n1)+a_ice(n2))/3.0;
+            istr(el) = 0.5 * pstar * msum * Kokkos::exp(-c_pres*(1.0 - asum));
+            const real_t aa = 9.81 * ea(el) / 3.0;
+            const int g = 6*el;
+            const real_t e0=elev(n0), e1=elev(n1), e2=elev(n2);
+            const real_t edx = gs(g+0)*e0 + gs(g+1)*e1 + gs(g+2)*e2;
+            const real_t edy = gs(g+3)*e0 + gs(g+4)*e1 + gs(g+5)*e2;
+            for (int k = 0; k < 3; ++k) {
+                const int n = en(3*el+k);
+                Kokkos::atomic_add(&rhs_a(n), -(aa*edx));
+                Kokkos::atomic_add(&rhs_m(n), -(aa*edy));
+            }
+        });
+
+    /* Step 4: divide rhs_a/rhs_m by surface area over OWNED. */
+    Kokkos::parallel_for("ice_evp_step4", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;
+            rhs_a(n) /= area(n*nl + 0);
+            rhs_m(n) /= area(n*nl + 0);
+        });
+    ice->work.inv_areamass_fld.modify_device(); ice->work.inv_mass_fld.modify_device();
+    ice->work.ice_strength_fld.modify_device();
+    ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
+    ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();
+
+    /* Step 5: the EVP subcycle (host loop + device kernels + per-subcycle uice/vice halo bracket). */
+    const int parallel = (partit && partit->npes > 1);
+    for (int sub = 0; sub < ice->evp_rheol_steps; ++sub) {
+        fesom_ice_stress_tensor_kk(ice, mesh);
+        fesom_ice_stress2rhs_kk(ice, mesh);
+
+        /* save old velocity (Fortran line 671; u_old/v_old unused downstream but ported faithfully). */
+        { auto u_old=ice->uice_old_fld.d(); auto v_old=ice->vice_old_fld.d();
+          auto ui=u_ice; auto vi=v_ice;
+          Kokkos::parallel_for("ice_evp_saveold", Kokkos::RangePolicy<>(0, N),
+              KOKKOS_LAMBDA(const int n){ u_old(n)=ui(n); v_old(n)=vi(n); });
+          ice->uice_old_fld.modify_device(); ice->vice_old_fld.modify_device(); }
+
+        /* velocity update over OWNED (per-node implicit drag/Coriolis solve). */
+        Kokkos::parallel_for("ice_evp_velupd", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int n) {
+                if (ulev_n(n) > 1) return;
+                if (a_ice(n) >= 0.01) {
+                    const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
+                    const real_t umod = Kokkos::sqrt(du*du+dv*dv);
+                    const real_t drag = cd*umod*rho0*inv_m(n);
+                    const real_t rhsu = u_ice(n)+rdt*(drag*(ax*u_w(n)-ay*v_w(n))+inv_m(n)*sax(n)+u_rhs(n));
+                    const real_t rhsv = v_ice(n)+rdt*(drag*(ax*v_w(n)+ay*u_w(n))+inv_m(n)*say(n)+v_rhs(n));
+                    const real_t r_a = 1.0 + ax*drag*rdt;
+                    const real_t r_b = rdt*(cor(n)+ay*drag);
+                    const real_t det = 1.0/(r_a*r_a+r_b*r_b);
+                    u_ice(n) = det*(r_a*rhsu+r_b*rhsv);
+                    v_ice(n) = det*(r_a*rhsv-r_b*rhsu);
+                } else { u_ice(n)=0.0; v_ice(n)=0.0; }
+            });
+        ice->uice_fld.modify_device(); ice->vice_fld.modify_device();
+
+        /* Coastal BC + halo on the HOST (the BC needs partit->myList_edge2D; folded into the halo
+         * bracket's host phase — uice/vice round-trip is needed for the halo at np>1 regardless). */
+        ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+        { real_t *u = ice->uice, *v = ice->vice;
+          for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
+              if (partit->myList_edge2D[ed] <= mesh->edge2D_in) continue;   /* interior edge */
+              int e0 = mesh->edges[ed*2+0], e1 = mesh->edges[ed*2+1];
+              u[e0]=0.0; v[e0]=0.0; u[e1]=0.0; v[e1]=0.0;
+          } }
+        if (parallel) { fesom_exchange_nod2D(ice->uice, partit); fesom_exchange_nod2D(ice->vice, partit); }
+        ice->uice_fld.modify_host(); ice->uice_fld.sync_device();
+        ice->vice_fld.modify_host(); ice->vice_fld.sync_device();
+    }
+}
+
+/* FESOM_KK_VERIFY=evp — the EVP read-modify-writes uice/vice + sigma11/12/22 (the rheology state
+ * carried across subcycles AND ocean steps), so capture-before those 5. The driver snapshots them
+ * PRE-EVP; here snapshot the KK result, restore the pre-values, run the C twin (the whole
+ * fesom_ice_evp_dynamics: setup + 120 subcycles), diff uice/vice (+sigma), restore KK. The inputs
+ * (a/m/ms, srfoce_*, stress_atmice_*) are intact (EVP doesn't modify them). On Serial the atomic_add
+ * scatters are ordered → max|Δ|==0; OpenMP/CUDA climate-close (D22). ⚠️ Meaningful only with ACTIVE
+ * ice (CORE2). */
+void fesom_ice_evp_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                          int step_n, const std::vector<real_t> &pre_u, const std::vector<real_t> &pre_v,
+                          const std::vector<real_t> &pre_s11, const std::vector<real_t> &pre_s12,
+                          const std::vector<real_t> &pre_s22)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int Eo = mesh->myDim_elem2D;
+    real_t *u=ice->uice, *v=ice->vice;
+    real_t *s11=ice->work.sigma11, *s12=ice->work.sigma12, *s22=ice->work.sigma22;
+    std::vector<real_t> ku(u,u+N), kv(v,v+N), k11(s11,s11+Eo), k12(s12,s12+Eo), k22(s22,s22+Eo);
+    std::copy(pre_u.begin(),pre_u.end(),u);  std::copy(pre_v.begin(),pre_v.end(),v);
+    std::copy(pre_s11.begin(),pre_s11.end(),s11); std::copy(pre_s12.begin(),pre_s12.end(),s12);
+    std::copy(pre_s22.begin(),pre_s22.end(),s22);
+    fesom_ice_evp_dynamics(ice, partit, mesh);   /* C twin */
+    auto mx=[](const std::vector<real_t>&kk,const real_t*c,int n){ double d=0.0;
+        for(int i=0;i<n;++i){double x=std::fabs((double)kk[i]-(double)c[i]); if(x>d)d=x;} return d; };
+    double du=mx(ku,u,N), dv=mx(kv,v,N), d11=mx(k11,s11,Eo), d12=mx(k12,s12,Eo), d22=mx(k22,s22,Eo);
+    std::copy(ku.begin(),ku.end(),u); std::copy(kv.begin(),kv.end(),v);
+    std::copy(k11.begin(),k11.end(),s11); std::copy(k12.begin(),k12.end(),s12); std::copy(k22.begin(),k22.end(),s22);
+    double dmax=du; for(double x:{dv,d11,d12,d22}) if(x>dmax) dmax=x;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=evp] step %d backend=%s  max|Δ|: uice=%.3e vice=%.3e sig11=%.3e sig12=%.3e sig22=%.3e\n",
+                step_n, be.c_str(), du, dv, d11, d12, d22);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=evp] FAIL step %d: EVP Serial must be bit-identical "
+                             "(max|Δ|=%.3e)\n", step_n, dmax); std::abort();
+    }
 }

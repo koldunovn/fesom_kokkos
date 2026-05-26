@@ -330,14 +330,16 @@ static void load_ice_env_once(void)
     s_ice_env_loaded = 1;
 }
 
-/* M4.3a FESOM_KK_VERIFY=icemap gate (ocean2ice + cut_off + h_ice/h_snow diag). Cached. */
+/* FESOM_KK_VERIFY ice gates: icemap (M4.3a ocean2ice+cut_off+diag), evp (M4.3b). Cached. */
 static int s_ice_verify_loaded = 0;
 static int s_verify_icemap     = 0;
+static int s_verify_evp        = 0;
 static void load_ice_verify_once(void)
 {
     if (s_ice_verify_loaded) return;
     const char *e = getenv("FESOM_KK_VERIFY");
     s_verify_icemap = (e && strstr(e, "icemap")) ? 1 : 0;   /* collision-free token (L25) */
+    s_verify_evp    = (e && strstr(e, "evp"))    ? 1 : 0;   /* M4.3b */
     s_ice_verify_loaded = 1;
 }
 
@@ -441,9 +443,39 @@ void fesom_ice_step(int                            step,
     }
 
     if (!s_no_ice_dyn) {
-        /* whichEVP=0 (standard EVP) only; mEVP/aEVP are out of scope. */
+        /* whichEVP=0 (standard EVP) only; mEVP/aEVP are out of scope. M4.3b: ON THE DEVICE.
+         * IN rail (L28/L14): push the EVP inputs the host producers/prev step wrote via raw
+         * alias — a/m/ms (prev step's cut_off/thermo), srfoce_u/v/ssh (this step's ocean2ice,
+         * host-current after its halo — L30 re-push), stress_atmice_x/y (forcing producers),
+         * uice/vice + sigma11/12/22 (the RMW rheology state from the prev step's EVP). OUT:
+         * sync_host(uice/vice/sigma) so the host FCT (uice/vice) + next step's IN rail see them. */
         if (ice->whichEVP == 0) {
-            fesom_ice_evp_dynamics(ice, partit, mesh);
+            const int Nn = mesh->myDim_nod2D + mesh->eDim_nod2D;
+            const int Eo = mesh->myDim_elem2D;
+            std::vector<real_t> eu, ev, e11, e12, e22;
+            if (s_verify_evp) {
+                eu.assign (ice->uice, ice->uice + Nn);  ev.assign (ice->vice, ice->vice + Nn);
+                e11.assign(ice->work.sigma11, ice->work.sigma11 + Eo);
+                e12.assign(ice->work.sigma12, ice->work.sigma12 + Eo);
+                e22.assign(ice->work.sigma22, ice->work.sigma22 + Eo);
+            }
+            ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+            ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+            ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+            ice->srfoce_u_fld.modify_host();   ice->srfoce_u_fld.sync_device();
+            ice->srfoce_v_fld.modify_host();   ice->srfoce_v_fld.sync_device();
+            ice->srfoce_ssh_fld.modify_host(); ice->srfoce_ssh_fld.sync_device();
+            ice->stress_atmice_x_fld.modify_host(); ice->stress_atmice_x_fld.sync_device();
+            ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
+            ice->uice_fld.modify_host();    ice->uice_fld.sync_device();
+            ice->vice_fld.modify_host();    ice->vice_fld.sync_device();
+            ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
+            ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
+            ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
+            fesom_ice_evp_dynamics_kk(ice, partit, mesh);
+            ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+            ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+            if (s_verify_evp) fesom_ice_evp_verify(ice, partit, mesh, step, eu, ev, e11, e12, e22);
         } else {
             fprintf(stderr, "fesom_ice: whichEVP=%d not supported (only standard EVP=0)\n",
                     ice->whichEVP);

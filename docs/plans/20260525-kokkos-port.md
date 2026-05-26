@@ -600,8 +600,10 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - [x] **M4.3a** — `ocean2ice` (gather) + `cut_off` (clamp) + h_ice/h_snow diag. Race-free → Serial AND
       OpenMP bit-identical (key `icemap`). Gates: pi `max|Δ|=0` Serial+OpenMP (ocean2ice non-trivial),
       pi==golden np1+np2, SYNCCHECK, **+ 120-step CORE2 dist_16 ice-active `max|Δ|=0` Serial** (job 25148594).
-- [ ] **M4.3b** — EVP dynamics (the 120-subcycle island: setup maps/scatters + `stress_tensor`/
-      `stress2rhs`/vel-update + the per-subcycle uice/vice halo bracket — the CG/M4.2 host-loop pattern).
+- [x] **M4.3b** — EVP dynamics (the 120-subcycle island: setup maps/scatters + `stress_tensor`/
+      `stress2rhs`/vel-update + the per-subcycle uice/vice halo bracket — the CG/M4.2 host-loop pattern;
+      2 element→node scatters D22; coastal BC stays host). Serial `max|Δ|=0` on a 60-step CORE2 dist_16
+      ice-active run (job 25149090; uice max 0.95 m/s), pi==golden np1+np2, SYNCCHECK. Key `evp`, L43.
 - [ ] **M4.3c** — ice FCT (`tg_rhs` + `fct_solve`) — the M2.6 ocean-FCT analogue (scatter decision, D22).
 - [ ] **M4.3d** — thermodynamics + `oce_fluxes` (column physics + the flux coupling overwriting forcing).
 - [ ] **M4 acceptance**: whole model on device; 1-yr CORE2 Serial bit-identical to cref; 2-yr+5-yr CUDA

@@ -1,6 +1,25 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 16 (2026-05-26) — M4.3a COMPLETE: the simple sea-ice coupling/maps on the device — the
+**Session 16 (2026-05-26) — M4.3a + M4.3b COMPLETE: sea-ice coupling/maps AND the EVP dynamics on the
+device.** Two commits: **M4.3a `473c15b`** (`ocean2ice` gather + `cut_off` clamp + h_ice/h_snow diag);
+**M4.3b `<this>`** (the EVP 120-subcycle rheology island). **M4.3b — `fesom_ice_evp_dynamics_kk`
+(`src/fesom_ice_evp.cpp`):** the CG/M4.2 pattern applied to sea ice — HOST loop control (fixed 120
+subcycles, no convergence reduce) + DEVICE per-subcycle kernels (`stress_tensor_kk` per-elem / `stress2rhs_kk`
+map+SCATTER+map / save-old / velocity-update) + setup Steps 1-4 (4 kernels) + the per-subcycle uice/vice
+halo bracket. 2 element→node SCATTERS (D22): Step 3 elevation-grad rhs + stress2rhs Loop 2 — Serial
+bit-identical, OpenMP/CUDA climate-close (compounds over 120 subcycles → confirm at the M4 CORE2 OpenMP/
+CUDA acceptance). The **coastal BC stays the verbatim C edge loop on the HOST** (needs `partit->myList_edge2D`,
+not Field-backed), folded into the halo bracket's host phase (free at np>1; device-mask BC = M5).
+**M4.3b gate — ALL GREEN**: `FESOM_KK_VERIFY=evp` Serial `max|Δ|=0` on a 60-step CORE2 dist_16 run with
+ACTIVE ice (job `25149090`: 3840 lines, 0 nonzero; uice max 0.95 m/s, 33416 ice nodes; 120 subcycles/step)
+— the meaningful gate (pi = 0 trivially); pi==golden (np=1 AND np=2 CMA-off); `ctest` 4/4; SYNCCHECK
+np=1+np=2 clean; OpenMP pi at the M4.2 floor (ice trivial on pi). Verify = L26 capture-before uice/vice/
+sigma11/12/22 (the rheology RMW state carried across subcycles + ocean steps). Lesson **L43**; SYNC_MAP §3
+EVP row updated; key `evp`. **NEXT = M4.3c (ice FCT — `tg_rhs`+`fct_solve`, the M2.6 ocean-FCT analogue;
+`src/fesom_ice_fct.cpp`), then M4.3d (thermo + `oce_fluxes`) → M4 acceptance/tag `m4-full-device`.** The
+M4.3a detail + the two M4.3 findings follow.
+
+**Session 16a — M4.3a: the simple sea-ice coupling/maps on the device — the
 FIRST sea-ice kernels.** `ocean2ice` (gather) + `cut_off` (clamp) + the h_ice/h_snow diagnostic, in
 `src/fesom_ice_coupling.cpp` / `fesom_ice_thermo.cpp` / `fesom_ice.cpp`. **Two defining findings:**
 (1) **No data-layer step** — M1.4 already `Field`-wrapped EVERY ice array (work/thermo/data/top-level)
@@ -18,9 +37,8 @@ the meaningful cut_off/diag gate); **OpenMP `max|Δ|=0`** (gathers/maps); pi==go
 CMA-off); `ctest` 4/4; SYNCCHECK np=1+np=2 clean + bit-identical. ⚠️ np>1 verify subtlety: `ocean2ice`
 runs the verify AFTER the `srfoce_u/v` driver halo (the kernel leaves halo=0 pre-exchange → a pre-halo
 [0,N) diff would false-positive at np>1). Lesson **L42**; SYNC_MAP §3 rows updated; key `icemap`.
-**NEXT = M4.3b (EVP dynamics — the 120-subcycle rheology island, the CG/M4.2 host-loop + device-kernels
-pattern; `src/fesom_ice_evp.cpp`).** Then M4.3c (FCT, the M2.6 analogue), M4.3d (thermo + oce_fluxes).
-**⚠️ Run OUTPUT → `/work` or `/scratch`, never `$HOME`.** M2/M4.2 detail follows.
+(→ led into M4.3b, done above this session.) **⚠️ Run OUTPUT → `/work` or `/scratch`, never `$HOME`.**
+M2/M4.2 detail follows.
 
 ---
 

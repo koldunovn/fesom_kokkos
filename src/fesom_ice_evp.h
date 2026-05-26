@@ -2,6 +2,7 @@
 #define FESOM_ICE_EVP_H
 
 #include "fesom_ice_types.h"
+#include <vector>   // M4.3b: FESOM_KK_VERIFY=evp capture-before buffers
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -40,5 +41,18 @@ void fesom_ice_stress2rhs(fesom_ice            *ice,
 void fesom_ice_evp_dynamics(fesom_ice            *ice,
                             struct fesom_partit  *partit,
                             struct fesom_mesh    *mesh);
+
+/* M4.3b: DEVICE twins. stress_tensor_kk (per-element, race-free) + stress2rhs_kk
+ * (map + element→node atomic_add scatter + map) are called per subcycle by
+ * evp_dynamics_kk, which runs the setup (4 kernels) + the 120-subcycle host loop
+ * (device kernels + the per-subcycle uice/vice halo bracket; coastal BC on the host).
+ * Serial bit-identical (the scatters ordered); OpenMP/CUDA climate-close (D22). */
+void fesom_ice_stress_tensor_kk(fesom_ice *ice, struct fesom_mesh *mesh);
+void fesom_ice_stress2rhs_kk   (fesom_ice *ice, struct fesom_mesh *mesh);
+void fesom_ice_evp_dynamics_kk (fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh);
+void fesom_ice_evp_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                          int step_n, const std::vector<real_t> &pre_u, const std::vector<real_t> &pre_v,
+                          const std::vector<real_t> &pre_s11, const std::vector<real_t> &pre_s12,
+                          const std::vector<real_t> &pre_s22);
 
 #endif /* FESOM_ICE_EVP_H */
