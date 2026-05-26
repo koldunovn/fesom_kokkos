@@ -102,10 +102,18 @@ rule and the §CUDA / M3.1 deferral).
 Per plan §M2.1 + the M2 cross-cutting notes. **This is a different kind of task from all of M1** —
 the first compute moved onto the device. Expect the validation ladder to change here:
 
-- **Port `fesom_pressure_bv`** to a `parallel_for` over nodes with the level loop inside the lambda
-  (`Kokkos::` math for the JM-EOS `pow`/`sqrt` — the first transcendental-portability check), then
-  **`compute_sw_alpha_beta`**. Preserve every constant/loop bound verbatim (re-read
-  `docs/PORTING_LESSONS.md` first). Keep the C twin in-tree (dead-but-diffable) until M2 closes.
+- **Entry points (`src/fesom_eos.cpp`, signatures in `src/fesom_eos.h`):** `fesom_pressure_bv`
+  (line 78) and `fesom_compute_sw_alpha_beta` (line 323) — both `(const fesom_tracers*, mesh, aux)`:
+  they READ `tracers->data[T/S].values` and WRITE `aux->{density_m_rho0,hpressure,bvfreq}` /
+  `{sw_alpha,sw_beta}` respectively (this read/write set IS the SYNC_MAP §1 rail). The EOS core is
+  `fesom_eos_jm_components` (line 15, the Jackett–McDougall EOS — `sqrt` at line 44 + the JM
+  polynomial; this is the first **GPU rounding/`Kokkos::sqrt`** check). `fesom_smooth_nod3D`
+  (line 226, the bvfreq smoother) has its own `malloc` scratch (`vol`/`work`) — wrap it in `Field`
+  (M1 scope note) if/when it moves to device, else it stays a host op between EOS and its consumers.
+- **Port** `fesom_pressure_bv` to a `parallel_for` over nodes with the level loop inside the lambda
+  (`Kokkos::` math throughout), then `fesom_compute_sw_alpha_beta`. Preserve every constant/loop
+  bound verbatim (re-read `docs/PORTING_LESSONS.md` first). Keep the C twin in-tree (dead-but-diffable)
+  until M2 closes.
 - **The per-kernel gate replaces whole-run bit-identity:** add `FESOM_KK_VERIFY=eos` — run the C twin
   AND the Kokkos kernel on the same live state and assert `max|Δ|==0` on **Serial** (the in-binary
   analogue of `exp1_compare_bidiff.py`). Serial must stay `max|Δ|==0`; OpenMP `Δ≲1e-12`; **CUDA is
@@ -158,7 +166,7 @@ the first compute moved onto the device. Expect the validation ladder to change 
 > - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← the per-substep host/device currency map (substep 1 = EOS = your first device kernel; §9 kernel-author checklist)
 > - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D17, L1–L22) — APPEND every session
 > - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride nl, halo bounds) — re-read before touching a kernel
-> - `/home/a/a270088/port_kokkos/src/fesom_field.hpp`, `src/fesom_eos.cpp`, `src/fesom_step.cpp`
+> - `/home/a/a270088/port_kokkos/src/fesom_eos.cpp` + `src/fesom_eos.h` (the M2.1 kernels: `fesom_pressure_bv` L78, `fesom_compute_sw_alpha_beta` L323, EOS core `fesom_eos_jm_components` L15), `src/fesom_field.hpp` (`Field::d()` device view for the kernel), `src/fesom_step.cpp` (the EOS call sites + the `h_checked()` guards at L78/L80)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/`
 >
 > GOAL — **M2.1: the first device compute kernel** (EOS / `fesom_pressure_bv` / `compute_sw_alpha_beta`).
