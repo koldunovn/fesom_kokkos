@@ -35,4 +35,50 @@ void fesom_pp_mixing(const struct fesom_mesh *mesh,
 void fesom_mo_convect(const struct fesom_mesh *mesh,
                       struct fesom_aux        *aux);
 
+/*
+ * M2.2 DEVICE kernel twins (Kokkos parallel_for; the M2.1 EOS template, D19).
+ * Production path from M2.2. Each requires its inputs device-current (the step
+ * driver's substep-3 sync rail supplies that — see docs/SYNC_MAP.md §2 row 3) and
+ * marks its outputs modify_device(). The host C twins above stay in-tree untouched
+ * as the FESOM_KK_VERIFY=pp oracle until M2 closes.
+ *   - compute_vel_nodes_kk: in dyn->uv (per-step sync) → out dyn->uvnode
+ *   - pp_mixing_kk:         in dyn->uvnode, aux->bvfreq → out aux->Kv (node), Av (elem)
+ *   - mo_convect_kk:        in aux->bvfreq,Kv,Av        → out aux->Kv, Av
+ * ⚠️ mo_convect_kk is the first device reader of bvfreq after the host smooth_nod3D
+ *    (substep 1) → its driver rail uses modify_host()+sync_device() on bvfreq, not
+ *    a bare sync_device() (L14). pp_mixing keeps the loop-2-before-loop-3 ordering.
+ */
+void fesom_compute_vel_nodes_kk(const struct fesom_mesh *mesh,
+                                struct fesom_dyn        *dyn);
+
+void fesom_pp_mixing_kk(const struct fesom_mesh *mesh,
+                        const struct fesom_dyn  *dyn,
+                        struct fesom_aux        *aux);
+
+void fesom_mo_convect_kk(const struct fesom_mesh *mesh,
+                         struct fesom_aux        *aux);
+
+/*
+ * FESOM_KK_VERIFY=pp in-binary per-kernel gates: run the host C twin alongside the
+ * Kokkos production result and assert max|Δ|==0 on the Serial backend; non-intrusive
+ * (each restores the Kokkos result). Call AFTER the *_kk kernel + its output
+ * sync_host(). step_n is for the log. compute_vel_nodes/pp_mixing are EOS-style;
+ * mo_convect modifies its inputs in place, so the driver passes the PRE-kernel
+ * Kv/Av (Kv_in/Av_in) as the C-twin oracle's input. See docs/SYNC_MAP.md §9.5.
+ */
+void fesom_compute_vel_nodes_verify(const struct fesom_mesh *mesh,
+                                    struct fesom_dyn        *dyn,
+                                    int step_n);
+
+void fesom_pp_mixing_verify(const struct fesom_mesh *mesh,
+                            const struct fesom_dyn  *dyn,
+                            struct fesom_aux        *aux,
+                            int step_n);
+
+void fesom_mo_convect_verify(const struct fesom_mesh *mesh,
+                             struct fesom_aux        *aux,
+                             int step_n,
+                             const real_t *Kv_in,
+                             const real_t *Av_in);
+
 #endif /* FESOM_PP_H */

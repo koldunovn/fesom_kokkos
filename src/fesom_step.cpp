@@ -26,6 +26,7 @@
 
 #include <stdlib.h>
 #include <cstring>   /* strstr — FESOM_KK_VERIFY substring match (M2.1) */
+#include <vector>    /* M2.2: mo_convect verify pre-kernel Kv/Av capture (host-only diagnostic) */
 
 #ifdef FESOM_KK_SYNCCHECK
 /* M1.5 plumbing proof (docs/SYNC_MAP.md §"Proving the rails"). Bounce a representative set of the
@@ -119,9 +120,19 @@ int fesom_timestep(int                          step_n,
      * so FESOM_KK_VERIFY=eos,pp,... works. Cached like the other env knobs. */
     static int s_verify_loaded = 0;
     static int s_verify_eos    = 0;
+    static int s_verify_pp     = 0;
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
+        /* Match the "pp" token but NOT the "pp" inside "kpp" (M2.3's sibling gate key):
+         * scan for "pp" not immediately preceded by 'k'. (eos uses a plain strstr; pp
+         * needs the guard because kpp is a substring superset — lesson L25.) */
+        s_verify_pp = 0;
+        if (e) {
+            for (const char *q = strstr(e, "pp"); q; q = strstr(q + 2, "pp")) {
+                if (q == e || q[-1] != 'k') { s_verify_pp = 1; break; }
+            }
+        }
         s_verify_loaded = 1;
     }
 
@@ -192,25 +203,63 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_elem3D(aux->pgf_x, nl, p);
     fesom_exchange_elem3D(aux->pgf_y, nl, p);
 
-    /*  3. mixing: UVnode → (PP or KPP) → convective adjustment.
+    /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
      *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
-     *     mo_convect is shared (called after either scheme).  */
-    fesom_compute_vel_nodes(mesh, dyn);
-    fesom_halo_exchange(dyn->uvnode, FESOM_HALO_NOD3D, nl, 2, p);
+     *     mo_convect is shared (called after either scheme). compute_vel_nodes +
+     *     mo_convect always run on device; pp_mixing only in the PP branch (KPP is the
+     *     default). KPP itself stays a HOST kernel until M2.3 — so on the default path
+     *     uvnode round-trips device→host (kernel→halo+KPP), and Kv/Av round-trip
+     *     host→device→host (KPP→mo_convect→halos). See docs/SYNC_MAP.md §2 row 3. */
+
+    /* INPUT rail (compute_vel_nodes): dyn->uv is host-written by last step's update_vel
+     * + bolus (raw alias, invisible to the DualView, L14) → modify_host()+sync_device().
+     * Mesh CSR / elem_area / levels are set-once device-current. (No-op on Serial/OpenMP.) */
+    dyn->uv_fld.modify_host(); dyn->uv_fld.sync_device();
+    fesom_compute_vel_nodes_kk(mesh, dyn);              /* device: writes dyn->uvnode (owned) */
+    dyn->uvnode_fld.sync_host();                        /* OUT rail: before the halo + host KPP/PP */
+    if (s_verify_pp) fesom_compute_vel_nodes_verify(mesh, dyn, step_n);
+    fesom_halo_exchange(dyn->uvnode_fld.h_checked(), FESOM_HALO_NOD3D, nl, 2, p);
 
     if (s_use_kpp) {
         /* KPP writes aux->Av (elements) + the single aux->Kv (T-channel,
-         * oce_ale.F90:3518-3522) and does its own internal halo exchanges. */
+         * oce_ale.F90:3518-3522) and does its own internal halo exchanges. HOST kernel
+         * until M2.3; reads the host-current uvnode just synced above. */
         fesom_kpp_mixing(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
     } else {
-        fesom_pp_mixing(mesh, dyn, aux);
-        fesom_exchange_nod3D (aux->Kv, nl, p);
-        fesom_exchange_elem3D(aux->Av, nl, p);
+        /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: uvnode (host-halo'd above)
+         * + bvfreq (host-written by smooth_nod3D, substep 1) → device. */
+        dyn->uvnode_fld.modify_host(); dyn->uvnode_fld.sync_device();
+        aux->bvfreq_fld.modify_host(); aux->bvfreq_fld.sync_device();
+        fesom_pp_mixing_kk(mesh, dyn, aux);             /* device: Kv (node), Av (elem) */
+        aux->Kv_fld.sync_host();                        /* OUT rail: before the Kv/Av halos */
+        aux->Av_fld.sync_host();
+        if (s_verify_pp) fesom_pp_mixing_verify(mesh, dyn, aux, step_n);
+        fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
+        fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
     }
 
-    fesom_mo_convect(mesh, aux);
-    fesom_exchange_nod3D (aux->Kv, nl, p);
-    fesom_exchange_elem3D(aux->Av, nl, p);
+    /* mo_convect (always-on, after either scheme). INPUT rail: bvfreq is host-written by
+     * smooth_nod3D (substep 1) and mo_convect is its FIRST device reader after that — so
+     * modify_host()+sync_device(), NOT a bare sync_device() (L14). Kv/Av are host-
+     * authoritative too (KPP wrote them on host on the default path; the PP branch
+     * sync_host()'d + halo'd them above) → same. Capture the PRE-kernel Kv/Av for the
+     * in-place-modify verify oracle (mo_convect raises Kv/Av in place). */
+    std::vector<real_t> mc_Kv_in, mc_Av_in;
+    if (s_verify_pp) {
+        const size_t nKv = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
+        const size_t nAv = (size_t)mesh->myDim_elem2D * (size_t)nl;
+        mc_Kv_in.assign(aux->Kv, aux->Kv + nKv);
+        mc_Av_in.assign(aux->Av, aux->Av + nAv);
+    }
+    aux->bvfreq_fld.modify_host(); aux->bvfreq_fld.sync_device();
+    aux->Kv_fld.modify_host();     aux->Kv_fld.sync_device();
+    aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
+    fesom_mo_convect_kk(mesh, aux);                     /* device: Kv, Av */
+    aux->Kv_fld.sync_host();                            /* OUT rail: before the Kv/Av halos */
+    aux->Av_fld.sync_host();
+    if (s_verify_pp) fesom_mo_convect_verify(mesh, aux, step_n, mc_Kv_in.data(), mc_Av_in.data());
+    fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
+    fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
 
     /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF)  */
     fesom_compute_vel_rhs(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);

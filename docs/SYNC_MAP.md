@@ -77,9 +77,9 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 1 | ✅ **`pressure_bv_kk`, `sw_alpha_beta_kk` (M2.1 — DONE, first device kernels)** | tracers T/S `values`; mesh `hnode`, `Z`, set-once `ulevels/nlevels_nod2D` | aux `density_m_rho0`, `hpressure`, `bvfreq`, `dbsfc`, `MLD1_ind`, `sw_alpha`, `sw_beta` | nod3D ×5 (density/hpressure/bvfreq/sw_α/sw_β), then `smooth_nod3D(bvfreq)` | **implemented:** driver IN rail `modify_host()+sync_device()` on `T,S,hnode` (host-written via raw alias, L14; `Z/ulevels/nlevels` already device-current from the one-shot push); kernels `mod_dev` their outputs; driver `sync_host()` all 7 outputs (incl. non-halo `dbsfc`→KPP, `MLD1_ind`→GM) before the halos; all 5 halo reads + `smooth_nod3D` routed through `h_checked()` |
 | 1b| GM/Redi prereq (M2.5b) `sigma_xy`/`neutral_slope`/`init_redi_gm`/`fer_solve_gamma`/`fer_gamma2vel` | aux `density`,`sw_*`; tracers; mesh | gm scratch (`fer_K/C/gamma/...`), dyn `fer_uv` | (internal) | `→dev` aux+tracers; `mod_dev(fer_uv,fer_w)`; wrap gm scratch in `Field` (deferred from M1) |
 | 2 | `pressure_force_linfs_fullcell` (M2.4) | aux `density_m_rho0`,`hpressure`; mesh | aux `pgf_x`,`pgf_y` | elem3D ×2 | `→dev(density,hpressure)`; `mod_dev(pgf_x,pgf_y)`; `→host(pgf_*)` before halos |
-| 3 | `compute_vel_nodes` (M2.2) | dyn `uv`; mesh `nod_in_elem2D` CSR | dyn `uvnode` | nod3D `uvnode` | `→dev(uv)`; `mod_dev(uvnode)`; `→host(uvnode)` before halo |
-| 3 | **KPP** `kpp_mixing` (M2.3) *or* PP `pp_mixing` (M2.2) | aux `bvfreq`, dyn `uvnode`, tracers, forcing | aux `Av` (elem), `Kv` (node) | KPP: **6 internal exchanges** (see §6); PP: `Kv` nod3D, `Av` elem3D | bracket each of KPP's 6: `→host`→halo→`→dev`; `mod_dev(Av,Kv)`; wrap KPP scratch in `Field` |
-| 3 | `mo_convect` (M2.2) | aux `bvfreq`,`Kv`,`Av` | aux `Kv`,`Av` | `Kv` nod3D, `Av` elem3D | `→dev(bvfreq,Kv,Av)`; `mod_dev(Kv,Av)`; `→host` before halos |
+| 3 | ✅ **`compute_vel_nodes_kk` (M2.2 — DONE)** | dyn `uv` (per-step); mesh `nod_in_elem2D` CSR / `elem_area` / levels (set-once) | dyn `uvnode` | nod3D `uvnode` | **implemented:** driver IN `modify_host()+sync_device()` on `uv` (host-written by update_vel+bolus via raw alias, L14); kernel `mod_dev(uvnode)`; driver `sync_host(uvnode)` before the halo (via `h_checked`) + the host KPP/PP readers |
+| 3 | **KPP** `kpp_mixing` (M2.3, still HOST) *or* ✅ **PP `pp_mixing_kk` (M2.2 — DONE)** | aux `bvfreq`, dyn `uvnode`, tracers, forcing | aux `Av` (elem), `Kv` (node) | KPP: **6 internal exchanges** (see §6); PP: `Kv` nod3D, `Av` elem3D | KPP: bracket each of its 6 at M2.3 (host until then); **PP implemented:** driver IN `modify_host()+sync_device()` on `uvnode` (host-halo'd above) + `bvfreq` (host smooth); kernel `mod_dev(Kv,Av)` (3 loops = 3 `parallel_for` launches; the launch barrier preserves loop-2-before-loop-3); driver `sync_host(Kv,Av)` before the halos (`h_checked`) |
+| 3 | ✅ **`mo_convect_kk` (M2.2 — DONE)** | aux `bvfreq`,`Kv`,`Av` | aux `Kv`,`Av` | `Kv` nod3D, `Av` elem3D | **implemented:** driver IN `modify_host()+sync_device()` on **`bvfreq`** (first device reader AFTER the host smooth_nod3D — a bare `sync_device` would be a silent no-op, L14/L24) + `Kv`,`Av` (host-authoritative: KPP-written on the default path, or PP-halo'd); kernel `mod_dev(Kv,Av)`; driver `sync_host(Kv,Av)` before the halos (`h_checked`) |
 | 4 | `compute_vel_rhs` (M2.4) — **AB2 eps=0.1** | dyn `uv`,`uv_rhsAB`,`eta_n`; aux `pgf`; mesh | dyn `uv_rhs`,`uv_rhsAB` | elem3D `uv_rhs`,`uv_rhsAB` | `→dev(uv,uv_rhsAB,eta_n,pgf)`; `mod_dev(uv_rhs,uv_rhsAB)`; `→host` before halos |
 | 5 | `visc_filt_bidiff` (M2.4) | dyn `uv`,`uv_rhs`; mesh | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv,uv_rhs)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
 | 6 | `impl_vert_visc` (M2.4, per-elem TDMA) | dyn `uv_rhs`; aux `Av`; forcing `stress_surf` | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv_rhs,Av,stress_surf)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
@@ -101,8 +101,20 @@ substep 1 is the worked example of the §9 checklist in action (the rest of the 
 `[H]` until its kernel lands). The **`h_checked()` guards** at the §1 halos (all 5 EOS outputs +
 `smooth_nod3D`) now actually transition `Device→Synced` each step under `-DFESOM_KK_SYNCCHECK` and
 would abort if the output `sync_host()` were dropped — verified: the SYNCCHECK pi smoke runs clean
-(no abort) and bit-identical. The §9 (uv) and §13-T (values) guards remain installed as forward
-worked examples until M2.2/M2.6 wire their rails.
+(no abort) and bit-identical. The §13-T (values) guards remain installed as forward
+worked examples until M2.6 wires its rails.
+
+**M2.2 landed substep 3 (PP mixing) — the second LIVE rail group:** `compute_vel_nodes_kk` (always-on),
+`pp_mixing_kk` (PP branch), and `mo_convect_kk` (always-on) are device kernels, each with the §9
+checklist wired in the driver. Two subtleties this substep added to the worked record: (a) **a mid-step
+device→host→device hand-off** — `bvfreq` is produced on the device in substep 1, overwritten on the
+**host** by `smooth_nod3D`, then read on the device by `mo_convect_kk`, so that rail uses
+`modify_host()+sync_device()` (the host smooth is invisible to the DualView, L14/L27), not a bare
+`sync_device()`; (b) on the **default KPP path** `compute_vel_nodes_kk`+`mo_convect_kk` run on the device
+while KPP itself is still a HOST kernel between them, so `uvnode` round-trips device→host (kernel→halo+KPP)
+and `Kv`/`Av` round-trip host→device→host (KPP→`mo_convect`→halos) — an expected within-step bounce, like
+the §5 CG round-trip. The §9 (`uvnode`) and the Kv/Av halo guards now transition `Device→Synced` each step
+under SYNCCHECK and ran clean on **both** the KPP and PP branches.
 
 ---
 
