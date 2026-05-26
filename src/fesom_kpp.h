@@ -125,6 +125,39 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
                       const struct fesom_mesh    *mesh,
                       struct fesom_partit        *partit);
 
+/*
+ * M2.3b DEVICE twin of fesom_kpp_mixing (Kokkos parallel_for stages; the D19/D20
+ * template). Production path from M2.3. Requires its inputs device-current — the
+ * step driver's substep-3 KPP IN rail (sync_device on bvfreq, sw_alpha, sw_beta,
+ * dbsfc, uvnode, S, forcing, hnode) supplies that (the structs are non-const there);
+ * this function owns the two INTERNAL halo brackets (smooth_blmc + the pre-elem-average
+ * exchanges, SYNC_MAP section 6) and marks aux->Av/Kv modify_device() at the end (driver OUT rail
+ * sync_host()s them). The host C twin above stays in-tree as the FESOM_KK_VERIFY=kpp
+ * oracle until M2 closes. wmt/wst are pushed device-current once in fesom_kpp_init.
+ */
+void fesom_kpp_mixing_kk(fesom_kpp                  *k,
+                         struct fesom_aux           *aux,
+                         const struct fesom_tracers *tracers,
+                         const struct fesom_forcing *forcing,
+                         const struct fesom_dyn     *dyn,
+                         const struct fesom_mesh    *mesh,
+                         struct fesom_partit        *partit);
+
+/*
+ * FESOM_KK_VERIFY=kpp in-binary per-kernel gate: runs the host C twin alongside the
+ * Kokkos production Av/Kv (already in aux, sync_host()'d by the driver) and asserts
+ * Serial max|Δ|==0; non-intrusive (restores the Kokkos Av/Kv). Call AFTER
+ * fesom_kpp_mixing_kk + its output sync_host(). step_n is for the log.
+ */
+void fesom_kpp_verify(fesom_kpp                  *k,
+                      struct fesom_aux           *aux,
+                      const struct fesom_tracers *tracers,
+                      const struct fesom_forcing *forcing,
+                      const struct fesom_dyn     *dyn,
+                      const struct fesom_mesh    *mesh,
+                      struct fesom_partit        *partit,
+                      int                         step_n);
+
 /* ---- dump harness (FESOM_KPP_DUMP_DIR-gated dual-instrumentation) --------
  * Mirror of the EVP dump diagnostic (reference_evp_dump_diagnostic). Off by
  * default (zero overhead). When FESOM_KPP_DUMP_DIR is set, the KPP routines

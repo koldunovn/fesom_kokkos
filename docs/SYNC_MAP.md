@@ -78,7 +78,7 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 1b| GM/Redi prereq (M2.5b) `sigma_xy`/`neutral_slope`/`init_redi_gm`/`fer_solve_gamma`/`fer_gamma2vel` | aux `density`,`sw_*`; tracers; mesh | gm scratch (`fer_K/C/gamma/...`), dyn `fer_uv` | (internal) | `→dev` aux+tracers; `mod_dev(fer_uv,fer_w)`; wrap gm scratch in `Field` (deferred from M1) |
 | 2 | `pressure_force_linfs_fullcell` (M2.4) | aux `density_m_rho0`,`hpressure`; mesh | aux `pgf_x`,`pgf_y` | elem3D ×2 | `→dev(density,hpressure)`; `mod_dev(pgf_x,pgf_y)`; `→host(pgf_*)` before halos |
 | 3 | ✅ **`compute_vel_nodes_kk` (M2.2 — DONE)** | dyn `uv` (per-step); mesh `nod_in_elem2D` CSR / `elem_area` / levels (set-once) | dyn `uvnode` | nod3D `uvnode` | **implemented:** driver IN `modify_host()+sync_device()` on `uv` (host-written by update_vel+bolus via raw alias, L14); kernel `mod_dev(uvnode)`; driver `sync_host(uvnode)` before the halo (via `h_checked`) + the host KPP/PP readers |
-| 3 | **KPP** `kpp_mixing` (M2.3, still HOST) *or* ✅ **PP `pp_mixing_kk` (M2.2 — DONE)** | aux `bvfreq`, dyn `uvnode`, tracers, forcing | aux `Av` (elem), `Kv` (node) | KPP: **6 internal exchanges** (see §6); PP: `Kv` nod3D, `Av` elem3D | KPP: bracket each of its 6 at M2.3 (host until then); **PP implemented:** driver IN `modify_host()+sync_device()` on `uvnode` (host-halo'd above) + `bvfreq` (host smooth); kernel `mod_dev(Kv,Av)` (3 loops = 3 `parallel_for` launches; the launch barrier preserves loop-2-before-loop-3); driver `sync_host(Kv,Av)` before the halos (`h_checked`) |
+| 3 | ✅ **KPP `kpp_mixing_kk` (M2.3 — DONE)** *or* ✅ **PP `pp_mixing_kk` (M2.2 — DONE)** | aux `bvfreq`, `sw_alpha/beta`, `dbsfc`; dyn `uvnode`; tracers `S`; forcing `stress_node_surf/heat_flux/water_flux/sw_3d`; mesh `hnode` | aux `Av` (elem), `Kv` (node) | KPP: **2 internal exchange points** (see §6): `smooth_blmc` (blmc ×3 + 3-sweep smoother) + the pre-elem-average (diffK ×2, ghats, viscA); PP: `Kv` nod3D, `Av` elem3D | **KPP implemented:** the driver (substep-3, non-const structs) owns the IN rail `modify_host()+sync_device()` on all the inputs at left (D21) + the OUT rail `sync_host(Av,Kv)`; `fesom_kpp_mixing_kk` owns the two INTERNAL brackets (`mod_dev`→`sync_host`→halo+smooth via `h_checked`→`mod_host`→`sync_device`) and `mod_dev(Av,Kv)`. **PP implemented:** driver IN `modify_host()+sync_device()` on `uvnode`+`bvfreq`; kernel `mod_dev(Kv,Av)` (3 launches; loop-2-before-loop-3); driver `sync_host(Kv,Av)` before halos |
 | 3 | ✅ **`mo_convect_kk` (M2.2 — DONE)** | aux `bvfreq`,`Kv`,`Av` | aux `Kv`,`Av` | `Kv` nod3D, `Av` elem3D | **implemented:** driver IN `modify_host()+sync_device()` on **`bvfreq`** (first device reader AFTER the host smooth_nod3D — a bare `sync_device` would be a silent no-op, L14/L24) + `Kv`,`Av` (host-authoritative: KPP-written on the default path, or PP-halo'd); kernel `mod_dev(Kv,Av)`; driver `sync_host(Kv,Av)` before the halos (`h_checked`) |
 | 4 | `compute_vel_rhs` (M2.4) — **AB2 eps=0.1** | dyn `uv`,`uv_rhsAB`,`eta_n`; aux `pgf`; mesh | dyn `uv_rhs`,`uv_rhsAB` | elem3D `uv_rhs`,`uv_rhsAB` | `→dev(uv,uv_rhsAB,eta_n,pgf)`; `mod_dev(uv_rhs,uv_rhsAB)`; `→host` before halos |
 | 5 | `visc_filt_bidiff` (M2.4) | dyn `uv`,`uv_rhs`; mesh | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv,uv_rhs)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
@@ -115,6 +115,16 @@ while KPP itself is still a HOST kernel between them, so `uvnode` round-trips de
 and `Kv`/`Av` round-trip host→device→host (KPP→`mo_convect`→halos) — an expected within-step bounce, like
 the §5 CG round-trip. The §9 (`uvnode`) and the Kv/Av halo guards now transition `Device→Synced` each step
 under SYNCCHECK and ran clean on **both** the KPP and PP branches.
+
+**M2.3 put the rest of substep 3 (KPP) on the device** — so on the default path substep 3 is now
+*fully* device-resident except its internal halo round-trips: `compute_vel_nodes_kk` → halo →
+`kpp_mixing_kk` (device, with its two internal exchange brackets) → `mo_convect_kk` → halos. The
+within-step `Kv/Av` host↔device bounce noted for M2.2 (b) is now just the KPP OUT rail (`sync_host`)
+feeding `mo_convect`'s IN rail (`modify_host+sync_device`) — kept for uniformity with the PP branch
+and the verify. The KPP IN rail (driver) syncs **all** inputs KPP reads (D21/L28: the Serial gate
+can't catch a missing `sync_device`, so they are synced explicitly, not assumed device-current from
+substep 1). The two KPP internal brackets transitioned their `h_checked()` guards `Device→Synced`
+cleanly under SYNCCHECK on the default path.
 
 ---
 
@@ -183,9 +193,14 @@ Two ported routines do `fesom_exchange_*` **inside** themselves; each internal e
 operation and needs its own `sync_host → halo → sync_device` bracket (these are explicit checkboxes
 in the M2.3 / M2.6 / M4.3 tasks):
 
-- **KPP** (`fesom_kpp_mixing`, M2.3) performs **6 internal halo exchanges** (`fesom_step.c:116`
-  notes this). On device each becomes: device-compute → `sync_host` → halo → `sync_device` →
-  device-compute. Candidates for on-device pack/unpack in M5; host round-trips until then.
+- ✅ **KPP** (`fesom_kpp_mixing_kk`, M2.3 — DONE) has **2 internal exchange points** wrapping 7
+  `fesom_exchange_nod3D` calls: (1) **smooth_blmc** after `enhance` — exchange the 3 `blmc` channels,
+  then a 3-sweep `fesom_smooth_nod3D` per channel (the smoother does its own internal exchanges, host);
+  (2) the **pre-elem-average** exchanges after `combine` — `diffK` ch0/ch1, `ghats` (`nl-1`), `viscA`.
+  Each point is bracketed `modify_device → sync_host → exchange+smooth (h_checked) → modify_host →
+  sync_device` inside `fesom_kpp_mixing_kk` (the function owns these because it owns the exchanges;
+  the IN/OUT rails are the driver's, D21). `ghats` is not re-synced to device after its exchange
+  (gated off in CORE2, not read on device after). Candidates for on-device pack/unpack in M5.
 - **FCT pipeline** (`tracer_advect_one_fct`, M2.6; and the ice FCT, M4.3) interleaves low/high-order
   flux assembly with exchanges. Same bracket per internal exchange. The edge→node flux scatter is a
   separate decision (`docs/SCATTER_STRATEGY.md`, M2.6): Serial keeps natural edge order

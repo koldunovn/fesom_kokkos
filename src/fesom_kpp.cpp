@@ -15,10 +15,14 @@
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
 
+#include <Kokkos_Core.hpp>   // M2.3b: device kernels (parallel_for) + Kokkos:: math
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>            // M2.3b: FESOM_KK_VERIFY=kpp snapshot buffers (host-only diagnostic)
+#include <string>
+#include <algorithm>
 
 /*===========================================================================
  * KPP constants — verified against oce_ale_mixing_kpp.F90 + the CORE2
@@ -159,6 +163,14 @@ void fesom_kpp_init(fesom_kpp *k)
             k->wst[KPP_TBL(i, j)] = ws;
         }
     }
+
+    /* M2.3b: wmt/wst are set-once (never change after this) — push them to the device
+     * ONCE here (modify_host()+sync_device(), the mesh_sync_geometry_device pattern, L14),
+     * so the device bldepth_kk/blmix_kk lookups read them device-current for free. Kokkos
+     * is initialised by now (fesom_main.cpp: Kokkos::initialize precedes fesom_kpp_init).
+     * No-op on Serial/OpenMP (host==device); one bitwise deep_copy on CUDA. */
+    k->wmt_fld.modify_host(); k->wmt_fld.sync_device();
+    k->wst_fld.modify_host(); k->wst_fld.sync_device();
 }
 
 /*===========================================================================
@@ -202,6 +214,54 @@ static void kpp_wscale(const fesom_kpp *k, real_t zehat, real_t us,
         real_t u3 = us * us * us;
         *wm = KPP_VONK * us * u3 / (u3 + KPP_CONC1 * zehat + KPP_EPSLN);
         *ws = *wm;
+    }
+}
+
+/*--- wscale — DEVICE inline twin (M2.3b) -------------------------------------
+ * KOKKOS_INLINE_FUNCTION callable from device parallel_for (bldepth/blmix). The
+ * wmt/wst lookup tables come in as device Views (templated WV) and the table-step
+ * scalars deltaz/deltau by value; the body is a verbatim copy of kpp_wscale above
+ * (`*wm/*ws` → `wm/ws` refs, `k->wmt[KPP_TBL(...)]` → wmt(KPP_TBL(...))). Pure
+ * lookup + arithmetic (no transcendentals), so Serial == the C twin bit-identical.
+ */
+template <class WV>
+KOKKOS_INLINE_FUNCTION
+void kpp_wscale_kk(const WV &wmt, const WV &wst, real_t deltaz, real_t deltau,
+                   real_t zehat, real_t us, real_t &wm, real_t &ws)
+{
+    if (zehat <= KPP_ZMAX) {
+        real_t zdiff = zehat - KPP_ZMIN;
+        int iz = (int)(zdiff / deltaz);             /* INT (trunc) */
+        if (iz > FESOM_KPP_NNI) iz = FESOM_KPP_NNI;
+        if (iz < 0)             iz = 0;
+        int izp1 = iz + 1;
+
+        real_t udiff = us - KPP_UMIN;
+        real_t uq = udiff / deltau;                 /* MIN(.,nnj) then INT */
+        if (uq > (real_t)FESOM_KPP_NNJ) uq = (real_t)FESOM_KPP_NNJ;
+        int ju = (int)uq;
+        if (ju < 0) ju = 0;
+        int jup1 = ju + 1;
+
+        real_t zfrac = zdiff / deltaz - (real_t)iz;
+        real_t ufrac = udiff / deltau - (real_t)ju;
+        real_t fzfrac = 1.0 - zfrac;
+
+        real_t wam = fzfrac * wmt(KPP_TBL(iz, jup1))
+                   + zfrac  * wmt(KPP_TBL(izp1, jup1));
+        real_t wbm = fzfrac * wmt(KPP_TBL(iz, ju))
+                   + zfrac  * wmt(KPP_TBL(izp1, ju));
+        wm = (1.0 - ufrac) * wbm + ufrac * wam;
+
+        real_t was = fzfrac * wst(KPP_TBL(iz, jup1))
+                   + zfrac  * wst(KPP_TBL(izp1, jup1));
+        real_t wbs = fzfrac * wst(KPP_TBL(iz, ju))
+                   + zfrac  * wst(KPP_TBL(izp1, ju));
+        ws = (1.0 - ufrac) * wbs + ufrac * was;
+    } else {
+        real_t u3 = us * us * us;
+        wm = KPP_VONK * us * u3 / (u3 + KPP_CONC1 * zehat + KPP_EPSLN);
+        ws = wm;
     }
 }
 
@@ -267,6 +327,80 @@ static void kpp_ri_iwmix(fesom_kpp *k, const struct fesom_aux *aux,
         viscA[a0]  = viscA[a1];  diffKt[a0] = diffKt[a1]; diffKs[a0] = diffKs[a1];
         viscA[b0]  = viscA[b1];  diffKt[b0] = diffKt[b1]; diffKs[b0] = diffKs[b1];
     }
+}
+
+/*--- ri_iwmix — DEVICE twin (M2.3b) ------------------------------------------
+ * Two parallel_for launches over owned nodes (the level loops + edge copies
+ * inside each per-node lambda → race-free, the C accumulation order). The two
+ * launches are load-bearing (D20): Loop 1 fills diffKt with the Richardson-number
+ * SCRATCH (all nodes, incl. edge copies); Loop 2 reads that Ri scratch and
+ * OVERWRITES diffKt with the shear-Ri diffusivity — fusing them or running Loop 2
+ * before Loop 1 completes would feed Loop 2 corrupted Ri. Verbatim arithmetic.
+ */
+static void kpp_ri_iwmix_kk(fesom_kpp *k, const struct fesom_aux *aux,
+                            const struct fesom_dyn *dyn, const struct fesom_mesh *mesh)
+{
+    const int nl   = k->nl;
+    const int Nmy  = mesh->myDim_nod2D;
+    const size_t slab = (size_t)k->n_nod * (size_t)nl;
+    const real_t A_bg = (real_t)FESOM_PHASE1_A_VER;
+    const real_t K_bg = (real_t)FESOM_PHASE1_K_VER;
+
+    auto viscA  = k->viscA_fld.d();
+    auto diffK  = k->diffK_fld.d();
+    auto bvfreq = aux->bvfreq_fld.d();
+    auto uvnode = dyn->uvnode_fld.d();
+    auto Z      = mesh->Z_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n = mesh->nlevels_nod2D_fld.d();
+
+    /* Loop 1: Ri = MAX(N²,0)/(shear²+epsln) → diffKt (channel 0) scratch. */
+    Kokkos::parallel_for("kpp_ri_iwmix_Ri", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                real_t dz_inv = 1.0 / (Z(nz - 1) - Z(nz));      /* > 0 */
+                real_t du = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 0)
+                          - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 0);
+                real_t dv = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 1)
+                          - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 1);
+                real_t shear = (du * du + dv * dv) * dz_inv * dz_inv;
+                real_t Nsq = bvfreq(FESOM_NODE3D(n, nz, nl));
+                real_t Nsq_pos = Nsq > 0.0 ? Nsq : 0.0;
+                diffK(0 * slab + FESOM_NODE3D(n, nz, nl)) = Nsq_pos / (shear + KPP_EPSLN);
+            }
+            diffK(0 * slab + FESOM_NODE3D(n, nzmin, nl)) =
+                diffK(0 * slab + FESOM_NODE3D(n, nzmin + 1, nl));
+            diffK(0 * slab + FESOM_NODE3D(n, nzmax, nl)) =
+                diffK(0 * slab + FESOM_NODE3D(n, nzmax - 1, nl));
+        });
+
+    /* Loop 2: viscA / diffK from the shear-Ri shape function (reads Loop-1 Ri). */
+    Kokkos::parallel_for("kpp_ri_iwmix_shape", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                size_t i = FESOM_NODE3D(n, nz, nl);
+                real_t Rii = diffK(0 * slab + i);
+                real_t Rigg = Rii > 0.0 ? Rii : 0.0;            /* AMAX1(Ri,0) */
+                real_t ratio = Rigg / KPP_RIINFTY;
+                if (ratio > 1.0) ratio = 1.0;                   /* AMIN1(.,1) */
+                real_t frit = 1.0 - ratio * ratio;
+                frit = frit * frit * frit;
+                viscA(i) = KPP_VISC_SH_LIMIT * frit + A_bg;
+                real_t dK = KPP_DIFF_SH_LIMIT * frit + K_bg;    /* Kv0_const branch */
+                diffK(0 * slab + i) = dK;
+                diffK(1 * slab + i) = dK;                       /* diffK(2)=diffK(1) */
+            }
+            size_t a0 = FESOM_NODE3D(n, nzmin, nl),     a1 = FESOM_NODE3D(n, nzmin + 1, nl);
+            size_t b0 = FESOM_NODE3D(n, nzmax, nl),     b1 = FESOM_NODE3D(n, nzmax - 1, nl);
+            viscA(a0) = viscA(a1);
+            diffK(0*slab + a0) = diffK(0*slab + a1); diffK(1*slab + a0) = diffK(1*slab + a1);
+            viscA(b0) = viscA(b1);
+            diffK(0*slab + b0) = diffK(0*slab + b1); diffK(1*slab + b0) = diffK(1*slab + b1);
+        });
 }
 
 /* generic per-node column getter for fesom_kpp_dump_nodes: arr is [N*nl]
@@ -430,6 +564,148 @@ static void kpp_bldepth(fesom_kpp *k, const struct fesom_aux *aux,
     }
 }
 
+/*--- bldepth — DEVICE twin (M2.3b) -------------------------------------------
+ * Three parallel_for launches over owned nodes (D20 ordering): Loop 1 inits
+ * hbl/kbl to the bottomed-out fallback (which Loop 2 keeps if its bulk-Ri search
+ * never crosses Ricr); Loop 2 is the bulk-Ri search (per-node inner nz loop with
+ * an early `break` — fine in a per-node lambda — + the hekman/hmonob limits);
+ * Loop 3 re-finds kbl from the final hbl + the final bfsfc/stable/caseA (reads
+ * Loop-2's hbl). Each node owns its hbl/kbl/bfsfc/stable/caseA slots → race-free.
+ * wscale via the device inline twin (wmt/wst views). Verbatim arithmetic.
+ */
+static void kpp_bldepth_kk(fesom_kpp *k, const struct fesom_aux *aux,
+                           const struct fesom_forcing *forcing,
+                           const struct fesom_mesh *mesh)
+{
+    const int nl  = k->nl;
+    const int Nmy = mesh->myDim_nod2D;
+    const real_t Vtc = k->Vtc, deltaz = k->deltaz, deltau = k->deltau;
+    const real_t G = (real_t)FESOM_G;
+
+    auto hbl     = k->hbl_fld.d();
+    auto kbl     = k->kbl_fld.d();
+    auto bfsfc   = k->bfsfc_fld.d();
+    auto stableV = k->stable_fld.d();
+    auto caseA   = k->caseA_fld.d();
+    auto Bo      = k->Bo_fld.d();
+    auto ustar   = k->ustar_fld.d();
+    auto dVsq    = k->dVsq_fld.d();
+    auto wmt     = k->wmt_fld.d();
+    auto wst     = k->wst_fld.d();
+    auto sw_alpha = aux->sw_alpha_fld.d();
+    auto dbsfc    = aux->dbsfc_fld.d();
+    auto bvfreq   = aux->bvfreq_fld.d();
+    auto sw_3d    = forcing->sw_3d_fld.d();
+    auto zbar3    = mesh->zbar_3d_n_fld.d();
+    auto coriolis_node = mesh->coriolis_node_fld.d();
+    auto ulev_n  = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n  = mesh->nlevels_nod2D_fld.d();
+
+    /* Loop 1: init hbl/kbl to bottomed-out values (:696-702) */
+    Kokkos::parallel_for("kpp_bldepth_init", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmax = nlev_n(n) - 1;
+            kbl(n) = nzmax;
+            hbl(n) = Kokkos::fabs(zbar3(FESOM_NODE3D(n, nzmax, nl)));
+        });
+
+    /* Loop 2: bulk-Richardson search for hbl (:708-802) */
+    Kokkos::parallel_for("kpp_bldepth_search", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+            real_t Bo_n = Bo(n);
+            real_t us   = ustar(n);
+            real_t coeff_sw = G * sw_alpha(FESOM_NODE3D(n, nzmin, nl));
+            real_t sw_surf  = sw_3d(FESOM_NODE3D(n, nzmin, nl));
+            real_t Rib_km1  = 0.0;
+            bfsfc(n) = Bo_n;
+
+            for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+                real_t zk   = Kokkos::fabs(zbar3(FESOM_NODE3D(n, nz,     nl)));
+                real_t zkm1 = Kokkos::fabs(zbar3(FESOM_NODE3D(n, nz - 1, nl)));
+
+                bfsfc(n) = Bo_n + coeff_sw * (sw_surf - sw_3d(FESOM_NODE3D(n, nz, nl)));
+                real_t bfs    = bfsfc(n);
+                real_t stbl   = 0.5 + Kokkos::copysign(0.5, bfs);
+                stableV(n)    = stbl;
+                real_t sigma  = stbl + (1.0 - stbl) * KPP_EPSILON;
+
+                real_t zehat = KPP_VONK * sigma * zk * bfs;
+                real_t wm, ws;
+                kpp_wscale_kk(wmt, wst, deltaz, deltau, zehat, us, wm, ws);
+
+                real_t bvsq = bvfreq(FESOM_NODE3D(n, nz, nl));
+                real_t Vtsq = zk * ws * Kokkos::sqrt(Kokkos::fabs(bvsq)) * Vtc;
+
+                real_t Ritop = zk * dbsfc(FESOM_NODE3D(n, nz, nl));
+                real_t Rib_k = Ritop / (dVsq(FESOM_NODE3D(n, nz, nl)) + Vtsq + KPP_EPSLN);
+                real_t dzup  = zk - zkm1;
+
+                if (Rib_k > KPP_RICR) {
+                    hbl(n) = zkm1 + dzup * (KPP_RICR - Rib_km1)
+                                        / (Rib_k - Rib_km1 + KPP_EPSLN);
+                    kbl(n) = nz;
+                    break;
+                } else {
+                    Rib_km1 = Rib_k;
+                }
+
+                {
+                    real_t sw_km1 = sw_3d(FESOM_NODE3D(n, nz - 1, nl));
+                    real_t sw_k   = sw_3d(FESOM_NODE3D(n, nz,     nl));
+                    bfsfc(n) = Bo_n + coeff_sw *
+                        ( sw_surf - ( sw_km1 + (sw_k - sw_km1) * (hbl(n) - zkm1) / dzup ) );
+                    real_t st = 0.5 + Kokkos::copysign(0.5, bfsfc(n));
+                    stableV(n) = st;
+                    bfsfc(n)   = bfsfc(n) + st * KPP_EPSLN;
+                }
+            }
+
+            if (bfsfc(n) > 0.0 && nzmin == 0) {
+                real_t hekman = KPP_CEKMAN * us / Kokkos::fmax(Kokkos::fabs(coriolis_node(n)), KPP_EPSLN);
+                real_t hmonob = KPP_CMONOB * us * us * us
+                                / KPP_VONK / (bfsfc(n) + KPP_EPSLN);
+                real_t hlimit = stableV(n) * Kokkos::fmin(hekman, hmonob);
+                hbl(n) = Kokkos::fmin(hbl(n), hlimit);
+                hbl(n) = Kokkos::fmax(hbl(n), Kokkos::fabs(zbar3(FESOM_NODE3D(n, 1, nl))));
+            }
+        });
+
+    /* Loop 3: find new kbl from final hbl, refine bfsfc, set caseA (:812-852) */
+    Kokkos::parallel_for("kpp_bldepth_kbl", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+
+            kbl(n) = nzmax;
+            for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+                if (Kokkos::fabs(zbar3(FESOM_NODE3D(n, nz, nl))) > hbl(n)) {
+                    kbl(n) = nz;
+                    break;
+                }
+            }
+
+            int kb = kbl(n);
+            real_t coeff_sw = G * sw_alpha(FESOM_NODE3D(n, nzmin, nl));
+            real_t sw_surf  = sw_3d(FESOM_NODE3D(n, nzmin,  nl));
+            real_t sw_km1   = sw_3d(FESOM_NODE3D(n, kb - 1, nl));
+            real_t sw_k     = sw_3d(FESOM_NODE3D(n, kb,     nl));
+            real_t zbar_km1 = zbar3(FESOM_NODE3D(n, kb - 1, nl));
+            real_t zbar_k   = zbar3(FESOM_NODE3D(n, kb,     nl));
+            bfsfc(n) = Bo(n) + coeff_sw *
+                ( sw_surf - ( sw_km1 + (sw_k - sw_km1)
+                                       * (hbl(n) + zbar_km1) / (zbar_km1 - zbar_k) ) );
+            real_t st = 0.5 + Kokkos::copysign(0.5, bfsfc(n));
+            stableV(n) = st;
+            bfsfc(n)   = bfsfc(n) + st * KPP_EPSLN;
+
+            real_t dzup = zbar_km1 - zbar_k;
+            real_t arg  = Kokkos::fabs(zbar_k) - 0.5 * dzup - hbl(n);
+            caseA(n) = 0.5 + Kokkos::copysign(0.5, arg);
+        });
+}
+
 /*===========================================================================
  * blmix_kpp — boundary-layer mixing coeffs blmc[3] + dkm1[3] + ghats.
  * Literal port of blmix_kpp (oce_ale_mixing_kpp.F90:1155-1327). Matches the
@@ -574,6 +850,151 @@ static void kpp_blmix(fesom_kpp *k, const struct fesom_mesh *mesh)
     }
 }
 
+/*--- blmix_kpp — DEVICE twin (M2.3b) -----------------------------------------
+ * One parallel_for over owned nodes; the whole per-node body (per-column dthick/
+ * dcol scratch, the wscale calls, the shape-function interface loop, the kbl-1
+ * dkm1) runs inside the lambda → race-free (each node owns its blmc/dkm1/ghats
+ * column). The blmc zero-fill (C memset over 3·slab) is a preceding deep_copy. The
+ * `continue` temporary-solution skips become `return` (a per-node lambda has no
+ * outer loop). dthick/dcol are lambda-local (per-thread; nl≤KPP_NL_MAX=64, checked
+ * once on the host before the launch). Verbatim arithmetic; wscale via the inline twin.
+ */
+static void kpp_blmix_kk(fesom_kpp *k, const struct fesom_mesh *mesh)
+{
+    const int nl  = k->nl;
+    const int N   = k->n_nod;
+    const int Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)N * (size_t)nl;
+    const real_t deltaz = k->deltaz, deltau = k->deltau, cg = k->cg;
+    FESOM_CHECK(nl <= KPP_NL_MAX, "kpp_blmix_kk: nl %d > KPP_NL_MAX", nl);
+
+    auto viscA = k->viscA_fld.d();
+    auto diffK = k->diffK_fld.d();
+    auto blmc  = k->blmc_fld.d();
+    auto dkm1  = k->dkm1_fld.d();
+    auto ghats = k->ghats_fld.d();
+    auto hblV  = k->hbl_fld.d();
+    auto bfsfcV = k->bfsfc_fld.d();
+    auto stableV = k->stable_fld.d();
+    auto ustarV  = k->ustar_fld.d();
+    auto caseAV  = k->caseA_fld.d();
+    auto kblV    = k->kbl_fld.d();
+    auto wmt = k->wmt_fld.d();
+    auto wst = k->wst_fld.d();
+    auto hnode = mesh->hnode_fld.d();
+    auto Z     = mesh->Z_fld.d();
+    auto zbar3 = mesh->zbar_3d_n_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();   /* 1-based counts (skip checks) */
+    auto nlev_n = mesh->nlevels_nod2D_fld.d();
+
+    Kokkos::deep_copy(blmc, 0.0);   /* zero blmc over 3·slab (C memset, :1177-1179) */
+
+    Kokkos::parallel_for("kpp_blmix", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;                       /* 0-based deepest interface */
+            if (nlev_n(n) < 3) return;                       /* temporary-solution skips */
+            if (nlev_n(n) - ulev_n(n) < 2) return;
+
+            real_t hbl    = hblV(n);
+            real_t bfsfc  = bfsfcV(n);
+            real_t stable = stableV(n);
+            real_t us     = ustarV(n);
+            int    kbl    = kblV(n);
+
+            real_t dthick[KPP_NL_MAX];
+            real_t dcol[KPP_NL_MAX][3];
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz)
+                dthick[nz] = 0.5 * ( hnode(FESOM_NODE3D(n, nz - 1, nl))
+                                   + hnode(FESOM_NODE3D(n, nz,     nl)) );
+            dthick[nzmin] = hnode(FESOM_NODE3D(n, nzmin,     nl)) * 0.5;
+            dthick[nzmax] = hnode(FESOM_NODE3D(n, nzmax - 1, nl)) * 0.5;
+            for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                size_t i = FESOM_NODE3D(n, nz, nl);
+                dcol[nz][0] = viscA(i);
+                dcol[nz][1] = diffK(0 * slab + i);
+                dcol[nz][2] = diffK(1 * slab + i);
+            }
+            dcol[nzmax][0] = dcol[nzmax - 1][0];
+            dcol[nzmax][1] = dcol[nzmax - 1][1];
+            dcol[nzmax][2] = dcol[nzmax - 1][2];
+
+            real_t sigma = stable * 1.0 + (1.0 - stable) * KPP_EPSILON;
+            real_t zehat = KPP_VONK * sigma * hbl * bfsfc;
+            real_t wm, ws;
+            kpp_wscale_kk(wmt, wst, deltaz, deltau, zehat, us, wm, ws);
+
+            int ca   = (int)(caseAV(n) + KPP_EPSLN);
+            int kn   = ca * (kbl - 1) + (1 - ca) * kbl;
+            if (kn   > nzmax - 1) kn   = nzmax - 1;
+            int knm1 = kn - 1; if (knm1 < nzmin) knm1 = nzmin;
+            int knp1 = kn + 1; if (knp1 > nzmax) knp1 = nzmax;
+
+            real_t delhat = Kokkos::fabs(Z(kn)) - hbl;
+            real_t R      = 1.0 - delhat / dthick[kn];
+            real_t dvdzup, dvdzdn;
+            dvdzup = (dcol[knm1][0] - dcol[kn][0]) / dthick[kn];
+            dvdzdn = (dcol[kn][0] - dcol[knp1][0]) / dthick[knp1];
+            real_t viscp = 0.5 * ( (1.0 - R) * (dvdzup + Kokkos::fabs(dvdzup))
+                                 + R         * (dvdzdn + Kokkos::fabs(dvdzdn)) );
+            dvdzup = (dcol[knm1][2] - dcol[kn][2]) / dthick[kn];
+            dvdzdn = (dcol[kn][2] - dcol[knp1][2]) / dthick[knp1];
+            real_t difsp = 0.5 * ( (1.0 - R) * (dvdzup + Kokkos::fabs(dvdzup))
+                                 + R         * (dvdzdn + Kokkos::fabs(dvdzdn)) );
+            dvdzup = (dcol[knm1][1] - dcol[kn][1]) / dthick[kn];
+            dvdzdn = (dcol[kn][1] - dcol[knp1][1]) / dthick[knp1];
+            real_t diftp = 0.5 * ( (1.0 - R) * (dvdzup + Kokkos::fabs(dvdzup))
+                                 + R         * (dvdzdn + Kokkos::fabs(dvdzdn)) );
+
+            real_t visch = dcol[kn][0] + viscp * delhat;
+            real_t difsh = dcol[kn][2] + difsp * delhat;
+            real_t difth = dcol[kn][1] + diftp * delhat;
+
+            real_t f1 = stable * KPP_CONC1 * bfsfc / (us*us*us*us + KPP_EPSLN);
+
+            real_t gat1m = visch / (hbl + KPP_EPSLN) / (wm + KPP_EPSLN);
+            real_t dat1m = -viscp / (wm + KPP_EPSLN) + f1 * visch;
+            if (dat1m > 0.0) dat1m = 0.0;
+            real_t gat1s = difsh / (hbl + KPP_EPSLN) / (ws + KPP_EPSLN);
+            real_t dat1s = -difsp / (ws + KPP_EPSLN) + f1 * difsh;
+            if (dat1s > 0.0) dat1s = 0.0;
+            real_t gat1t = difth / (hbl + KPP_EPSLN) / (ws + KPP_EPSLN);
+            real_t dat1t = -diftp / (ws + KPP_EPSLN) + f1 * difth;
+            if (dat1t > 0.0) dat1t = 0.0;
+
+            real_t sig, a1, a2, a3, Gm, Gs, Gt;
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                if (nz >= kbl) break;
+                sig   = Kokkos::fabs(Z(nz)) / (hbl + KPP_EPSLN);
+                sigma = stable * sig + (1.0 - stable) * Kokkos::fmin(sig, (real_t)KPP_EPSILON);
+                zehat = KPP_VONK * sigma * hbl * bfsfc;
+                kpp_wscale_kk(wmt, wst, deltaz, deltau, zehat, us, wm, ws);
+                a1 = sig - 2.0; a2 = 3.0 - 2.0 * sig; a3 = sig - 1.0;
+                Gm = a1 + a2 * gat1m + a3 * dat1m;
+                Gs = a1 + a2 * gat1s + a3 * dat1s;
+                Gt = a1 + a2 * gat1t + a3 * dat1t;
+                size_t i = FESOM_NODE3D(n, nz, nl);
+                blmc(0 * slab + i) = hbl * wm * sig * (1.0 + sig * Gm);
+                blmc(1 * slab + i) = hbl * ws * sig * (1.0 + sig * Gt);
+                blmc(2 * slab + i) = hbl * ws * sig * (1.0 + sig * Gs);
+                ghats((size_t)n * (nl - 1) + nz) =
+                    (1.0 - stable) * cg / (ws * hbl + KPP_EPSLN);
+            }
+
+            sig   = Kokkos::fabs(zbar3(FESOM_NODE3D(n, kbl - 1, nl))) / (hbl + KPP_EPSLN);
+            sigma = stable * sig + (1.0 - stable) * Kokkos::fmin(sig, (real_t)KPP_EPSILON);
+            zehat = KPP_VONK * sigma * hbl * bfsfc;
+            kpp_wscale_kk(wmt, wst, deltaz, deltau, zehat, us, wm, ws);
+            a1 = sig - 2.0; a2 = 3.0 - 2.0 * sig; a3 = sig - 1.0;
+            Gm = a1 + a2 * gat1m + a3 * dat1m;
+            Gs = a1 + a2 * gat1s + a3 * dat1s;
+            Gt = a1 + a2 * gat1t + a3 * dat1t;
+            dkm1(0 * N + n) = hbl * wm * sig * (1.0 + sig * Gm);
+            dkm1(1 * N + n) = hbl * ws * sig * (1.0 + sig * Gt);
+            dkm1(2 * N + n) = hbl * ws * sig * (1.0 + sig * Gs);
+        });
+}
+
 /*===========================================================================
  * enhance — enhancement of the BL coeffs at the kbl-1 interface using dkm1.
  * Literal port of enhance (oce_ale_mixing_kpp.F90:1346-1390). Blends the
@@ -614,6 +1035,51 @@ static void kpp_enhance(fesom_kpp *k, const struct fesom_mesh *mesh)
         /* ghats (:1385) */
         k->ghats[(size_t)n * (nl - 1) + kk] *= (1.0 - caseA);
     }
+}
+
+/*--- enhance — DEVICE twin (M2.3b) -------------------------------------------
+ * Single parallel_for over owned nodes; per-node enhancement at the kbl-1
+ * interface (each node owns its blmc/ghats slot → race-free). Verbatim arithmetic.
+ */
+static void kpp_enhance_kk(fesom_kpp *k, const struct fesom_mesh *mesh)
+{
+    const int nl = k->nl, N = k->n_nod, Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)N * (size_t)nl;
+    auto viscA = k->viscA_fld.d();
+    auto diffK = k->diffK_fld.d();
+    auto blmc  = k->blmc_fld.d();
+    auto dkm1  = k->dkm1_fld.d();
+    auto ghats = k->ghats_fld.d();
+    auto hblV  = k->hbl_fld.d();
+    auto caseAV = k->caseA_fld.d();
+    auto kblV  = k->kbl_fld.d();
+    auto zbar3 = mesh->zbar_3d_n_fld.d();
+
+    Kokkos::parallel_for("kpp_enhance", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int kk = kblV(n) - 1;                            /* k = kbl-1 */
+            real_t caseA = caseAV(n);
+            real_t zk  = zbar3(FESOM_NODE3D(n, kk,     nl));
+            real_t zk1 = zbar3(FESOM_NODE3D(n, kk + 1, nl));
+            real_t delta = (hblV(n) + zk) / (zk - zk1);
+            real_t om = 1.0 - delta, om2 = om * om, d2 = delta * delta;
+            size_t ik = FESOM_NODE3D(n, kk, nl);
+            real_t dkmp5, dstar;
+            /* momentum */
+            dkmp5 = caseA * viscA(ik) + (1.0 - caseA) * blmc(0 * slab + ik);
+            dstar = om2 * dkm1(0 * N + n) + d2 * dkmp5;
+            blmc(0 * slab + ik) = om * viscA(ik) + delta * dstar;
+            /* temperature: diffK ch0 → blmc ch1 */
+            dkmp5 = caseA * diffK(0 * slab + ik) + (1.0 - caseA) * blmc(1 * slab + ik);
+            dstar = om2 * dkm1(1 * N + n) + d2 * dkmp5;
+            blmc(1 * slab + ik) = om * diffK(0 * slab + ik) + delta * dstar;
+            /* salinity: diffK ch1 → blmc ch2 */
+            dkmp5 = caseA * diffK(1 * slab + ik) + (1.0 - caseA) * blmc(2 * slab + ik);
+            dstar = om2 * dkm1(2 * N + n) + d2 * dkmp5;
+            blmc(2 * slab + ik) = om * diffK(1 * slab + ik) + delta * dstar;
+            /* ghats */
+            ghats((size_t)n * (nl - 1) + kk) *= (1.0 - caseA);
+        });
 }
 
 /* K5 dump: driver pre-step inputs to bldepth — prestep(ustar,Bo) + dVsq + dbsfc
@@ -917,6 +1383,290 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
      * viscAE); the post-copy aux->Kv == diffKt (the array the TDMA actually reads). */
     if (fesom_kpp_dump_this_step(s_kpp_call))
         kpp_dump_final(k, aux, mesh, partit);
+}
+
+/*===========================================================================
+ * KPP driver — DEVICE twin (M2.3b). Mirror of fesom_kpp_mixing above, with every
+ * stage a Kokkos parallel_for over owned nodes/elements (the D19/D20 template).
+ * Stage flow is device→device on owned nodes with NO host round-trip until the two
+ * internal halo points — smooth_blmc (after enhance) and the pre-elem-average
+ * exchanges (after combine) — which stay HOST (MPI pack/unpack + the host
+ * smoother) and are bracketed device→host→halo→host→device (SYNC_MAP §6). The IN
+ * rail (sync the host-authoritative inputs to device) and OUT rail (sync Av/Kv to
+ * host) live in the driver (fesom_step.cpp) where the input structs are non-const;
+ * this function owns the INTERNAL brackets (k->* and aux are non-const here) and
+ * marks the Av/Kv outputs modify_device() at the end. Verbatim arithmetic — the
+ * FESOM_KK_VERIFY=kpp gate asserts Serial max|Δ|==0 vs the C twin above.
+ *===========================================================================*/
+void fesom_kpp_mixing_kk(fesom_kpp                  *k,
+                         struct fesom_aux           *aux,
+                         const struct fesom_tracers *tracers,
+                         const struct fesom_forcing *forcing,
+                         const struct fesom_dyn     *dyn,
+                         const struct fesom_mesh    *mesh,
+                         struct fesom_partit        *partit)
+{
+    ++s_kpp_call;                            /* = ocean step (mirrors Fortran kpp_call_count) */
+    const int nl  = k->nl;
+    const int Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)k->n_nod * (size_t)nl;
+    const real_t G = (real_t)FESOM_G;
+    const real_t VCPW = (real_t)FESOM_VCPW;
+    const real_t density_0_r = 1.0 / (real_t)FESOM_DENSITY_0;
+
+    /* device views for the inline stages (prestep / combine / viscAE / Kv copy) */
+    auto viscA  = k->viscA_fld.d();
+    auto diffK  = k->diffK_fld.d();
+    auto blmc   = k->blmc_fld.d();
+    auto ghats  = k->ghats_fld.d();
+    auto dVsq   = k->dVsq_fld.d();
+    auto ustarV = k->ustar_fld.d();
+    auto BoV    = k->Bo_fld.d();
+    auto kblV   = k->kbl_fld.d();
+    auto uvnode = dyn->uvnode_fld.d();
+    auto sw_alpha = aux->sw_alpha_fld.d();
+    auto sw_beta  = aux->sw_beta_fld.d();
+    auto dbsfc    = aux->dbsfc_fld.d();
+    auto Av       = aux->Av_fld.d();
+    auto Kv       = aux->Kv_fld.d();
+    auto stress_n = forcing->stress_node_surf_fld.d();
+    auto heat_flux  = forcing->heat_flux_fld.d();
+    auto water_flux = forcing->water_flux_fld.d();
+    auto Sval     = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n = mesh->nlevels_nod2D_fld.d();
+    auto ulev_e = mesh->ulevels_fld.d();
+    auto nlev_e = mesh->nlevels_fld.d();
+    auto elnod  = mesh->elem_nodes_fld.d();
+
+    /* zero viscA over N (driver :340-343) */
+    Kokkos::deep_copy(viscA, 0.0);
+
+    /* ---- driver pre-step: dVsq (eqn 21) + surface dbsfc zero (:344-380) ---- */
+    Kokkos::parallel_for("kpp_prestep_dVsq", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+            dVsq(FESOM_NODE3D(n, nzmin, nl))  = 0.0;
+            dbsfc(FESOM_NODE3D(n, nzmin, nl)) = 0.0;
+            real_t usurf = uvnode(FESOM_ELEMVEC(n, nzmin, nl) + 0);
+            real_t vsurf = uvnode(FESOM_ELEMVEC(n, nzmin, nl) + 1);
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                real_t u_loc = 0.5 * ( uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 0)
+                                     + uvnode(FESOM_ELEMVEC(n, nz,     nl) + 0) );
+                real_t v_loc = 0.5 * ( uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 1)
+                                     + uvnode(FESOM_ELEMVEC(n, nz,     nl) + 1) );
+                real_t du = usurf - u_loc, dv = vsurf - v_loc;
+                dVsq(FESOM_NODE3D(n, nz, nl)) = du * du + dv * dv;
+            }
+            dVsq(FESOM_NODE3D(n, nzmax, nl)) = dVsq(FESOM_NODE3D(n, nzmax - 1, nl));
+        });
+
+    /* ustar (eqn 2) + Bo (A2c/A2d) (:401-411) */
+    Kokkos::parallel_for("kpp_prestep_ustar_Bo", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            real_t sx = stress_n(2*n + 0);
+            real_t sy = stress_n(2*n + 1);
+            ustarV(n) = Kokkos::sqrt( Kokkos::sqrt(sx*sx + sy*sy) * density_0_r );
+            BoV(n) = -G * ( sw_alpha(FESOM_NODE3D(n, nzmin, nl)) * heat_flux(n) / VCPW
+                          + sw_beta(FESOM_NODE3D(n, nzmin, nl))
+                              * water_flux(n) * Sval(FESOM_NODE3D(n, nzmin, nl)) );
+        });
+
+    /* interior mixing (ri_iwmix, :419) */
+    kpp_ri_iwmix_kk(k, aux, dyn, mesh);
+
+#if KPP_DOUBLE_DIFFUSION
+#error "KPP double_diffusion=.true. unsupported: port ddmix (oce_ale_mixing_kpp.F90:1012-1085)"
+#endif
+
+    /* OBL depth (bldepth, :428) */
+    kpp_bldepth_kk(k, aux, forcing, mesh);
+
+    /* optional Fortran-input replay (FESOM_KPP_REPLAY_DIR; off by default): inject host
+     * values then push them to the device so blmix_kk reads the replayed inputs. */
+    {
+        const char *replay = getenv("FESOM_KPP_REPLAY_DIR");
+        if (replay && fesom_kpp_dump_this_step(s_kpp_call)) {
+            kpp_replay_inputs(k, mesh, partit, replay);
+            k->hbl_fld.modify_host();    k->hbl_fld.sync_device();
+            k->kbl_fld.modify_host();    k->kbl_fld.sync_device();
+            k->bfsfc_fld.modify_host();  k->bfsfc_fld.sync_device();
+            k->stable_fld.modify_host(); k->stable_fld.sync_device();
+            k->caseA_fld.modify_host();  k->caseA_fld.sync_device();
+            k->ustar_fld.modify_host();  k->ustar_fld.sync_device();
+            k->Bo_fld.modify_host();     k->Bo_fld.sync_device();
+            k->viscA_fld.modify_host();  k->viscA_fld.sync_device();
+            k->diffK_fld.modify_host();  k->diffK_fld.sync_device();
+        }
+    }
+
+    /* boundary-layer mixing coeffs (blmix_kpp, :430) */
+    kpp_blmix_kk(k, mesh);
+
+    /* K6 dumps (BEFORE enhance). Off by default; sync the dumped scratch to host first
+     * (the dump readers use the raw host alias). On Serial host==device → no-op. */
+    if (fesom_kpp_dump_this_step(s_kpp_call)) {
+        k->dVsq_fld.modify_device();  k->dVsq_fld.sync_host();
+        k->ustar_fld.modify_device(); k->ustar_fld.sync_host();
+        k->Bo_fld.modify_device();    k->Bo_fld.sync_host();
+        k->viscA_fld.modify_device(); k->viscA_fld.sync_host();
+        k->diffK_fld.modify_device(); k->diffK_fld.sync_host();
+        aux->dbsfc_fld.modify_device(); aux->dbsfc_fld.sync_host();
+        k->hbl_fld.modify_device();   k->hbl_fld.sync_host();
+        k->kbl_fld.modify_device();   k->kbl_fld.sync_host();
+        k->bfsfc_fld.modify_device(); k->bfsfc_fld.sync_host();
+        k->stable_fld.modify_device(); k->stable_fld.sync_host();
+        k->caseA_fld.modify_device(); k->caseA_fld.sync_host();
+        k->blmc_fld.modify_device();  k->blmc_fld.sync_host();
+        k->ghats_fld.modify_device(); k->ghats_fld.sync_host();
+        kpp_dump_prestep(k, aux, mesh, partit);
+        kpp_dump_riiwmix(k, aux, mesh, partit);
+        kpp_dump_bldepth(k, mesh, partit);
+        kpp_dump_blmix(k, mesh, partit);
+        /* re-push to device for the rest of the pipeline (no-op on Serial). */
+        k->blmc_fld.modify_host(); k->blmc_fld.sync_device();
+        k->diffK_fld.modify_host(); k->diffK_fld.sync_device();
+        k->viscA_fld.modify_host(); k->viscA_fld.sync_device();
+    }
+
+    /* enhance the BL coeffs at kbl-1 (enhance, :435) */
+    kpp_enhance_kk(k, mesh);
+
+    /* ---- INTERNAL HALO BRACKET 1: smooth_blmc (:437-447) ---------------------
+     * smooth_blmc=.true.: exchange each blmc channel then 3-sweep smooth_nod3D (HOST).
+     * Device-compute → sync_host → halo+smooth (h_checked) → sync_device. */
+    k->blmc_fld.modify_device();
+    k->blmc_fld.sync_host();
+    for (int j = 0; j < 3; ++j)
+        fesom_exchange_nod3D(k->blmc_fld.h_checked() + (size_t)j * slab, nl, partit);
+    for (int j = 0; j < 3; ++j)
+        fesom_smooth_nod3D(k->blmc_fld.h_checked() + (size_t)j * slab, nl, 3, mesh, partit);
+    k->blmc_fld.modify_host();
+    k->blmc_fld.sync_device();
+
+    /* combine blmc into viscA/diffK within the BL; zero ghats outside (:451-463) */
+    Kokkos::parallel_for("kpp_combine", Kokkos::RangePolicy<>(0, Nmy),
+        KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1;
+            int nzmax = nlev_n(n) - 1;
+            int kbl   = kblV(n);
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                size_t i = FESOM_NODE3D(n, nz, nl);
+                if (nz < kbl) {                                  /* within the BL */
+                    viscA(i)            = Kokkos::fmax(viscA(i),            blmc(0*slab + i));
+                    diffK(0*slab + i)   = Kokkos::fmax(diffK(0*slab + i),   blmc(1*slab + i));
+                    diffK(1*slab + i)   = Kokkos::fmax(diffK(1*slab + i),   blmc(2*slab + i));
+                } else {
+                    ghats((size_t)n * (nl - 1) + nz) = 0.0;
+                }
+            }
+        });
+
+    /* ---- INTERNAL HALO BRACKET 2: pre-elem-average exchanges (:468-473) ------
+     * combine wrote viscA/diffK/ghats on device → sync_host → halo (h_checked) →
+     * sync_device viscA+diffK (needed on device for the elem average + Kv copy).
+     * ghats is gated off in CORE2 (not read on device after) → left host. */
+    k->diffK_fld.modify_device();
+    k->viscA_fld.modify_device();
+    k->ghats_fld.modify_device();
+    k->diffK_fld.sync_host();
+    k->viscA_fld.sync_host();
+    k->ghats_fld.sync_host();
+    fesom_exchange_nod3D(k->diffK_fld.h_checked() + 0 * slab, nl, partit);
+    fesom_exchange_nod3D(k->diffK_fld.h_checked() + 1 * slab, nl, partit);
+    fesom_exchange_nod3D(k->ghats_fld.h_checked(), nl - 1, partit);
+    fesom_exchange_nod3D(k->viscA_fld.h_checked(), nl, partit);
+    k->diffK_fld.modify_host(); k->diffK_fld.sync_device();
+    k->viscA_fld.modify_host(); k->viscA_fld.sync_device();
+
+    /* node→elem viscAE = Σ(viscA over 3 vertices)/3 + bottom fill + minmix (:475-490) */
+    Kokkos::parallel_for("kpp_viscAE", Kokkos::RangePolicy<>(0, mesh->myDim_elem2D),
+        KOKKOS_LAMBDA(const int e) {
+            int n0 = elnod(3*e + 0);
+            int n1 = elnod(3*e + 1);
+            int n2 = elnod(3*e + 2);
+            int nzmin = ulev_e(e) - 1;
+            int nzmax = nlev_e(e) - 1;
+            for (int nz = nzmin; nz < nzmax; ++nz)
+                Av(FESOM_ELEM3D(e, nz, nl)) =
+                    ( viscA(FESOM_NODE3D(n0, nz, nl))
+                    + viscA(FESOM_NODE3D(n1, nz, nl))
+                    + viscA(FESOM_NODE3D(n2, nz, nl)) ) / 3.0;
+            Av(FESOM_ELEM3D(e, nzmax, nl)) = Av(FESOM_ELEM3D(e, nzmax - 1, nl));
+            if (Av(FESOM_ELEM3D(e, nzmin, nl)) < KPP_MINMIX)
+                Av(FESOM_ELEM3D(e, nzmin, nl)) = KPP_MINMIX;
+        });
+
+    /* single Kv = diffK(:,:,1) (T-channel) over N — the array the TDMA reads (:512-514) */
+    Kokkos::deep_copy(Kv, Kokkos::subview(diffK, Kokkos::make_pair((size_t)0, slab)));
+
+    /* outputs now device-authoritative (the driver OUT rail sync_host()s them) */
+    aux->Av_fld.modify_device();
+    aux->Kv_fld.modify_device();
+
+    if (fesom_kpp_dump_this_step(s_kpp_call)) {
+        aux->Av_fld.sync_host(); aux->Kv_fld.sync_host();
+        kpp_dump_final(k, aux, mesh, partit);
+        aux->Av_fld.modify_host(); aux->Av_fld.sync_device();
+        aux->Kv_fld.modify_host(); aux->Kv_fld.sync_device();
+    }
+}
+
+/*--- FESOM_KK_VERIFY=kpp — in-binary per-kernel gate (M2.3b) ------------------
+ * The EOS/PP verify shape (D19): aux holds the Kokkos production Av/Kv (the driver
+ * sync_host()'d them). Snapshot, run the HOST C twin (fesom_kpp_mixing — recomputes
+ * everything from the host-current inputs, which KPP does not modify except the
+ * dbsfc surface it re-zeros identically; it clobbers k->scratch + aux->Av/Kv via the
+ * raw alias, all recomputed next step), diff over the owned region, RESTORE the
+ * Kokkos Av/Kv (non-intrusive), report + assert Serial max|Δ|==0. s_kpp_call is
+ * saved/restored so the C twin's ++ does not double-count the step (dump gating).
+ */
+void fesom_kpp_verify(fesom_kpp                  *k,
+                      struct fesom_aux           *aux,
+                      const struct fesom_tracers *tracers,
+                      const struct fesom_forcing *forcing,
+                      const struct fesom_dyn     *dyn,
+                      const struct fesom_mesh    *mesh,
+                      struct fesom_partit        *partit,
+                      int                         step_n)
+{
+    const int nl = mesh->nl;
+    const size_t nKv = (size_t)k->n_nod * (size_t)nl;            /* aux.Kv == N*nl */
+    const size_t nAv = (size_t)mesh->myDim_elem2D * (size_t)nl;  /* KPP writes owned elems */
+
+    std::vector<real_t> kk_Kv(aux->Kv, aux->Kv + nKv);
+    std::vector<real_t> kk_Av(aux->Av, aux->Av + nAv);
+
+    int saved_call = s_kpp_call;
+    fesom_kpp_mixing(k, aux, tracers, forcing, dyn, mesh, partit);   /* C twin via raw alias */
+    s_kpp_call = saved_call;
+
+    auto maxdiff = [](const std::vector<real_t> &kk, const real_t *c, size_t n) -> double {
+        double m = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = std::fabs((double)kk[i] - (double)c[i]);
+            if (d > m) m = d;
+        }
+        return m;
+    };
+    double d_Kv = maxdiff(kk_Kv, aux->Kv, nKv);
+    double d_Av = maxdiff(kk_Av, aux->Av, nAv);
+
+    std::copy(kk_Kv.begin(), kk_Kv.end(), aux->Kv);   /* restore KK production result */
+    std::copy(kk_Av.begin(), kk_Av.end(), aux->Av);
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    const double dmax = std::max(d_Kv, d_Av);
+    std::printf("[FESOM_KK_VERIFY=kpp] step %d backend=%s  max|Δ|: Kv=%.3e Av=%.3e\n",
+                step_n, backend.c_str(), d_Kv, d_Av);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=kpp] FAIL: Serial must be bit-identical to the "
+                             "C twin (max|Δ|=%.3e)\n", dmax);
+        std::abort();
+    }
 }
 
 /*===========================================================================

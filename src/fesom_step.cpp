@@ -121,12 +121,14 @@ int fesom_timestep(int                          step_n,
     static int s_verify_loaded = 0;
     static int s_verify_eos    = 0;
     static int s_verify_pp     = 0;
+    static int s_verify_kpp    = 0;
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
-        /* Match the "pp" token but NOT the "pp" inside "kpp" (M2.3's sibling gate key):
-         * scan for "pp" not immediately preceded by 'k'. (eos uses a plain strstr; pp
-         * needs the guard because kpp is a substring superset — lesson L25.) */
+        s_verify_kpp = (e && strstr(e, "kpp")) ? 1 : 0;   /* safe: kpp is not a substring of pp */
+        /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
+         * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
+         * guard because kpp is a substring superset — lesson L25.) */
         s_verify_pp = 0;
         if (e) {
             for (const char *q = strstr(e, "pp"); q; q = strstr(q + 2, "pp")) {
@@ -221,10 +223,36 @@ int fesom_timestep(int                          step_n,
     fesom_halo_exchange(dyn->uvnode_fld.h_checked(), FESOM_HALO_NOD3D, nl, 2, p);
 
     if (s_use_kpp) {
-        /* KPP writes aux->Av (elements) + the single aux->Kv (T-channel,
-         * oce_ale.F90:3518-3522) and does its own internal halo exchanges. HOST kernel
-         * until M2.3; reads the host-current uvnode just synced above. */
-        fesom_kpp_mixing(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
+        /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
+         * oce_ale.F90:3518-3522) and does its OWN internal halo exchanges (bracketed inside
+         * fesom_kpp_mixing_kk). INPUT rail: push every host-authoritative input KPP reads to
+         * the device — the Serial gate can't catch a missing sync_device (host==device), so we
+         * sync them all explicitly. bvfreq is the L27 device→host(smooth)→device hand-off;
+         * forcing is host-produced; sw_alpha, sw_beta, dbsfc, uvnode, S, hnode are device-current
+         * from substep 1 but re-synced for robustness. (No-op on Serial/OpenMP.) */
+        aux->bvfreq_fld.modify_host();   aux->bvfreq_fld.sync_device();
+        aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
+        aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
+        aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
+        dyn->uvnode_fld.modify_host();   dyn->uvnode_fld.sync_device();
+        tracers->data[FESOM_TRACER_S].values_fld.modify_host();
+        tracers->data[FESOM_TRACER_S].values_fld.sync_device();
+        mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
+        /* forcing is a const input to the step; the sync_device is a pure coherence op (moves
+         * host→device, no logical mutation) → const_cast is safe and localized here. */
+        auto *fnc = const_cast<struct fesom_forcing *>(forcing);
+        fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+        fnc->heat_flux_fld.modify_host();        fnc->heat_flux_fld.sync_device();
+        fnc->water_flux_fld.modify_host();       fnc->water_flux_fld.sync_device();
+        fnc->sw_3d_fld.modify_host();            fnc->sw_3d_fld.sync_device();
+
+        fesom_kpp_mixing_kk(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
+
+        /* OUT rail: pull Av/Kv to host — mo_convect's rail (below) + the L212/213 halos read
+         * them host-authoritative (uniform with the PP branch), and the verify needs them host. */
+        aux->Av_fld.sync_host();
+        aux->Kv_fld.sync_host();
+        if (s_verify_kpp) fesom_kpp_verify(ctx->kpp, aux, tracers, forcing, dyn, mesh, p, step_n);
     } else {
         /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: uvnode (host-halo'd above)
          * + bvfreq (host-written by smooth_nod3D, substep 1) → device. */
