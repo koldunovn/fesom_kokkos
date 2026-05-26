@@ -35,7 +35,8 @@ enum { NL_MAX = 64 };          /* matches the cap used in fesom_eos / momentum *
 
 void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
 {
-    memset(g, 0, sizeof(*g));
+    /* Field members (DualView) make a raw memset UB (L13); value-initialise instead (D13). */
+    *g = fesom_gm{};
 
     int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     int nl = mesh->nl;
@@ -48,29 +49,20 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     int E_full = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
     size_t e_nl1x2 = (size_t)E_full * (size_t)(nl - 1) * 2;
 
-    g->sigma_xy      = (decltype(g->sigma_xy))calloc(n_nlx2,    sizeof(real_t));
-    g->neutral_slope = (decltype(g->neutral_slope))calloc(n_nlm1x3,  sizeof(real_t));
-    g->slope_tapered = (decltype(g->slope_tapered))calloc(n_nlm1x3,  sizeof(real_t));
-    g->fer_tapfac    = (decltype(g->fer_tapfac))calloc(n_nl,      sizeof(real_t));
-    g->fer_gamma     = (decltype(g->fer_gamma))calloc(n_nlx2,    sizeof(real_t));
-    g->fer_K         = (decltype(g->fer_K))calloc(n_nl,      sizeof(real_t));
-    g->Ki            = (decltype(g->Ki))calloc(n_nl,      sizeof(real_t));
-    g->fer_C         = (decltype(g->fer_C))calloc((size_t)N, sizeof(real_t));
-    g->fer_scal      = (decltype(g->fer_scal))calloc((size_t)N, sizeof(real_t));
-    g->tr_xy         = (decltype(g->tr_xy))calloc(e_nl1x2,   sizeof(real_t));
-    g->tr_z          = (decltype(g->tr_z))calloc(n_nl,      sizeof(real_t));
-
-    GM_CHECK(g->sigma_xy,      "sigma_xy");
-    GM_CHECK(g->neutral_slope, "neutral_slope");
-    GM_CHECK(g->slope_tapered, "slope_tapered");
-    GM_CHECK(g->fer_tapfac,    "fer_tapfac");
-    GM_CHECK(g->fer_gamma,     "fer_gamma");
-    GM_CHECK(g->fer_K,         "fer_K");
-    GM_CHECK(g->Ki,            "Ki");
-    GM_CHECK(g->fer_C,         "fer_C");
-    GM_CHECK(g->fer_scal,      "fer_scal");
-    GM_CHECK(g->tr_xy,         "tr_xy");
-    GM_CHECK(g->tr_z,          "tr_z");
+    /* M2.5b: each array is OWNED by a fesom::Field; the raw pointer is a non-owning
+     * alias to field.h() (the M1.2/D12 / M2.3a KPP data-layer pattern). Field::alloc
+     * zero-inits both host and device mirrors (== the calloc semantics here). */
+    g->sigma_xy_fld.alloc("gm.sigma_xy", n_nlx2);              g->sigma_xy      = g->sigma_xy_fld.h();
+    g->neutral_slope_fld.alloc("gm.neutral_slope", n_nlm1x3);  g->neutral_slope = g->neutral_slope_fld.h();
+    g->slope_tapered_fld.alloc("gm.slope_tapered", n_nlm1x3);  g->slope_tapered = g->slope_tapered_fld.h();
+    g->fer_tapfac_fld.alloc("gm.fer_tapfac", n_nl);            g->fer_tapfac    = g->fer_tapfac_fld.h();
+    g->fer_gamma_fld.alloc("gm.fer_gamma", n_nlx2);            g->fer_gamma     = g->fer_gamma_fld.h();
+    g->fer_K_fld.alloc("gm.fer_K", n_nl);                      g->fer_K         = g->fer_K_fld.h();
+    g->Ki_fld.alloc("gm.Ki", n_nl);                            g->Ki            = g->Ki_fld.h();
+    g->fer_C_fld.alloc("gm.fer_C", (size_t)N);                 g->fer_C         = g->fer_C_fld.h();
+    g->fer_scal_fld.alloc("gm.fer_scal", (size_t)N);           g->fer_scal      = g->fer_scal_fld.h();
+    g->tr_xy_fld.alloc("gm.tr_xy", e_nl1x2);                   g->tr_xy         = g->tr_xy_fld.h();
+    g->tr_z_fld.alloc("gm.tr_z", n_nl);                        g->tr_z          = g->tr_z_fld.h();
 
     /* Initial value matches Fortran oce_setup_step.F90:934.
      * init_Redi_GM (G3) overwrites this every step, but pre-G3 readers
@@ -82,18 +74,9 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
 
 void fesom_gm_free(fesom_gm *g)
 {
-    free(g->sigma_xy);
-    free(g->neutral_slope);
-    free(g->slope_tapered);
-    free(g->fer_tapfac);
-    free(g->fer_gamma);
-    free(g->fer_K);
-    free(g->Ki);
-    free(g->fer_C);
-    free(g->fer_scal);
-    free(g->tr_xy);
-    free(g->tr_z);
-    memset(g, 0, sizeof(*g));
+    /* *g = fesom_gm{} releases every Field (assigns an empty DualView → drops the refcount/frees)
+     * and zeros the raw aliases (D13/L13); no per-array free (the raw ptrs are non-owning). */
+    *g = fesom_gm{};
 }
 
 /* Physics-function stubs land in later phases. Each stub aborts so that

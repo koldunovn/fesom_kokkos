@@ -2,6 +2,7 @@
 #define FESOM_GM_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M2.5b: DualView-backed storage for the GM scratch (deferred from M1)
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -51,6 +52,18 @@ typedef struct fesom_gm {
      * (Fortran tr_z from oce_tracer_mod.F90:222-227). Sized [N * nl]; nz=0
      * (top) and nz=nlevels-1 (bottom) are 0 boundaries. */
     real_t *tr_z;
+
+    /* M2.5b: each persistent array above is OWNED by the matching fesom::Field
+     * below; the raw pointer is a NON-OWNING alias re-pointed at field.h() right
+     * after field.alloc() in fesom_gm_alloc (the M1.2/D12 / M2.3a KPP pattern).
+     * The GM scratch is recomputed in place every step through the raw alias (no
+     * buffer swap), so the alias stays valid for the whole run. The device _kk
+     * kernels (M2.5b) read/write the .d() views; the host C twins read the .h()
+     * alias. fer_K is host-initialised to K_GM_max=1000 at alloc (see below) —
+     * overwritten every step by init_Redi_GM before any reader. */
+    fesom::Field sigma_xy_fld, neutral_slope_fld, slope_tapered_fld, fer_tapfac_fld;
+    fesom::Field fer_gamma_fld, fer_K_fld, Ki_fld, fer_C_fld, fer_scal_fld;
+    fesom::Field tr_xy_fld, tr_z_fld;
 } fesom_gm;
 
 void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh);
