@@ -48,6 +48,24 @@ The unmodified C binary's output is the **golden reference** for the M0 bit-iden
 > source of truth. The **login-node MPI override** above is required because UCX/IB transports
 > aren't available off the compute nodes.
 
+### Re-baselined 2026-05-26 — `-ffp-contract=off` adopted (M2.1 determinism knob)
+
+M2.1 lands the first device kernels, so the per-kernel `FESOM_KK_VERIFY` Serial `max|Δ|==0` gate
+goes live and the build adopts **`-ffp-contract=off`** (the kernel-gate determinism knob deferred
+from M0.3 — `CMakeLists.txt`). The golden was to be re-captured at this setting.
+
+**Finding: the golden is UNCHANGED.** The `-ffp-contract=off` Serial build produces **byte-identical**
+pi output to the fma=fast golden captured 2026-05-25 (`diff_snap.py` zero-tolerance, all fields;
+np=1 **and** np=2-vs-`pi_np2_ref_m13_nocma` both `ALL FIELDS BIT-IDENTICAL`; `ctest` 4/4). The reason
+is the **target ISA**: the build uses baseline x86-64 (no `-march=native`/`-mfma`), so the host
+compiler has **no FMA instruction to contract into** — `-ffp-contract=off` vs the default is a
+codegen no-op on this host. We still set the flag because it is the **explicit, portable determinism
+standard** the M2 per-kernel gate relies on (a host `a*b+c` and its Kokkos Serial port compile to the
+same mul+add), and it future-proofs the gate against any build that does enable FMA-capable target
+flags. So the existing `docs/reference/c_baseline_snapshots/pi` golden and the
+`/scratch/a/a270088/pi_np2_ref_m13_nocma` np=2 oracle remain valid at `-ffp-contract=off` — no
+regeneration needed. (See `docs/KOKKOS_PORTING_LESSONS.md` D18 / L23.)
+
 ### Still to capture (when needed, on a compute node)
 
 - **CORE2, 16-rank, ~50 steps** (real MPI + production config) — a SLURM job, not login-node.

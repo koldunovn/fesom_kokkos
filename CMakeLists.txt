@@ -34,17 +34,23 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
 # --- Compile flags --------------------------------------------------------------------------
-# Release matches the captured C golden reference (-O3, default fma contraction) so the
-# Serial build can be bit-identical (M0.5). NOTE: do NOT add -ffp-contract=off here without
-# re-capturing the golden at the same setting (see the plan §M0.3 / Technical Details).
+# -ffp-contract=off is the M2 kernel-gate determinism knob (deferred from M0.3 to "when the
+# first device kernel lands" — M2.1). It disables fused multiply-add CONTRACTION on the HOST
+# compiler, so a host kernel `a*b+c` and the Kokkos Serial port of the same expression compile
+# to the SAME mul+add (no fma fusion in one but not the other) → the per-kernel FESOM_KK_VERIFY
+# gate can demand max|Δ|==0 on Serial. It also makes the whole Serial/OpenMP build reproducible.
+# The pi golden was RE-CAPTURED at this setting in M2.1 (docs/reference/PROVENANCE.md); do not
+# revert without re-capturing. On the CUDA build this reaches the host portion only (nvcc_wrapper
+# forwards it to g++); DEVICE fmad stays enabled, which is exactly why CUDA first diverges at M2.1
+# (climate-close, not bit-identical — plan §M2 / validation ladder D5).
 #
 # void*->T* casts: all 305 malloc/calloc/realloc sites now carry explicit casts
 # (scripts/cast_alloc_voidstar.py — M0-cuda), so -fpermissive is GONE. nvcc's front-end rejects
-# implicit void*->T* and ignores -fpermissive anyway (lesson L1); the casts don't change codegen,
-# so the Serial build stays bit-identical to the C golden.
+# implicit void*->T* and ignores -fpermissive anyway (lesson L1); the casts don't change codegen.
 add_compile_options(
   -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
   -fno-omit-frame-pointer
+  -ffp-contract=off
   "$<$<CONFIG:Debug>:-O0>"  "$<$<CONFIG:Debug>:-g3>"
   "$<$<CONFIG:Release>:-O3>" "$<$<CONFIG:Release>:-g>"
 )
