@@ -126,6 +126,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_ivisc  = 0;   /* M2.4 substep 6 */
     static int s_verify_vfilt  = 0;   /* M2.4 substep 5 */
     static int s_verify_vrhs   = 0;   /* M2.4 substep 4 */
+    static int s_verify_ale    = 0;   /* M2.5 substeps 12/14 */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -134,6 +135,7 @@ int fesom_timestep(int                          step_n,
         s_verify_ivisc = (e && strstr(e, "ivisc")) ? 1 : 0;   /* M2.4: distinct from vfilt */
         s_verify_vfilt = (e && strstr(e, "vfilt")) ? 1 : 0;   /* M2.4: distinct from ivisc */
         s_verify_vrhs = (e && strstr(e, "vrhs")) ? 1 : 0;     /* M2.4: no substring collision */
+        s_verify_ale = (e && strstr(e, "ale")) ? 1 : 0;       /* M2.5: no substring collision */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -491,23 +493,59 @@ int fesom_timestep(int                          step_n,
     }
     /* eta_n already covers myDim+eDim because hbar/hbar_old are exchanged. */
 
-    /* 12. ALE step (linfs). */
-    fesom_ale_thickness_linfs(mesh);
+    /* 12. ALE step (linfs) — M2.5: device kernels. SYNC_MAP §2 row 12. Each kernel: IN rail
+     *  (modify_host()+sync_device() the host-written/halo'd inputs, L28), device kernel
+     *  (mod_dev outputs), OUT rail (sync_host before the host halo via h_checked). The host
+     *  halo between successive kernels makes the data bounce device→host(halo)→device — the
+     *  substep-1/3 rail pattern. None of these has an INTERNAL halo (every exchange_nod is a
+     *  driver halo) → no D21 bracket. Default golden path runs gm=0 → the fer_* branches are
+     *  dead (preserved verbatim). On Serial/OpenMP host==device so every sync is a no-op. */
+
+    /* 12a. thickness: hnode_new = hnode. IN: hnode (evolving mesh, host-written/halo'd by last
+     *  step's commit). OUT: sync_host(hnode_new) — it is read on the HOST by the tracer
+     *  advection/diffusion (substeps 13/13b) and stays Synced for the device cflz/commit. */
+    mesh->hnode_fld.modify_host(); mesh->hnode_fld.sync_device();
+    fesom_ale_thickness_linfs_kk(mesh);
+    mesh->hnode_new_fld.sync_host();
+    if (s_verify_ale) fesom_ale_thickness_verify(mesh, step_n);
     /* hnode_new = hnode (no exchange needed; both already cover halo). */
 
-    fesom_ale_vert_vel_linfs(mesh, dyn, gm ? 1 : 0);
-    fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2679 */
+    /* 12b. vertical velocity. IN: uv (update_vel+halo, substep 9), helem (evolving mesh),
+     *  fer_uv (GM only). EDGE→NODE SCATTER (atomic_add, D22) + per-node level cumsum.
+     *  OUT: sync_host(w[,fer_w]) before the halo. */
+    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
+    if (gm) { dyn->fer_uv_fld.modify_host(); dyn->fer_uv_fld.sync_device(); }
+    fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
+    dyn->w_fld.sync_host();
+    if (gm) dyn->fer_w_fld.sync_host();
+    if (s_verify_ale) fesom_ale_vert_vel_verify(mesh, dyn, gm ? 1 : 0, step_n);
+    fesom_exchange_nod3D(dyn->w_fld.h_checked(), nl, p);     /* Fortran oce_ale.F90:2679 */
     if (gm) {
         /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
-        fesom_exchange_nod3D(dyn->fer_w, nl, p);
+        fesom_exchange_nod3D(dyn->fer_w_fld.h_checked(), nl, p);
     }
 
-    fesom_ale_compute_cflz(mesh, dyn);
-    fesom_exchange_nod3D(dyn->cfl_z, nl, p);
+    /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
+     *  Per-node accumulation into the node's OWN column → race-free (NOT a scatter).
+     *  OUT: sync_host(cfl_z) before the halo. */
+    dyn->w_fld.modify_host(); dyn->w_fld.sync_device();
+    mesh->hnode_new_fld.sync_device();   /* no-op: Synced from 12a; documents the dependency */
+    fesom_ale_compute_cflz_kk(mesh, dyn);
+    dyn->cfl_z_fld.sync_host();
+    if (s_verify_ale) fesom_ale_compute_cflz_verify(mesh, dyn, step_n);
+    fesom_exchange_nod3D(dyn->cfl_z_fld.h_checked(), nl, p);
 
-    fesom_ale_compute_wvel_split(mesh, dyn);
-    fesom_exchange_nod3D(dyn->w_e, nl, p);
-    fesom_exchange_nod3D(dyn->w_i, nl, p);
+    /* 12d. w-split (⚠️ use_wsplit=.false. preserved → w_e=w, w_i=0). IN: cfl_z (just halo'd),
+     *  w (Synced from 12c IN; cflz did not write w). Pure per-(n,nz) map. OUT: sync_host(w_e,w_i). */
+    dyn->cfl_z_fld.modify_host(); dyn->cfl_z_fld.sync_device();
+    dyn->w_fld.sync_device();   /* no-op: Synced from 12c IN; w unchanged by cflz */
+    fesom_ale_compute_wvel_split_kk(mesh, dyn);
+    dyn->w_e_fld.sync_host();
+    dyn->w_i_fld.sync_host();
+    if (s_verify_ale) fesom_ale_compute_wvel_split_verify(mesh, dyn, step_n);
+    fesom_exchange_nod3D(dyn->w_e_fld.h_checked(), nl, p);
+    fesom_exchange_nod3D(dyn->w_i_fld.h_checked(), nl, p);
 
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
      * Wraps BOTH advection (13) and diffusion (13b) so each tracer sees the
@@ -634,10 +672,18 @@ int fesom_timestep(int                          step_n,
         }
     }
 
-    /* 14. commit thickness: hnode := hnode_new, helem from vertex mean. */
-    fesom_ale_commit_thickness(mesh);
-    fesom_exchange_nod3D (mesh->hnode, nl, p);   /* both already same — but be explicit */
-    fesom_exchange_elem3D(mesh->helem, nl, p);   /* Fortran oce_ale.F90:1027,1249 */
+    /* 14. commit thickness — M2.5: device kernel. SYNC_MAP §2 row 14. hnode := hnode_new
+     *  (flat copy), helem := vertex mean (owned elems; halo via the exchanges below). IN:
+     *  hnode_new is Synced since 12a — the host tracer adv/diff (substep 13) only READ it, so the
+     *  device copy is still current (sync_device is a no-op). OUT: sync_host(hnode, helem) before
+     *  the halos; both EVOLVING → feed next step's substep-1 EOS + substep-6 TDMA. */
+    mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
+    fesom_ale_commit_thickness_kk(mesh);
+    mesh->hnode_fld.sync_host();
+    mesh->helem_fld.sync_host();
+    if (s_verify_ale) fesom_ale_commit_verify(mesh, step_n);
+    fesom_exchange_nod3D (mesh->hnode_fld.h_checked(), nl, p);   /* both already same — but be explicit */
+    fesom_exchange_elem3D(mesh->helem_fld.h_checked(), nl, p);   /* Fortran oce_ale.F90:1027,1249 */
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */

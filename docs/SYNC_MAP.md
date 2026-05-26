@@ -88,12 +88,12 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 9 | `update_vel` (M2.4) | dyn `uv_rhs`,`d_eta`; mesh | dyn `uv` | elem3D `uv` | `→dev(uv_rhs,d_eta)`; `mod_dev(uv)`; `→host(uv)` before halo |
 | 10| `compute_hbar` (M4.2) | dyn `uv`; mesh `hbar`,`hbar_old` | dyn `ssh_rhs_old`; mesh `hbar` | nod2D `ssh_rhs_old`,`hbar` | part of the §5 bracket |
 | 11| `eta_n` inline | mesh `hbar`,`hbar_old`,`ulevels_nod2D` | dyn `eta_n` | (covered) | trivial; fold into M2.4 device region or keep host |
-| 12| ALE `thickness`/`vert_vel`/`cflz`/`wvel_split` (M2.5) | mesh `hnode*`,`helem`; dyn `w*` | mesh `hnode_new`; dyn `w`,`w_e`,`w_i`,`cfl_z`,`fer_w` | `w` nod3D, `fer_w` (gm), `cfl_z`, `w_e`, `w_i` | `→dev` thickness inputs; `mod_dev(w,w_e,w_i,cfl_z)`; `→host` before each halo |
+| 12| ✅ **ALE `thickness`/`vert_vel`/`cflz`/`wvel_split` (M2.5 — DONE)** | mesh `hnode` (12a), `helem` + dyn `uv` (+`fer_uv` gm) (12b), set-once `area`/`edges`/`edge_tri`/`edge_cross`/levels; `w`,`cfl_z` (re-read after each driver halo) | mesh `hnode_new` (12a); dyn `w`[,`fer_w` gm] (12b), `cfl_z` (12c), `w_e`,`w_i` (12d) | `w` nod3D[,`fer_w` gm], `cfl_z`, `w_e`, `w_i` (all DRIVER halos — no internal exchange) | **implemented (4 device kernels, each its own rail — NO internal halo, no D21):** 12a `thickness_linfs_kk` IN `modify_host()+sync_device(hnode)`, `mod_dev(hnode_new)`, OUT `sync_host(hnode_new)` (read on HOST by tracer adv/diff substeps 13/13b — see row note); 12b `vert_vel_linfs_kk` IN `uv`(+`fer_uv` if gm), `helem`, **EDGE→NODE SCATTER (`atomic_add`, D22) + per-node level cumsum**, `mod_dev(w[,fer_w])`, OUT `sync_host` before the nod3D halo (`h_checked`); 12c `compute_cflz_kk` IN re-push `w` (just halo'd) + no-op `sync_device(hnode_new)` (Synced from 12a), per-node OWN-column accumulation (NOT a scatter → bit-identical OpenMP), `mod_dev(cfl_z)`, OUT `sync_host`; 12d `compute_wvel_split_kk` (⚠️`use_wsplit=.false.`→`w_e=w,w_i=0`) IN re-push `cfl_z`, pure map, `mod_dev(w_e,w_i)`, OUT `sync_host` before the halos. ⚠️ **GM is ON in pi** → the `fer_*` branch is LIVE (Serial `fer_w` bit-identical, OpenMP climate-close), L34. |
 | 13a| bolus add (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (in place) | — | `→dev(fer_uv,fer_w)`; `mod_dev(uv,w,w_e)` — honour `feedback_bolus_divergence_balance` |
 | 13| FCT tracer advection T,S (M2.6) — **AB2 eps=0.1** | dyn `uv`,`w*`; tracers; mesh | tracers `values` (T then S) | nod3D `values` per tracer | **FCT pipeline has internal exchanges — see §6**; wrap FCT scratch in `Field`; `mod_dev(values)` |
 | 13b| `impl_vert_diff_tracers` (M2.7, per-node TDMA) + S-floor | tracers; aux `Kv`; forcing fluxes | tracers `values` | nod3D `values` ×2 | `→dev(values,Kv,fluxes)`; `mod_dev(values)`; `→host(values)` before halos |
 | 13c| bolus sub (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (restore) | — | mirror of 13a |
-| 14| `ale_commit_thickness` (M2.5) | mesh `hnode_new` | mesh `hnode`,`helem` | `hnode` nod3D, `helem` elem3D | `→dev(hnode_new)`; `mod_dev(hnode,helem)`; `→host` before halos |
+| 14| ✅ **`ale_commit_thickness` (M2.5 — DONE)** | mesh `hnode_new` (Synced since 12a; substep-13 host tracer adv/diff only READ it), set-once `elem_nodes`/levels | mesh `hnode`,`helem` | `hnode` nod3D, `helem` elem3D | **implemented:** IN no-op `sync_device(hnode_new)` (device-current since 12a — never `modify_host()`, host didn't write it); `commit_thickness_kk` = `hnode:=hnode_new` flat copy then `helem` vertex-mean (2 launches, barrier orders the helem read of the copied hnode, D20); race-free maps → bit-identical all backends; `mod_dev(hnode,helem)`; OUT `sync_host(hnode,helem)` before the nod3D/elem3D halos (`h_checked`). Both EVOLVING → feed next step's substep-1 EOS + substep-6 TDMA. |
 
 At M1 the whole column was `[H]`. **M2.1 landed substep 1 (EOS) — the first LIVE rail:** its
 inputs are pushed to the device and its outputs round-trip back to the host before the halos, so
@@ -125,6 +125,23 @@ and the verify. The KPP IN rail (driver) syncs **all** inputs KPP reads (D21/L28
 can't catch a missing `sync_device`, so they are synced explicitly, not assumed device-current from
 substep 1). The two KPP internal brackets transitioned their `h_checked()` guards `Device→Synced`
 cleanly under SYNCCHECK on the default path.
+
+**M2.5 put the ALE block (substeps 12 + 14) on the device** — five `_kk` twins, each with its own
+IN/OUT rail (rows 12/14). Unlike KPP, **no ALE kernel has an internal exchange** — every
+`fesom_exchange_*` sits in the driver *between* kernels, so there is no D21 bracket; instead the data
+bounces device→host(halo)→device and each kernel's IN rail re-pushes the just-halo'd input
+(`modify_host()+sync_device()` on `w` before `cflz`, on `cfl_z` before `wvel_split`). Two rail
+subtleties: (a) **`hnode_new` is device-resident across 12a→12c→14** — `thickness` writes it on the
+device and `sync_host()`s it (the substep-13 host tracer advect/diff READ it via the raw alias, so it
+MUST be host-current), leaving it `Synced`; `cflz` and `commit` then read the device copy current with a
+no-op `sync_device()` and never `modify_host()` it (the host never writes it). (b) **GM is ON in the pi
+smoke** (contrary to the earlier "GM off by default" note), so `vert_vel`'s `fer_w` accumulator is LIVE:
+the `if(gm)` IN rail syncs `fer_uv`→device and OUT `sync_host`s `fer_w`, and the verify proved the
+`gm_on` branch bit-identical on Serial (`fer_w` max|Δ|=0) and climate-close on OpenMP (≈7e-22) — L34.
+Only `vert_vel` is a SCATTER (edge→node `atomic_add`, D22); the other four are race-free maps (`cflz`'s
+`+=` accumulates into each node's OWN column, not a cross-thread scatter) → bit-identical on Serial AND
+OpenMP. The new nod3D/elem3D halo guards (`w`/`cfl_z`/`w_e`/`w_i`/`hnode`/`helem`, all via `h_checked()`)
+transition `Device→Synced` each step under SYNCCHECK and ran clean.
 
 ---
 

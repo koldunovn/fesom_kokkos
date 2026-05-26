@@ -50,8 +50,8 @@ order** exactly.
 Through M2.1–M2.3 every ported kernel was a pure map or a *private* gather (each entity owns its
 output; `compute_vel_nodes` accumulates a node's surrounding elements into lambda-local scalars),
 so **OpenMP happened to be bit-identical too**. From M2.4 on, the scatter kernels
-(`visc_filt_bidiff`, `compute_vel_rhs`'s `momentum_adv_scalar`, and later FCT/EVP) are the first
-where **OpenMP is climate-close, not bit-identical**. This is within spec:
+(`visc_filt_bidiff`, `compute_vel_rhs`'s `momentum_adv_scalar`, `ale_vert_vel_linfs` (M2.5), and later
+FCT/EVP) are the first where **OpenMP is climate-close, not bit-identical**. This is within spec:
 
 - **Serial** = bit-identical (the bit-identity oracle, the `FESOM_KK_VERIFY` and `diff_snap` gate). Unchanged.
 - **OpenMP** = climate-identical, per-step Δ ≲ 1e-12 (the plan's per-backend acceptance / D5).
@@ -76,6 +76,7 @@ perf if the atomics are a measured bottleneck.
 | `visc_filt_bidiff_kk` stage 1 (M2.4) | edge → element | `u_b`/`v_b` (Uc/Vc Laplacian) | ✅ atomic_add |
 | `visc_filt_bidiff_kk` stage 2 (M2.4) | edge → element | `uv_rhs` | ✅ atomic_add |
 | `momentum_adv_scalar_kk` horiz adv (M2.4) | edge → node | `uvnode_rhs` | ✅ atomic_add |
+| `ale_vert_vel_linfs_kk` edge flux (M2.5) | edge → node | `w` (+`fer_w` when GM on) | ✅ atomic_add |
 | FCT flux assembly (M2.6) | edge → node | tracer flux | ⏳ (same decision) |
 | ice FCT / EVP (M4.3) | edge → node | ice flux / stress | ⏳ (same decision) |
 

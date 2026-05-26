@@ -55,4 +55,37 @@ void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
                                   struct fesom_dyn        *dyn);
 
+/*===========================================================================
+ * M2.5 — DEVICE (Kokkos) twins of the five ALE kernels (substeps 12 + 14).
+ *
+ * Each `_kk` is a verbatim parallel_for port of its C twin above (D19); the C
+ * twins stay untouched as the bit-identity oracle. Shapes (derived from the C
+ * BODY, L33):
+ *   - thickness/commit/cflz/wvel_split = race-free maps (each entity writes only
+ *     its own slot/column) → bit-identical on Serial AND OpenMP.
+ *   - vert_vel = an EDGE→NODE SCATTER (Kokkos::atomic_add, D22) + a per-node
+ *     sequential level cumsum → Serial bit-identical, OpenMP/CUDA climate-close.
+ * None has an internal halo (every fesom_exchange_* is a driver halo) → no D21
+ * bracket. The `_verify` fns run the C twin beside the device result on the live
+ * state and assert max|Δ|==0 on Serial (FESOM_KK_VERIFY=ale).
+ *===========================================================================*/
+void fesom_ale_thickness_linfs_kk(struct fesom_mesh *mesh);
+void fesom_ale_commit_thickness_kk(struct fesom_mesh *mesh);
+void fesom_ale_vert_vel_linfs_kk(const struct fesom_mesh *mesh,
+                                 struct fesom_dyn        *dyn,
+                                 int                      gm_on);
+void fesom_ale_compute_cflz_kk(const struct fesom_mesh *mesh,
+                               struct fesom_dyn        *dyn);
+void fesom_ale_compute_wvel_split_kk(const struct fesom_mesh *mesh,
+                                     struct fesom_dyn        *dyn);
+
+void fesom_ale_thickness_verify(struct fesom_mesh *mesh, int step_n);
+void fesom_ale_commit_verify(struct fesom_mesh *mesh, int step_n);
+void fesom_ale_vert_vel_verify(const struct fesom_mesh *mesh,
+                               struct fesom_dyn *dyn, int gm_on, int step_n);
+void fesom_ale_compute_cflz_verify(const struct fesom_mesh *mesh,
+                                   struct fesom_dyn *dyn, int step_n);
+void fesom_ale_compute_wvel_split_verify(const struct fesom_mesh *mesh,
+                                         struct fesom_dyn *dyn, int step_n);
+
 #endif /* FESOM_ALE_H */
