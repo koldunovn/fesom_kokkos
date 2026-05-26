@@ -81,6 +81,29 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
                                          struct fesom_aux        *aux);
 
 /*
+ * M2.4 DEVICE kernel twin of fesom_pressure_force_linfs_fullcell (Kokkos
+ * parallel_for over owned elements; the level loop inside the lambda; each
+ * element writes only its own pgf_x/pgf_y → race-free, EOS-style — Serial AND
+ * OpenMP bit-identical). INPUT hpressure must be device-current (the driver's
+ * substep-2 rail does modify_host()+sync_device() on it — it was produced on the
+ * device in substep 1, then sync_host'd + halo-exchanged on the host, L27); the
+ * set-once mesh gradient_sca/elem_nodes/ulevels/nlevels are already device-current.
+ * Marks pgf_x/pgf_y modify_device(). See docs/SYNC_MAP.md §2 row 2.
+ */
+void fesom_pressure_force_linfs_fullcell_kk(const struct fesom_mesh *mesh,
+                                            struct fesom_aux        *aux);
+
+/*
+ * FESOM_KK_VERIFY=pgf in-binary per-kernel gate (the fesom_eos_verify shape):
+ * snapshots the Kokkos pgf_x/pgf_y already in aux, runs the host C twin (full
+ * overwrite from the intact hpressure → EOS-style, no capture-before needed),
+ * diffs, asserts max|Δ|==0 on Serial, restores the Kokkos result. Non-intrusive.
+ */
+void fesom_pressure_force_verify(const struct fesom_mesh *mesh,
+                                 struct fesom_aux        *aux,
+                                 int step_n);
+
+/*
  * Compute thermal expansion (sw_alpha) and saline contraction (sw_beta)
  * coefficients per node per level, from McDougall (1987). Mirror of
  * oce_ale_pressure_bv.F90:2751-2846 sw_alpha_beta. Outputs into

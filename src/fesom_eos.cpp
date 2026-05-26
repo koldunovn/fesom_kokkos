@@ -508,6 +508,103 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- pressure_force_linfs_fullcell — DEVICE kernel (M2.4) ---------------------
+ * Kokkos parallel_for over owned elements (the M2.1 EOS template, D19). The level
+ * loop runs inside the lambda and each element writes only its own pgf_x/pgf_y →
+ * NO cross-element write race → the Serial range is sequential == the C twin loop,
+ * and even OpenMP is bit-identical (a pure per-element map, no reduction/atomic).
+ * Every bound/constant/association is a verbatim copy of the C twin above (the
+ * `(g0*hp0 + g1*hp1 + g2*hp2) * inv_r` parenthesisation is preserved exactly).
+ *
+ * SYNC contract (SYNC_MAP §2 row 2): INPUT aux->hpressure was produced on the device
+ * (pressure_bv_kk, substep 1), then sync_host'd + halo-exchanged on the HOST — the halo
+ * write is invisible to the DualView (L14/L27), so the driver's substep-2 rail does
+ * modify_host()+sync_device() on it (NOT a bare sync_device()). The set-once mesh
+ * gradient_sca/elem_nodes/ulevels/nlevels are already device-current (one-shot push).
+ * OUTPUTS pgf_x/pgf_y marked modify_device(); the driver sync_host()s them before the
+ * elem3D halos.
+ */
+void fesom_pressure_force_linfs_fullcell_kk(const struct fesom_mesh *mesh,
+                                            struct fesom_aux        *aux)
+{
+    const int    nl    = mesh->nl;
+    const int    E     = mesh->myDim_elem2D;
+    const real_t inv_r = 1.0 / (real_t)FESOM_DENSITY_0;
+
+    auto hpressure = aux->hpressure_fld.d();
+    auto pgf_x     = aux->pgf_x_fld.d();
+    auto pgf_y     = aux->pgf_y_fld.d();
+    auto ulev      = mesh->ulevels_fld.d();
+    auto nlev      = mesh->nlevels_fld.d();
+    auto elnod     = mesh->elem_nodes_fld.d();
+    auto gradsca   = mesh->gradient_sca_fld.d();
+
+    Kokkos::parallel_for("fesom_pressure_force", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int e) {
+            int nzmin = ulev(e) - 1;            /* 1-based → 0-based */
+            int nzmax = nlev(e) - 1;            /* exclusive bound  */
+            int n0 = elnod(3*e + 0);
+            int n1 = elnod(3*e + 1);
+            int n2 = elnod(3*e + 2);
+            real_t g0 = gradsca(6*e + 0), g1 = gradsca(6*e + 1), g2 = gradsca(6*e + 2);
+            real_t g3 = gradsca(6*e + 3), g4 = gradsca(6*e + 4), g5 = gradsca(6*e + 5);
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t hp0 = hpressure(FESOM_NODE3D(n0, nz, nl));
+                real_t hp1 = hpressure(FESOM_NODE3D(n1, nz, nl));
+                real_t hp2 = hpressure(FESOM_NODE3D(n2, nz, nl));
+                pgf_x(FESOM_ELEM3D(e, nz, nl)) = (g0*hp0 + g1*hp1 + g2*hp2) * inv_r;
+                pgf_y(FESOM_ELEM3D(e, nz, nl)) = (g3*hp0 + g4*hp1 + g5*hp2) * inv_r;
+            }
+        });
+
+    aux->pgf_x_fld.modify_device();   /* driver sync_host()s before the elem3D halos */
+    aux->pgf_y_fld.modify_device();
+}
+
+/*--- FESOM_KK_VERIFY=pgf (M2.4) ----------------------------------------------
+ * EOS-style gate (fesom_eos_verify shape, D19): pgf_x/pgf_y are FULL overwrites
+ * from inputs the kernel never modifies (hpressure / mesh), so the C twin
+ * recomputes from intact state — no capture-before needed (cf. L26). On entry aux
+ * holds the Kokkos result (driver sync_host'd it). Snapshot it, run the C twin
+ * (overwrites the owned region via the raw alias), diff, RESTORE the Kokkos result.
+ * Non-intrusive; asserts max|Δ|==0 on Serial.
+ */
+void fesom_pressure_force_verify(const struct fesom_mesh *mesh,
+                                 struct fesom_aux        *aux,
+                                 int step_n)
+{
+    const int nl = mesh->nl;
+    const size_t nE = (size_t)mesh->myDim_elem2D * (size_t)nl;     /* owned elements */
+
+    std::vector<real_t> kk_pgf_x(aux->pgf_x, aux->pgf_x + nE);
+    std::vector<real_t> kk_pgf_y(aux->pgf_y, aux->pgf_y + nE);
+    fesom_pressure_force_linfs_fullcell(mesh, aux);     /* C twin overwrites via raw alias */
+
+    auto maxdiff = [](const std::vector<real_t> &kk, const real_t *c, size_t n) -> double {
+        double m = 0.0;
+        for (size_t i = 0; i < n; ++i) {
+            double d = std::fabs((double)kk[i] - (double)c[i]);
+            if (d > m) m = d;
+        }
+        return m;
+    };
+    double d_x = maxdiff(kk_pgf_x, aux->pgf_x, nE);
+    double d_y = maxdiff(kk_pgf_y, aux->pgf_y, nE);
+    std::copy(kk_pgf_x.begin(), kk_pgf_x.end(), aux->pgf_x);       /* restore KK */
+    std::copy(kk_pgf_y.begin(), kk_pgf_y.end(), aux->pgf_y);
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    const double dmax = std::max(d_x, d_y);
+    std::printf("[FESOM_KK_VERIFY=pgf] step %d backend=%s  max|Δ|: pgf_x=%.3e pgf_y=%.3e\n",
+                step_n, backend.c_str(), d_x, d_y);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=pgf] FAIL: Serial must be bit-identical to the C twin "
+                             "(max|Δ|=%.3e)\n", dmax);
+        std::abort();
+    }
+}
+
 /*--- sw_alpha_beta (oce_ale_pressure_bv.F90:2751-2846) -------------------------
  * McDougall (1987) thermal expansion and saline contraction coefficients per
  * node per level. Inputs: potential T (°C), S (PSU); pressure proxy = |Z[nz]|.

@@ -122,10 +122,12 @@ int fesom_timestep(int                          step_n,
     static int s_verify_eos    = 0;
     static int s_verify_pp     = 0;
     static int s_verify_kpp    = 0;
+    static int s_verify_pgf    = 0;   /* M2.4 substep 2 */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
         s_verify_kpp = (e && strstr(e, "kpp")) ? 1 : 0;   /* safe: kpp is not a substring of pp */
+        s_verify_pgf = (e && strstr(e, "pgf")) ? 1 : 0;   /* M2.4: no substring collision */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -200,10 +202,21 @@ int fesom_timestep(int                          step_n,
         fesom_fer_gamma2vel        (dyn,           mesh, gm, p);
     }
 
-    /*  2. PGF (linfs + full cells)  */
-    fesom_pressure_force_linfs_fullcell(mesh, aux);
-    fesom_exchange_elem3D(aux->pgf_x, nl, p);
-    fesom_exchange_elem3D(aux->pgf_y, nl, p);
+    /*  2. PGF (linfs + full cells) — M2.4: device kernel.
+     *  SYNC_MAP §2 row 2. INPUT rail: hpressure was produced on the device (substep 1),
+     *  then sync_host'd (L163) + halo-exchanged on the host (L178) — the halo write is
+     *  invisible to the DualView (L14/L27), so push the now-halo-current host hpressure
+     *  back to the device with modify_host()+sync_device() (NOT a bare sync_device, which
+     *  would feed the kernel the pre-halo device bytes). gradient_sca/elem_nodes/ulevels/
+     *  nlevels are set-once device-current (mesh_sync_geometry_device). No-op on Serial/OpenMP. */
+    aux->hpressure_fld.modify_host(); aux->hpressure_fld.sync_device();
+    fesom_pressure_force_linfs_fullcell_kk(mesh, aux);   /* device: pgf_x, pgf_y (elem) */
+    /* OUTPUT rail: pull pgf to host before the elem3D halos (read via h_checked). */
+    aux->pgf_x_fld.sync_host();
+    aux->pgf_y_fld.sync_host();
+    if (s_verify_pgf) fesom_pressure_force_verify(mesh, aux, step_n);
+    fesom_exchange_elem3D(aux->pgf_x_fld.h_checked(), nl, p);
+    fesom_exchange_elem3D(aux->pgf_y_fld.h_checked(), nl, p);
 
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
      *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
