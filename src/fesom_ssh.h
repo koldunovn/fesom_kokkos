@@ -2,6 +2,7 @@
 #define FESOM_SSH_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M4.2-a: DualView-backed storage for the CSR + CG vectors
 
 struct fesom_mesh;
 struct fesom_dyn;
@@ -31,6 +32,17 @@ typedef struct fesom_ssh_stiff {
     int    *colind;     /* [nnz]     */
     real_t *values;     /* [nnz]     */
     real_t *pr_values;  /* [nnz]     — preconditioner */
+
+    /* M4.2-a: each raw pointer above is a NON-OWNING alias = field.h(), re-pointed once
+     * in fesom_ssh_stiff_alloc_and_build (the M2.6-a data-layer pattern). The Fields back
+     * the M4.2-b device CG SpMV (per-row CSR gather); the C twin (csr_matvec) keeps using
+     * the raw aliases unchanged. The CSR is set-once (linfs builds it once and never
+     * updates it, oce_ale.F90:3722) → pushed to the device a single time at the end of
+     * fesom_ssh_preconditioner. No pointer swaps happen, so the aliases stay valid. */
+    fesom::IntField rowptr_fld;
+    fesom::IntField colind_fld;
+    fesom::Field    values_fld;
+    fesom::Field    pr_values_fld;
 } fesom_ssh_stiff;
 
 /*
@@ -47,6 +59,11 @@ typedef struct fesom_solverinfo {
     real_t *App;
     int     last_iters;     /* iters used by the last solve (diagnostic) */
     struct fesom_partit *partit;  /* set after fesom_solverinfo_alloc() — used by parallel CG */
+
+    /* M4.2-a: rr/zz/pp/App are NON-OWNING aliases = field.h() (re-pointed once in
+     * fesom_solverinfo_alloc). The Fields back the M4.2-b device CG vector kernels
+     * (SpMV / dot-product parallel_reduce / AXPY maps); the C twin reads the raw aliases. */
+    fesom::Field rr_fld, zz_fld, pp_fld, App_fld;
 } fesom_solverinfo;
 
 /*--- Lifecycle -------------------------------------------------------------*/

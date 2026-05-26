@@ -48,7 +48,10 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
      * (halo), where we don't have a matrix row. So skipping halo edges here
      * exactly matches Fortran. */
     const int E         = mesh->myDim_edge2D;
-    memset(S, 0, sizeof(*S));
+    /* M4.2-a: S now holds fesom::Field members → a raw memset over it is UB (D13/L13).
+     * Value-initialise (runs each Field's default ctor, releases any prior storage, zeros
+     * every POD) — the fesom_tracer_adv_init pattern. */
+    *S = fesom_ssh_stiff{};
     S->dim = N;
     (void)N_alloc;
 
@@ -84,8 +87,11 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
         }
     }
 
-    /* ---- 2. Build CSR rowptr (lines 1467-1477) ---------------------------- */
-    S->rowptr = (decltype(S->rowptr))malloc((size_t)(N + 1) * sizeof(int));
+    /* ---- 2. Build CSR rowptr (lines 1467-1477) ----------------------------
+     * M4.2-a: rowptr is OWNED by S->rowptr_fld; the raw pointer is a non-owning alias
+     * to field.h(). Field::alloc zero-inits (rowptr is then fully written below). */
+    S->rowptr_fld.alloc("ssh.rowptr", (size_t)(N + 1));
+    S->rowptr = S->rowptr_fld.h();
     FESOM_CHECK(S->rowptr, "ssh_stiff: out of memory (rowptr)");
     S->rowptr[0] = 0;
     for (int n = 0; n < N; ++n) {
@@ -93,10 +99,16 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     }
     S->nnz = S->rowptr[N];
 
-    /* ---- 3. Fill colind + zero values + alloc pr_values (lines 1481-1494) - */
-    S->colind    = (decltype(S->colind))malloc((size_t)S->nnz * sizeof(int));
-    S->values    = (decltype(S->values))calloc((size_t)S->nnz, sizeof(real_t));
-    S->pr_values = (decltype(S->pr_values))calloc((size_t)S->nnz, sizeof(real_t));
+    /* ---- 3. Fill colind + zero values + alloc pr_values (lines 1481-1494) -
+     * M4.2-a: colind/values/pr_values are OWNED by their Fields (raw ptrs = aliases).
+     * Field::alloc zero-inits → matches the original calloc for values/pr_values; colind
+     * is fully written below (the original malloc was uninitialised — alloc over-specifies). */
+    S->colind_fld.alloc("ssh.colind", (size_t)S->nnz);
+    S->values_fld.alloc("ssh.values", (size_t)S->nnz);
+    S->pr_values_fld.alloc("ssh.pr_values", (size_t)S->nnz);
+    S->colind    = S->colind_fld.h();
+    S->values    = S->values_fld.h();
+    S->pr_values = S->pr_values_fld.h();
     FESOM_CHECK(S->colind && S->values && S->pr_values,
                 "ssh_stiff: out of memory (CSR arrays)");
     for (int n = 0; n < N; ++n) {
@@ -206,11 +218,11 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
 
 void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
 {
-    free(S->rowptr);
-    free(S->colind);
-    free(S->values);
-    free(S->pr_values);
-    memset(S, 0, sizeof(*S));
+    /* M4.2-a: rowptr/colind/values/pr_values are non-owning aliases to the Field host
+     * mirrors — no per-array free (that would double-free). Value-init releases every
+     * Field (empty-DualView assign → refcount drop/free) and zeros the POD members
+     * (D13/L13; the fesom_tracer_adv_free pattern). Runs before Kokkos::finalize(). */
+    *S = fesom_ssh_stiff{};
 }
 
 /*===========================================================================
@@ -252,6 +264,18 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
         }
     }
     free(diag_values);
+
+    /* M4.2-a: the CSR is now final (build filled rowptr/colind/values; this routine just
+     * filled pr_values). It is set-once — linfs never updates the stiffness matrix
+     * (oce_ale.F90:3722) and ice_mass_matrix_fill takes it `const`. Push all four arrays to
+     * the device a SINGLE time (the mesh_sync_geometry_device pattern, L14) so the M4.2-b
+     * device CG SpMV reads them device-current with no per-step sync. The raw host writes
+     * above are invisible to the DualView modify flags, so modify_host() first. No-op on
+     * Serial/OpenMP (host==device); one bitwise-exact deep_copy each on CUDA. */
+    S->rowptr_fld.modify_host();    S->rowptr_fld.sync_device();
+    S->colind_fld.modify_host();    S->colind_fld.sync_device();
+    S->values_fld.modify_host();    S->values_fld.sync_device();
+    S->pr_values_fld.modify_host(); S->pr_values_fld.sync_device();
 }
 
 /*===========================================================================
@@ -334,27 +358,27 @@ void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
 void fesom_solverinfo_alloc(fesom_solverinfo       *si,
                             const struct fesom_mesh *mesh)
 {
-    memset(si, 0, sizeof(*si));
+    /* M4.2-a: si holds fesom::Field members → value-init, not memset (D13/L13). */
+    *si = fesom_solverinfo{};
     si->maxiter = FESOM_PHASE1_MAXITER;
     si->soltol  = FESOM_PHASE1_SOLTOL;
     /* Allocate for full local extent — matrix-vector reads pp at column
-     * indices that may reach into halo. */
+     * indices that may reach into halo. The Fields OWN the storage; the raw
+     * pointers are non-owning aliases (the C twin reads them). */
     size_t n = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
-    si->rr  = (decltype(si->rr))calloc(n, sizeof(real_t));
-    si->zz  = (decltype(si->zz))calloc(n, sizeof(real_t));
-    si->pp  = (decltype(si->pp))calloc(n, sizeof(real_t));
-    si->App = (decltype(si->App))calloc(n, sizeof(real_t));
+    si->rr_fld.alloc("ssh.cg.rr",   n);  si->rr  = si->rr_fld.h();
+    si->zz_fld.alloc("ssh.cg.zz",   n);  si->zz  = si->zz_fld.h();
+    si->pp_fld.alloc("ssh.cg.pp",   n);  si->pp  = si->pp_fld.h();
+    si->App_fld.alloc("ssh.cg.App", n);  si->App = si->App_fld.h();
     FESOM_CHECK(si->rr && si->zz && si->pp && si->App,
                 "solverinfo: out of memory");
 }
 
 void fesom_solverinfo_free(fesom_solverinfo *si)
 {
-    free(si->rr);
-    free(si->zz);
-    free(si->pp);
-    free(si->App);
-    memset(si, 0, sizeof(*si));
+    /* M4.2-a: rr/zz/pp/App are non-owning aliases — value-init releases the Fields and
+     * zeros the POD (no per-array free; the fesom_tracer_adv_free pattern). */
+    *si = fesom_solverinfo{};
 }
 
 /*===========================================================================
