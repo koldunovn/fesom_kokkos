@@ -134,6 +134,28 @@ void fesom_gm_solve_gamma_verify  (const struct fesom_aux *aux, const struct fes
 void fesom_gm_gamma2vel_verify    (struct fesom_dyn *dyn, const struct fesom_mesh *mesh,
                                    const fesom_gm *gm, struct fesom_partit *partit, int step_n);
 
+/* --- M2.5b-c: DEVICE twins of the substep-13 Redi diffusion (own their internal
+ * tr_xy/tr_z halo D21 brackets; diff_hor is an edge→node atomic_add scatter D22). */
+void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
+                                      fesom_gm                *gm,
+                                      const struct fesom_mesh *mesh,
+                                      struct fesom_tracers    *tracers,
+                                      struct fesom_partit     *partit);
+void fesom_diff_part_hor_redi_kk     (int                      tr_idx,
+                                      fesom_gm                *gm,
+                                      const struct fesom_mesh *mesh,
+                                      struct fesom_tracers    *tracers,
+                                      struct fesom_partit     *partit);
+
+/* L26 capture-before gate for the combined Redi (driver passes the pre-Redi values). */
+#ifdef __cplusplus
+#include <vector>
+void fesom_gm_redi_verify(int tr_idx, fesom_gm *gm, const struct fesom_aux *aux,
+                          const struct fesom_mesh *mesh, struct fesom_tracers *tracers,
+                          struct fesom_partit *partit, int step_n,
+                          const std::vector<real_t> &pre_redi);
+#endif
+
 /* --- Phase G7a: vertical-explicit Redi (oce_ale_tracer.F90:1086-1169)
  *
  * Adds the off-diagonal Redi tensor's vertical projection to T values

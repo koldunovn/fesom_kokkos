@@ -642,21 +642,56 @@ int fesom_timestep(int                          step_n,
         nt_adv_checked = 1;
     }
     if (!nt_adv_skip) {
+        /* M2.5b-c: the GM/Redi tracer diffusion (diff_ver + diff_hor) runs on the
+         * DEVICE, interleaved between the HOST FCT advection calls — a device island
+         * with a host round-trip on `values` (the M2.2/§5 accepted pattern). Each
+         * Redi kernel owns its internal tr_xy/tr_z halo (D21); diff_hor is an
+         * edge→node SCATTER (atomic_add, D22). `values` is read-modify-write → the
+         * verify is the L26 capture-before. SYNC_MAP §2 row 13. The shared GM/mesh
+         * inputs are pushed to the device ONCE here (unchanged through substep 13;
+         * `slope_tapered`/`Ki` are re-pushed because diff_hor reads them at HALO
+         * edge-endpoints, L30); per-tracer `values`/`valuesold` are pushed after
+         * each FCT writes them (L28). On Serial/OpenMP host==device so all no-ops. */
+        const int N_redi = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        if (gm) {
+            gm->slope_tapered_fld.modify_host(); gm->slope_tapered_fld.sync_device();
+            gm->Ki_fld.modify_host();            gm->Ki_fld.sync_device();
+            mesh->hnode_fld.modify_host();       mesh->hnode_fld.sync_device();
+            mesh->hnode_new_fld.modify_host();   mesh->hnode_new_fld.sync_device();
+            mesh->helem_fld.modify_host();       mesh->helem_fld.sync_device();
+        }
+
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
         if (gm) {
-            /* G7a builds gm->tr_xy + adds vertical-explicit Redi flux to T. */
-            fesom_diff_ver_part_redi_expl(FESOM_TRACER_T, gm, aux, mesh, tracers, p);
-            /* G7b reuses gm->tr_xy + builds gm->tr_z + horizontal Redi flux. */
-            fesom_diff_part_hor_redi    (FESOM_TRACER_T, gm, aux, mesh, tracers, p);
+            auto &vT  = tracers->data[FESOM_TRACER_T].values_fld;
+            auto &voT = tracers->data[FESOM_TRACER_T].valuesold_fld;
+            vT.modify_host();  vT.sync_device();
+            voT.modify_host(); voT.sync_device();
+            std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi) */
+            if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_T].values,
+                                             tracers->data[FESOM_TRACER_T].values + (size_t)N_redi * nl);
+            fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_T, gm, mesh, tracers, p);
+            fesom_diff_part_hor_redi_kk     (FESOM_TRACER_T, gm, mesh, tracers, p);
+            vT.sync_host();                   /* OUT rail: before the host halo */
+            if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_T, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);   /* M1.5 guarded */
 
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
         if (gm) {
-            fesom_diff_ver_part_redi_expl(FESOM_TRACER_S, gm, aux, mesh, tracers, p);
-            fesom_diff_part_hor_redi    (FESOM_TRACER_S, gm, aux, mesh, tracers, p);
+            auto &vS  = tracers->data[FESOM_TRACER_S].values_fld;
+            auto &voS = tracers->data[FESOM_TRACER_S].valuesold_fld;
+            vS.modify_host();  vS.sync_device();
+            voS.modify_host(); voS.sync_device();
+            std::vector<real_t> redi_pre;
+            if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_S].values,
+                                             tracers->data[FESOM_TRACER_S].values + (size_t)N_redi * nl);
+            fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_S, gm, mesh, tracers, p);
+            fesom_diff_part_hor_redi_kk     (FESOM_TRACER_S, gm, mesh, tracers, p);
+            vS.sync_host();                   /* OUT rail: before the host halo */
+            if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_S, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
     }
 
     /* 13b. implicit vertical diffusion of tracers + surface heat/water flux BC.

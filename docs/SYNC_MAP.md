@@ -89,10 +89,11 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 10| `compute_hbar` (M4.2) | dyn `uv`; mesh `hbar`,`hbar_old` | dyn `ssh_rhs_old`; mesh `hbar` | nod2D `ssh_rhs_old`,`hbar` | part of the §5 bracket |
 | 11| `eta_n` inline | mesh `hbar`,`hbar_old`,`ulevels_nod2D` | dyn `eta_n` | (covered) | trivial; fold into M2.4 device region or keep host |
 | 12| ✅ **ALE `thickness`/`vert_vel`/`cflz`/`wvel_split` (M2.5 — DONE)** | mesh `hnode` (12a), `helem` + dyn `uv` (+`fer_uv` gm) (12b), set-once `area`/`edges`/`edge_tri`/`edge_cross`/levels; `w`,`cfl_z` (re-read after each driver halo) | mesh `hnode_new` (12a); dyn `w`[,`fer_w` gm] (12b), `cfl_z` (12c), `w_e`,`w_i` (12d) | `w` nod3D[,`fer_w` gm], `cfl_z`, `w_e`, `w_i` (all DRIVER halos — no internal exchange) | **implemented (4 device kernels, each its own rail — NO internal halo, no D21):** 12a `thickness_linfs_kk` IN `modify_host()+sync_device(hnode)`, `mod_dev(hnode_new)`, OUT `sync_host(hnode_new)` (read on HOST by tracer adv/diff substeps 13/13b — see row note); 12b `vert_vel_linfs_kk` IN `uv`(+`fer_uv` if gm), `helem`, **EDGE→NODE SCATTER (`atomic_add`, D22) + per-node level cumsum**, `mod_dev(w[,fer_w])`, OUT `sync_host` before the nod3D halo (`h_checked`); 12c `compute_cflz_kk` IN re-push `w` (just halo'd) + no-op `sync_device(hnode_new)` (Synced from 12a), per-node OWN-column accumulation (NOT a scatter → bit-identical OpenMP), `mod_dev(cfl_z)`, OUT `sync_host`; 12d `compute_wvel_split_kk` (⚠️`use_wsplit=.false.`→`w_e=w,w_i=0`) IN re-push `cfl_z`, pure map, `mod_dev(w_e,w_i)`, OUT `sync_host` before the halos. ⚠️ **GM is ON in pi** → the `fer_*` branch is LIVE (Serial `fer_w` bit-identical, OpenMP climate-close), L34. |
-| 13a| bolus add (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (in place) | — | `→dev(fer_uv,fer_w)`; `mod_dev(uv,w,w_e)` — honour `feedback_bolus_divergence_balance` |
+| 13a| bolus add (gm) — **STAYS HOST at M2.5b-c (moves to device with the FCT, M2.6)** | dyn `fer_uv`,`fer_w` (device GM output, sync_host'd in 1b/12b → host-current) | dyn `uv`,`w`,`w_e` (in place, host) | — | **host loop kept:** the bolus-augmented `uv`/`w`/`w_e` have NO device consumer — the only readers are the HOST FCT advect + tracer diff (verified: they only READ, never write `uv`/`w`/`w_e`; the device Redi doesn't read them). A device bolus would be a pure device→host round-trip. The host write is picked up by the next step's substep-3/12b `modify_host()+sync_device(uv)` IN rails. ⚠️ `feedback_bolus_divergence_balance` honoured (C twin does no per-cell clamp). |
+| 13(Redi)| ✅ **GM/Redi diffusion (M2.5b-c — DONE)** `diff_ver_part_redi_expl`/`diff_part_hor_redi` per tracer (T,S), between the host FCT calls | gm `slope_tapered`,`Ki`,`tr_xy`,`tr_z`; tracers `values`(post-FCT),`valuesold`; mesh `hnode`,`hnode_new`,`helem` + set-once `gradient_sca`/`areasvol`/`area`/`zbar`/`edge_*`/`elem_*`/`nod_in_elem2D`/levels | tracers `values` (+= Redi flux, in place) | (internal `tr_xy` elem2D-full, `tr_z` nod3D — see §6); driver `values` nod3D | **implemented (2 device kernels, ⚠️ GM ON L34):** shared IN rail (once) `modify_host()+sync_device()` on `slope_tapered`/`Ki` (re-push — diff_hor reads them at HALO edge-endpoints, L30) + `hnode`/`hnode_new`/`helem`; per-tracer IN `values`(host FCT wrote)/`valuesold` (L28). `diff_ver` = per-node gather + vd_flux → `+= values` (race-free map); `diff_hor` = build `tr_z` + edge→node SCATTER (`atomic_add`, D22) `+= values`. Each kernel OWNS its internal halo (D21): `diff_ver` exchanges `tr_xy`, `diff_hor` exchanges `tr_z` (`tr_xy` flows diff_ver→diff_hor device-current). `mod_dev(values)`; OUT `sync_host(values)` before the host nod3D halo (`h_checked`). `values` read-modify-write → L26 capture-before verify. **Serial bit-identical; OpenMP bit-identical too** (the pi-mesh Redi scatter didn't reorder-diverge; the only whole-run OpenMP floor is the M2.5 vert_vel scatter). |
 | 13| FCT tracer advection T,S (M2.6) — **AB2 eps=0.1** | dyn `uv`,`w*`; tracers; mesh | tracers `values` (T then S) | nod3D `values` per tracer | **FCT pipeline has internal exchanges — see §6**; wrap FCT scratch in `Field`; `mod_dev(values)` |
 | 13b| `impl_vert_diff_tracers` (M2.7, per-node TDMA) + S-floor | tracers; aux `Kv`; forcing fluxes | tracers `values` | nod3D `values` ×2 | `→dev(values,Kv,fluxes)`; `mod_dev(values)`; `→host(values)` before halos |
-| 13c| bolus sub (M2.5b, gm) | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (restore) | — | mirror of 13a |
+| 13c| bolus sub (gm) — **STAYS HOST (mirror of 13a)** | dyn `fer_uv`,`fer_w` | dyn `uv`,`w`,`w_e` (restore, host) | — | mirror of 13a — host loop, restores `uv`/`w`/`w_e` to pre-bolus for the next step. Moves to device with the FCT (M2.6). |
 | 14| ✅ **`ale_commit_thickness` (M2.5 — DONE)** | mesh `hnode_new` (Synced since 12a; substep-13 host tracer adv/diff only READ it), set-once `elem_nodes`/levels | mesh `hnode`,`helem` | `hnode` nod3D, `helem` elem3D | **implemented:** IN no-op `sync_device(hnode_new)` (device-current since 12a — never `modify_host()`, host didn't write it); `commit_thickness_kk` = `hnode:=hnode_new` flat copy then `helem` vertex-mean (2 launches, barrier orders the helem read of the copied hnode, D20); race-free maps → bit-identical all backends; `mod_dev(hnode,helem)`; OUT `sync_host(hnode,helem)` before the nod3D/elem3D halos (`h_checked`). Both EVOLVING → feed next step's substep-1 EOS + substep-6 TDMA. |
 
 At M1 the whole column was `[H]`. **M2.1 landed substep 1 (EOS) — the first LIVE rail:** its
@@ -158,6 +159,22 @@ shape) and `compute_sigma_xy`/`fer_gamma2vel` are gathers (the L27/`compute_vel_
 substep-1b chain produces `fer_uv` (consumed by the device `vert_vel`, 12b, + the bolus add, 13a) and
 `slope_tapered`/`Ki` (consumed by the substep-13 Redi). The 8 new halo guards transition `Device→Synced`
 each step under SYNCCHECK and ran clean (np=1 **and** np=2 CMA-off vs `…m13_nocma`).
+
+**M2.5b-c put the GM/Redi tracer diffusion on the device** — `diff_ver_part_redi_expl_kk` +
+`diff_part_hor_redi_kk` (row 13(Redi)), run per tracer (T,S) as a DEVICE island **between the host FCT
+advection calls** (the M2.2/§5 host-round-trip-on-`values` pattern: host FCT writes `values` → IN rail
+`modify_host()+sync_device(values)` → device Redi `+=` → OUT `sync_host(values)` → host halo + FCT-S).
+Each Redi kernel OWNS its internal halo (D21, §6): `diff_ver` exchanges `tr_xy`, `diff_hor` exchanges
+`tr_z`. `diff_ver` is a per-node gather + vd_flux → `+= values` (race-free map); `diff_hor` is an
+edge→node SCATTER (`atomic_add`, D22) with the 5 partial-cell branches. `values` is read-modify-write →
+the verify is the L26 capture-before (the driver snapshots the post-FCT `values` and passes it). Both
+Serial AND OpenMP bit-identical on the pi mesh (the Redi scatter didn't reorder-diverge; the only
+whole-run OpenMP floor stays the M2.5 vert_vel `w`-scatter ≈3.4e-21). **The bolus add/sub (13a/13c) STAY
+ON HOST** — verified the bolus-augmented `uv`/`w`/`w_e` have no device consumer (FCT + tracer-diff only
+READ them, the Redi doesn't read them at all), so a device bolus would be a pure round-trip; it moves to
+the device with the FCT in M2.6. This completes the GM/Redi PHYSICS on the device (substep-1b chain +
+the tracer-side Redi); only the trivial bolus shuffle and the still-host FCT/tracer-diff remain in
+substep 13.
 
 ---
 
@@ -245,6 +262,15 @@ in the M2.3 / M2.4 / M2.6 / M4.3 tasks):
   sync_device` inside `fesom_kpp_mixing_kk` (the function owns these because it owns the exchanges;
   the IN/OUT rails are the driver's, D21). `ghats` is not re-synced to device after its exchange
   (gated off in CORE2, not read on device after). Candidates for on-device pack/unpack in M5.
+- ✅ **GM/Redi diffusion** (`diff_ver_part_redi_expl_kk` + `diff_part_hor_redi_kk`, substep 13, M2.5b-c
+  — DONE) has **1 internal exchange point each**: `diff_ver` exchanges `tr_xy` (`exchange_elem`, full
+  element halo, 2-comp) between the per-element gradient build and the per-node gather; `diff_hor`
+  exchanges `tr_z` (`exchange_nod3D`) between the per-node vertical-gradient build and the edge loop.
+  Each is bracketed `modify_device → sync_host → halo (h_checked) → modify_host → sync_device` inside
+  the function (D21, the KPP/`visc_filt` idiom). `tr_xy` is built by `diff_ver` and re-read by
+  `diff_hor` — the D21 bracket leaves it device-current (owned+halo), so it flows diff_ver→diff_hor
+  with no extra re-push. `diff_hor`'s edge loop is an edge→node **scatter** into `values` (`atomic_add`,
+  D22).
 - **FCT pipeline** (`tracer_advect_one_fct`, M2.6; and the ice FCT, M4.3) interleaves low/high-order
   flux assembly with exchanges. Same bracket per internal exchange. The edge→node flux scatter is a
   separate decision (`docs/SCATTER_STRATEGY.md`, M2.6): Serial keeps natural edge order
