@@ -41,9 +41,14 @@
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
 
+#include <Kokkos_Core.hpp>   // M2.6-b: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>            // M2.6-b: FESOM_KK_VERIFY snapshot buffers (host-only diagnostic)
+#include <string>
+#include <algorithm>
+#include <cstdio>
 
 void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
                            const struct fesom_mesh  *mesh)
@@ -1297,4 +1302,592 @@ void fesom_tracer_advect_one(fesom_tracer_adv_scratch *sc,
 
     /* 6. ALE reconstruction */
     ale_reconstruct(mesh, tracers->data[tr_idx].values, tracers->del_ttf);
+}
+
+/*===========================================================================
+ * M2.6-b — DEVICE (Kokkos) twin of the FCT pipeline (fesom_tracer_advect_one_fct).
+ * Runs the whole MFCT 3rd-order H + QR4C V flux-corrected transport on the device
+ * as one function owning ~24 parallel_for launches + its THREE internal-exchange
+ * D21 brackets (fct_LO nod3D, tr_xy elem2D-full, fct_plus/fct_minus nod3D — the C
+ * twin does these inside the pipeline). The DRIVER (fesom_step.cpp substep 13) owns
+ * the IN rail (sync values/valuesold/uv/w_e/hnode/hnode_new/helem → device, L28) and
+ * the OUT rail (sync_host values+valuesold before the host halo + Redi).
+ *
+ * THREE edge→node SCATTERS use Kokkos::atomic_add (D22 — Serial bit-identical in the
+ * natural edge order, OpenMP/CUDA climate-close): compute_fct_LO step-1 divergence,
+ * the Zalesak fct_plus/fct_minus assembly (b1), and flux2dtracer's horizontal
+ * accumulation. Everything else is a per-node/per-edge/per-element race-free map or
+ * private gather. ⚠️ AB2 eps=0.1 preserved (init_AB); ⚠️ the MFCT element gradient is
+ * built from `values` (feedback_mfct_gradient_from_values) while the MFCT flux uses
+ * `valuesAB` — exactly as the C twin (oce_tracer_mod.F90:127 / oce_adv_tra_driver.F90:307).
+ *
+ * Layout matches the C twin (L33: derive every bound from the body): adv_flux_hor is
+ * zeroed/written over myDim_edge2D only; adv_flux_ver/fct_LO over myDim; init_AB +
+ * Zalesak a1 over myDim+eDim; AUX written for owned elements only (halo AUX stays 0 —
+ * the per-node a3 gather reads ±bignumber padding / 0, matching the C). The fct_plus/
+ * fct_minus and fct_LO halo scatter garbage is overwritten by the D21 exchange before
+ * any consumer reads it (b2/a1 read owned only; b3/MFCT read post-exchange).
+ *===========================================================================*/
+
+enum { NL_MAX = 64 };   /* matches the cap used in fesom_eos / momentum / gm */
+
+/* Device twin of node_avg_grad: area-weighted mean of tr_xy over the node's
+ * surrounding elements that own layer nz, written into eud[gbase + nz*4 + cx/cy]. */
+template <class DV, class IV>
+KOKKOS_INLINE_FUNCTION
+void node_avg_grad_kk(const DV &txy, const DV &earea, const IV &nlev, const IV &ulev,
+                      const IV &off, const IV &nie, int nl,
+                      int node, int nz0, int nz1,
+                      const DV &eud, size_t gbase, int cx, int cy)
+{
+    int b0 = off(node), b1 = off(node + 1);
+    for (int nz = nz0; nz < nz1; ++nz) {
+        real_t tvol = 0.0, tx = 0.0, ty = 0.0;
+        for (int k = b0; k < b1; ++k) {
+            int el = nie(k);
+            if (nz >= nlev(el) - 1 || nz < ulev(el) - 1) continue;
+            real_t a = earea(el);
+            tvol += a;
+            tx   += txy((size_t)el * nl * 2 + nz * 2 + 0) * a;
+            ty   += txy((size_t)el * nl * 2 + nz * 2 + 1) * a;
+        }
+        if (tvol > 0.0) { eud(gbase + nz*4 + cx) = tx / tvol; eud(gbase + nz*4 + cy) = ty / tvol; }
+    }
+}
+
+/* Device twin of mfct_edge_flux: 3rd-order reconstructed antidiffusive flux at one
+ * (edge, level), written as (HO − existing) since the LO upwind is already in `flux`. */
+template <class DV>
+KOKKOS_INLINE_FUNCTION
+void mfct_edge_flux_kk(const DV &ttf, const DV &flux, const DV &eud,
+                       int n1, int n2, int e, int nz, int nl,
+                       real_t vflux, real_t a, real_t edx, real_t edy,
+                       real_t RE, real_t num_ord)
+{
+    real_t T1   = ttf((size_t)n1 * nl + nz);
+    real_t T2   = ttf((size_t)n2 * nl + nz);
+    real_t diff = T2 - T1;
+    size_t gb = ((size_t)e * nl + nz) * 4;
+    real_t Tmean1 = T1 + (2.0*diff + edx*a*eud(gb+0) + edy*RE*eud(gb+2)) / 6.0;
+    real_t Tmean2 = T2 - (2.0*diff + edx*a*eud(gb+1) + edy*RE*eud(gb+3)) / 6.0;
+    real_t av  = Kokkos::fabs(vflux);
+    real_t cHO = (vflux + av)*Tmean1 + (vflux - av)*Tmean2;
+    real_t hi  = -0.5*(1.0 - num_ord)*cHO - vflux*num_ord*0.5*(Tmean1 + Tmean2);
+    flux((size_t)e * nl + nz) = hi - flux((size_t)e * nl + nz);
+}
+
+void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
+                                    int                       tr_idx,
+                                    const struct fesom_mesh  *mesh,
+                                    const struct fesom_dyn   *dyn,
+                                    struct fesom_tracers     *tracers,
+                                    struct fesom_partit      *partit)
+{
+    const int    nl       = mesh->nl;
+    const int    myDim    = mesh->myDim_nod2D;
+    const int    N_full   = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    myDim_e  = mesh->myDim_elem2D;
+    const int    E_full   = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    const int    Ee       = mesh->myDim_edge2D;       /* Fortran adv/FCT loops are myDim only */
+    const real_t dt       = (real_t)FESOM_PHASE1_DT;
+    const real_t RE       = (real_t)FESOM_R_EARTH;
+    const real_t eps      = 0.1;                       /* ⚠️ AB2 offset (oce_tracer_mod.F90:53) */
+    const real_t c_old    = -(0.5 + eps);
+    const real_t c_new    =  (1.5 + eps);
+    const real_t flux_eps = 1e-16;
+    const real_t bignumber= 1e3;
+    FESOM_CHECK(nl <= NL_MAX, "tracer_advect_one_fct_kk: nl %d > NL_MAX", nl);
+
+    /* device views */
+    auto vals     = tracers->data[tr_idx].values_fld.d();
+    auto valsAB   = tracers->data[tr_idx].valuesAB_fld.d();
+    auto valsold  = tracers->data[tr_idx].valuesold_fld.d();
+    auto delttf   = tracers->del_ttf_fld.d();
+    auto aflux_h  = sc->adv_flux_hor_fld.d();
+    auto aflux_v  = sc->adv_flux_ver_fld.d();
+    auto dth      = sc->del_ttf_advhoriz_fld.d();
+    auto dtv      = sc->del_ttf_advvert_fld.d();
+    auto fctLO    = sc->fct_LO_fld.d();
+    auto fmin     = sc->fct_ttf_min_fld.d();
+    auto fmax     = sc->fct_ttf_max_fld.d();
+    auto fplus    = sc->fct_plus_fld.d();
+    auto fminus   = sc->fct_minus_fld.d();
+    auto AUX      = sc->fct_aux_fld.d();
+    auto trxy     = sc->tr_xy_fld.d();
+    auto eud      = sc->edge_up_dn_grad_fld.d();
+    auto uv       = dyn->uv_fld.d();
+    auto W        = dyn->w_e_fld.d();
+    auto edges    = mesh->edges_fld.d();
+    auto edge_tri = mesh->edge_tri_fld.d();
+    auto ecross   = mesh->edge_cross_dxdy_fld.d();
+    auto edxdy    = mesh->edge_dxdy_fld.d();
+    auto elnod    = mesh->elem_nodes_fld.d();
+    auto ecos     = mesh->elem_cos_fld.d();
+    auto grad     = mesh->gradient_sca_fld.d();
+    auto earea    = mesh->elem_area_fld.d();
+    auto helem    = mesh->helem_fld.d();
+    auto hnode    = mesh->hnode_fld.d();
+    auto hnode_new= mesh->hnode_new_fld.d();
+    auto area     = mesh->area_fld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto zbar     = mesh->zbar_fld.d();
+    auto Zc       = mesh->Z_fld.d();
+    auto nlev_e   = mesh->nlevels_fld.d();
+    auto ulev_e   = mesh->ulevels_fld.d();
+    auto nlev_n   = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    auto nlevn_min= mesh->nlevels_nod2D_min_fld.d();
+    auto uleln_max= mesh->ulevels_nod2D_max_fld.d();
+    auto eudt     = mesh->edge_up_dn_tri_fld.d();
+    auto nie      = mesh->nod_in_elem2D_fld.d();
+    auto off      = mesh->nod_in_elem2D_offsets_fld.d();
+
+    using RP = Kokkos::RangePolicy<>;
+
+    /* ===== 1. init_tracers_AB (⚠️ AB2 eps=0.1) ===== */
+    Kokkos::parallel_for("fct_init_zero", RP(0, (size_t)N_full * nl),
+        KOKKOS_LAMBDA(const size_t i) { delttf(i) = 0.0; dth(i) = 0.0; dtv(i) = 0.0; });
+    Kokkos::parallel_for("fct_init_AB", RP(0, (size_t)N_full * nl),
+        KOKKOS_LAMBDA(const size_t i) { valsAB(i) = c_old * valsold(i) + c_new * vals(i); });
+    Kokkos::parallel_for("fct_init_save", RP(0, (size_t)N_full * nl),   /* valuesold = values (after AB) */
+        KOKKOS_LAMBDA(const size_t i) { valsold(i) = vals(i); });
+
+    /* ===== 2. LO upwind horizontal flux from `values` (adv_tra_hor_upw1) ===== */
+    Kokkos::parallel_for("fct_upw1h_zero", RP(0, (size_t)Ee * nl),
+        KOKKOS_LAMBDA(const size_t i) { aflux_h(i) = 0.0; });
+    Kokkos::parallel_for("fct_upw1h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nu1 = (el1>=0)? ulev_e(el1)-1 : 0, nl1 = (el1>=0)? nlev_e(el1)-1 : 0;
+        int nu2 = (el2>=0)? ulev_e(el2)-1 : 0, nl2 = (el2>=0)? nlev_e(el2)-1 : 0;
+        real_t dx1 = (el1>=0)? ecross(4*e+0) : 0.0, dy1 = (el1>=0)? ecross(4*e+1) : 0.0;
+        real_t dx2 = (el2>=0)? ecross(4*e+2) : 0.0, dy2 = (el2>=0)? ecross(4*e+3) : 0.0;
+        int nl12 = (el2>=0)? ((nl1<nl2)?nl1:nl2) : 0;
+        int nu12 = nu1; if (nu2 > nu12) nu12 = nu2;
+        for (int nz = nu1; nz < nu12; ++nz) {                 /* (A) el1-only above */
+            real_t u = uv((size_t)el1*nl*2+nz*2+0), v = uv((size_t)el1*nl*2+nz*2+1);
+            real_t vflux = (-v*dx1 + u*dy1) * helem((size_t)el1*nl+nz);
+            real_t T1 = vals((size_t)n1*nl+nz), T2 = vals((size_t)n2*nl+nz), av = Kokkos::fabs(vflux);
+            aflux_h((size_t)e*nl+nz) = -0.5*(T1*(vflux+av) + T2*(vflux-av));
+        }
+        if (el2>=0) for (int nz = nu2; nz < nu12; ++nz) {     /* (B) el2-only above */
+            real_t u = uv((size_t)el2*nl*2+nz*2+0), v = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (v*dx2 - u*dy2) * helem((size_t)el2*nl+nz);
+            real_t T1 = vals((size_t)n1*nl+nz), T2 = vals((size_t)n2*nl+nz), av = Kokkos::fabs(vflux);
+            aflux_h((size_t)e*nl+nz) = -0.5*(T1*(vflux+av) + T2*(vflux-av));
+        }
+        for (int nz = nu12; nz < nl12; ++nz) {                /* (C) both */
+            real_t u1 = uv((size_t)el1*nl*2+nz*2+0), v1 = uv((size_t)el1*nl*2+nz*2+1);
+            real_t u2 = uv((size_t)el2*nl*2+nz*2+0), v2 = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (-v1*dx1 + u1*dy1) * helem((size_t)el1*nl+nz)
+                         + ( v2*dx2 - u2*dy2) * helem((size_t)el2*nl+nz);
+            real_t T1 = vals((size_t)n1*nl+nz), T2 = vals((size_t)n2*nl+nz), av = Kokkos::fabs(vflux);
+            aflux_h((size_t)e*nl+nz) = -0.5*(T1*(vflux+av) + T2*(vflux-av));
+        }
+        for (int nz = nl12; nz < nl1; ++nz) {                 /* (D) el1-only below */
+            real_t u = uv((size_t)el1*nl*2+nz*2+0), v = uv((size_t)el1*nl*2+nz*2+1);
+            real_t vflux = (-v*dx1 + u*dy1) * helem((size_t)el1*nl+nz);
+            real_t T1 = vals((size_t)n1*nl+nz), T2 = vals((size_t)n2*nl+nz), av = Kokkos::fabs(vflux);
+            aflux_h((size_t)e*nl+nz) = -0.5*(T1*(vflux+av) + T2*(vflux-av));
+        }
+        if (el2>=0) for (int nz = nl12; nz < nl2; ++nz) {     /* (E) el2-only below */
+            real_t u = uv((size_t)el2*nl*2+nz*2+0), v = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (v*dx2 - u*dy2) * helem((size_t)el2*nl+nz);
+            real_t T1 = vals((size_t)n1*nl+nz), T2 = vals((size_t)n2*nl+nz), av = Kokkos::fabs(vflux);
+            aflux_h((size_t)e*nl+nz) = -0.5*(T1*(vflux+av) + T2*(vflux-av));
+        }
+    });
+
+    /* ===== 3. LO upwind vertical flux from `values` (adv_tra_ver_upw1) ===== */
+    Kokkos::parallel_for("fct_upw1v_zero", RP(0, (size_t)myDim * nl),
+        KOKKOS_LAMBDA(const size_t i) { aflux_v(i) = 0.0; });
+    Kokkos::parallel_for("fct_upw1v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
+        if (nzmax <= nzmin) return;
+        aflux_v((size_t)n*nl+nzmin) = -W((size_t)n*nl+nzmin) * vals((size_t)n*nl+nzmin)
+                                     * area((size_t)n*nl+nzmin);
+        for (int nz = nzmin+1; nz < nzmax; ++nz) {
+            real_t w_iface = W((size_t)n*nl+nz);
+            real_t T_below = vals((size_t)n*nl+nz), T_above = vals((size_t)n*nl+(nz-1));
+            real_t a = area((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);
+            aflux_v((size_t)n*nl+nz) = -0.5*(T_below*(w_iface+aw) + T_above*(w_iface-aw)) * a;
+        }
+    });
+
+    /* ===== 4. fct_LO from upwind (compute_fct_LO): edge→node SCATTER + per-node finalise ===== */
+    Kokkos::parallel_for("fct_LO_zero", RP(0, (size_t)myDim * nl),
+        KOKKOS_LAMBDA(const size_t i) { fctLO(i) = 0.0; });
+    Kokkos::parallel_for("fct_LO_scatter", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (nu2 > nu12) nu12 = nu2;
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = aflux_h((size_t)e*nl+nz);
+            Kokkos::atomic_add(&fctLO((size_t)n1*nl+nz),  f);
+            Kokkos::atomic_add(&fctLO((size_t)n2*nl+nz), -f);
+        }
+    });
+    Kokkos::parallel_for("fct_LO_final", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = (size_t)n*nl+nz;
+            real_t a = areasvol(k), hnod_old = hnode(k), hnod_new = hnode_new(k);
+            if (hnod_new <= 0.0 || a <= 0.0) { fctLO(k) = 0.0; continue; }
+            real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
+            real_t numer = vals(k)*hnod_old + (fctLO(k) + (f_top - f_bot)) * dt / a;
+            fctLO(k) = numer / hnod_new;
+        }
+    });
+    sc->fct_LO_fld.modify_device();
+    /* D21 internal halo: exchange fct_LO (Zalesak a1 reads LO at halo nodes). */
+    sc->fct_LO_fld.sync_host();
+    fesom_exchange_nod3D(sc->fct_LO_fld.h_checked(), nl, partit);
+    sc->fct_LO_fld.modify_host(); sc->fct_LO_fld.sync_device();
+
+    /* ===== 5. HO horizontal (MFCT): element gradient FROM `values`, exchange, fill, flux FROM valuesAB ===== */
+    Kokkos::parallel_for("fct_grad_zero", RP(0, (size_t)E_full * nl * 2),
+        KOKKOS_LAMBDA(const size_t i) { trxy(i) = 0.0; });
+    Kokkos::parallel_for("fct_grad_elem", RP(0, myDim_e), KOKKOS_LAMBDA(const int el) {
+        int n0 = elnod(3*el+0), n1 = elnod(3*el+1), n2 = elnod(3*el+2);
+        real_t g0=grad(6*el+0), g1=grad(6*el+1), g2=grad(6*el+2);
+        real_t g3=grad(6*el+3), g4=grad(6*el+4), g5=grad(6*el+5);
+        int nu = ulev_e(el)-1, nle = nlev_e(el)-1;
+        for (int nz = nu; nz < nle; ++nz) {
+            real_t t0 = vals((size_t)n0*nl+nz), t1 = vals((size_t)n1*nl+nz), t2 = vals((size_t)n2*nl+nz);
+            trxy((size_t)el*nl*2+nz*2+0) = g0*t0 + g1*t1 + g2*t2;
+            trxy((size_t)el*nl*2+nz*2+1) = g3*t0 + g4*t1 + g5*t2;
+        }
+    });
+    sc->tr_xy_fld.modify_device();
+    /* D21 internal halo: exchange tr_xy (full element halo, 2-comp; fill_up_dn_grad +
+     * the node gather read it at HALO elements). */
+    sc->tr_xy_fld.sync_host();
+    fesom_halo_exchange(sc->tr_xy_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
+    sc->tr_xy_fld.modify_host(); sc->tr_xy_fld.sync_device();
+
+    /* fill_up_dn_grad: per-edge up/down + node-averaged gradients. */
+    Kokkos::parallel_for("fct_eud_zero", RP(0, (size_t)Ee * nl * 4),
+        KOKKOS_LAMBDA(const size_t i) { eud(i) = 0.0; });
+    Kokkos::parallel_for("fct_eud_fill", RP(0, Ee), KOKKOS_LAMBDA(const int ed) {
+        int n1 = edges(2*ed+0), n2 = edges(2*ed+1);
+        int up = eudt(2*ed+0), dn = eudt(2*ed+1);
+        size_t gb = (size_t)ed * nl * 4;
+        if (up >= 0 && dn >= 0) {
+            int a1 = uleln_max(n1), a2 = uleln_max(n2);
+            int nzmin = ((a1>a2)?a1:a2) - 1;
+            int b1 = nlevn_min(n1), b2 = nlevn_min(n2);
+            int nzmax = ((b1<b2)?b1:b2) - 1;
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n1, ulev_n(n1)-1, nzmin, eud, gb, 0, 2);
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n2, ulev_n(n2)-1, nzmin, eud, gb, 1, 3);
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                eud(gb+nz*4+0) = trxy((size_t)up*nl*2+nz*2+0);
+                eud(gb+nz*4+1) = trxy((size_t)dn*nl*2+nz*2+0);
+                eud(gb+nz*4+2) = trxy((size_t)up*nl*2+nz*2+1);
+                eud(gb+nz*4+3) = trxy((size_t)dn*nl*2+nz*2+1);
+            }
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n1, nzmax, nlev_n(n1)-1, eud, gb, 0, 2);
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n2, nzmax, nlev_n(n2)-1, eud, gb, 1, 3);
+        } else {
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n1, ulev_n(n1)-1, nlev_n(n1)-1, eud, gb, 0, 2);
+            node_avg_grad_kk(trxy, earea, nlev_e, ulev_e, off, nie, nl, n2, ulev_n(n2)-1, nlev_n(n2)-1, eud, gb, 1, 3);
+        }
+    });
+
+    /* adv_tra_hor_mfct (num_ord=0, init_zero=0 → += antidiffusive HO−LO), ttf = valuesAB. */
+    Kokkos::parallel_for("fct_mfct_h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nu1 = (el1>=0)? ulev_e(el1)-1 : 0, nl1 = (el1>=0)? nlev_e(el1)-1 : 0;
+        int nu2 = (el2>=0)? ulev_e(el2)-1 : 0, nl2 = (el2>=0)? nlev_e(el2)-1 : 0;
+        real_t dx1 = (el1>=0)? ecross(4*e+0) : 0.0, dy1 = (el1>=0)? ecross(4*e+1) : 0.0;
+        real_t dx2 = (el2>=0)? ecross(4*e+2) : 0.0, dy2 = (el2>=0)? ecross(4*e+3) : 0.0;
+        int nl12 = (el2>=0)? ((nl1<nl2)?nl1:nl2) : 0;
+        int nu12 = (nu1>nu2)? nu1 : nu2;
+        real_t edx = edxdy(2*e+0), edy = edxdy(2*e+1);
+        real_t a = (el1>=0)? RE*ecos(el1) : 0.0;
+        if (el2>=0) a = 0.5*(a + RE*ecos(el2));
+        for (int nz = nu1; nz < nu12; ++nz) {                 /* (A) el1-only above */
+            real_t u = uv((size_t)el1*nl*2+nz*2+0), v = uv((size_t)el1*nl*2+nz*2+1);
+            real_t vflux = (-v*dx1 + u*dy1) * helem((size_t)el1*nl+nz);
+            mfct_edge_flux_kk(valsAB, aflux_h, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, 0.0);
+        }
+        if (el2>=0) for (int nz = nu2; nz < nu12; ++nz) {     /* (B) el2-only above */
+            real_t u = uv((size_t)el2*nl*2+nz*2+0), v = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (v*dx2 - u*dy2) * helem((size_t)el2*nl+nz);
+            mfct_edge_flux_kk(valsAB, aflux_h, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, 0.0);
+        }
+        for (int nz = nu12; nz < nl12; ++nz) {                /* (C) both */
+            real_t u1 = uv((size_t)el1*nl*2+nz*2+0), v1 = uv((size_t)el1*nl*2+nz*2+1);
+            real_t u2 = uv((size_t)el2*nl*2+nz*2+0), v2 = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (-v1*dx1 + u1*dy1) * helem((size_t)el1*nl+nz)
+                         + ( v2*dx2 - u2*dy2) * helem((size_t)el2*nl+nz);
+            mfct_edge_flux_kk(valsAB, aflux_h, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, 0.0);
+        }
+        for (int nz = nl12; nz < nl1; ++nz) {                 /* (D) el1-only below */
+            real_t u = uv((size_t)el1*nl*2+nz*2+0), v = uv((size_t)el1*nl*2+nz*2+1);
+            real_t vflux = (-v*dx1 + u*dy1) * helem((size_t)el1*nl+nz);
+            mfct_edge_flux_kk(valsAB, aflux_h, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, 0.0);
+        }
+        if (el2>=0) for (int nz = nl12; nz < nl2; ++nz) {     /* (E) el2-only below */
+            real_t u = uv((size_t)el2*nl*2+nz*2+0), v = uv((size_t)el2*nl*2+nz*2+1);
+            real_t vflux = (v*dx2 - u*dy2) * helem((size_t)el2*nl+nz);
+            mfct_edge_flux_kk(valsAB, aflux_h, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, 0.0);
+        }
+    });
+
+    /* ===== 6. HO vertical (adv_tra_ver_qr4c, num_ord=1, init_zero=0 → += HO−LO), ttf=valuesAB ===== */
+    Kokkos::parallel_for("fct_qr4c_v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
+        if (nzmax <= nzmin) return;
+        const real_t num_ord = 1.0;
+        { int nz = nzmin; size_t k = (size_t)n*nl+nz;            /* surface */
+          aflux_v(k) = -valsAB(k) * W(k) * area(k) - aflux_v(k); }
+        if (nzmax - nzmin >= 2) { int nz = nzmin+1;             /* 2nd layer */
+          real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
+          size_t k = (size_t)n*nl+nz;
+          aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k); }
+        if (nzmax - nzmin >= 2) { int nz = nzmax-1;             /* bottom-1 */
+          real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
+          size_t k = (size_t)n*nl+nz;
+          aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k); }
+        { int nz = nzmax; size_t k = (size_t)n*nl+nz; aflux_v(k) = 0.0 - aflux_v(k); }  /* bottom */
+        for (int nz = nzmin+2; nz <= nzmax-2; ++nz) {           /* interior 4th-order quadratic */
+            real_t Z_um1 = Zc(nz-1), Z_u = Zc(nz), Z_dn = Zc(nz+1), Z_um2 = Zc(nz-2);
+            real_t Tum1 = valsAB((size_t)n*nl+(nz-1)), Tu = valsAB((size_t)n*nl+nz);
+            real_t Tdn  = valsAB((size_t)n*nl+(nz+1)), Tum2 = valsAB((size_t)n*nl+(nz-2));
+            real_t qc = (Tum1 - Tu) / (Z_um1 - Z_u);
+            real_t qu = (Tu - Tdn) / (Z_u - Z_dn);
+            real_t qd = (Tum2 - Tum1) / (Z_um2 - Z_um1);
+            real_t zb = zbar(nz);
+            real_t Tmean1 = Tu   + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
+            real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
+            real_t w_iface = W((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);
+            real_t Tmean = (w_iface + aw)*Tmean1 + (w_iface - aw)*Tmean2;
+            real_t a = area((size_t)n*nl+nz);
+            real_t hi = (-0.5*(1.0 - num_ord)*Tmean - num_ord*0.5*(Tmean1 + Tmean2)*w_iface) * a;
+            aflux_v((size_t)n*nl+nz) = hi - aflux_v((size_t)n*nl+nz);
+        }
+    });
+
+    /* ===== 7. Zalesak limiter (oce_tra_adv_fct), ttf = values, LO = fct_LO ===== */
+    /* a1: per-node max/min(LO, ttf) over OWNED+HALO (a2 reads at halo vertices). */
+    Kokkos::parallel_for("fct_zal_a1", RP(0, N_full), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = (size_t)n*nl+nz; real_t a = fctLO(k), b = vals(k);
+            fmax(k) = (a>b)?a:b; fmin(k) = (a<b)?a:b;
+        }
+    });
+    /* a2: per-element max/min over 3 vertices + ±bignumber pad below nlevels. */
+    Kokkos::parallel_for("fct_zal_a2", RP(0, myDim_e), KOKKOS_LAMBDA(const int e) {
+        int n0 = elnod(3*e+0), n1 = elnod(3*e+1), n2 = elnod(3*e+2);
+        int nu1 = ulev_e(e)-1, nle = nlev_e(e)-1;
+        for (int nz = nu1; nz < nle; ++nz) {
+            real_t a0=fmax((size_t)n0*nl+nz), a1=fmax((size_t)n1*nl+nz), a2=fmax((size_t)n2*nl+nz);
+            real_t mx=a0; if(a1>mx)mx=a1; if(a2>mx)mx=a2;
+            real_t b0=fmin((size_t)n0*nl+nz), b1=fmin((size_t)n1*nl+nz), b2=fmin((size_t)n2*nl+nz);
+            real_t mn=b0; if(b1<mn)mn=b1; if(b2<mn)mn=b2;
+            AUX(((size_t)e*nl+nz)*2+0) = mx;
+            AUX(((size_t)e*nl+nz)*2+1) = mn;
+        }
+        for (int nz = nle; nz < nl-1; ++nz) {
+            AUX(((size_t)e*nl+nz)*2+0) = -bignumber;
+            AUX(((size_t)e*nl+nz)*2+1) =  bignumber;
+        }
+    });
+    /* a3+a4 fused (per OWNED node, column-local tvert): cluster max/min over surrounding
+     * cells (a3) then admissible increment vs LO with vertical 3-layer cluster (a4). */
+    Kokkos::parallel_for("fct_zal_a34", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        if (nu1 >= nl1) return;
+        real_t tvmax[NL_MAX], tvmin[NL_MAX];
+        int o0 = off(n), o1 = off(n+1);
+        for (int nz = nu1; nz < nl1; ++nz) {                  /* a3: cluster over cells */
+            int e0 = nie(o0);
+            real_t mx = AUX(((size_t)e0*nl+nz)*2+0), mn = AUX(((size_t)e0*nl+nz)*2+1);
+            for (int k = o0+1; k < o1; ++k) {
+                int e = nie(k);
+                real_t a = AUX(((size_t)e*nl+nz)*2+0), b = AUX(((size_t)e*nl+nz)*2+1);
+                if (a > mx) mx = a;
+                if (b < mn) mn = b;
+            }
+            tvmax[nz] = mx; tvmin[nz] = mn;
+        }
+        { int nz = nu1; size_t k = (size_t)n*nl+nz;           /* a4 surface */
+          fmax(k) = tvmax[nz] - fctLO(k); fmin(k) = tvmin[nz] - fctLO(k); }
+        for (int nz = nu1+1; nz < nl1-1; ++nz) {              /* a4 interior 3-layer cluster */
+            size_t k = (size_t)n*nl+nz;
+            real_t mx = tvmax[nz-1]; if (tvmax[nz]>mx) mx=tvmax[nz]; if (tvmax[nz+1]>mx) mx=tvmax[nz+1];
+            real_t mn = tvmin[nz-1]; if (tvmin[nz]<mn) mn=tvmin[nz]; if (tvmin[nz+1]<mn) mn=tvmin[nz+1];
+            fmax(k) = mx - fctLO(k); fmin(k) = mn - fctLO(k);
+        }
+        if (nl1-1 > nu1) { int nz = nl1-1; size_t k = (size_t)n*nl+nz;   /* a4 bottom */
+          fmax(k) = tvmax[nz] - fctLO(k); fmin(k) = tvmin[nz] - fctLO(k); }
+    });
+    /* b1: per-node vertical antidiffusive sums (zero+vertical fused → assign). */
+    Kokkos::parallel_for("fct_zal_b1v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            real_t fv_top = aflux_v((size_t)n*nl+nz), fv_bot = aflux_v((size_t)n*nl+(nz+1));
+            real_t pos = (fv_top>0.0?fv_top:0.0) + (-fv_bot>0.0?-fv_bot:0.0);
+            real_t neg = (fv_top<0.0?fv_top:0.0) + (-fv_bot<0.0?-fv_bot:0.0);
+            size_t k = (size_t)n*nl+nz; fplus(k) = pos; fminus(k) = neg;
+        }
+    });
+    /* b1 horizontal: edge→node SCATTER (atomic_add) into fct_plus/fct_minus. */
+    Kokkos::parallel_for("fct_zal_b1h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (el2>=0 && nu2 < nu12) nu12 = nu2;
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = aflux_h((size_t)e*nl+nz);
+            Kokkos::atomic_add(&fplus ((size_t)n1*nl+nz), (f>0.0? f:0.0));
+            Kokkos::atomic_add(&fminus((size_t)n1*nl+nz), (f<0.0? f:0.0));
+            Kokkos::atomic_add(&fplus ((size_t)n2*nl+nz), (-f>0.0? -f:0.0));
+            Kokkos::atomic_add(&fminus((size_t)n2*nl+nz), (-f<0.0? -f:0.0));
+        }
+    });
+    /* b2: per-node limiter factors. */
+    Kokkos::parallel_for("fct_zal_b2", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = (size_t)n*nl+nz; real_t a = areasvol(k), hn = hnode_new(k);
+            if (a <= 0.0 || hn <= 0.0) { fplus(k) = 1.0; fminus(k) = 1.0; continue; }
+            real_t flux_pos = fplus(k)*dt/a/hn + flux_eps;
+            real_t r_pos = fmax(k) / flux_pos; fplus(k) = (r_pos<1.0)?r_pos:1.0;
+            real_t flux_neg = fminus(k)*dt/a/hn - flux_eps;
+            real_t r_neg = fmin(k) / flux_neg; fminus(k) = (r_neg<1.0)?r_neg:1.0;
+        }
+    });
+    sc->fct_plus_fld.modify_device(); sc->fct_minus_fld.modify_device();
+    /* D21 internal halo: exchange fct_plus/fct_minus (b3 horizontal reads at edge
+     * endpoints, which can be HALO nodes). Two single-field calls (no 2-field variant). */
+    sc->fct_plus_fld.sync_host(); sc->fct_minus_fld.sync_host();
+    fesom_exchange_nod3D(sc->fct_plus_fld.h_checked(),  nl, partit);
+    fesom_exchange_nod3D(sc->fct_minus_fld.h_checked(), nl, partit);
+    sc->fct_plus_fld.modify_host();  sc->fct_plus_fld.sync_device();
+    sc->fct_minus_fld.modify_host(); sc->fct_minus_fld.sync_device();
+    /* b3 vertical: limit adf_v (per-node, own column). */
+    Kokkos::parallel_for("fct_zal_b3v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        if (nu1 >= nl1) return;
+        { int nz = nu1; size_t k = (size_t)n*nl+nz; real_t f = aflux_v(k);
+          real_t ae = (f>=0.0)? fplus(k) : fminus(k); aflux_v(k) = ae*f; }
+        for (int nz = nu1+1; nz < nl1; ++nz) {
+            size_t k = (size_t)n*nl+nz; real_t f = aflux_v(k); real_t ae;
+            if (f >= 0.0) { real_t a = fminus((size_t)n*nl+(nz-1)), b = fplus(k);  ae=(a<b)?a:b; }
+            else          { real_t a = fplus ((size_t)n*nl+(nz-1)), b = fminus(k); ae=(a<b)?a:b; }
+            aflux_v(k) = ae*f;
+        }
+    });
+    /* b3 horizontal: limit adf_h (per-edge, own slot; reads fct_plus/minus at endpoints). */
+    Kokkos::parallel_for("fct_zal_b3h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (el2>=0 && nu2 < nu12) nu12 = nu2;
+        for (int nz = nu12; nz < nl12; ++nz) {
+            size_t k = (size_t)e*nl+nz; real_t f = aflux_h(k); real_t ae;
+            if (f >= 0.0) { real_t a = fplus ((size_t)n1*nl+nz), b = fminus((size_t)n2*nl+nz); ae=(a<b)?a:b; }
+            else          { real_t a = fminus((size_t)n1*nl+nz), b = fplus ((size_t)n2*nl+nz); ae=(a<b)?a:b; }
+            aflux_h(k) = ae*f;
+        }
+    });
+
+    /* ===== 8. flux2dtracer_fct (LO transition + limited HO into del_ttf_adv{vert,horiz}) ===== */
+    Kokkos::parallel_for("fct_f2d_v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
+        for (int nz = nu1; nz < nl1; ++nz) {                  /* LO transition */
+            size_t k = (size_t)n*nl+nz;
+            dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);
+        }
+        for (int nz = nu1; nz < nl1; ++nz) {                  /* antidiffusive vertical divergence */
+            size_t k = (size_t)n*nl+nz; real_t a = areasvol(k);
+            if (a <= 0.0) continue;
+            real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
+            dtv(k) += (f_top - f_bot) * dt / a;
+        }
+    });
+    Kokkos::parallel_for("fct_f2d_h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {   /* edge→node SCATTER */
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (el2>=0 && nu2 > 0 && nu2 < nu12) nu12 = nu2;
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = aflux_h((size_t)e*nl+nz);
+            real_t a1 = areasvol((size_t)n1*nl+nz), a2 = areasvol((size_t)n2*nl+nz);
+            if (a1 > 0.0) Kokkos::atomic_add(&dth((size_t)n1*nl+nz),   f*dt/a1);
+            if (a2 > 0.0) Kokkos::atomic_add(&dth((size_t)n2*nl+nz), -(f*dt/a2));
+        }
+    });
+
+    /* ===== 9. del_ttf = del_ttf_advhoriz + del_ttf_advvert (per-node, full nl) ===== */
+    Kokkos::parallel_for("fct_delttf_sum", RP(0, (size_t)myDim * nl),
+        KOKKOS_LAMBDA(const size_t i) { delttf(i) = dth(i) + dtv(i); });
+
+    /* ===== 10. ALE reconstruction (T_new = LO + limited antidiff) ===== */
+    Kokkos::parallel_for("fct_ale_recon", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+        int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            size_t k = (size_t)n*nl+nz;
+            real_t hnode_old = hnode(k), hn_new = hnode_new(k);
+            delttf(k) += vals(k) * (hnode_old - hn_new);
+            if (hn_new > 0.0) vals(k) += delttf(k) / hn_new;
+        }
+    });
+
+    tracers->data[tr_idx].values_fld.modify_device();
+    tracers->data[tr_idx].valuesold_fld.modify_device();
+}
+
+/*--- FESOM_KK_VERIFY=tradv gate ---------------------------------------------
+ * The FCT pipeline reads-and-modifies `values` (and overwrites `valuesold = values`
+ * inside init_AB, after reading the original valuesold for the AB2 combination), so
+ * this is the L26 capture-before with TWO inputs: the DRIVER snapshots the pre-FCT
+ * `values` and `valuesold` and passes them. Restore both, run the C twin (recomputes
+ * everything incl. its own internal halos — a no-op at np=1), diff the final `values`,
+ * restore the KK production state (values + valuesold). del_ttf/valuesAB are FCT-
+ * internal scratch (C-overwritten == KK on Serial; no host reader after the FCT). */
+void fesom_tracer_fct_verify(fesom_tracer_adv_scratch *sc, int tr_idx,
+                             const struct fesom_mesh *mesh, const struct fesom_dyn *dyn,
+                             struct fesom_tracers *tracers, struct fesom_partit *partit,
+                             int step_n, const std::vector<real_t> &pre_values,
+                             const std::vector<real_t> &pre_valuesold)
+{
+    (void)partit;
+    const int nl = mesh->nl;
+    const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
+    real_t *vals = tracers->data[tr_idx].values;
+    real_t *vold = tracers->data[tr_idx].valuesold;
+    std::vector<real_t> kk_v(vals, vals + total);          /* KK final values */
+    std::vector<real_t> kk_vo(vold, vold + total);         /* KK valuesold (= pre_values) */
+    std::copy(pre_values.begin(),    pre_values.end(),    vals);   /* restore FCT inputs */
+    std::copy(pre_valuesold.begin(), pre_valuesold.end(), vold);
+    fesom_tracer_advect_one_fct(sc, tr_idx, mesh, dyn, tracers);    /* C twin (uses sc->partit) */
+    double d = 0.0;
+    for (size_t i = 0; i < total; ++i) {
+        double dd = std::fabs((double)kk_v[i] - (double)vals[i]);
+        if (dd > d) d = dd;
+    }
+    std::copy(kk_v.begin(),  kk_v.end(),  vals);           /* restore KK production state */
+    std::copy(kk_vo.begin(), kk_vo.end(), vold);
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=tradv] step %d backend=%s  max|Δ|: fct(tr%d) values=%.3e\n",
+                step_n, backend.c_str(), tr_idx, d);
+    std::fflush(stdout);
+    if (backend == "Serial" && d != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=tradv] FAIL (fct tr%d) step %d: Serial must be "
+                             "bit-identical to the C twin (max|Δ|=%.3e)\n", tr_idx, step_n, d);
+        std::abort();
+    }
 }

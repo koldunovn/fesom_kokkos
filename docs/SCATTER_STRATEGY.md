@@ -77,7 +77,10 @@ perf if the atomics are a measured bottleneck.
 | `visc_filt_bidiff_kk` stage 2 (M2.4) | edge → element | `uv_rhs` | ✅ atomic_add |
 | `momentum_adv_scalar_kk` horiz adv (M2.4) | edge → node | `uvnode_rhs` | ✅ atomic_add |
 | `ale_vert_vel_linfs_kk` edge flux (M2.5) | edge → node | `w` (+`fer_w` when GM on) | ✅ atomic_add |
-| FCT flux assembly (M2.6) | edge → node | tracer flux | ⏳ (same decision) |
+| Redi `diff_part_hor_redi_kk` (M2.5b) | edge → node | tracer `values` | ✅ atomic_add |
+| FCT `compute_fct_LO` divergence (M2.6) | edge → node | `fct_LO` | ✅ atomic_add |
+| FCT Zalesak `b1` assembly (M2.6) | edge → node | `fct_plus`/`fct_minus` | ✅ atomic_add |
+| FCT `flux2dtracer` horizontal (M2.6) | edge → node | `del_ttf_advhoriz` | ✅ atomic_add |
 | ice FCT / EVP (M4.3) | edge → node | ice flux / stress | ⏳ (same decision) |
 
 (Note: a *gather* — each entity reads its neighbours into private accumulators and writes only its

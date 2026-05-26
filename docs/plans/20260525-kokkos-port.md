@@ -518,17 +518,21 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - Modify: `src/fesom_tracer_adv.cpp` (1301 LoC), `src/fesom_step.cpp`
 - Create: `docs/SCATTER_STRATEGY.md`
 
-- [ ] wrap FCT scratch arrays in `Field` (`edge_up_dn_grad/fct_LO/tr_xy`, flux work) — deferred
-      from M1; bracket the pipeline's internal `fesom_exchange_*` with sync points (as in M2.3)
-- [ ] port the MFCT 3rd-order horizontal + vertical FCT pipeline; gradients from `values`
-      (`feedback_mfct_gradient_from_values`); **preserve the tracer AB2 `eps=0.1`** too
-      (`PORTING_LESSONS §1`, `oce_tracer_mod.F90:53`)
-- [ ] ⚠️ **flux assembly is edge→node scatter**: on Serial it's a sequential `+=` → bit-identical.
-      GPU strategy = `Kokkos::atomic_add` (simplest, climate-close). **Constraint:** the **Serial
-      verify path keeps natural edge order** so `max|Δ|==0` holds; edge-**coloring**, if ever
-      adopted, is **GPU-only** (it reorders a physics sum → would break the Serial gate and the
-      no-simplification rule). Record this in `docs/SCATTER_STRATEGY.md`
-- [ ] `FESOM_KK_VERIFY=tradv` Serial `max|Δ|==0`; backends — before M2.7
+- [x] wrap FCT scratch arrays in `Field` (all 12: `adv_flux_hor/adv_flux_ver/del_ttf_adv{horiz,vert}/
+      fct_LO/fct_ttf_{min,max}/fct_plus/fct_minus/fct_aux/tr_xy/edge_up_dn_grad`) — M2.6-a (`d210025`),
+      `*sc = T{}` not memset (D13/L13), bit-identical
+- [x] port the MFCT 3rd-order horizontal + vertical FCT pipeline — M2.6-b: `fesom_tracer_advect_one_fct_kk`
+      (~24 launches + 3 D21 internal-exchange brackets in ONE fn). ⚠️ MFCT element gradient from `values`
+      (`feedback_mfct_gradient_from_values`) while the MFCT flux uses `valuesAB`; ⚠️ tracer AB2 `eps=0.1`
+      (`oce_tracer_mod.F90:53`, init_AB). a3+a4 fused to column-local scratch (no `[N*nl]` tvert). Verify
+      `tradv` = L26 capture-before on BOTH `values` and `valuesold` (L37)
+- [x] ⚠️ **flux assembly is edge→node scatter** — M2.6-b: 3 scatters (`compute_fct_LO` divergence,
+      Zalesak `fct_plus/minus`, `flux2dtracer` horizontal) via `Kokkos::atomic_add` in natural edge
+      order (Serial bit-identical, OpenMP/CUDA climate-close — added no new class on pi; edge-coloring
+      GPU-only). Recorded in `docs/SCATTER_STRATEGY.md` (D22) — first written M2.4, extended here
+- [x] `FESOM_KK_VERIFY=tradv` Serial `max|Δ|==0` (40 lines, 0 non-zero); backends — Serial pi == golden
+      (np=1 + np=2 CMA-off); `ctest` 4/4; SYNCCHECK clean + bit-identical; OpenMP climate-close (unchanged
+      M2.5 budget); CUDA builds + climate-close. **+ M2.6-c: move bolus add/sub to device.** → M2.7
 
 ### Task M2.7: Tracer diffusion (implicit vertical + Redi K33) + M2 acceptance
 

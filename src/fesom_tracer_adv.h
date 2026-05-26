@@ -3,6 +3,7 @@
 
 #include "fesom_types.h"
 #include "fesom_field.hpp"   // M2.6-a: DualView-backed storage for the FCT scratch arrays
+#include <vector>            // M2.6-b: FESOM_KK_VERIFY capture-before buffers
 
 struct fesom_mesh;
 struct fesom_dyn;
@@ -121,5 +122,29 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
                                  const struct fesom_mesh  *mesh,
                                  const struct fesom_dyn   *dyn,
                                  struct fesom_tracers     *tracers);
+
+/*
+ * M2.6-b: DEVICE (Kokkos) twin of fesom_tracer_advect_one_fct — the whole MFCT
+ * 3rd-order H + QR4C V flux-corrected transport on the device (one function owning
+ * ~24 parallel_for launches + its 3 internal-exchange D21 brackets; 3 edge→node
+ * atomic_add scatters, D22). The DRIVER owns the IN/OUT sync rails (substep 13).
+ */
+void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
+                                    int                       tr_idx,
+                                    const struct fesom_mesh  *mesh,
+                                    const struct fesom_dyn   *dyn,
+                                    struct fesom_tracers     *tracers,
+                                    struct fesom_partit      *partit);
+
+/*
+ * FESOM_KK_VERIFY=tradv gate: capture-before (L26) on `values` + `valuesold` (the
+ * FCT read-modifies both). Runs the C twin on the restored inputs and asserts the
+ * final `values` is bit-identical on Serial; non-intrusive (restores KK state).
+ */
+void fesom_tracer_fct_verify(fesom_tracer_adv_scratch *sc, int tr_idx,
+                             const struct fesom_mesh *mesh, const struct fesom_dyn *dyn,
+                             struct fesom_tracers *tracers, struct fesom_partit *partit,
+                             int step_n, const std::vector<real_t> &pre_values,
+                             const std::vector<real_t> &pre_valuesold);
 
 #endif /* FESOM_TRACER_ADV_H */

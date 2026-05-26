@@ -128,6 +128,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_vrhs   = 0;   /* M2.4 substep 4 */
     static int s_verify_ale    = 0;   /* M2.5 substeps 12/14 */
     static int s_verify_gm     = 0;   /* M2.5b substep 1b */
+    static int s_verify_tradv  = 0;   /* M2.6 substep 13 (FCT) */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -138,6 +139,7 @@ int fesom_timestep(int                          step_n,
         s_verify_vrhs = (e && strstr(e, "vrhs")) ? 1 : 0;     /* M2.4: no substring collision */
         s_verify_ale = (e && strstr(e, "ale")) ? 1 : 0;       /* M2.5: no substring collision */
         s_verify_gm  = (e && strstr(e, "gm"))  ? 1 : 0;       /* M2.5b: no substring collision (gm ⊄ any key) */
+        s_verify_tradv = (e && strstr(e, "tradv")) ? 1 : 0;   /* M2.6: distinct token (no collision either way, L25) */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -642,30 +644,54 @@ int fesom_timestep(int                          step_n,
         nt_adv_checked = 1;
     }
     if (!nt_adv_skip) {
-        /* M2.5b-c: the GM/Redi tracer diffusion (diff_ver + diff_hor) runs on the
-         * DEVICE, interleaved between the HOST FCT advection calls — a device island
-         * with a host round-trip on `values` (the M2.2/§5 accepted pattern). Each
-         * Redi kernel owns its internal tr_xy/tr_z halo (D21); diff_hor is an
-         * edge→node SCATTER (atomic_add, D22). `values` is read-modify-write → the
-         * verify is the L26 capture-before. SYNC_MAP §2 row 13. The shared GM/mesh
-         * inputs are pushed to the device ONCE here (unchanged through substep 13;
-         * `slope_tapered`/`Ki` are re-pushed because diff_hor reads them at HALO
-         * edge-endpoints, L30); per-tracer `values`/`valuesold` are pushed after
-         * each FCT writes them (L28). On Serial/OpenMP host==device so all no-ops. */
+        /* M2.6-b: the FCT tracer advection (T then S) runs on the DEVICE
+         * (fesom_tracer_advect_one_fct_kk) — one device island per tracer owning ~24
+         * launches + its 3 internal-exchange D21 brackets (fct_LO/tr_xy/fct_plus+minus)
+         * and 3 edge→node atomic_add scatters (D22). The M2.5b-c GM/Redi diffusion
+         * (diff_ver + diff_hor) still runs on the DEVICE right after each FCT, += onto
+         * the FCT-advected `values`. `values`/`valuesold` are read-modify-write → both
+         * verifies are L26 capture-before. SYNC_MAP §2 row 13.
+         *
+         * FCT IN rail (unconditional, L28): the device FCT reads the bolus-augmented
+         * dyn->uv / dyn->w_e (13a wrote them on host this step) and the evolving mesh
+         * hnode / hnode_new / helem; push all five once (shared across T and S — the FCT
+         * and Redi only READ them). The GM/Redi shared rail then adds slope_tapered/Ki
+         * (re-pushed: diff_hor reads them at HALO edge-endpoints, L30). Per-tracer
+         * values/valuesold are pushed right before each FCT. On Serial/OpenMP host==
+         * device so every sync is a no-op (the run stays bit-identical). */
         const int N_redi = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
+        dyn->w_e_fld.modify_host();         dyn->w_e_fld.sync_device();
+        mesh->hnode_fld.modify_host();      mesh->hnode_fld.sync_device();
+        mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
+        mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
         if (gm) {
             gm->slope_tapered_fld.modify_host(); gm->slope_tapered_fld.sync_device();
             gm->Ki_fld.modify_host();            gm->Ki_fld.sync_device();
-            mesh->hnode_fld.modify_host();       mesh->hnode_fld.sync_device();
-            mesh->hnode_new_fld.modify_host();   mesh->hnode_new_fld.sync_device();
-            mesh->helem_fld.modify_host();       mesh->helem_fld.sync_device();
         }
 
-        fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
+        /* ---- T ---- */
+        {
+            auto &vT  = tracers->data[FESOM_TRACER_T].values_fld;
+            auto &voT = tracers->data[FESOM_TRACER_T].valuesold_fld;
+            vT.modify_host();  vT.sync_device();          /* FCT per-tracer IN rail */
+            voT.modify_host(); voT.sync_device();
+            std::vector<real_t> fct_pre_v, fct_pre_vo;    /* L26 capture-before (pre-FCT inputs) */
+            if (s_verify_tradv) {
+                fct_pre_v.assign (tracers->data[FESOM_TRACER_T].values,
+                                  tracers->data[FESOM_TRACER_T].values    + (size_t)N_redi * nl);
+                fct_pre_vo.assign(tracers->data[FESOM_TRACER_T].valuesold,
+                                  tracers->data[FESOM_TRACER_T].valuesold + (size_t)N_redi * nl);
+            }
+            fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers, p);
+            vT.sync_host();  voT.sync_host();             /* OUT rail: Redi rail + halo + next step read them */
+            if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn,
+                                                        tracers, p, step_n, fct_pre_v, fct_pre_vo);
+        }
         if (gm) {
             auto &vT  = tracers->data[FESOM_TRACER_T].values_fld;
             auto &voT = tracers->data[FESOM_TRACER_T].valuesold_fld;
-            vT.modify_host();  vT.sync_device();
+            vT.modify_host();  vT.sync_device();          /* Redi IN: post-FCT values (host-current) */
             voT.modify_host(); voT.sync_device();
             std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi) */
             if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_T].values,
@@ -677,7 +703,24 @@ int fesom_timestep(int                          step_n,
         }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);   /* M1.5 guarded */
 
-        fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
+        /* ---- S ---- */
+        {
+            auto &vS  = tracers->data[FESOM_TRACER_S].values_fld;
+            auto &voS = tracers->data[FESOM_TRACER_S].valuesold_fld;
+            vS.modify_host();  vS.sync_device();
+            voS.modify_host(); voS.sync_device();
+            std::vector<real_t> fct_pre_v, fct_pre_vo;
+            if (s_verify_tradv) {
+                fct_pre_v.assign (tracers->data[FESOM_TRACER_S].values,
+                                  tracers->data[FESOM_TRACER_S].values    + (size_t)N_redi * nl);
+                fct_pre_vo.assign(tracers->data[FESOM_TRACER_S].valuesold,
+                                  tracers->data[FESOM_TRACER_S].valuesold + (size_t)N_redi * nl);
+            }
+            fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers, p);
+            vS.sync_host();  voS.sync_host();
+            if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn,
+                                                        tracers, p, step_n, fct_pre_v, fct_pre_vo);
+        }
         if (gm) {
             auto &vS  = tracers->data[FESOM_TRACER_S].values_fld;
             auto &voS = tracers->data[FESOM_TRACER_S].valuesold_fld;
