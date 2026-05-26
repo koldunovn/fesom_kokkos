@@ -1551,6 +1551,33 @@ void fesom_fer_gamma2vel_kk(struct fesom_dyn        *dyn,
     dyn->fer_uv_fld.modify_device();
 }
 
+/*--- M2.6-c — GM bolus velocity add/sub on device (substeps 13a / 13c) -------
+ * uv += sgn*fer_uv (element, both comps), w += sgn*fer_w, w_e += sgn*fer_w (node),
+ * over OWNED+HALO (myDim+eDim) — the C loops in fesom_step.cpp:13a/13c. sgn=+1 adds,
+ * sgn=-1 restores. `1.0*x==x` and `-1.0*x==-x` are IEEE-exact and `a+(-b)==a-b`, so
+ * the sign-parameterised map is bit-identical to the C `+=`/`-=` on Serial. Pure
+ * elementwise map (no scatter/reduce) → bit-identical on Serial AND OpenMP. The
+ * driver owns the IN/OUT rails. */
+void fesom_gm_bolus_apply_kk(struct fesom_dyn *dyn, const struct fesom_mesh *mesh, real_t sgn)
+{
+    const int nl     = mesh->nl;
+    const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
+    const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
+
+    auto uv     = dyn->uv_fld.d();
+    auto w      = dyn->w_fld.d();
+    auto w_e    = dyn->w_e_fld.d();
+    auto fer_uv = dyn->fer_uv_fld.d();
+    auto fer_w  = dyn->fer_w_fld.d();
+
+    /* uv (element, both comps) — flat over [0, E_loop*nl*2). */
+    Kokkos::parallel_for("fesom_gm_bolus_uv", Kokkos::RangePolicy<>(0, (size_t)E_loop * nl * 2),
+        KOKKOS_LAMBDA(const size_t i) { uv(i) += sgn * fer_uv(i); });
+    /* w, w_e (node) — flat over [0, N_loop*nl). */
+    Kokkos::parallel_for("fesom_gm_bolus_w", Kokkos::RangePolicy<>(0, (size_t)N_loop * nl),
+        KOKKOS_LAMBDA(const size_t i) { w(i) += sgn * fer_w(i); w_e(i) += sgn * fer_w(i); });
+}
+
 /*===========================================================================
  * M2.5b — FESOM_KK_VERIFY=gm gates. Each runs the untouched C twin beside the
  * device result on the same live state, reports per-field max|Δ|, and asserts

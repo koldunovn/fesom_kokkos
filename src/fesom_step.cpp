@@ -615,24 +615,25 @@ int fesom_timestep(int                          step_n,
 
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
      * Wraps BOTH advection (13) and diffusion (13b) so each tracer sees the
-     * bolus-augmented velocity field. Subtracted back after diffusion. */
+     * bolus-augmented velocity field. Subtracted back after diffusion (13c).
+     * M2.6-c: ON THE DEVICE (uv/w/w_e += fer_uv/fer_w) — now that the device FCT
+     * (substep 13) reads uv/w_e on the device, the bolus is its device producer (L36).
+     * IN rail (L28): push uv/w/w_e (host-current from update_vel + the ALE w/w_e) +
+     * fer_uv/fer_w (re-push — produced on device in 1b/12b then sync_host'd + halo'd on
+     * the host, L30). OUT: modify_device then sync_host(uv/w/w_e) so the host mirrors
+     * the augmented velocity — the FESOM_KK_VERIFY=tradv C twin reads host uv, and uv/
+     * w/w_e then stay device-current (Synced, augmented) through the whole FCT region
+     * until 13c restores them (the FCT only READS uv/w_e; Redi/tracer-diff don't touch
+     * them). On Serial/OpenMP host==device so the kernel is the C loop, bit-identical. */
     if (gm) {
-        const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
-        const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
-        for (int e = 0; e < E_loop; ++e) {
-            for (int nz = 0; nz < nl; ++nz) {
-                size_t k = (size_t)e * nl * 2 + nz * 2;
-                dyn->uv[k + 0] += dyn->fer_uv[k + 0];
-                dyn->uv[k + 1] += dyn->fer_uv[k + 1];
-            }
-        }
-        for (int n = 0; n < N_loop; ++n) {
-            for (int nz = 0; nz < nl; ++nz) {
-                size_t k = (size_t)n * nl + nz;
-                dyn->w  [k] += dyn->fer_w[k];
-                dyn->w_e[k] += dyn->fer_w[k];
-            }
-        }
+        dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+        dyn->w_fld.modify_host();      dyn->w_fld.sync_device();
+        dyn->w_e_fld.modify_host();    dyn->w_e_fld.sync_device();
+        dyn->fer_uv_fld.modify_host(); dyn->fer_uv_fld.sync_device();
+        dyn->fer_w_fld.modify_host();  dyn->fer_w_fld.sync_device();
+        fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)1.0);
+        dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
+        dyn->uv_fld.sync_host();       dyn->w_fld.sync_host();       dyn->w_e_fld.sync_host();
     }
 
     /* 13. tracer advection: T then S.
@@ -794,24 +795,16 @@ int fesom_timestep(int                          step_n,
     /* 13c. Phase G6b — bolus velocity sub (Fortran oce_ale_tracer.F90:284-295).
      * Restore dyn->uv / dyn->w / dyn->w_e to their pre-add values so the
      * remainder of the timestep (and the next step) sees the original
-     * velocity field. */
+     * velocity field. M2.6-c: ON THE DEVICE (mirror of 13a). uv/w/w_e are
+     * device-current (augmented, Synced) from 13a through the whole FCT region —
+     * the FCT only READS uv/w_e and the Redi/tracer-diff/sfloor never touch them —
+     * and fer_uv/fer_w stay device-current from 13a, so no IN push is needed. OUT:
+     * modify_device then sync_host(uv/w/w_e) so the next step's host substep-3
+     * readers (update_vel/compute_vel_nodes) see the restored velocity. */
     if (gm) {
-        const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
-        const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
-        for (int e = 0; e < E_loop; ++e) {
-            for (int nz = 0; nz < nl; ++nz) {
-                size_t k = (size_t)e * nl * 2 + nz * 2;
-                dyn->uv[k + 0] -= dyn->fer_uv[k + 0];
-                dyn->uv[k + 1] -= dyn->fer_uv[k + 1];
-            }
-        }
-        for (int n = 0; n < N_loop; ++n) {
-            for (int nz = 0; nz < nl; ++nz) {
-                size_t k = (size_t)n * nl + nz;
-                dyn->w  [k] -= dyn->fer_w[k];
-                dyn->w_e[k] -= dyn->fer_w[k];
-            }
-        }
+        fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)-1.0);
+        dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
+        dyn->uv_fld.sync_host();       dyn->w_fld.sync_host();       dyn->w_e_fld.sync_host();
     }
 
     /* 14. commit thickness — M2.5: device kernel. SYNC_MAP §2 row 14. hnode := hnode_new

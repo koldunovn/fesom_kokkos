@@ -121,6 +121,14 @@ void fesom_fer_gamma2vel_kk        (struct fesom_dyn           *dyn,
                                     const struct fesom_mesh    *mesh,
                                     const fesom_gm             *gm);
 
+/* --- M2.6-c: GM bolus velocity add/sub on device (substeps 13a/13c). sgn=+1.0
+ * adds fer_uv/fer_w into uv/w/w_e, sgn=-1.0 restores. Bit-identical to the C host
+ * loops on Serial (a pure elementwise map). Bracketed by the FCT device island so
+ * the FCT reads the bolus-augmented velocity on the device (L36). */
+void fesom_gm_bolus_apply_kk       (struct fesom_dyn           *dyn,
+                                    const struct fesom_mesh    *mesh,
+                                    real_t                      sgn);
+
 /* --- M2.5b: FESOM_KK_VERIFY=gm per-kernel gates (Serial max|Δ|==0) ---------- */
 void fesom_gm_sigma_xy_verify     (struct fesom_aux *aux, const struct fesom_tracers *tracers,
                                    const struct fesom_mesh *mesh, fesom_gm *gm,
