@@ -124,12 +124,14 @@ int fesom_timestep(int                          step_n,
     static int s_verify_kpp    = 0;
     static int s_verify_pgf    = 0;   /* M2.4 substep 2 */
     static int s_verify_ivisc  = 0;   /* M2.4 substep 6 */
+    static int s_verify_vfilt  = 0;   /* M2.4 substep 5 */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
         s_verify_kpp = (e && strstr(e, "kpp")) ? 1 : 0;   /* safe: kpp is not a substring of pp */
         s_verify_pgf = (e && strstr(e, "pgf")) ? 1 : 0;   /* M2.4: no substring collision */
         s_verify_ivisc = (e && strstr(e, "ivisc")) ? 1 : 0;   /* M2.4: distinct from vfilt */
+        s_verify_vfilt = (e && strstr(e, "vfilt")) ? 1 : 0;   /* M2.4: distinct from ivisc */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -310,13 +312,28 @@ int fesom_timestep(int                          step_n,
     fesom_halo_exchange(dyn->uv_rhs,   FESOM_HALO_ELEM3D, nl, 2, p);
     fesom_halo_exchange(dyn->uv_rhsAB, FESOM_HALO_ELEM3D, nl, 2, p);
 
-    /*  5. horizontal viscosity. CORE2 runs opt_visc=7 (biharmonic, flow-aware);
-     *     the biharmonic ∇⁴ damps grid-scale 2Δx modes that opt_visc=5 lets grow
-     *     — required for dt=1800 stability (work_core/namelist.dyn opt_visc=7).  */
-    fesom_visc_filt_bidiff(mesh, dyn, p);
+    /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
+     *     CORE2 runs opt_visc=7; the ∇⁴ damps grid-scale 2Δx modes that opt_visc=5 lets
+     *     grow (required for dt=1800 stability). FIRST SCATTER kernel: edge→element via
+     *     Kokkos::atomic_add (SCATTER_STRATEGY.md, D22) → Serial bit-identical (single-thread
+     *     ordered), OpenMP/CUDA climate-close (≲1e-12, the D5 ladder). SYNC_MAP §2 row 5 + §6.
+     *     IN rail: uv (last step's update_vel + halo + bolus) and uv_rhs (compute_vel_rhs
+     *     output + halo this step; the read-modify-write target) → device (L28); u_b/v_b
+     *     scratch zeroed on device in the kernel; the kernel owns the internal Uc/Vc halo (D21). */
+    std::vector<real_t> vfb_uv_rhs_in;
+    if (s_verify_vfilt) {
+        const size_t nvec = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D)
+                          * (size_t)nl * 2;
+        vfb_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before (full extent) */
+    }
+    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    dyn->uv_rhs_fld.modify_host(); dyn->uv_rhs_fld.sync_device();
+    fesom_visc_filt_bidiff_kk(mesh, dyn, p);   /* device: uv_rhs += biharmonic; internal Uc/Vc halo (D21) */
+    dyn->uv_rhs_fld.sync_host();               /* OUT rail: before the elem3D halo */
+    if (s_verify_vfilt) fesom_visc_filt_bidiff_verify(mesh, dyn, p, step_n, vfb_uv_rhs_in.data());
     /* uv_rhs is the final output; needed at halo for impl_vert_visc neighbour
      * reads through the TDMA SpMV. */
-    fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
      *  SYNC_MAP §2 row 6. IN rail: sync ALL inputs explicitly (L28) — uv_rhs (the

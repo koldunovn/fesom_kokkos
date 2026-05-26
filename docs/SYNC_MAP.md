@@ -81,7 +81,7 @@ Substeps follow the code 1:1; ported in M2.1–M2.7. Element/node/level layout i
 | 3 | ✅ **KPP `kpp_mixing_kk` (M2.3 — DONE)** *or* ✅ **PP `pp_mixing_kk` (M2.2 — DONE)** | aux `bvfreq`, `sw_alpha/beta`, `dbsfc`; dyn `uvnode`; tracers `S`; forcing `stress_node_surf/heat_flux/water_flux/sw_3d`; mesh `hnode` | aux `Av` (elem), `Kv` (node) | KPP: **2 internal exchange points** (see §6): `smooth_blmc` (blmc ×3 + 3-sweep smoother) + the pre-elem-average (diffK ×2, ghats, viscA); PP: `Kv` nod3D, `Av` elem3D | **KPP implemented:** the driver (substep-3, non-const structs) owns the IN rail `modify_host()+sync_device()` on all the inputs at left (D21) + the OUT rail `sync_host(Av,Kv)`; `fesom_kpp_mixing_kk` owns the two INTERNAL brackets (`mod_dev`→`sync_host`→halo+smooth via `h_checked`→`mod_host`→`sync_device`) and `mod_dev(Av,Kv)`. **PP implemented:** driver IN `modify_host()+sync_device()` on `uvnode`+`bvfreq`; kernel `mod_dev(Kv,Av)` (3 launches; loop-2-before-loop-3); driver `sync_host(Kv,Av)` before halos |
 | 3 | ✅ **`mo_convect_kk` (M2.2 — DONE)** | aux `bvfreq`,`Kv`,`Av` | aux `Kv`,`Av` | `Kv` nod3D, `Av` elem3D | **implemented:** driver IN `modify_host()+sync_device()` on **`bvfreq`** (first device reader AFTER the host smooth_nod3D — a bare `sync_device` would be a silent no-op, L14/L24) + `Kv`,`Av` (host-authoritative: KPP-written on the default path, or PP-halo'd); kernel `mod_dev(Kv,Av)`; driver `sync_host(Kv,Av)` before the halos (`h_checked`) |
 | 4 | `compute_vel_rhs` (M2.4) — **AB2 eps=0.1** | dyn `uv`,`uv_rhsAB`,`eta_n`; aux `pgf`; mesh | dyn `uv_rhs`,`uv_rhsAB` | elem3D `uv_rhs`,`uv_rhsAB` | `→dev(uv,uv_rhsAB,eta_n,pgf)`; `mod_dev(uv_rhs,uv_rhsAB)`; `→host` before halos |
-| 5 | `visc_filt_bidiff` (M2.4) | dyn `uv`,`uv_rhs`; mesh | dyn `uv_rhs` | elem3D `uv_rhs` | `→dev(uv,uv_rhs)`; `mod_dev(uv_rhs)`; `→host(uv_rhs)` before halo |
+| 5 | ✅ **`visc_filt_bidiff_kk` (M2.4 — DONE; first SCATTER + internal halo)** | dyn `uv`, `uv_rhs` (read-modify-write); dyn `u_b`/`v_b` scratch (zeroed on device); set-once mesh `edge_tri`/`elem_area`/`ulevels`/`nlevels` | dyn `uv_rhs` | **internal** elem3D `u_b`/`v_b` (§6) then elem3D `uv_rhs` | **implemented:** driver IN rail `modify_host()+sync_device()` on `uv` + `uv_rhs` (L28); two edge→element stages scatter via **`Kokkos::atomic_add`** (D22 — Serial bit-identical, OpenMP/CUDA climate-close); the function owns the **INTERNAL Uc/Vc(=`u_b`/`v_b`) elem3D halo bracket** (D21, §6); kernel `mod_dev(uv_rhs)`; driver `sync_host(uv_rhs)` before the elem3D halo (via `h_checked`). Verify `vfilt` = L26 capture-before, FULL extent (scatter writes halo elems). |
 | 6 | ✅ **`impl_vert_visc_kk` (M2.4 — DONE, per-elem TDMA)** | dyn `uv_rhs` (read-modify-write), `uv`, `w_i` (read at the 3 vertices incl. HALO); aux `Av`; mesh `helem` (evolving), set-once `zbar`/`elem_nodes`/`ulevels`/`nlevels`; forcing `stress_surf` | dyn `uv_rhs` | elem3D `uv_rhs` | **implemented:** driver IN rail `modify_host()+sync_device()` on **all** of `uv_rhs`/`uv`/`w_i`/`Av`/`helem`/`stress_surf` (L28 — sync every input the body reads; the SYNC_MAP guess listed only `uv_rhs/Av/stress_surf`, but the body also reads `uv`, `w_i`, and the evolving `helem`); `forcing` const → localized `const_cast` for `stress_surf`. Kernel `mod_dev(uv_rhs)`; driver `sync_host(uv_rhs)` before the elem3D halo (via `h_checked`). Per-element TDMA → race-free, **Serial AND OpenMP bit-identical**. Verify `ivisc` = L26 capture-before (read-modify-write). |
 | 7 | `compute_ssh_rhs_linfs` (M4.2) | dyn `uv_rhs`,`d_eta`; mesh | dyn `ssh_rhs` | nod2D `ssh_rhs` | **mid-step host bracket — see §5** |
 | 8 | `ssh_solve_cg` (M4.2) — CG w/ `MPI_Allreduce` dots | mesh stiffness CSR; dyn `ssh_rhs` | dyn `d_eta` | nod2D `d_eta` | stays HOST through M2/M3 (§5); on device only at M4.2 |
@@ -189,10 +189,15 @@ GPU non-determinism source there).
 
 ## 6. Intra-kernel exchanges — the map is per-*substep*, not per-top-level-kernel
 
-Two ported routines do `fesom_exchange_*` **inside** themselves; each internal exchange is a host
+Several ported routines do `fesom_exchange_*` **inside** themselves; each internal exchange is a host
 operation and needs its own `sync_host → halo → sync_device` bracket (these are explicit checkboxes
-in the M2.3 / M2.6 / M4.3 tasks):
+in the M2.3 / M2.4 / M2.6 / M4.3 tasks):
 
+- ✅ **`visc_filt_bidiff_kk`** (substep 5, M2.4 — DONE) has **1 internal exchange point**: the
+  `exchange_elem(U_c,V_c)` between its two Laplacian stages (`u_b`/`v_b` ×1 each), bracketed
+  `modify_device → sync_host → halo (h_checked) → modify_host → sync_device` inside the function
+  (D21, the KPP `smooth_blmc` analogue). Exchange gated `npes>1` (no-op at np=1); the round-trip is a
+  no-op on Serial. The two stages themselves are edge→element **scatters** (`atomic_add`, D22 / §`SCATTER`).
 - ✅ **KPP** (`fesom_kpp_mixing_kk`, M2.3 — DONE) has **2 internal exchange points** wrapping 7
   `fesom_exchange_nod3D` calls: (1) **smooth_blmc** after `enhance` — exchange the 3 `blmc` channels,
   then a 3-sweep `fesom_smooth_nod3D` per channel (the smoother does its own internal exchanges, host);

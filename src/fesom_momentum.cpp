@@ -1006,6 +1006,192 @@ void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- visc_filt_bidiff — DEVICE kernel (M2.4): the first edge→element SCATTER ---
+ * Biharmonic ∇⁴ (opt_visc=7) as two edge-loop stages, each an EDGE→ELEMENT scatter
+ * (neighbouring edges accumulate into the same element), ported with
+ * Kokkos::atomic_add (docs/SCATTER_STRATEGY.md, D22). On Serial a single-thread
+ * atomic_add executes in the loop's edge order, identical to the C twin's `+=` →
+ * Serial bit-identical (FESOM_KK_VERIFY=vfilt max|Δ|==0); on OpenMP/CUDA the atomic
+ * accumulation order is non-deterministic → climate-close (≲1e-12), by the D5 ladder
+ * (these are the first kernels for which OpenMP is NOT bit-identical to the golden).
+ *
+ *   zero Uc/Vc (= dyn u_b/v_b scratch) on device
+ *   stage 1 (edge scatter): Uc/Vc = the flow-aware Laplacian
+ *   ---- INTERNAL elem3D halo of Uc/Vc (D21 bracket, the KPP smooth_blmc analogue) ----
+ *   stage 2 (edge scatter): uv_rhs += the biharmonic update
+ *
+ * Every constant/bound/association (incl. the double `g1*sqrt(vi)` evaluation and
+ * the `g0_h`/`g1_h`=0 Laplacian add-on) is a verbatim copy of the C twin above;
+ * `sqrt`→`Kokkos::sqrt` (host == libm IEEE → Serial bit-identical). FESOM_VISC_MULT
+ * (real physics knob, default 1.0) + the one-time FESOM_DIAG_VISCEDGE diagnostic stay
+ * host code in the preamble. SYNC: INPUTS uv/uv_rhs device-current (driver IN rail);
+ * the function owns the internal Uc/Vc bracket; OUTPUT uv_rhs modify_device().
+ */
+void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
+                               struct fesom_dyn        *dyn,
+                               struct fesom_partit     *partit)
+{
+    const int Eedg    = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int nl      = mesh->nl;
+    const int E_alloc = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    const real_t dt   = (real_t)FESOM_PHASE1_DT;
+    real_t vmult = 1.0;
+    { const char *e = getenv("FESOM_VISC_MULT"); if (e) vmult = (real_t)atof(e); }
+    const real_t g0  = (real_t)FESOM_PHASE1_VISC_GAMMA0 * vmult;
+    const real_t g1  = (real_t)FESOM_PHASE1_VISC_GAMMA1 * vmult;
+    const real_t g2  = (real_t)FESOM_PHASE1_VISC_GAMMA2 * vmult;
+    const real_t g0h = (real_t)FESOM_PHASE1_VISC_GAMMA0_H;   /* 0 for CORE2 */
+    const real_t g1h = (real_t)FESOM_PHASE1_VISC_GAMMA1_H;   /* 0 for CORE2 */
+
+    /* DIAG (FESOM_DIAG_VISCEDGE): one-time host count of INTERIOR edges this loop
+       SKIPS via el<0 (a viscous-coupling gap at a rank boundary). Verbatim host. */
+    if (getenv("FESOM_DIAG_VISCEDGE")) {
+        static int viscedge_done = 0;
+        if (!viscedge_done) {
+            viscedge_done = 1;
+            int n_int = 0, n_bnd = 0;
+            for (int ed = 0; ed < Eedg; ++ed) {
+                if (mesh->edge_tri[2*ed+0] >= 0 && mesh->edge_tri[2*ed+1] >= 0) continue;
+                if (partit->myList_edge2D[ed] <= mesh->edge2D_in) n_int++; else n_bnd++;
+            }
+            if (n_int > 0)
+                fprintf(stderr, "[viscedge r%d] INTERIOR edges skipped by el<0: %d "
+                        "(true-boundary skipped: %d, local edges: %d)\n",
+                        partit->mype, n_int, n_bnd, Eedg);
+        }
+    }
+
+    auto edge_tri = mesh->edge_tri_fld.d();
+    auto area     = mesh->elem_area_fld.d();
+    auto ulev     = mesh->ulevels_fld.d();
+    auto nlev     = mesh->nlevels_fld.d();
+    auto uv       = dyn->uv_fld.d();
+    auto Uc       = dyn->u_b_fld.d();
+    auto Vc       = dyn->v_b_fld.d();
+    auto uv_rhs   = dyn->uv_rhs_fld.d();
+
+    /* Stage 1: U_c = V_c = 0 over full local extent (Fortran 621-625). */
+    const int UcN = E_alloc * nl;
+    Kokkos::parallel_for("fesom_visc_bidiff_zero", Kokkos::RangePolicy<>(0, UcN),
+        KOKKOS_LAMBDA(const int i) { Uc(i) = 0.0; Vc(i) = 0.0; });
+
+    /* Stage 1 edge loop (Fortran 631-665) — EDGE→ELEMENT scatter (atomic_add). */
+    Kokkos::parallel_for("fesom_visc_bidiff_stage1", Kokkos::RangePolicy<>(0, Eedg),
+        KOKKOS_LAMBDA(const int ed) {
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            if (el1 < 0 || el2 < 0) return;
+            real_t len = Kokkos::sqrt(area(el1) + area(el2));
+            int nu1 = ulev(el1) - 1, nu2 = ulev(el2) - 1;
+            int nzmin = (nu1 > nu2) ? nu1 : nu2;            /* maxval(ulevels) */
+            int nl1 = nlev(el1) - 1, nl2 = nlev(el2) - 1;
+            int nzmax = (nl1 < nl2) ? nl1 : nl2;            /* minval(nlevels)-1 */
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t u1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 0)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                real_t v1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 1)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                real_t vi = u1*u1 + v1*v1;
+                real_t inner = (g1*Kokkos::sqrt(vi) > g2*vi) ? g1*Kokkos::sqrt(vi) : g2*vi;
+                vi = Kokkos::sqrt((g0 > inner ? g0 : inner) * len);
+                real_t du = u1 * vi, dv = v1 * vi;
+                Kokkos::atomic_add(&Uc(FESOM_ELEM3D(el1, nz, nl)), -du);
+                Kokkos::atomic_add(&Vc(FESOM_ELEM3D(el1, nz, nl)), -dv);
+                Kokkos::atomic_add(&Uc(FESOM_ELEM3D(el2, nz, nl)),  du);
+                Kokkos::atomic_add(&Vc(FESOM_ELEM3D(el2, nz, nl)),  dv);
+            }
+        });
+
+    /* ---- INTERNAL HALO BRACKET: exchange_elem(U_c, V_c) (Fortran 670-672) ----
+     * Stage 1 wrote Uc/Vc on device → sync_host → halo (h_checked) → sync_device,
+     * so stage 2 reads halo-current Uc/Vc on the device (D21). The exchange is gated
+     * on npes>1 like the C twin (a no-op at np=1); the round-trip is a no-op on Serial. */
+    dyn->u_b_fld.modify_device();
+    dyn->v_b_fld.modify_device();
+    dyn->u_b_fld.sync_host();
+    dyn->v_b_fld.sync_host();
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(dyn->u_b_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 1, partit);
+        fesom_halo_exchange(dyn->v_b_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 1, partit);
+    }
+    dyn->u_b_fld.modify_host();
+    dyn->v_b_fld.modify_host();
+    dyn->u_b_fld.sync_device();
+    dyn->v_b_fld.sync_device();
+
+    /* Stage 2 edge loop (Fortran 677-742, non-subcycl) — EDGE→ELEMENT scatter into uv_rhs. */
+    Kokkos::parallel_for("fesom_visc_bidiff_stage2", Kokkos::RangePolicy<>(0, Eedg),
+        KOKKOS_LAMBDA(const int ed) {
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            if (el1 < 0 || el2 < 0) return;
+            real_t a1 = area(el1), a2 = area(el2);
+            real_t len = Kokkos::sqrt(a1 + a2);
+            int nu1 = ulev(el1) - 1, nu2 = ulev(el2) - 1;
+            int nzmin = (nu1 > nu2) ? nu1 : nu2;
+            int nl1 = nlev(el1) - 1, nl2 = nlev(el2) - 1;
+            int nzmax = (nl1 < nl2) ? nl1 : nl2;
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                real_t u1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 0)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                real_t v1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 1)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                real_t vi = u1*u1 + v1*v1;
+                real_t inner = (g1*Kokkos::sqrt(vi) > g2*vi) ? g1*Kokkos::sqrt(vi) : g2*vi;
+                vi = -dt * Kokkos::sqrt((g0 > inner ? g0 : inner) * len);
+                real_t mag = Kokkos::sqrt(u1*u1 + v1*v1);
+                real_t viLapl = dt * ((g0h > g1h*mag) ? g0h : g1h*mag) * len;  /* 0 for CORE2 */
+                real_t du = vi * (Uc(FESOM_ELEM3D(el1, nz, nl)) - Uc(FESOM_ELEM3D(el2, nz, nl))) + viLapl*u1;
+                real_t dv = vi * (Vc(FESOM_ELEM3D(el1, nz, nl)) - Vc(FESOM_ELEM3D(el2, nz, nl))) + viLapl*v1;
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 0), -(du / a1));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 1), -(dv / a1));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 0),  (du / a2));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 1),  (dv / a2));
+            }
+        });
+
+    dyn->uv_rhs_fld.modify_device();   /* driver sync_host()s before the elem3D halo */
+}
+
+/*--- FESOM_KK_VERIFY=vfilt (M2.4) --------------------------------------------
+ * visc_filt_bidiff READ-MODIFY-WRITES uv_rhs (stage-2 `+=`), so the L26
+ * capture-before pattern: the driver snapshots the PRE-kernel uv_rhs (uv_rhs_in)
+ * over the FULL local extent (the scatter writes halo elements too) before the IN
+ * rail. Here: snapshot the KK result, restore uv_rhs_in, run the C twin (which
+ * re-zeros + recomputes its own u_b/v_b scratch and re-does the stage-2 +=), diff,
+ * restore KK. The Serial single-thread atomic order == the C `+=` order → max|Δ|==0.
+ * Non-intrusive.
+ */
+void fesom_visc_filt_bidiff_verify(const struct fesom_mesh *mesh,
+                                   struct fesom_dyn        *dyn,
+                                   struct fesom_partit     *partit,
+                                   int step_n, const real_t *uv_rhs_in)
+{
+    const int nl = mesh->nl;
+    const int E_alloc = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    const size_t nvec = (size_t)E_alloc * (size_t)nl * 2;     /* full local uv_rhs */
+
+    std::vector<real_t> kk_uv_rhs(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* KK result (host-synced) */
+    std::copy(uv_rhs_in, uv_rhs_in + nvec, dyn->uv_rhs);             /* restore pre-kernel input */
+    fesom_visc_filt_bidiff(mesh, dyn, partit);                       /* C twin runs on the input */
+    double dmax = 0.0;
+    for (size_t i = 0; i < nvec; ++i) {
+        double d = std::fabs((double)kk_uv_rhs[i] - (double)dyn->uv_rhs[i]);
+        if (d > dmax) dmax = d;
+    }
+    std::copy(kk_uv_rhs.begin(), kk_uv_rhs.end(), dyn->uv_rhs);      /* restore KK */
+
+    const std::string backend = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=vfilt] step %d backend=%s  max|Δ|: uv_rhs=%.3e\n",
+                step_n, backend.c_str(), dmax);
+    std::fflush(stdout);
+    if (backend == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=vfilt] FAIL: Serial must be bit-identical to the C twin "
+                             "(max|Δ|=%.3e)\n", dmax);
+        std::abort();
+    }
+}
+
 /*===========================================================================
  * compute_hbar_ale (oce_ale.F90:1974-2116)
  *

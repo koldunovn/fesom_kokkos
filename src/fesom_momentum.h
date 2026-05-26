@@ -134,4 +134,35 @@ void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
                             struct fesom_dyn        *dyn,
                             struct fesom_partit     *partit);
 
+/*
+ * M2.4 DEVICE kernel twin of fesom_visc_filt_bidiff (the biharmonic ∇⁴, opt_visc=7).
+ * The first EDGE→ELEMENT SCATTER kernel in the port: two edge-loop stages each
+ * accumulate into element-indexed arrays shared by neighbouring edges, ported with
+ * Kokkos::atomic_add (docs/SCATTER_STRATEGY.md, D22). On Serial a single-thread
+ * atomic_add executes in edge order == the C twin's `+=` → bit-identical (the
+ * FESOM_KK_VERIFY=vfilt gate holds); on OpenMP/CUDA the atomic order is
+ * non-deterministic → climate-close (≲1e-12), the D5 ladder. Stage 1 writes the
+ * Laplacian Uc/Vc (= dyn u_b/v_b scratch); an INTERNAL elem3D halo exchange of Uc/Vc
+ * is bracketed inside this function (D21, the KPP smooth_blmc analogue); stage 2
+ * scatters the biharmonic update into uv_rhs. INPUTS uv/uv_rhs device-current (driver
+ * IN rail); marks uv_rhs modify_device(). See docs/SYNC_MAP.md §2 row 5 + §6.
+ */
+void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
+                               struct fesom_dyn        *dyn,
+                               struct fesom_partit     *partit);
+
+/*
+ * FESOM_KK_VERIFY=vfilt gate. visc_filt_bidiff READ-MODIFY-WRITES uv_rhs (stage 2
+ * `+=`), so the L26 capture-before pattern: the driver snapshots the PRE-kernel
+ * uv_rhs (uv_rhs_in, FULL local extent — the scatter writes halo elements too)
+ * before the IN rail; here snapshot the Kokkos result, restore uv_rhs_in, run the
+ * C twin, diff, restore the Kokkos result. The u_b/v_b stage-1 scratch is
+ * fully overwritten by both (memset+scatter) so it needs no capture. Non-intrusive;
+ * max|Δ|==0 on Serial.
+ */
+void fesom_visc_filt_bidiff_verify(const struct fesom_mesh *mesh,
+                                   struct fesom_dyn        *dyn,
+                                   struct fesom_partit     *partit,
+                                   int step_n, const real_t *uv_rhs_in);
+
 #endif /* FESOM_MOMENTUM_H */
