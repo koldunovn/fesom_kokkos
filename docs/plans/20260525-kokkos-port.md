@@ -399,10 +399,24 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Modify: `src/fesom_pp.cpp`, `src/fesom_step.cpp`
 
-- [ ] port `compute_vel_nodes` (gather over `nod_in_elem2D` → accumulate-local-then-write; race-free)
-- [ ] port the 3 `pp_mixing` loops (preserve the loop-2-before-loop-3 ordering subtlety) + `mo_convect`
-- [ ] `FESOM_KK_VERIFY=pp` Serial `max|Δ|==0`
-- [ ] verify backends as M2.1 — before M2.3
+- [x] `fesom_compute_vel_nodes_kk`: `parallel_for` over owned nodes, the inner gather over
+      `nod_in_elem2D` accumulates into lambda-local `tx/ty/tvol` then writes only this node's
+      `uvnode` slots → race-free; the private per-node reduction keeps the C accumulation order so
+      **Serial AND OpenMP are bit-identical** (a private reduce, not a cross-thread one)
+- [x] `fesom_pp_mixing_kk`: the 3 loops as **3 separate `parallel_for` launches** — the launch
+      barrier preserves the ⚠️ loop-2-before-loop-3 ordering (Av from `Kv`-as-factor² before Loop 3
+      cubes `Kv` in place), **D20**; `fesom_mo_convect_kk`: convective-adjustment maxes (race-free)
+- [x] `FESOM_KK_VERIFY=pp` Serial `max|Δ|==0` all 20 pi steps — KPP path = compute_vel_nodes +
+      mo_convect (default), PP path (`FESOM_MIX_SCHEME=PP`) adds pp_mixing. compute_vel_nodes/
+      pp_mixing are EOS-style; mo_convect read-modify-writes its inputs so the driver captures the
+      pre-kernel `Kv/Av` for the C-twin oracle (L26). Key match guards `"pp"`⊂`"kpp"` (L25)
+- [x] SYNC_MAP §2 row-3 rails wired (driver IN `modify_host()+sync_device()`, kernel `mod_dev`,
+      driver `sync_host()` before halos via `h_checked`); ⚠️ `mo_convect` IN rail does
+      `modify_host()+sync_device(bvfreq)` — first device read AFTER the host `smooth_nod3D` (L14/L27)
+- [x] **verified** (commit `17ea075`): Serial pi (KPP) == golden bit-identical (np=1 + np=2 CMA-off);
+      OpenMP == golden; `ctest` 4/4; **SYNCCHECK clean + bit-identical on BOTH KPP and PP branches**;
+      **CUDA (A100) builds + runs + climate-close** (density 3.18e-12 stable, Av/Kv ≈0.095 isolated
+      threshold-flips, u/v ≈1e-4 drift — the M2.1 budget D5; no new divergence class) — → M2.3
 
 ### Task M2.3: KPP vertical mixing (the large mixing kernel)
 
