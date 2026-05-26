@@ -2,6 +2,7 @@
 #define FESOM_TRACER_ADV_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M2.6-a: DualView-backed storage for the FCT scratch arrays
 
 struct fesom_mesh;
 struct fesom_dyn;
@@ -48,6 +49,24 @@ typedef struct fesom_tracer_adv_scratch {
        up/down tracer gradients [myDim_edge2D*nl*4] from fill_up_dn_grad. */
     real_t *tr_xy;               /* [elem2D * nl * 2]      */
     real_t *edge_up_dn_grad;     /* [myDim_edge2D * nl * 4] */
+
+    /* M2.6-a: each raw pointer above is a NON-OWNING alias = field.h(), re-pointed
+       once in fesom_tracer_adv_init (the M1.2/D12 / M2.3a / M2.5b-a data-layer
+       pattern). The Fields back the M2.6-b device FCT (fesom_tracer_advect_one_fct_kk);
+       the C twins keep using the raw aliases unchanged. No pointer swaps happen, so the
+       aliases stay valid for the whole run. */
+    fesom::Field adv_flux_hor_fld;
+    fesom::Field adv_flux_ver_fld;
+    fesom::Field del_ttf_advhoriz_fld;
+    fesom::Field del_ttf_advvert_fld;
+    fesom::Field fct_LO_fld;
+    fesom::Field fct_ttf_min_fld;
+    fesom::Field fct_ttf_max_fld;
+    fesom::Field fct_plus_fld;
+    fesom::Field fct_minus_fld;
+    fesom::Field fct_aux_fld;
+    fesom::Field tr_xy_fld;
+    fesom::Field edge_up_dn_grad_fld;
 
     /* MPI: partit pointer used by FCT mid-pipeline halo exchange of
      * fct_plus / fct_minus. Set after init via direct field assignment. */

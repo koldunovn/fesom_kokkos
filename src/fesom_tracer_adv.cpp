@@ -48,27 +48,35 @@
 void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
                            const struct fesom_mesh  *mesh)
 {
-    memset(sc, 0, sizeof(*sc));
+    /* M2.6-a: the scratch now holds fesom::Field (DualView) members, so a raw memset
+       over the struct is UB (D13/L13). Value-initialise instead — this runs every
+       nested Field's default ctor and zeros every POD (incl. `partit`, which the
+       driver re-sets after init). */
+    *sc = fesom_tracer_adv_scratch{};
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
     int EG = mesh->myDim_edge2D + mesh->eDim_edge2D;
     size_t e_full = (size_t)EG * (size_t)mesh->nl;
     size_t n_full = (size_t)N  * (size_t)mesh->nl;
+    size_t e2_full = (size_t)E * (size_t)mesh->nl * 2;
+    size_t eud_full = (size_t)mesh->myDim_edge2D * (size_t)mesh->nl * 4;
 
-    sc->adv_flux_hor     = (decltype(sc->adv_flux_hor))calloc(e_full,         sizeof(real_t));
-    sc->adv_flux_ver     = (decltype(sc->adv_flux_ver))calloc(n_full,         sizeof(real_t));
-    sc->del_ttf_advhoriz = (decltype(sc->del_ttf_advhoriz))calloc(n_full,         sizeof(real_t));
-    sc->del_ttf_advvert  = (decltype(sc->del_ttf_advvert))calloc(n_full,         sizeof(real_t));
-    sc->fct_LO           = (decltype(sc->fct_LO))calloc(n_full,         sizeof(real_t));
-    sc->fct_ttf_min      = (decltype(sc->fct_ttf_min))calloc(n_full,         sizeof(real_t));
-    sc->fct_ttf_max      = (decltype(sc->fct_ttf_max))calloc(n_full,         sizeof(real_t));
-    sc->fct_plus         = (decltype(sc->fct_plus))calloc(n_full,         sizeof(real_t));
-    sc->fct_minus        = (decltype(sc->fct_minus))calloc(n_full,         sizeof(real_t));
-    sc->fct_aux          = (decltype(sc->fct_aux))calloc((size_t)E * (size_t)mesh->nl * 2,
-                                  sizeof(real_t));
-    sc->tr_xy            = (decltype(sc->tr_xy))calloc((size_t)E * (size_t)mesh->nl * 2, sizeof(real_t));
-    sc->edge_up_dn_grad  = (decltype(sc->edge_up_dn_grad))calloc((size_t)mesh->myDim_edge2D * (size_t)mesh->nl * 4,
-                                  sizeof(real_t));
+    /* M2.6-a: each array is OWNED by a fesom::Field; the raw pointer is a non-owning
+       alias to field.h() (the M1.2/D12 / M2.3a / M2.5b-a data-layer pattern). Field::alloc
+       zero-inits both host and device mirrors (== the calloc semantics here). Counts are
+       in ELEMENTS, not bytes (D12). */
+    sc->adv_flux_hor_fld.alloc("tradv.adv_flux_hor", e_full);             sc->adv_flux_hor     = sc->adv_flux_hor_fld.h();
+    sc->adv_flux_ver_fld.alloc("tradv.adv_flux_ver", n_full);             sc->adv_flux_ver     = sc->adv_flux_ver_fld.h();
+    sc->del_ttf_advhoriz_fld.alloc("tradv.del_ttf_advhoriz", n_full);     sc->del_ttf_advhoriz = sc->del_ttf_advhoriz_fld.h();
+    sc->del_ttf_advvert_fld.alloc("tradv.del_ttf_advvert", n_full);       sc->del_ttf_advvert  = sc->del_ttf_advvert_fld.h();
+    sc->fct_LO_fld.alloc("tradv.fct_LO", n_full);                         sc->fct_LO           = sc->fct_LO_fld.h();
+    sc->fct_ttf_min_fld.alloc("tradv.fct_ttf_min", n_full);               sc->fct_ttf_min      = sc->fct_ttf_min_fld.h();
+    sc->fct_ttf_max_fld.alloc("tradv.fct_ttf_max", n_full);               sc->fct_ttf_max      = sc->fct_ttf_max_fld.h();
+    sc->fct_plus_fld.alloc("tradv.fct_plus", n_full);                     sc->fct_plus         = sc->fct_plus_fld.h();
+    sc->fct_minus_fld.alloc("tradv.fct_minus", n_full);                   sc->fct_minus        = sc->fct_minus_fld.h();
+    sc->fct_aux_fld.alloc("tradv.fct_aux", e2_full);                      sc->fct_aux          = sc->fct_aux_fld.h();
+    sc->tr_xy_fld.alloc("tradv.tr_xy", e2_full);                          sc->tr_xy            = sc->tr_xy_fld.h();
+    sc->edge_up_dn_grad_fld.alloc("tradv.edge_up_dn_grad", eud_full);     sc->edge_up_dn_grad  = sc->edge_up_dn_grad_fld.h();
     FESOM_CHECK(sc->adv_flux_hor && sc->adv_flux_ver
              && sc->del_ttf_advhoriz && sc->del_ttf_advvert
              && sc->fct_LO && sc->fct_ttf_min && sc->fct_ttf_max
@@ -79,19 +87,10 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
 
 void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
 {
-    free(sc->adv_flux_hor);
-    free(sc->adv_flux_ver);
-    free(sc->del_ttf_advhoriz);
-    free(sc->del_ttf_advvert);
-    free(sc->fct_LO);
-    free(sc->fct_ttf_min);
-    free(sc->fct_ttf_max);
-    free(sc->fct_plus);
-    free(sc->fct_minus);
-    free(sc->fct_aux);
-    free(sc->tr_xy);
-    free(sc->edge_up_dn_grad);
-    memset(sc, 0, sizeof(*sc));
+    /* *sc = fesom_tracer_adv_scratch{} releases every Field (assigns an empty DualView →
+       drops the refcount/frees) and zeros the raw aliases (D13/L13); no per-array free
+       (the raw ptrs are non-owning). */
+    *sc = fesom_tracer_adv_scratch{};
 }
 
 /*--- compute_fct_LO --------------------------------------------------------
