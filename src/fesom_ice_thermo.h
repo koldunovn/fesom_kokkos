@@ -2,6 +2,7 @@
 #define FESOM_ICE_THERMO_H
 
 #include "fesom_ice_types.h"
+#include <vector>   // M4.3a: FESOM_KK_VERIFY=icemap capture-before buffers (cut_off)
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -53,6 +54,15 @@ void fesom_ice_flooding(const fesom_ice_thermo *th,
 void fesom_ice_cut_off(fesom_ice            *ice,
                        struct fesom_partit  *partit,
                        struct fesom_mesh    *mesh);
+
+/* M4.3a: DEVICE twin of cut_off — per-node clamp (race-free RMW → Serial AND OpenMP
+ * bit-identical). Marks the 3 ice-tracer values modify_device(). + the capture-before verify. */
+void fesom_ice_cut_off_kk(fesom_ice            *ice,
+                          struct fesom_partit  *partit,
+                          struct fesom_mesh    *mesh);
+void fesom_ice_cut_off_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                              int step_n, const std::vector<real_t> &pre_a,
+                              const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s);
 
 /*
  * Open-water surface energy budget (single cell).

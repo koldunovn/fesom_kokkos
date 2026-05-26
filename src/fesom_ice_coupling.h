@@ -26,6 +26,18 @@ void fesom_ocean2ice(fesom_ice                 *ice,
                      struct fesom_partit        *partit,
                      struct fesom_mesh          *mesh);
 
+/* M4.3a: DEVICE twin of ocean2ice (two race-free node kernels — srfoce_temp/salt/ssh map +
+ * the srfoce_u/v area-weighted gather, the compute_vel_nodes shape). Marks srfoce_*
+ * modify_device(); the driver owns the OUT sync_host + the u_w/v_w halo. + the verify. */
+void fesom_ocean2ice_kk(fesom_ice                  *ice,
+                        const struct fesom_dyn     *dyn,
+                        const struct fesom_tracers *tracers,
+                        struct fesom_partit        *partit,
+                        struct fesom_mesh          *mesh);
+void fesom_ocean2ice_verify(fesom_ice *ice, const struct fesom_dyn *dyn,
+                            const struct fesom_tracers *tracers, struct fesom_partit *partit,
+                            struct fesom_mesh *mesh, int step_n);
+
 /*
  * Ice → ocean heat / freshwater fluxes. Mirror of Fortran oce_fluxes
  * (ice_oce_coupling.F90:249) — non-ICEPACK branch only (lines 393-398):

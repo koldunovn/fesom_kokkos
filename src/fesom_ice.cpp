@@ -5,15 +5,20 @@
 #include "fesom_ice_evp.h"
 #include "fesom_ice_fct.h"
 #include "fesom_ice_thermo.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
 
+#include <Kokkos_Core.hpp>   // M4.3a: device h_ice/h_snow diag kernel + ocean2ice/cut_off islands
 #include <mpi.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>            // M4.3a: FESOM_KK_VERIFY backend name
+#include <algorithm>         // M4.3a: verify snapshot/restore copies
+#include <vector>
 
 #ifdef FESOM_KK_SYNCCHECK
 /* M1.5 plumbing proof (docs/SYNC_MAP.md §4). Bounce a representative set of the sea-ice step's
@@ -325,6 +330,76 @@ static void load_ice_env_once(void)
     s_ice_env_loaded = 1;
 }
 
+/* M4.3a FESOM_KK_VERIFY=icemap gate (ocean2ice + cut_off + h_ice/h_snow diag). Cached. */
+static int s_ice_verify_loaded = 0;
+static int s_verify_icemap     = 0;
+static void load_ice_verify_once(void)
+{
+    if (s_ice_verify_loaded) return;
+    const char *e = getenv("FESOM_KK_VERIFY");
+    s_verify_icemap = (e && strstr(e, "icemap")) ? 1 : 0;   /* collision-free token (L25) */
+    s_ice_verify_loaded = 1;
+}
+
+/* ====================================================================== *
+ *  M4.3a — h_ice/h_snow diagnostic (Fortran ice_setup_step.F90:319-330).  *
+ *  h = m / max(a, 1e-3) over [0,N) (halo included). Full overwrite from    *
+ *  a_ice/m_ice/m_snow → race-free map; the C twin is the verify oracle.    *
+ * ====================================================================== */
+static void fesom_ice_h_diag(fesom_ice *ice, struct fesom_mesh *mesh)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const real_t *a_ice  = ice->data[FESOM_ICE_AICE].values;
+    const real_t *m_ice  = ice->data[FESOM_ICE_MICE].values;
+    const real_t *m_snow = ice->data[FESOM_ICE_MSNOW].values;
+    for (int i = 0; i < N; ++i) {
+        real_t denom = a_ice[i] > 1e-3 ? a_ice[i] : 1e-3;
+        ice->h_ice [i] = m_ice [i] / denom;
+        ice->h_snow[i] = m_snow[i] / denom;
+    }
+}
+
+static void fesom_ice_h_diag_kk(fesom_ice *ice, struct fesom_mesh *mesh)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    auto a_ice  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snow = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    auto h_ice  = ice->h_ice_fld.d();
+    auto h_snow = ice->h_snow_fld.d();
+    Kokkos::parallel_for("fesom_ice_h_diag", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int i) {
+            real_t denom = a_ice(i) > 1e-3 ? a_ice(i) : 1e-3;
+            h_ice(i)  = m_ice(i)  / denom;
+            h_snow(i) = m_snow(i) / denom;
+        });
+    ice->h_ice_fld.modify_device();
+    ice->h_snow_fld.modify_device();
+}
+
+/* EOS-style verify (h_ice/h_snow are a full overwrite from intact a/m/ms). */
+static void fesom_ice_h_diag_verify(fesom_ice *ice, struct fesom_mesh *mesh, int step_n)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    std::vector<real_t> ki(ice->h_ice, ice->h_ice + N), ks(ice->h_snow, ice->h_snow + N);
+    fesom_ice_h_diag(ice, mesh);   /* C twin recomputes h_ice/h_snow */
+    double di = 0.0, ds = 0.0;
+    for (int i = 0; i < N; ++i) {
+        double x = std::fabs((double)ki[i]-(double)ice->h_ice[i]);  if (x>di) di=x;
+        x        = std::fabs((double)ks[i]-(double)ice->h_snow[i]); if (x>ds) ds=x;
+    }
+    std::copy(ki.begin(), ki.end(), ice->h_ice); std::copy(ks.begin(), ks.end(), ice->h_snow);
+    double dmax = di > ds ? di : ds;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=icemap] step %d backend=%s  max|Δ|: h_ice=%.3e h_snow=%.3e\n",
+                step_n, be.c_str(), di, ds);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=icemap] FAIL step %d: h_diag Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax); std::abort();
+    }
+}
+
 void fesom_ice_step(int                            step,
                     fesom_ice                     *ice,
                     struct fesom_partit           *partit,
@@ -336,15 +411,33 @@ void fesom_ice_step(int                            step,
                     const struct fesom_sss_runoff *sr,
                     const struct fesom_ssh_stiff  *stiff)
 {
-    (void)step;
     load_ice_env_once();
+    load_ice_verify_once();
 
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
 
-    /* Phase C1: ocean2ice — populate ice->srfoce_* from ocean state.
-     * Falls back to no-op if dyn or tracers are NULL (analytical forcing path). */
+    /* Phase C1: ocean2ice — populate ice->srfoce_* from ocean state. M4.3a: ON THE DEVICE
+     * (a device island within the still-host ice step — EVP/FCT/thermo move in M4.3b-d).
+     * IN rail (L28): push the ocean state it reads — tracers T/S (surface), mesh hbar, dyn uv
+     * (host-current from the previous ocean step; const → localized const_cast, the forcing
+     * pattern). OUT: sync_host(srfoce_*) for the host EVP + the u_w/v_w nod2D halo (driver,
+     * the ALE pattern). Falls back to no-op if dyn or tracers are NULL. */
     if (dyn && tracers) {
-        fesom_ocean2ice(ice, dyn, tracers, partit, mesh);
+        struct fesom_dyn     *d  = const_cast<struct fesom_dyn *>(dyn);
+        struct fesom_tracers *tr = const_cast<struct fesom_tracers *>(tracers);
+        tr->data[FESOM_TRACER_T].values_fld.modify_host(); tr->data[FESOM_TRACER_T].values_fld.sync_device();
+        tr->data[FESOM_TRACER_S].values_fld.modify_host(); tr->data[FESOM_TRACER_S].values_fld.sync_device();
+        mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();
+        d->uv_fld.modify_host();      d->uv_fld.sync_device();
+        fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
+        ice->srfoce_temp_fld.sync_host(); ice->srfoce_salt_fld.sync_host(); ice->srfoce_ssh_fld.sync_host();
+        ice->srfoce_u_fld.sync_host();    ice->srfoce_v_fld.sync_host();
+        fesom_exchange_nod2D(ice->srfoce_u_fld.h_checked(), partit);   /* Fortran ocean2ice line 244 */
+        fesom_exchange_nod2D(ice->srfoce_v_fld.h_checked(), partit);
+        /* Verify AFTER the halo so the device srfoce_u/v halo (driver-exchanged) matches the
+         * C twin's own halo at np>1 — the kernel leaves srfoce_u/v halo=0 pre-exchange, so a
+         * pre-halo diff would false-positive on the halo nodes (the C twin halos internally). */
+        if (s_verify_icemap) fesom_ocean2ice_verify(ice, dyn, tracers, partit, mesh, step);
     }
 
     if (!s_no_ice_dyn) {
@@ -364,10 +457,26 @@ void fesom_ice_step(int                            step,
         fesom_ice_tg_rhs   (ice,       partit, mesh);
         fesom_ice_fct_solve(ice, stiff, partit, mesh);
     }
-    /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics
-     * regardless of NO_ICE_ADV — Fortran does not gate it. Clamps tracers
-     * before thermo reads them. */
-    fesom_ice_cut_off(ice, partit, mesh);
+    /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics regardless of
+     * NO_ICE_ADV. M4.3a: ON THE DEVICE. IN: push the ice tracer values (host EVP/FCT wrote
+     * them via the raw alias, L14). capture-before (RMW clamp) if verify. OUT: sync_host for
+     * the host thermo. No halo (cut_off over [0,N) covers halo directly). */
+    {
+        std::vector<real_t> ca, cm, cs;
+        if (s_verify_icemap) {
+            ca.assign(ice->data[FESOM_ICE_AICE].values,  ice->data[FESOM_ICE_AICE].values  + N);
+            cm.assign(ice->data[FESOM_ICE_MICE].values,  ice->data[FESOM_ICE_MICE].values  + N);
+            cs.assign(ice->data[FESOM_ICE_MSNOW].values, ice->data[FESOM_ICE_MSNOW].values + N);
+        }
+        ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        fesom_ice_cut_off_kk(ice, partit, mesh);
+        ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        if (s_verify_icemap) fesom_ice_cut_off_verify(ice, partit, mesh, step, ca, cm, cs);
+    }
 
     /* Thermodynamics + ice→ocean flux update. Both need forcing+jra+sr; without
      * them (e.g. pi-mesh smoke test) the step is silently a no-op. */
@@ -378,18 +487,19 @@ void fesom_ice_step(int                            step,
         fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);
     }
 
-    /*
-     * Post-step diagnostic h_ice/h_snow. Mirrors ice_setup_step.F90:319-330.
-     * Fortran loop bound: 1, myDim_nod2D+eDim_nod2D — must include halo.
-     */
-    real_t *a_ice  = ice->data[FESOM_ICE_AICE].values;
+    /* Post-step diagnostic h_ice/h_snow (Fortran ice_setup_step.F90:319-330). M4.3a: ON THE
+     * DEVICE. IN: push a_ice/m_ice/m_snow (the host thermo, if it ran, wrote them via the raw
+     * alias). OUT: sync_host(h_ice/h_snow) for I/O + the FESOM_DIAG_MICE block below. */
+    real_t *a_ice  = ice->data[FESOM_ICE_AICE].values;     /* kept for the DEBUG diag blocks */
     real_t *m_ice  = ice->data[FESOM_ICE_MICE].values;
-    real_t *m_snow = ice->data[FESOM_ICE_MSNOW].values;
-    for (int i = 0; i < N; ++i) {
-        real_t denom = a_ice[i] > 1e-3 ? a_ice[i] : 1e-3;
-        ice->h_ice [i] = m_ice [i] / denom;
-        ice->h_snow[i] = m_snow[i] / denom;
-    }
+    (void)a_ice;
+    ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+    ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+    ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+    fesom_ice_h_diag_kk(ice, mesh);
+    ice->h_ice_fld.sync_host();
+    ice->h_snow_fld.sync_host();
+    if (s_verify_icemap) fesom_ice_h_diag_verify(ice, mesh, step);
 
     /* DEBUG (FESOM_DIAG_MICE): per-step global max m_ice + max ice speed with
        their global node ids. m_ice should stay < ~10 m physically; MAXLOC

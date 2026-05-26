@@ -593,11 +593,19 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 - [x] 1-yr CORE2 Serial bit-identical to cref (job `25146822`: all 13 monthly snaps ALL FIELDS
       BIT-IDENTICAL) + CUDA smoke climate-close at the unchanged M2 budget — **M4.2 acceptance PASSED**
 
-### Task M4.3: Sea ice (EVP / thermo / FCT) on device
-**Files:** Modify `src/fesom_ice_evp.cpp`, `src/fesom_ice_thermo.cpp`, `src/fesom_ice_fct.cpp`, `src/fesom_ice.cpp`
-- [ ] port EVP subcycle kernels, thermodynamics, ice FCT (same scatter decision as M2.6)
-- [ ] `FESOM_KK_VERIFY` per kernel; **M4 acceptance**: whole model on device; 2-yr+5-yr re-validated;
-      tag `m4-full-device`
+### Task M4.3: Sea ice (coupling / EVP / FCT / thermo) on device
+**Files:** Modify `src/fesom_ice_coupling.cpp`, `src/fesom_ice_evp.cpp`, `src/fesom_ice_fct.cpp`, `src/fesom_ice_thermo.cpp`, `src/fesom_ice.cpp`
+- NO data-layer step: M1.4 already `Field`-wrapped every ice array. ⚠️ ice is FORCED-ONLY → the
+  `FESOM_KK_VERIFY=<icekey>` gate is CORE2-SLURM-based (`jobs/job_ice_verify_core2`), not pi (L42).
+- [x] **M4.3a** — `ocean2ice` (gather) + `cut_off` (clamp) + h_ice/h_snow diag. Race-free → Serial AND
+      OpenMP bit-identical (key `icemap`). Gates: pi `max|Δ|=0` Serial+OpenMP (ocean2ice non-trivial),
+      pi==golden np1+np2, SYNCCHECK, **+ 120-step CORE2 dist_16 ice-active `max|Δ|=0` Serial** (job 25148594).
+- [ ] **M4.3b** — EVP dynamics (the 120-subcycle island: setup maps/scatters + `stress_tensor`/
+      `stress2rhs`/vel-update + the per-subcycle uice/vice halo bracket — the CG/M4.2 host-loop pattern).
+- [ ] **M4.3c** — ice FCT (`tg_rhs` + `fct_solve`) — the M2.6 ocean-FCT analogue (scatter decision, D22).
+- [ ] **M4.3d** — thermodynamics + `oce_fluxes` (column physics + the flux coupling overwriting forcing).
+- [ ] **M4 acceptance**: whole model on device; 1-yr CORE2 Serial bit-identical to cref; 2-yr+5-yr CUDA
+      re-validated; tag `m4-full-device`
 
 ## ───────────── M5 · Performance (expand after M4) ─────────────
 *Coarse now; detail when reached.*

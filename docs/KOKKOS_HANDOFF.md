@@ -1,5 +1,29 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 16 (2026-05-26) — M4.3a COMPLETE: the simple sea-ice coupling/maps on the device — the
+FIRST sea-ice kernels.** `ocean2ice` (gather) + `cut_off` (clamp) + the h_ice/h_snow diagnostic, in
+`src/fesom_ice_coupling.cpp` / `fesom_ice_thermo.cpp` / `fesom_ice.cpp`. **Two defining findings:**
+(1) **No data-layer step** — M1.4 already `Field`-wrapped EVERY ice array (work/thermo/data/top-level)
+"for M4.3", so M4.3 goes straight to kernels. (2) **⚠️ The ice physics is FORCED-ONLY** — the pi smoke
+is a warm basin (no freezing → zero ice → EVP/FCT/cut_off/diag run trivial, thermo gated off), so the
+`FESOM_KK_VERIFY=<icekey>` gate is only meaningful on a short **CORE2** run (SLURM) — except `ocean2ice`
+(reads the non-trivial ocean surface → pi-verifiable). This is the validation cadence for ALL of M4.3
+(slower than M2's pi-based verify). Kernels: `ocean2ice` = the `compute_vel_nodes` L27 private-gather
+(srfoce_u/v) + a map (srfoce_temp/salt/ssh); `cut_off`/diag = race-free node maps → **all bit-identical
+Serial AND OpenMP** (no scatter/reduce). Device islands within the still-host ice step (round-trips
+compose away as EVP/FCT/thermo move in M4.3b-d, L42); `dyn`/`tracers` const→`const_cast` for the IN rail.
+**Gate — ALL GREEN**: `FESOM_KK_VERIFY=icemap` Serial `max|Δ|=0` on pi (ocean2ice non-trivial; cut_off/
+diag trivial-on-zero-ice) **AND on a 120-step CORE2 dist_16 run with ACTIVE ice** (job `25148594` —
+the meaningful cut_off/diag gate); **OpenMP `max|Δ|=0`** (gathers/maps); pi==golden (np=1 AND np=2
+CMA-off); `ctest` 4/4; SYNCCHECK np=1+np=2 clean + bit-identical. ⚠️ np>1 verify subtlety: `ocean2ice`
+runs the verify AFTER the `srfoce_u/v` driver halo (the kernel leaves halo=0 pre-exchange → a pre-halo
+[0,N) diff would false-positive at np>1). Lesson **L42**; SYNC_MAP §3 rows updated; key `icemap`.
+**NEXT = M4.3b (EVP dynamics — the 120-subcycle rheology island, the CG/M4.2 host-loop + device-kernels
+pattern; `src/fesom_ice_evp.cpp`).** Then M4.3c (FCT, the M2.6 analogue), M4.3d (thermo + oce_fluxes).
+**⚠️ Run OUTPUT → `/work` or `/scratch`, never `$HOME`.** M2/M4.2 detail follows.
+
+---
+
 **Session 15 (2026-05-26) — M4.2 COMPLETE: the §5 SSH block (SSH RHS + CG solver + update_vel +
 hbar) is on the device — the SYNC_MAP §5 mid-step host CG round-trip is CLOSED.** This was the M3.1
 perf bottleneck (the serial host CG ~127 iters/step + the device→host→device PCIe round-trip = ~0.7 of

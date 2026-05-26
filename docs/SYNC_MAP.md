@@ -222,16 +222,27 @@ salinity floor (row 13b), and the ice step (§3, M4.3). Lesson **L41**.
 ## 3. The sea-ice step — `fesom_ice_step` (`src/fesom_ice.cpp`; ported in M4.3)
 
 Runs *before* the ocean step each iteration (it overwrites `heat_flux`/`water_flux` the ocean step
-consumes). Currency at M1: `[H]` throughout.
+consumes). **⚠️ The ice physics is FORCED-ONLY: the pi smoke has no freezing → zero ice → EVP/FCT/
+cut_off/diag run on trivial state and thermo is gated off. So the `FESOM_KK_VERIFY=<icekey>` gate is
+CORE2-SLURM-based (`jobs/job_ice_verify_core2`, dist_16), not pi-based — except `ocean2ice` (reads the
+non-trivial ocean surface → pi-verifiable). No data-layer step: M1.4 already `Field`-wrapped every ice
+array (L42).** M4.3a (this milestone) ported the simple coupling/maps; EVP/FCT/thermo follow in M4.3b-d.
 
-| Sub | Kernel | Reads | Writes | M4.3 sync to add |
+| Sub | Kernel | Reads | Writes | M4.3 sync rail |
 |---|---|---|---|---|
-| ocean2ice | `fesom_ocean2ice` | dyn surface `uv`, tracers SST/SSS, `eta` | ice `srfoce_u/v/temp/salt/ssh` | `→dev` ocean surface; `mod_dev(srfoce_*)` |
-| EVP | `fesom_ice_evp_dynamics` (whichEVP=0) | ice `srfoce_*`,`stress_atmice_*`, work, mesh | ice `uice/vice`, work `sigma*/eps*/inv_*` | internal exchanges → bracket each; `mod_dev(uice,vice)` |
-| FCT | `ice_tg_rhs` + `ice_fct_solve` | ice `uice/vice`, `data[*].values`, work `fct_*`, stiffness | ice `data[*].values*` | internal exchanges (§6 pattern); wrap `fct_massmatrix`+work; `mod_dev(values)` |
-| cut_off | `fesom_ice_cut_off` | ice `data[*].values` | ice `data[*].values` (clamp) | `→dev`/`mod_dev(values)` |
-| thermo | `fesom_ice_thermodynamics` + `oce_fluxes` | ice state, forcing, jra, sr | ice `thermo.*`, `flx_*`; forcing `heat_flux`,`water_flux`,`virtual_salt`,`relax_salt` | `→dev`; `mod_dev(flx_*, forcing fluxes)`; `→host(forcing)` before the ocean step reads them |
-| diag | `h_ice`/`h_snow` | ice `data[AICE/MICE/MSNOW].values` | ice `h_ice`,`h_snow` | `mod_dev(h_ice,h_snow)` |
+| ocean2ice | ✅ **`fesom_ocean2ice_kk` (M4.3a — DONE)** | dyn surface `uv`, tracers SST/SSS, mesh `hbar` + set-once `nod_in_elem2D`/`elem_area`/levels | ice `srfoce_u/v/temp/salt/ssh` | **device: 2 race-free node kernels (srfoce_temp/salt/ssh map + the srfoce_u/v area-weighted PRIVATE gather, the L27 shape → bit-identical Serial AND OpenMP).** Driver IN `modify_host()+sync_device()` on `uv`/T/S/`hbar` (`dyn`/`tracers` const→`const_cast`, L28); `mod_dev(srfoce_*)`; OUT `sync_host(srfoce_*)` + the `srfoce_u/v` nod2D halo (driver). **Verify AFTER the halo** (the kernel leaves srfoce_u/v halo=0 pre-exchange → np>1 [0,N) diff would false-positive; L42). EOS-style verify, key `icemap`. |
+| EVP | `fesom_ice_evp_dynamics` (whichEVP=0) — **M4.3b** | ice `srfoce_*`,`stress_atmice_*`, work, mesh | ice `uice/vice`, work `sigma*/eps*/inv_*` | the 120-subcycle island (the CG/M4.2 pattern: host loop + device `stress_tensor`/`stress2rhs`/vel-update kernels + the per-subcycle uice/vice halo bracket); scatters (D22) → bracket each |
+| FCT | `ice_tg_rhs` + `ice_fct_solve` — **M4.3c** | ice `uice/vice`, `data[*].values`, work `fct_*`, stiffness | ice `data[*].values*` | internal exchanges (§6 pattern, the M2.6 ocean-FCT analogue); `mod_dev(values)` |
+| cut_off | ✅ **`fesom_ice_cut_off_kk` (M4.3a — DONE)** | ice `data[*].values` | ice `data[*].values` (clamp) | **device: per-node clamp over [0,N) (race-free RMW → bit-identical).** Driver IN `modify_host()+sync_device()` on the 3 values (host EVP/FCT wrote them via raw alias, L14); `mod_dev(values)`; OUT `sync_host` for the host thermo. No halo (covers [0,N)). L26 capture-before verify (RMW), key `icemap`. |
+| thermo | `fesom_ice_thermodynamics` + `oce_fluxes` — **M4.3d** | ice state, forcing, jra, sr | ice `thermo.*`, `flx_*`; forcing `heat_flux`,`water_flux`,`virtual_salt`,`relax_salt` | `→dev`; `mod_dev(flx_*, forcing fluxes)`; `→host(forcing)` before the ocean step reads them |
+| diag | ✅ **`fesom_ice_h_diag_kk` (M4.3a — DONE)** | ice `data[AICE/MICE/MSNOW].values` | ice `h_ice`,`h_snow` | **device: per-node `h = m/max(a,1e-3)` map (full overwrite → race-free).** Driver IN push a/m/ms; `mod_dev(h_ice,h_snow)`; OUT `sync_host` for I/O. EOS-style verify, key `icemap`. |
+
+**M4.3a put the simple ice coupling/maps on the device** — `ocean2ice` (gather) + `cut_off` (clamp) +
+the h_ice/h_snow diagnostic, the FIRST sea-ice device kernels (device islands within the still-host ice
+step; the round-trips compose away as EVP/FCT/thermo move in M4.3b-d). All race-free → bit-identical on
+Serial AND OpenMP. Gate `FESOM_KK_VERIFY=icemap`: pi (ocean2ice non-trivial, cut_off/diag trivial-on-
+zero-ice) `max|Δ|=0` Serial+OpenMP; pi==golden (np=1+np=2 CMA-off); SYNCCHECK np=1+np=2 clean; short
+CORE2 run (ice active) `max|Δ|=0` Serial. Lesson **L42**.
 
 ---
 

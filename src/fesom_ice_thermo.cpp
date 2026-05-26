@@ -10,6 +10,10 @@
 #include "fesom_tracers.h"
 #include "fesom_types.h"
 
+#include <Kokkos_Core.hpp>   // M4.3a: device cut_off clamp kernel
+#include <string>            // M4.3a: FESOM_KK_VERIFY backend name
+#include <algorithm>         // M4.3a: verify snapshot/restore copies
+#include <vector>
 #include <math.h>
 
 /*
@@ -71,6 +75,71 @@ void fesom_ice_cut_off(fesom_ice            *ice,
             m_snow[n] = 0.0;
             a_ice [n] = 0.0;
         }
+    }
+}
+
+/* ====================================================================== *
+ *  M4.3a — DEVICE (Kokkos) twin of fesom_ice_cut_off. Per-node clamp over  *
+ *  [0,N) (halo included, like the C); each node read-modify-writes only its *
+ *  own a_ice/m_ice/m_snow → race-free, NO scatter → Serial AND OpenMP       *
+ *  bit-identical. Marks the three ice-tracer values modify_device.          *
+ * ====================================================================== */
+void fesom_ice_cut_off_kk(fesom_ice            *ice,
+                          struct fesom_partit  *partit,
+                          struct fesom_mesh    *mesh)
+{
+    (void)partit;
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    auto a_ice  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snow = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+
+    Kokkos::parallel_for("fesom_ice_cut_off", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            real_t a = a_ice(n), m = m_ice(n), s = m_snow(n);
+            if (a > 1.0)      a = 1.0;
+            if (a < 1.0e-9) { a = 0.0; m = 0.0; s = 0.0; }
+            if (m < 1.0e-9) { m = 0.0; s = 0.0; a = 0.0; }
+            a_ice(n) = a; m_ice(n) = m; m_snow(n) = s;
+        });
+
+    ice->data[FESOM_ICE_AICE].values_fld.modify_device();
+    ice->data[FESOM_ICE_MICE].values_fld.modify_device();
+    ice->data[FESOM_ICE_MSNOW].values_fld.modify_device();
+}
+
+/* FESOM_KK_VERIFY=icemap — cut_off READ-MODIFY-WRITES a_ice/m_ice/m_snow (clamps in place),
+ * so this is the L26 capture-before: the driver snapshots the pre-clamp values; here snapshot
+ * the KK result, restore the pre values, run the C twin, diff, restore KK. max|Δ|==0 on Serial. */
+void fesom_ice_cut_off_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                              int step_n, const std::vector<real_t> &pre_a,
+                              const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    real_t *a = ice->data[FESOM_ICE_AICE].values;
+    real_t *m = ice->data[FESOM_ICE_MICE].values;
+    real_t *s = ice->data[FESOM_ICE_MSNOW].values;
+    std::vector<real_t> ka(a, a + N), km(m, m + N), ks(s, s + N);   /* KK result */
+    std::copy(pre_a.begin(), pre_a.end(), a);                       /* restore pre-clamp inputs */
+    std::copy(pre_m.begin(), pre_m.end(), m);
+    std::copy(pre_s.begin(), pre_s.end(), s);
+    fesom_ice_cut_off(ice, partit, mesh);                          /* C twin */
+    double da = 0.0, dm = 0.0, ds = 0.0;
+    for (int i = 0; i < N; ++i) {
+        double x;
+        x = std::fabs((double)ka[i]-(double)a[i]); if (x>da) da=x;
+        x = std::fabs((double)km[i]-(double)m[i]); if (x>dm) dm=x;
+        x = std::fabs((double)ks[i]-(double)s[i]); if (x>ds) ds=x;
+    }
+    std::copy(ka.begin(), ka.end(), a); std::copy(km.begin(), km.end(), m); std::copy(ks.begin(), ks.end(), s);
+    double dmax = da; if (dm>dmax) dmax=dm; if (ds>dmax) dmax=ds;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=icemap] step %d backend=%s  max|Δ|: cut_off a_ice=%.3e m_ice=%.3e m_snow=%.3e\n",
+                step_n, be.c_str(), da, dm, ds);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=icemap] FAIL step %d: cut_off Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax); std::abort();
     }
 }
 

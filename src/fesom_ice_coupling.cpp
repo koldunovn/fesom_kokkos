@@ -10,6 +10,10 @@
 #include "fesom_tracers.h"
 #include "fesom_types.h"
 
+#include <Kokkos_Core.hpp>   // M4.3a: device ocean2ice gather kernel
+#include <string>            // M4.3a: FESOM_KK_VERIFY backend name
+#include <algorithm>         // M4.3a: verify snapshot/restore copies (host-only diagnostic)
+#include <vector>
 #include <math.h>
 #include <mpi.h>
 
@@ -112,6 +116,124 @@ void fesom_ocean2ice(fesom_ice                  *ice,
     /* Halo exchange — Fortran line 244 */
     fesom_exchange_nod2D(u_w, partit);
     fesom_exchange_nod2D(v_w, partit);
+}
+
+/* ====================================================================== *
+ *  M4.3a — DEVICE (Kokkos) twin of fesom_ocean2ice. Two race-free node    *
+ *  kernels: (1) srfoce_temp/salt/ssh = surface tracer + hbar (per-node     *
+ *  map, skip cavity → keep prior like the C `continue`); (2) srfoce_u/v =   *
+ *  area-weighted gather of surface uv over the node's surrounding elements  *
+ *  (the compute_vel_nodes L27 PRIVATE-gather shape → race-free, bit-        *
+ *  identical Serial AND OpenMP). The DRIVER owns the OUT sync_host + the     *
+ *  u_w/v_w nod2D halo (the ALE driver-halo pattern); the kernel marks        *
+ *  srfoce_* modify_device. ⚠️ ice_update=1 on the golden path               *
+ *  (ice_ave_steps=1) — the time-avg branch is preserved verbatim but dead.  *
+ * ====================================================================== */
+void fesom_ocean2ice_kk(fesom_ice                  *ice,
+                        const struct fesom_dyn     *dyn,
+                        const struct fesom_tracers *tracers,
+                        struct fesom_partit        *partit,
+                        struct fesom_mesh          *mesh)
+{
+    (void)partit;
+    const int    N          = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    myDim      = mesh->myDim_nod2D;
+    const int    nl         = mesh->nl;
+    const int    ice_update = ice->ice_update;
+    const real_t sf         = (real_t)ice->ice_steps_since_upd;   /* time-avg (dead, ice_update=1) */
+    const real_t sn         = sf + 1.0;
+
+    auto trT     = tracers->data[FESOM_TRACER_T].values_fld.d();
+    auto trS     = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto hbar    = mesh->hbar_fld.d();
+    auto uv      = dyn->uv_fld.d();
+    auto ulev_n  = mesh->ulevels_nod2D_fld.d();
+    auto ulev    = mesh->ulevels_fld.d();
+    auto nie     = mesh->nod_in_elem2D_fld.d();
+    auto nie_off = mesh->nod_in_elem2D_offsets_fld.d();
+    auto earea   = mesh->elem_area_fld.d();
+    auto srf_t = ice->srfoce_temp_fld.d();
+    auto srf_s = ice->srfoce_salt_fld.d();
+    auto srf_h = ice->srfoce_ssh_fld.d();
+    auto srf_u = ice->srfoce_u_fld.d();
+    auto srf_v = ice->srfoce_v_fld.d();
+
+    /* (1) srfoce_temp/salt/ssh over [0,N) (covers halo directly — no exchange in the C either). */
+    Kokkos::parallel_for("fesom_ocean2ice_srf", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;                       /* cavity: keep prior */
+            const real_t T = trT(FESOM_NODE3D(n, 0, nl));
+            const real_t S = trS(FESOM_NODE3D(n, 0, nl));
+            const real_t H = hbar(n);
+            if (ice_update) { srf_t(n) = T; srf_s(n) = S; srf_h(n) = H; }
+            else {
+                srf_t(n) = (srf_t(n) * sf + T) / sn;
+                srf_s(n) = (srf_s(n) * sf + S) / sn;
+                srf_h(n) = (srf_h(n) * sf + H) / sn;
+            }
+        });
+
+    /* (2) srfoce_u/v: the C zeros u_w/v_w over [0,N) then gathers over [0,myDim) (skip cavity),
+     *     so halo + cavity nodes stay 0. One launch over [0,N): gather for owned non-cavity,
+     *     else 0. The dead time-avg branch reads the JUST-ZEROED u_w → uw/sn (preserved). */
+    Kokkos::parallel_for("fesom_ocean2ice_uv", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            if (n >= myDim || ulev_n(n) > 1) { srf_u(n) = 0.0; srf_v(n) = 0.0; return; }
+            real_t uw = 0.0, vw = 0.0, vol = 0.0;
+            const int beg = nie_off(n), end = nie_off(n + 1);
+            for (int k = beg; k < end; ++k) {
+                const int el = nie(k);
+                if (ulev(el) > 1) continue;
+                const real_t a = earea(el);
+                vol += a;
+                uw  += uv(FESOM_ELEMVEC(el, 0, nl) + 0) * a;
+                vw  += uv(FESOM_ELEMVEC(el, 0, nl) + 1) * a;
+            }
+            if (vol > 0.0) { uw /= vol; vw /= vol; }
+            if (ice_update) { srf_u(n) = uw;      srf_v(n) = vw;      }
+            else            { srf_u(n) = uw / sn; srf_v(n) = vw / sn; }   /* zeroed prior → uw/sn */
+        });
+
+    ice->srfoce_temp_fld.modify_device(); ice->srfoce_salt_fld.modify_device();
+    ice->srfoce_ssh_fld.modify_device();
+    ice->srfoce_u_fld.modify_device();    ice->srfoce_v_fld.modify_device();
+}
+
+/* FESOM_KK_VERIFY=icemap — ocean2ice writes srfoce_* as a full overwrite from intact inputs
+ * (dyn/tracers/mesh, unmodified by it) on the golden path (ice_update=1, no cavity), so this is
+ * the EOS-style verify (no capture-before needed; the C twin recomputes from the intact inputs):
+ * snapshot the KK srfoce_*, run the C twin, diff, restore KK. The C twin's internal u_w/v_w halo
+ * is a no-op on Serial. Non-intrusive; asserts max|Δ|==0 on Serial. */
+void fesom_ocean2ice_verify(fesom_ice *ice, const struct fesom_dyn *dyn,
+                            const struct fesom_tracers *tracers, struct fesom_partit *partit,
+                            struct fesom_mesh *mesh, int step_n)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    std::vector<real_t> kt(ice->srfoce_temp, ice->srfoce_temp + N);
+    std::vector<real_t> ks(ice->srfoce_salt, ice->srfoce_salt + N);
+    std::vector<real_t> kh(ice->srfoce_ssh,  ice->srfoce_ssh  + N);
+    std::vector<real_t> ku(ice->srfoce_u,    ice->srfoce_u    + N);
+    std::vector<real_t> kv(ice->srfoce_v,    ice->srfoce_v    + N);
+    fesom_ocean2ice(ice, dyn, tracers, partit, mesh);   /* C twin recomputes srfoce_* */
+    auto mx = [](const std::vector<real_t> &a, const real_t *b) {
+        double d = 0.0;
+        for (size_t i = 0; i < a.size(); ++i) { double x = std::fabs((double)a[i]-(double)b[i]); if (x>d) d=x; }
+        return d;
+    };
+    double dt = mx(kt, ice->srfoce_temp), ds = mx(ks, ice->srfoce_salt),
+           dh = mx(kh, ice->srfoce_ssh),  du = mx(ku, ice->srfoce_u), dv = mx(kv, ice->srfoce_v);
+    std::copy(kt.begin(), kt.end(), ice->srfoce_temp);  std::copy(ks.begin(), ks.end(), ice->srfoce_salt);
+    std::copy(kh.begin(), kh.end(), ice->srfoce_ssh);   std::copy(ku.begin(), ku.end(), ice->srfoce_u);
+    std::copy(kv.begin(), kv.end(), ice->srfoce_v);
+    double dmax = dt; for (double x : {ds, dh, du, dv}) if (x > dmax) dmax = x;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=icemap] step %d backend=%s  max|Δ|: ocean2ice temp=%.3e salt=%.3e "
+                "ssh=%.3e u=%.3e v=%.3e\n", step_n, be.c_str(), dt, ds, dh, du, dv);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=icemap] FAIL step %d: ocean2ice Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax); std::abort();
+    }
 }
 
 /*
