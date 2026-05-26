@@ -283,9 +283,50 @@ int main(int argc, char **argv)
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, mesh_dir, argc, argv);
 
-    /* Kokkos after MPI_Init (lets it pick a device per local rank later). M0: no
-     * compute runs on a Kokkos backend yet, so the result is identical to the C build. */
-    Kokkos::initialize(argc, argv);
+    /* Kokkos after MPI_Init: bind each MPI rank to its OWN GPU (M3.1). The device
+     * id must be the NODE-LOCAL rank, not the global rank — every node exposes
+     * GPUs 0..(g-1), so e.g. global rank 5 (the 2nd rank on node 1, 4 GPUs/node)
+     * must drive device 1. The authoritative source is an MPI_COMM_TYPE_SHARED
+     * split (the ranks that can share memory == the ranks on one node); the
+     * SLURM_LOCALID env var is the fallback if the split is unavailable. The old
+     * Kokkos::initialize(argc,argv) form set NO device_id, so every rank defaulted
+     * to device 0 — the multi-GPU bug this fixes.
+     *
+     * Contract (see docs/RUN_GPU.md): one rank per GPU, and every GPU on a node
+     * visible to every rank on it (--gres=gpu:<g> --ntasks-per-node=<g> WITHOUT a
+     * per-task --gpu-bind). set_device_id is a NO-OP on the Serial/OpenMP backends
+     * (no device backend → Kokkos' get_gpu() never runs, the id is never read), so
+     * the CPU bit-identity oracle is unaffected; for npes==1 the node-local rank is
+     * 0 ⇒ device 0, identical to the old default. */
+    int local_rank = 0;
+    {
+        MPI_Comm shmcomm = MPI_COMM_NULL;
+        if (MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0,
+                                MPI_INFO_NULL, &shmcomm) == MPI_SUCCESS &&
+            shmcomm != MPI_COMM_NULL) {
+            MPI_Comm_rank(shmcomm, &local_rank);
+            MPI_Comm_free(&shmcomm);
+        } else {
+            const char *slurm_localid = getenv("SLURM_LOCALID");
+            if (slurm_localid) local_rank = atoi(slurm_localid);
+        }
+    }
+    Kokkos::InitializationSettings kokkos_settings;
+    kokkos_settings.set_device_id(local_rank);     /* ignored by Serial/OpenMP */
+    Kokkos::initialize(kokkos_settings);
+
+    /* Per-rank GPU-binding proof (the M3.1 gate has no FESOM_KK_VERIFY): on a GPU
+     * backend Kokkos::device_id() is the bound device — it MUST be DISTINCT per
+     * node-local rank (0,1,2,3,…); on Serial/OpenMP it returns -1 (no device). The
+     * processor name confirms node placement (e.g. 4 ranks per gpu node). Every
+     * rank prints (stdout is line-buffered), so the SLURM log shows the mapping. */
+    {
+        char procname[MPI_MAX_PROCESSOR_NAME] = {0};
+        int procname_len = 0;
+        MPI_Get_processor_name(procname, &procname_len);
+        printf("[fesom_port] rank %d on %s: node-local rank %d -> Kokkos device_id %d\n",
+               mpi.mype, procname, local_rank, Kokkos::device_id());
+    }
     if (mpi.mype == 0)
         printf("[fesom_port] Kokkos backend: %s\n", Kokkos::DefaultExecutionSpace::name());
 

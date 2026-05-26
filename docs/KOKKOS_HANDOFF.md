@@ -1,5 +1,28 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 14 (2026-05-26) — M3.1 COMPLETE: multi-GPU run configuration (rank→GPU device mapping).**
+The CUDA build now runs across multiple A100s, **one MPI rank ⇒ one GPU**, each rank bound to a
+DISTINCT device by its node-local rank (`MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)` →
+`Kokkos::InitializationSettings::set_device_id` in `src/fesom_main.cpp`; the old `initialize(argc,argv)`
+made every rank grab GPU 0). Verified: pi `dist_2` (2 ranks/2 GPUs, 1 `gpu-devel` node —
+rank0→dev0/rank1→dev1) + CORE2 `dist_8` (8 ranks/8 GPUs, 2 `gpu` nodes — node-local rank resets 0–3 per
+node); both complete, physical, climate-close (np=2-CUDA vs the np=2 Serial oracle = density 2.75e-11,
+the unchanged CUDA budget; the larger diff vs the np=1 golden is the pre-existing partition effect, L40).
+**NO kernel changes** — halos already host-staged via the M1.5 rails, so multi-GPU uses regular MPI
+(GPU-aware = M5). **NO CPU regression** (re-ran ALL gates Serial+OpenMP: 460 verify lines `max|Δ|=0`,
+pi==golden np1+np2, ctest 4/4, SYNCCHECK; OpenMP at the unchanged M2.5 floor). New: **`docs/RUN_GPU.md`**
+(mapping, SLURM binding contract, the same-rank-oracle rule, the perf finding), job scripts
+`jobs/job_gpu_multi_pi` + `jobs/job_gpu_core2`, lesson **L40**. **⚠️ PERF (measured, honest): at M3.1
+the CPU is ~17× FASTER node-for-node** — CORE2 dt=1800: GPU 8×A100/2 nodes `dist_8` = **0.86 s/step** vs
+CPU 256 cores/2 nodes `dist_256` = **0.051 s/step**. The GPU is NOT slow; the **CG solver + sea ice are
+STILL ON HOST** and run 8-way (`dist_8`) not 256-way, dominating the step (the §5 round-trip + serial
+host CG ~127 iters/step + ice). **→ M4.2 (CG→device) is now the clear next priority** (the perf unlock);
+M3.2 (CUDA climate validation) is the parallel option. ⚠️ Run OUTPUT → `/work/ab0995/a270088/port2`,
+NEVER `$HOME` (60 GB home quota; a CORE2 GPU run = 3.5 GB). Tag `m2-ocean-device` is still the latest
+(M3.1 is run-config — no new tag). Read §0/§3/§5 below; M2 detail follows.
+
+---
+
 **Session 13 (2026-05-26) — M2.7 COMPLETE + M2 MILESTONE ACCEPTED (tag `m2-ocean-device`). The whole
 ocean step is now device-resident on the bit-identity oracle.** Commit `6e98fb3` (M2.7:
 `fesom_impl_vert_diff_tracers_kk` — the implicit vertical tracer-diffusion TDMA, the LAST host ocean
@@ -406,8 +429,8 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 >
 > READ FIRST (absolute paths):
 > - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (status §0, build/run/CUDA recipe §2 incl. the **sticky-module unload fix**, the **M3.1 detail §3**)
-> - **THE FILE TO EDIT: `src/fesom_main.cpp:286-288`** (`Kokkos::initialize` after `MPI_Init` — the device-id hook) + `src/fesom_partit.cpp` (`build_dist_dir` → `dist_<npes>` loader) + `jobs/job_pi_smoke_gpu` (1-GPU template → clone for multi-GPU)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (§M2 all ticked; you are at §M3.1, then §M3.2)
+> - **M4.2 FILES TO EDIT: `src/fesom_ssh.cpp`(?) + `src/fesom_step.cpp`** (the §5 CG round-trip → device) + the CG vectors/CSR `Field`-wrap (deferred from M1). **`docs/RUN_GPU.md`** = the M3.1 result (rank→GPU mapping, SLURM binding, perf table). (M3.1's `src/fesom_main.cpp` device-id hook is DONE.)
+> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← the plan (§M2 + §M3.1 ticked; you are at **§M4.2** (recommended) or §M3.2)
 > - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← per-substep host/device map (substeps 1–6, 1b, 12/13a/13/13(Redi)/13b/13c/14 ALL DONE; **§5 = the mid-step CG host round-trip = M4.2**; §6 = intra-kernel exchanges; §9 kernel-author checklist)
 > - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← Kokkos decisions/lessons (D1–D22, L1–L39; **D19/D20 = leaf-kernel template; D21 = internal-exchange bracket; D22 = scatter/atomic_add (the CG dot-product will be the first `parallel_reduce`); L25 = verify-token collision; L26 = capture-before; L28 = sync ALL inputs; L31 = per-node TDMA; L33 = derive shape from the BODY; L39 = M2.7 tracer-diff + the L36 host-vs-device decision**) — APPEND every session
 > - `/home/a/a270088/port_kokkos/docs/PORTING_LESSONS.md`  ← inherited Fortran→C traps (dt=1800 AB2 eps=0.1, tracer stride `nl`, halo bounds, module-default scalars carry physics)
@@ -416,44 +439,36 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > - **TEMPLATE: the M2 device kernels** — `src/fesom_eos.cpp`/`fesom_pp.cpp`/`fesom_kpp.cpp`/`fesom_momentum.cpp`/`fesom_gm.cpp`/`fesom_tracer_adv.cpp`/`fesom_tracer_diff.cpp` (leaf kernels + verifies) + the substep rails in `src/fesom_step.cpp` (D19 IN/OUT, L28 sync ALL inputs, `forcing` `const`→`const_cast`, L26 capture-before for read-modify-write)
 > - project memory: `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = what climate-close looks like)
 >
-> THIS SESSION = **M3.1: GPU run configuration (multi-GPU MPI→device mapping)** — the user chose M3.1 (M4.2
-> = SSH/CG on device is the task after). RUN-CONFIG work, **NOT new kernels → no `FESOM_KK_VERIFY` gate.**
-> Goal: run the existing CUDA build across multiple A100s (**1 MPI rank ⇒ 1 GPU**), confirm it completes +
-> is physical + stays climate-close, and write `docs/RUN_GPU.md`. Unblocks M3.2 (2-yr/5-yr CUDA CORE2 climate
-> validation vs `/scratch/a/a270088/fortran_pp_2yr`).
+> THIS SESSION = **M4.2 (recommended) OR M3.2 — ASK the user** (M3.1 multi-GPU mapping is DONE — see the
+> Session 14 header above + §3). **M4.2 is now the clear priority: the M3.1 perf measurement showed the CPU
+> ~17× faster node-for-node** (CORE2 dt=1800: GPU 8×A100/2 nodes `dist_8` = 0.86 s/step vs CPU 256 cores/2
+> nodes `dist_256` = 0.051 s/step) **because the CG solver + sea ice are STILL ON HOST and run 8-way on
+> `dist_8`, not 256-way — the §5 mid-step round-trip dominates the GPU step** (L40). M4.2 is the perf unlock.
 >
-> CORE CHANGE — **`src/fesom_main.cpp:286-288`**: `Kokkos::initialize(argc,argv)` is already placed AFTER
-> `MPI_Init` with the comment "lets it pick a device per local rank later" — that "later" is this task.
-> Derive the NODE-LOCAL rank (`MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,
-> &shm)` → `MPI_Comm_rank(shm,&local_rank)`; fallback `getenv("SLURM_LOCALID")`), then
-> `Kokkos::InitializationSettings s; s.set_device_id(local_rank); Kokkos::initialize(s);` (Kokkos 4.4 API).
-> The `argc/argv` form makes EVERY rank grab GPU 0 — that's the bug. No-op for Serial/OpenMP (ignore
-> device_id); guard npes==1. **Re-run the M2 Serial gates after** (all `FESOM_KK_VERIFY` keys, pi==golden
-> np=1+np=2 CMA-off, `ctest` 4/4, SYNCCHECK) to prove no CPU regression.
+> **M4.2 — SSH RHS + CG solver on device** (plan §M4.2; closes the SYNC_MAP §5 device→host→device bounce so
+> substeps 1–14 flow without it): wrap the CG vectors + the SSH stiffness CSR in `Field` (deferred from M1),
+> then port `compute_ssh_rhs_linfs` + the CG iteration (the SpMV `App` = an edge/elem→node SCATTER, D22; the
+> dot-products = `Kokkos::parallel_reduce` + an `MPI_Allreduce` on the scalar = the FIRST reduction, pairs
+> with M4.1; the AXPYs = maps) + `update_vel` + `compute_hbar`. The matrix is set-once (build on host, push
+> once). Gate: a new `FESOM_KK_VERIFY=cg`(?) Serial `max|Δ|==0` (the CG is deterministic → bit-identical on
+> Serial; the reduction order must match the C BODY, L33); pi==golden np=1+np=2 CMA-off; `ctest` 4/4;
+> SYNCCHECK; the dot-product `parallel_reduce` → watch associativity on OpenMP/CUDA (D22 ladder — likely
+> climate-close, not bit-identical, on the threaded/GPU backends). Files: `src/fesom_ssh.cpp`(?),
+> `src/fesom_step.cpp`; TEMPLATE = the M2 kernels + the D22 scatter strategy.
 >
-> KEY INSIGHT — correctness should follow from the mapping ALONE: every halo (`fesom_exchange_*`) runs on
-> HOST pointers (`h_checked()`) and the rails already `sync_host` before each halo + `sync_device` after,
-> so multi-GPU halos stage device→host→MPI→host→device with REGULAR (non-GPU-aware) MPI — no kernel
-> changes. GPU-aware MPI (device-pointer halos, the throughput optimisation) is DEFERRED (M5/perf).
+> **M3.2 (the alternative)** = 2-yr/5-yr CUDA CORE2 climate validation vs `/scratch/a/a270088/fortran_pp_2yr`
+> (+ KPP ref): SST/SSS RMS within the Fortran↔C budget; document the GPU↔CPU budget in `docs/GPU_FIDELITY.md`;
+> tag `m3-gpu-climate`. **⚠️ Diff vs a SAME-rank-count CPU reference, NOT the np=1 golden** (L40 — the
+> partition effect swamps the CUDA budget otherwise). M3.2 validates fidelity but does NOT unlock perf, so
+> M4.2 first is the stronger order. The GPU jobs are ready: `jobs/job_gpu_core2` (clone for the long run).
 >
-> PARTITIONS: CORE2 `dist_{8,16,32,64,72,144,256,288,432,512,864}`; pi `dist_{2,8}`. Levante `gpu`/
-> `gpu-devel` = 4× A100/node. Smoke ladder: (1) **pi `dist_2`** = 2 ranks/2 GPUs on ONE `gpu-devel` node
-> (proves binding + 2-GPU halos); (2) **CORE2 `dist_8`** = 8 ranks/8 GPUs (2 `gpu` nodes). Write
-> `jobs/job_gpu_multi_*` from `job_pi_smoke_gpu`: `--gres=gpu:4 --ntasks-per-node=4 --nodes=N`, `srun` the
-> `build-cuda` binary. ⚠️ the `OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader` override is a single-rank/LOGIN-node
-> hack — for multi-rank on `gpu` compute nodes use the STANDARD UCX/IB transport (don't force self,vader).
->
-> GATE (M3.1 — CUDA, NO bit-identity): the multi-GPU run COMPLETES (exit 0), is PHYSICAL (T/S sane, no
-> blow-up), each rank binds a DISTINCT GPU (print Kokkos device id per rank / `nvidia-smi` → 0,1,2,3 not
-> all-0), and is climate-close — pi `dist_2` diff vs `docs/reference/c_baseline_snapshots/pi` (expect the
-> unchanged CUDA budget density~3e-12; "DIVERGENCE" is a PASS, D5; NOT "BIT-IDENTICAL"). `diff_snap.py`
-> takes DIRECTORIES (L19). Write `docs/RUN_GPU.md` (rank→GPU mapping, partition choice, launch recipe, the
-> perf caveat below). Commit; append lesson **L40** + note in the handoff in the SAME commit.
->
-> GPU-SIZING context (from M2): CORE2 = 127k surface nodes × 48 levels (~4M wet 3D pts), bandwidth-bound →
-> ~1 A100 ≈ the 2-node/256-rank CPU job; too small to scale past ~1–2 GPUs (the real lever is higher-res
-> meshes). A FAIR perf benchmark wants **M4.2** (the §5 CG round-trip on device) first — note in RUN_GPU.md.
-> M3.1 = correctness/binding; M3.2 = climate validation; perf parity is later.
+> M3.1 RESULT (done, Session 14): rank→GPU via `MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)` →
+> `Kokkos::InitializationSettings::set_device_id` in `src/fesom_main.cpp` (the device-id hook, now filled);
+> `docs/RUN_GPU.md` (mapping + the SLURM binding contract `--gpu-bind=none` + the same-rank-oracle rule + the
+> perf table); `jobs/job_gpu_multi_pi` (pi `dist_2`, **gpu-devel = 2 A100/node**) + `jobs/job_gpu_core2`
+> (CORE2 `dist_8`, **gpu = 4 A100/node**, 2 nodes) + `jobs/job_{gpu,cpu,cpu256}_time_core2` (the perf runs);
+> lesson L40. **⚠️ Run OUTPUT → `/work/ab0995/a270088/port2/kokkos_gpu_runs`, NEVER `$HOME`** (60 GB home
+> quota; a CORE2 GPU run = 3.5 GB of snapshots — [[feedback-hpc-run-hygiene]]).
 >
 > BUILD (recipe §2): `source /sw/etc/profile.levante; module --force purge; module unload netcdf-c cdo
 > ncview git; module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 openmpi/4.1.2-gcc-11.2.0

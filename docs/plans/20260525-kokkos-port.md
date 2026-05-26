@@ -557,9 +557,11 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
 **Files:**
 - Create: `job_gpu_core2_*` SLURM templates, `docs/RUN_GPU.md`
 
-- [ ] map MPI ranks → GPUs (1 rank/GPU, 4/node on `gpu`); pick `dist_<#gpus>` partitions;
-      set `Kokkos` device-per-rank (local-rank → `cudaSetDevice` via `Kokkos` `--kokkos-device-id`)
-- [ ] short multi-GPU smoke on `gpu-devel`; document in `docs/RUN_GPU.md`
+- [x] map MPI ranks → GPUs (1 rank/GPU): node-local rank via `MPI_Comm_split_type(MPI_COMM_TYPE_SHARED)`
+      → `Kokkos::InitializationSettings::set_device_id` in `src/fesom_main.cpp` (gpu-devel=2/node, gpu=4/node)
+- [x] short multi-GPU smoke: pi `dist_2` (1 gpu-devel node) + CORE2 `dist_8` (2 gpu nodes) — both bind
+      distinct GPUs, complete, physical, climate-close; documented in `docs/RUN_GPU.md` + lesson L40.
+      ⚠️ Measured perf: at M3.1 CPU ~17× faster node-for-node (CG+ice still host, 8-way not 256-way) → M4.2.
 
 ### Task M3.2: 2-yr + 5-yr GPU climate validation
 

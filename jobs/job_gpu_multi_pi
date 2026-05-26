@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --job-name=kk_pi_gpu2
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/pi_gpu2.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/pi_gpu2.%j.err
+#
+# M3.1 multi-GPU smoke (SMALLEST): pi mesh, dist_2 = 2 MPI ranks -> 2 A100s on ONE
+# gpu-devel node (gpu-devel = 2 A100/node). Proves the rank->GPU device-id mapping
+# (src/fesom_main.cpp: MPI_COMM_TYPE_SHARED node-local rank -> Kokkos set_device_id)
+# AND that the 2-GPU halo exchange (device->host->MPI->host->device with REGULAR,
+# non-GPU-aware MPI) reproduces a physical, climate-close result.
+#
+# --gpu-bind=none keeps BOTH GPUs visible to BOTH ranks, so Kokkos
+# set_device_id(local_rank) picks visible_devices[0] / [1] -> distinct devices.
+# (1 rank per GPU is the contract; see docs/RUN_GPU.md.)
+#
+# GATE (CUDA => NOT bit-identical; climate-close at the M2 budget, D5):
+#   - exit 0, runs to completion, T/S sane (no blow-up)
+#   - EACH rank prints a DISTINCT Kokkos device_id (0 and 1, NOT both 0)
+#   - diff vs the np=1 C golden = the unchanged CUDA budget (density ~3e-12);
+#     diff_snap.py "DIVERGENCE" is a PASS, NOT "BIT-IDENTICAL".
+# Inspect:  grep "Kokkos device_id" runs/pi_gpu2.<jobid>.out
+#   python scripts/diff_snap.py docs/reference/c_baseline_snapshots/pi runs/pi_gpu2
+#   # (or vs the np=2 Serial oracle /scratch/a/a270088/pi_np2_ref_m13_nocma to
+#   #  isolate the pure CUDA budget from the np=1-vs-np=2 partition diff)
+
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+module --force purge
+module unload netcdf-c cdo ncview git 2>/dev/null      # sticky-module fix (L17)
+module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 \
+            openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
+export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+
+# Standard Levante UCX/IB transport for MULTI-RANK on compute/gpu nodes (verbatim
+# from env.sh; NOT the single-rank login-node self,vader hack in job_pi_smoke_gpu).
+# Halos are host-staged (regular MPI), so IB just moves host buffers as on CPU.
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl=self
+export OMPI_MCA_osc=pt2pt
+export UCX_IB_ADDR_TYPE=ib_global
+export OMPI_MCA_coll="^ml,hcoll"
+export OMPI_MCA_coll_hcoll_enable=0
+export HCOLL_ENABLE_MCAST_ALL=0
+export HCOLL_MAIN_IB=mlx5_0:1
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_TLS=mm,knem,cma,dc_mlx5,dc_x,self
+export UCX_UNIFIED_MODE=y
+export OMPI_MCA_io=romio321
+export HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/pi_gpu2   # NOT home (60GB home quota; outputs go to /work)
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "=== host=$(hostname) nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS gpus/node=$SLURM_GPUS_ON_NODE ==="
+nvidia-smi -L                                          # GPUs on the head node
+# pi smoke args: dt=100, 20 steps, snap_every=10, analytical forcing (matches the golden capture)
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 100 20 10
+echo "Exit: $?"

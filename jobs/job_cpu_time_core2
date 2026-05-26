@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ctime
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ctime.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ctime.%j.err
+#
+# M3.1 TIMING — the CPU twin of job_gpu_time_core2: SAME decomposition (dist_8 =
+# 8 MPI ranks), Kokkos SERIAL backend (1 core/rank), so it is 8 A100 vs 8 CPU
+# cores apples-to-apples on the SAME partition. loop(100) = wall(105) - wall(5).
+# (8 cores is a SMALL CPU allocation — a full compute node is 128 cores; see the
+# perf note in docs/RUN_GPU.md / the speed answer for the throughput framing.)
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"                    # gcc+openmpi+netcdf + the validated UCX/IB knobs
+ulimit -s 204800
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/time_cpu
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=200
+
+run() {  # $1=nsteps $2=tag
+  local t0 t1; t0=$(date +%s.%N)
+  srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" 1800 "$1" 999999 "$PHC" 1958 > "$OUT/log_$2.txt" 2>&1
+  local rc=$?; t1=$(date +%s.%N)
+  awk -v a="$t0" -v b="$t1" -v n="$1" -v t="$2" -v r="$rc" \
+      'BEGIN{printf "TIMING backend=CPU-serial tag=%s nsteps=%d wall=%.2f s rc=%s\n", t, n, b-a, r}'
+}
+echo "=== CPU(serial) dist_8 timing (nodes=$SLURM_JOB_NODELIST) ==="
+run 5   short
+run 105 long
+echo "--- last step of long run (sanity, no nan) ---"
+grep -E "it=" "$OUT/log_long.txt" | tail -1

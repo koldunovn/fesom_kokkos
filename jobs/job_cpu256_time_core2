@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=kk_c256time
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=256
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/c256time.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/c256time.%j.err
+#
+# FAIR node-for-node CPU baseline for the GPU dist_8 timing: the GPU job uses 2
+# gpu nodes (8 A100). The realistic CPU way to fill 2 compute nodes is 256 MPI
+# ranks (dist_256, pure MPI, 128 cores/node), NOT 8 cores. Serial Kokkos backend
+# (1 thread/rank), the same build the M1 acceptance used. loop(100)=wall(105)-wall(5).
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/time_cpu256
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=200
+
+run() {  # $1=nsteps $2=tag
+  local t0 t1; t0=$(date +%s.%N)
+  srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" 1800 "$1" 999999 "$PHC" 1958 > "$OUT/log_$2.txt" 2>&1
+  local rc=$?; t1=$(date +%s.%N)
+  awk -v a="$t0" -v b="$t1" -v n="$1" -v t="$2" -v r="$rc" \
+      'BEGIN{printf "TIMING backend=CPU-256rank tag=%s nsteps=%d wall=%.2f s rc=%s\n", t, n, b-a, r}'
+}
+echo "=== CPU(serial) dist_256 / 2 compute nodes timing (nodes=$SLURM_JOB_NODELIST) ==="
+run 5   short
+run 105 long
+echo "--- last step of long run (sanity, no nan) ---"
+grep -E "it=" "$OUT/log_long.txt" | tail -1
