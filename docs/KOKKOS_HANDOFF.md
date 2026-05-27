@@ -1,7 +1,7 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
 **Session 17 (2026-05-27) — M4.3c COMPLETE: the sea-ice FCT advection on the device.** Commit
-**`<this>`** — `fesom_ice_tg_rhs_kk` + `fesom_ice_fct_solve_kk` (`src/fesom_ice_fct.cpp`), the M2.6
+**`ff11119`** — `fesom_ice_tg_rhs_kk` + `fesom_ice_fct_solve_kk` (`src/fesom_ice_fct.cpp`), the M2.6
 ocean-FCT analogue but 2-D (single surface layer), reusing the M4.2 SSH-CSR machinery. **Three toolkit
 patterns composed:** (1) `tg_rhs` = the EVP `stress2rhs` shape (zero-map + element→node SCATTER into
 `values_rhs`, no halo); (2) `ice_solve_low/high_order` = the **M4.2 CG per-row CSR-gather SpMV** over the
@@ -524,7 +524,7 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > device-resident, tag `m2-ocean-device`) + M3.1 (multi-GPU rank→GPU mapping, `acadce2`) + M4.2 (the §5
 > SSH RHS + CG solver + update_vel + hbar on device, `4de3230`/`67fb2e1`/`718cbfd`) + M4.3a (sea-ice
 > coupling/maps: ocean2ice + cut_off + h_ice/h_snow diag, `473c15b`) + M4.3b (EVP sea-ice dynamics,
-> `e428372`) + M4.3c (the ice FCT advection, `<m4.3c-sha>`) are COMPLETE.** The whole OCEAN step flows on
+> `e428372`) + M4.3c (the ice FCT advection, `ff11119`) are COMPLETE.** The whole OCEAN step flows on
 > device; the only host ocean compute left is the trivial `eta_n` map + the salinity floor. Of the SEA-ICE
 > step (`fesom_ice_step`, runs BEFORE the ocean step each iteration), coupling/maps + EVP + FCT are now on
 > device; **THIS SESSION = M4.3d (thermodynamics + `oce_fluxes`) — the LAST piece — then the M4 acceptance
