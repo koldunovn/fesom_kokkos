@@ -29,6 +29,7 @@
 #include "fesom_halo.h"      // fesom_halo_kind, the host fesom_halo_exchange
 #include "fesom_partit.h"
 #include <cstdlib>          // getenv (FESOM_HALO_SELFCHECK dispatch)
+#include <cstring>          // strstr (FESOM_DBG_SYNC pinpoint)
 
 // Is the on-device halo path active? true only on a CUDA build with the env
 // override FESOM_HOST_HALO unset/!=1. Always defined (returns false elsewhere)
@@ -77,6 +78,19 @@ void fesom_halo_device_selfcheck(fesom::Field   &f,
 // bracket. (At npes<=1 it just marks device-dirty — the device already holds
 // the data, so it also skips the legacy path's pointless npes==1 round-trip.)
 // base_off (element offset into f) exchanges a SLAB of a multi-channel field; default 0.
+
+// M5.9 DEBUG: env-gated per-field sync_host to pinpoint which flipped field's host-staleness drives
+// the CORE2 divergence (run at HEAD, which dodges the M5.4 heisenbug crash). FESOM_DBG_SYNC is a
+// comma-list of ids; if it contains `id` (or "all"), pull the field to host fresh after its device
+// halo. Zero cost when unset. Remove once the culprit field is fixed with a targeted sync.
+inline void fesom_dbg_sync(fesom::Field &f, const char *id)
+{
+    static const char *envv = nullptr; static int loaded = 0;
+    if (!loaded) { envv = getenv("FESOM_DBG_SYNC"); loaded = 1; }
+    if (!envv) return;
+    if (std::strstr(envv, "all") || std::strstr(envv, id)) f.sync_host();
+}
+
 inline void fesom_halo_field(fesom::Field &f, fesom_halo_kind kind,
                              int n_levels, int n_components, fesom_partit *p,
                              std::size_t base_off = 0)

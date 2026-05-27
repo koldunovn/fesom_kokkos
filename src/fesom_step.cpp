@@ -204,6 +204,9 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(aux->hpressure_fld.h_checked(),      nl, p);
     /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
     fesom_halo_field(aux->bvfreq_fld, FESOM_HALO_NOD3D, nl, 1, p);
+    aux->bvfreq_fld.sync_host();   /* M5.9 FIX: device-halo left bvfreq device-auth; a host op reads it
+                                    * stale on CORE2 → re-sync (leave-one-out bisect; GPU_FIDELITY §M5.9).
+                                    * No-op on Serial (host==device). */
     fesom_exchange_nod3D(aux->sw_alpha_fld.h_checked(),       nl, p);
     fesom_exchange_nod3D(aux->sw_beta_fld.h_checked(),        nl, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
@@ -305,6 +308,7 @@ int fesom_timestep(int                          step_n,
      * with its halo (vel_rhs reads it on-device). */
     fesom_halo_field(aux->pgf_x_fld, FESOM_HALO_ELEM3D, nl, 1, p);
     fesom_halo_field(aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
+    aux->pgf_x_fld.sync_host(); aux->pgf_y_fld.sync_host();  /* M5.9 FIX (see §M5.9; no-op on Serial) */
 
     PMARK("2_pgf");
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
@@ -324,6 +328,7 @@ int fesom_timestep(int                          step_n,
     /* M5.4: uvnode device-halo (GPU-aware MPI on CUDA, host-staged on Serial); the OUT sync_host
      * + the KPP/PP IN re-pushes are gone — uvnode stays device-resident with its halo. */
     fesom_halo_field(dyn->uvnode_fld, FESOM_HALO_NOD3D, nl, 2, p);
+    dyn->uvnode_fld.sync_host();   /* M5.9 FIX (see §M5.9; no-op on Serial) */
 
     if (s_use_kpp) {
         /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
@@ -480,6 +485,7 @@ int fesom_timestep(int                          step_n,
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */
+    dyn->uv_rhs_fld.sync_host();   /* M5.9 FIX (see §M5.9; no-op on Serial) */
 
     /*  7-10. The §5 SSH block — M4.2: ON THE DEVICE (closes the SYNC_MAP §5 mid-step
      *  host CG round-trip; substeps 1-14 now flow on device except the trivial host eta_n
