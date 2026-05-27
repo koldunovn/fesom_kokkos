@@ -14,6 +14,7 @@
 #include "fesom_gm.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.4: flip ocean halos to GPU-aware-MPI (fesom_halo_field)
+#include "fesom_profile.hpp"       // M5.6: per-substep host+device timing (FESOM_STEP_PROFILE)
 #include "fesom_ice.h"
 #include "fesom_kpp.h"
 #include "fesom_mesh.h"
@@ -157,6 +158,12 @@ int fesom_timestep(int                          step_n,
         s_verify_loaded = 1;
     }
 
+    /* M5.6: per-substep timing (FESOM_STEP_PROFILE; host+device, fence-bounded — finds hidden
+     * host costs like the blmc smoother that nsys can't see). PMARK closes the current phase and
+     * opens the next; the final toc + #undef are after substep 14. No-op when profiling is off. */
+#define PMARK(nm) do { fesom_prof::toc((nm), _tp); _tp = fesom_prof::tic(); } while (0)
+    double _tp = fesom_prof::tic();
+
     /*  1. EOS + hydrostatic pressure + N² — M2.1: the FIRST device kernels.
      *  SYNC_MAP §1 INPUT rail: tracers T/S and mesh hnode are host-written via the raw alias each
      *  step, which the DualView cannot see (L14), so mark them host-dirty and push to the device
@@ -205,6 +212,7 @@ int fesom_timestep(int                          step_n,
      * consumers (GM, PP/KPP, mo_convect), whose bvfreq IN re-pushes are now removed. */
     fesom_smooth_nod3D_kk(aux->bvfreq_fld, 1, mesh, p);
 
+    PMARK("1_eos");
     /*  1b. GM/Redi prerequisites + per-step coefficient builder + streamfunction
      *      solve + bolus velocity reconstruction — M2.5b: device kernels.
      *      SYNC_MAP §2 row 1b. ⚠️ GM is ON by default in the pi smoke (s_no_gmredi=0,
@@ -281,6 +289,7 @@ int fesom_timestep(int                          step_n,
         fesom_halo_exchange(dyn->fer_uv_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl, 2, p);
     }
 
+    PMARK("1b_gm");
     /*  2. PGF (linfs + full cells) — M2.4: device kernel.
      *  SYNC_MAP §2 row 2. INPUT rail: hpressure was produced on the device (substep 1),
      *  then sync_host'd (L163) + halo-exchanged on the host (L178) — the halo write is
@@ -297,6 +306,7 @@ int fesom_timestep(int                          step_n,
     fesom_halo_field(aux->pgf_x_fld, FESOM_HALO_ELEM3D, nl, 1, p);
     fesom_halo_field(aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
 
+    PMARK("2_pgf");
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
      *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
      *     mo_convect is shared (called after either scheme). compute_vel_nodes +
@@ -381,6 +391,7 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
     fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
 
+    PMARK("3_mixing");
     /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF) — M2.4: device kernel.
      *  ⚠️ AB2 eps=0.1 preserved in the kernel (PORTING_LESSONS §1, the dt=1800 trap).
      *  compute_vel_rhs embeds momentum_adv_scalar: an edge→node SCATTER (atomic_add, D22)
@@ -411,6 +422,7 @@ int fesom_timestep(int                          step_n,
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
     fesom_halo_exchange(dyn->uv_rhsAB_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
+    PMARK("4_velrhs");
     /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
      *     CORE2 runs opt_visc=7; the ∇⁴ damps grid-scale 2Δx modes that opt_visc=5 lets
      *     grow (required for dt=1800 stability). FIRST SCATTER kernel: edge→element via
@@ -433,6 +445,7 @@ int fesom_timestep(int                          step_n,
      * device-halo (GPU-aware MPI on CUDA, host-staged on Serial). */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
 
+    PMARK("5_viscfilt");
     /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
      *  SYNC_MAP §2 row 6. IN rail: sync ALL inputs explicitly (L28) — uv_rhs (the
      *  read-modify-write target; host-written by visc_filt_bidiff + halo, substep 5),
@@ -493,6 +506,7 @@ int fesom_timestep(int                          step_n,
     mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
     mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
 
+    PMARK("6_ivisc");
     /*  7. SSH RHS (linfs) — device. CG reads ssh_rhs at OWNED rows only, so no re-push
      *     after the halo (the device owned ssh_rhs from the kernel stays current). */
     fesom_compute_ssh_rhs_linfs_kk(mesh, dyn);
@@ -617,6 +631,7 @@ int fesom_timestep(int                          step_n,
                                ssh_pre_rhs, ssh_pre_deta, ssh_pre_uv, ssh_pre_rhsold,
                                ssh_pre_hbar, ssh_pre_hbarold, ssh_pre_etan);
 
+    PMARK("7_ssh");
     /* 12. ALE step (linfs) — M2.5: device kernels. SYNC_MAP §2 row 12. Each kernel: IN rail
      *  (modify_host()+sync_device() the host-written/halo'd inputs, L28), device kernel
      *  (mod_dev outputs), OUT rail (sync_host before the host halo via h_checked). The host
@@ -671,6 +686,7 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(dyn->w_e_fld.h_checked(), nl, p);
     fesom_exchange_nod3D(dyn->w_i_fld.h_checked(), nl, p);
 
+    PMARK("12_ale");
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
      * Wraps BOTH advection (13) and diffusion (13b) so each tracer sees the
      * bolus-augmented velocity field. Subtracted back after diffusion (13c).
@@ -796,6 +812,7 @@ int fesom_timestep(int                          step_n,
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
     }
 
+    PMARK("13_fct");
     /* 13b. implicit vertical diffusion of tracers + surface heat/water flux BC.
      * M2.7: ON THE DEVICE (fesom_impl_vert_diff_tracers_kk) — the per-node implicit
      * vertical TDMA (T then S), the LAST host ocean compute in substep 13. The Thomas
@@ -910,6 +927,7 @@ int fesom_timestep(int                          step_n,
         dyn->uv_fld.sync_host();       dyn->w_fld.sync_host();       dyn->w_e_fld.sync_host();
     }
 
+    PMARK("13b_trdiff");
     /* 14. commit thickness — M2.5: device kernel. SYNC_MAP §2 row 14. hnode := hnode_new
      *  (flat copy), helem := vertex mean (owned elems; halo via the exchanges below). IN:
      *  hnode_new is Synced since 12a — the host tracer adv/diff (substep 13) only READ it, so the
@@ -925,6 +943,9 @@ int fesom_timestep(int                          step_n,
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */
+
+    PMARK("13c_bolus+14_commit");   /* M5.6: close the last substep bucket */
+#undef PMARK
 
 #ifdef FESOM_KK_SYNCCHECK
     /* M1.5: exercise the host<->device rails on this step's ocean state (no-op in production). */

@@ -16,6 +16,7 @@
 #include "fesom_io.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.1 GPU-aware-MPI on-device halo
+#include "fesom_profile.hpp"       // M5.6 per-substep timing (FESOM_STEP_PROFILE)
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_sss_runoff.h"
@@ -1013,6 +1014,7 @@ skip_rest_state:
                 t_loop_start = MPI_Wtime();
                 g_fesom_cg_wall = 0.0; g_fesom_cg_iters = 0;   /* measure CG over the timed window */
                 tp_force = tp_ice = tp_coupl = tp_ocean = 0.0;
+                fesom_prof::reset();   /* M5.6: per-substep timers over the timed window */
             }
             TP_BEG();
             if (use_jra) {
@@ -1309,6 +1311,7 @@ skip_rest_state:
                            tp_coupl*per, tp_coupl/timed, tp_ocean*per, tp_ocean/timed,
                            (tp_force+tp_ice+tp_coupl+tp_ocean)*per);
                 }
+                fesom_prof::report(loop_s, timed, mpi.mype);   /* M5.6: ocean substep breakdown */
                 fflush(stdout);
             }
         }

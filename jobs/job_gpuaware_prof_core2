@@ -30,6 +30,6 @@ OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/prof_core2
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 echo "=== nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS (CORE2 dist_8, device-halo, dt=1800) ==="
-srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 55 999999 "$PHC" 1958 2>&1 | \
-    grep -E "loop timing|CG share|STEP PROFILE|it=|nan|abort" | tail -8
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 55 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+grep -E "loop timing|CG share|STEP PROFILE|fesom_prof|nan|abort" "$OUT/run.log"
 echo "=== done ==="
