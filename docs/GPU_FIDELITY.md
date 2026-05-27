@@ -348,6 +348,38 @@ only for the host-read field (preserves the perf).** Tools added: `fesom_halo_de
 `job_gpuaware_validate_core2` (3-way A/B), `job_gpuaware_validate_pi_2node` (inter-node localiser),
 `job_dbg_{serial,dev,host}_step1` + `job_dbg_selfcheck20` (step-1 onset + the host-fresh proof).
 
+### M5.9 — bisecting the stale-host culprit (IN PROGRESS, GPU-blocked 2026-05-27)
+
+Bisect the M5.x flips vs the CORE2 Serial oracle (`serref_core2`, dist_8, dt=1800, 20 steps; dev-vs-Serial
+@ step20: clean ≈1e-3, broken ≈0.1–0.9). Each point: `git checkout <commit>` → build-cuda →
+`/work/.../bisect/run_dev_core2.sh` → `diff_snap` vs serref.
+
+| commit | flips added | dev-vs-Serial T@20 | verdict |
+|---|---|---|---|
+| **M5.1** `d6b0a1f` | CG, momentum(uvnode_rhs/u_b/v_b), gm(tr_xy/tr_z), ice-FCT | **1.2e-3** | ✅ clean |
+| M5.4a `4120d02` | uv_rhs (ELEM3D nc=2) | — | ⛔ crash-blocked |
+| M5.4b `bfa71ff` | pgf + uvnode | — | ⛔ crash-blocked |
+| M5.4c `d3e0726` | FCT internal halos | — | ⛔ crash-blocked |
+| **M5.5a** `0b329e3` | bvfreq device smoother | **0.41** | ❌ broken |
+
+⇒ **the stale-host bug entered in M5.4a–M5.5a** (5 candidate flips). ⚠️ **GPU obstacle:** the device-ptr
+GPU-aware-MPI path went **~100% segfault** (`invalid permissions for mapped object`, `knem/cma not
+available`) for a stretch — **14 consecutive** dist_8 crashes across many nodes (NOT one bad node: `l50103`
+ran M5.1 clean then crashed M5.4a). Transient partition flakiness, independent of the (deterministic)
+divergence; it blocks the M5.4a/b/c runs. Resume the bisect when the partition settles.
+
+**Ruled out by static analysis (so the culprit is subtle):** (1) no host op reads a flipped field — the ice
+(`ocean2ice` reads `dyn->uv`/T/S/`hbar`, none flipped), the eta_n map (`hbar`/`hbar_old`), the salinity floor
+(owned `S`, synced by trdiff), the reductions (diagnostic, read-only); (2) no surviving
+`modify_host()+sync_device()` re-push of a flipped field at HEAD (the flips removed them); (3) the device
+exchange is byte-perfect (self-check). Remaining mechanisms: a flipped field's **halo region** read on host,
+or a `sync_device` of a host-written-owned field clobbering the device **halo** with a stale host halo.
+**Finish plan:** (a) resume the GPU bisect (M5.4a→clean? then M5.4b/c) when the partition cooperates; once the
+commit is known, the culprit is one field → restore its targeted `sync_host` (keeps perf). An instrumented
+build (per-field "device-halo'd this step, then host-touched" tracker) would pinpoint it without the flaky
+GPU. **Proven-correct fallback: `sync_host` in the `fesom_halo_field` device path → 1e-3** (the
+`FESOM_HALO_SELFCHECK` run), at one PCIe copy/halo (still < the original 2-copy host-staging).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats
