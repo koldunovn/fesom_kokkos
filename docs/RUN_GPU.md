@@ -238,10 +238,18 @@ is a GPU↔CPU wall-time comparison meaningful. Do **not** quote a GPU speedup f
 
 ---
 
-## 9. Next
+## 9. Done since / Next
 
-- **M3.2** — 2-yr / 5-yr CUDA CORE2 climate validation vs `/scratch/a/a270088/fortran_pp_2yr`
-  (+ KPP ref): SST/SSS RMS within the Fortran↔C budget; document the GPU↔CPU budget in
-  `docs/GPU_FIDELITY.md`; tag `m3-gpu-climate`. (Compare against a same-rank-count CPU reference, §7.)
-- **M4.2** — SSH RHS + CG solver on device (closes the §5 round-trip; the prerequisite for a fair
-  GPU benchmark).
+- **M4.2 / M4.3 DONE** — CG + the whole sea-ice step on device (`m4-full-device`).
+- **M5.1a DONE (2026-05-27)** — GPU-aware MPI on-device halo. ⚠️ **build-cuda now uses `env_cuda.sh`**
+  (`openmpi/4.1.5-nvhpc-24.7`, CUDA-aware) NOT env.sh's `openmpi/4.1.2` (which is `--without-cuda` and
+  SEGFAULTs on device pointers). Device-halo (CG/momentum/gm/FCT flipped) = **0.716 s/step vs 0.780
+  host-staged on CORE2 dist_8, 8.2% faster** (`jobs/job_gpuaware_time_core2`, internal loop timer). The
+  win is the nod3D big fields; nod2D hot loops are PCIe-cheap; kpp/eos are host-smoothing-bound. See
+  `docs/GPU_FIDELITY.md` §M5.1, lesson L47, `docs/NEXT_GPU_AWARE_MPI.md`. `FESOM_HOST_HALO=1` forces the
+  legacy host path (A/B toggle).
+- **Next perf levers** (bigger than the remaining halo flips): port the kpp/eos `fesom_smooth_nod3D` to
+  device (kills those host round-trips); batch/fuse the CG's ~1000 kernel launches/step; a higher-res mesh
+  to fill the A100s. Remaining halo flips (EVP nod2D + device coastal-BC; kpp/eos once smoothing is on
+  device) are low/blocked payoff.
+- **M3.2** — CUDA climate-fidelity run (orthogonal); compare per `docs/GPU_FIDELITY.md`.

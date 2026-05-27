@@ -1,5 +1,22 @@
 # Next session — GPU-aware MPI (on-device halo exchange) · the M5 perf unlock
 
+> **STATUS: M5.1a DONE (2026-05-27, commit `d6b0a1f`, session 18).** Plan executed. Outcome below;
+> full write-up in lesson **L47** + `docs/GPU_FIDELITY.md` §M5.1 + the session-18 handoff entry.
+> - **The gate (§4.1) was the crux:** Levante `openmpi/4.1.2` is `--without-cuda` → device-ptr MPI
+>   **SEGFAULTs**. Switched build-cuda to **`openmpi/4.1.5-nvhpc-24.7`** via **`env_cuda.sh`** (CUDA-aware).
+>   `jobs/job_mpi_cuda_smoke` proves it. [[reference-cuda-aware-mpi]]
+> - **Built Approach B** (`src/fesom_halo_device.{hpp,cpp}`, `fesom_halo_field()` dispatch, `FESOM_HOST_HALO=1`
+>   toggle). Flipped CG + momentum + gm + ice-FCT. Validated at the CUDA run-to-run floor (NOT byte-identity —
+>   CUDA is non-deterministic run-to-run; §6's "byte-match" premise was wrong, see L47).
+> - **Payoff = ~8% (0.780→0.716 s/step, CORE2 dist_8) — modest, and that's the finding.** The win is the
+>   nod3D big fields; nod2D hot loops (CG/EVP) are PCIe-cheap; kpp/eos big halos are host-bound by
+>   `fesom_smooth_nod3D`. So the "halo-bound" premise (§0) was only partly right.
+> - **Remaining / real next levers** (bigger than the leftover halo flips): port the kpp/eos
+>   `fesom_smooth_nod3D` to device; batch/fuse the CG's ~1000 kernel launches/step; a bigger mesh to fill the
+>   A100s. Leftover flips (EVP nod2D + device coastal-BC; kpp/eos once smoothing→device) are low/blocked.
+>
+> The original plan follows for reference.
+
 Paste this whole file as the next-session prompt. It is the "careful planning + implementation" handover
 for replacing the host-staged halo exchange with a device-pointer / GPU-aware-MPI path.
 

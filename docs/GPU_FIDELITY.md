@@ -41,6 +41,28 @@ to the device actually *added* PCIe round-trips for those halos (they were host�
 MPI to halo on-device is the M5 unlock**, not more kernel porting. (CORE2 is also small/bandwidth-bound,
 M3.1 note.) M3.2 is about *fidelity*, not speed — but this is the headline for the M5 prompt.
 
+### M5.1 result (GPU-aware MPI on-device halo) — measured 2026-05-27
+
+GPU-aware MPI was **proven** (`openmpi/4.1.5-nvhpc-24.7`; the old `4.1.2` is `--without-cuda` and SEGFAULTs
+on device pointers — [[reference-cuda-aware-mpi]]) and the device-pointer halo path built + validated
+(L47). After flipping the CG + momentum + gm + ice-FCT brackets to the on-device exchange, CORE2 dist_8
+(startup-free internal loop timer, 2 reps each):
+
+| config (CORE2 dist_8, 8×A100/2 nodes) | s/step | vs host-staged |
+|---|---|---|
+| host-staged (`FESOM_HOST_HALO=1`, same binary) | 0.780 (0.7818 / 0.7779) | — |
+| **device-halo** (GPU-aware MPI) | **0.716** (0.7166 / 0.7156) | **8.2% faster** |
+
+**The payoff is modest (~8%), and that is itself the finding.** The win is the **large nod3D fields**
+(~48 MB — the full-field PCIe sync was real); the **small nod2D hot loops (CG/EVP, ~1 MB) barely benefit**
+(PCIe-cheap; the device path still fences). The *other* big nod3D halos (kpp `diffK`/`blmc`, eos pressure)
+are **host-bound by `fesom_smooth_nod3D`** (a host op forcing the round-trip regardless) → not device-halo
+candidates. So ~8% is near the ceiling for this optimization on this config; **the "halo-bound" premise was
+only partly right.** Correctness: device-halo == host-staged at the CUDA run-to-run noise floor (no NEW
+divergence — data path, not arithmetic). The next real GPU levers: port the kpp/eos **smoothing** to device,
+batch/fuse the CG's ~1000 launches/step, or a **bigger mesh** to fill the A100s. (Validated; not bit-identity
+— CUDA is non-deterministic run-to-run via the atomic scatters, L47.)
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

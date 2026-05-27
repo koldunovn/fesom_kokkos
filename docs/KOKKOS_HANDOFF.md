@@ -1,5 +1,34 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 18 (2026-05-27) — M5.1a COMPLETE: GPU-aware MPI on-device halo exchange (the perf track).**
+Commit **`d6b0a1f`**. The whole story is lesson **L47** + `docs/GPU_FIDELITY.md` §M5.1 + `docs/NEXT_GPU_AWARE_MPI.md`.
+- ⚠️⚠️ **build-cuda's MPI CHANGED.** Levante `openmpi/4.1.2-gcc-11.2.0` (env.sh) is `--without-cuda` and its
+  UCX 1.12 has NO cuda transports → a device pointer into MPI **SEGFAULTS** (proven, `jobs/job_mpi_cuda_smoke`).
+  build-cuda now sources **`env_cuda.sh`** = `openmpi/4.1.5-nvhpc-24.7` (CUDA-aware) + `netcdf-c/main-openmpi-4.1.5-nvhpc-24.7`.
+  **To build CUDA: `source ./env_cuda.sh && cmake --build build-cuda --target fesom_port -j 16`** (NOT the
+  old §2 recipe). Serial/OpenMP unchanged (env.sh). [[reference-cuda-aware-mpi]].
+- **Infra** `src/fesom_halo_device.{hpp,cpp}`: device pack(`slist` gather)→GPU-aware MPI on **device** bufs→
+  device unpack(`rlist` scatter, race-free). Kind-generic (`stride=nl*nc`; offset collapses to `g*stride`
+  since sptr[0]=rptr[0]=1). Dispatch **`fesom_halo_field(Field&,kind,nl,nc,p)`**: device path under
+  `#ifdef KOKKOS_ENABLE_CUDA`, EXACT legacy host bracket else (Approach B — Serial oracle untouched).
+  **`FESOM_HOST_HALO=1`** forces the legacy host path inside the CUDA build (the A/B regression toggle).
+  Device Views freed in `fesom_halo_device_free()` (main, before `Kokkos::finalize()`). Added a startup-free
+  **internal loop timer** in `fesom_main.cpp` (prints `s/step`; use it, not wall-subtraction).
+- **Flipped:** CG exch (`fesom_ssh.cpp`, nod2D) + momentum (`uvnode_rhs` nod3D, `u_b/v_b` elem3D) + gm
+  (`tr_xy` elem2D_full, `tr_z` nod3D) + ice FCT (`fct_halo_nod2D`).
+- **VALIDATED (not bit-identity!):** device-halo == host-staged at the CUDA **run-to-run noise floor**
+  (CUDA is non-deterministic run-to-run via the atomic scatters → ssh_rhs → CG). Gate = host-vs-dev ≈
+  host-vs-host (run host-staged twice; `jobs/job_gpuaware_{validate,repro}_pi`). pi dist_2: host-vs-dev
+  Av/Kv/T/density ≤ host-vs-host → PASS (no new divergence — data path, not arithmetic). Inter-node device
+  MPI works (CORE2 dist_8, gdr_copy absent → packed-halo host bounce).
+- **PAYOFF = ~8% (and that's the finding):** CORE2 dist_8 host-staged **0.780** → device-halo **0.716 s/step**
+  (`jobs/job_gpuaware_time_core2`, 2 reps). The win is the **nod3D big fields**; small nod2D hot loops
+  (CG/EVP) are PCIe-cheap; kpp/eos big halos are **host-bound by `fesom_smooth_nod3D`**. So ~8% is near the
+  ceiling here — the "halo-bound" premise was only partly right. **Real next levers (bigger than the leftover
+  flips): port kpp/eos `fesom_smooth_nod3D` to device; batch/fuse the CG's ~1000 launches/step; bigger mesh
+  to fill the A100s.** Leftover halo flips (EVP nod2D + device coastal-BC; kpp/eos after smoothing→device) are
+  low/blocked payoff. M3.2 climate run was orthogonal/in-flight (do not conflate with this perf track).
+
 **Session 17 (2026-05-27) — M4.3c COMPLETE: the sea-ice FCT advection on the device.** Commit
 **`ff11119`** — `fesom_ice_tg_rhs_kk` + `fesom_ice_fct_solve_kk` (`src/fesom_ice_fct.cpp`), the M2.6
 ocean-FCT analogue but 2-D (single surface layer), reusing the M4.2 SSH-CSR machinery. **Three toolkit
