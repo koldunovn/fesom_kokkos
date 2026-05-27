@@ -1,0 +1,29 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ab_core2
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ab_core2.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ab_core2.%j.err
+# M5.8 CUDA fidelity: CORE2 dist_8 (ICE ACTIVE — JRA55 forced) run 3×:
+#   HOST = FESOM_HOST_HALO=1 (legacy), DEV/DEV' = device-halo (default, the EVP on-device BC+halo).
+# host-vs-dev must sit at the dev-vs-dev' run-to-run noise floor (esp. uice/vice/a_ice/m_ice).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+H=$BASE/ab_core2_host; D=$BASE/ab_core2_dev; D2=$BASE/ab_core2_dev2
+rm -rf "$H" "$D" "$D2"; mkdir -p "$H" "$D" "$D2"
+echo "############ HOST ############"; FESOM_HOST_HALO=1 srun "$ROOT/build-cuda/fesom_port" "$MESH" "$H"  1800 20 10 "$PHC" 1958 > "$H/log" 2>&1; echo "[host] $?"
+echo "############ DEV  ############"; srun "$ROOT/build-cuda/fesom_port" "$MESH" "$D"  1800 20 10 "$PHC" 1958 > "$D/log" 2>&1; echo "[dev] $?"
+echo "############ DEV2 ############"; srun "$ROOT/build-cuda/fesom_port" "$MESH" "$D2" 1800 20 10 "$PHC" 1958 > "$D2/log" 2>&1; echo "[dev2] $?"
+echo "=== done ==="

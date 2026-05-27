@@ -268,6 +268,57 @@ Running totals (CORE2 dist_8 device path): M5.1 0.716 → M5.4c 0.592 → M5.5b 
 (~33% vs M5.1's device-halo start; ~39% vs the original ~0.78 all-host). **Next: EVP** (`ice_dyn` 8.8–9.7%,
 the §M5.6 finding #2 — 120 host-staged subcycle halos + host coastal-BC).
 
+### M5.8 — flip the EVP subcycle's 120× host-staged halo + coastal BC (finding #2) — DONE (2026-05-27)
+
+`ice_dyn` was 8.8–9.7% = the entire sea-ice cost, dominated by the EVP: a host loop over
+`evp_rheol_steps` (120) subcycles, each staging `uice`/`vice` host (`sync_host` → host coastal BC →
+host `fesom_exchange_nod2D` → `sync_device`) = **4 PCIe copies × 120 = 480 small copies/step**, the
+ice analogue of the CG. Flipped (`fesom_ice_evp.cpp`):
+- **Coastal BC → device kernel.** The host BC zeros `uice`/`vice` at the endpoints of OWNED
+  open-boundary edges (`gid = myList_edge2D > edge2D_in` — the rank-boundary-safe criterion). Since
+  `myList_edge2D` is host-only, precompute ONCE a per-node 0/1 device mask (`evp_coastal_mask`, built
+  from the host `myList_edge2D`+`edges`+`edge2D_in`); the BC kernel zeros the marked nodes. All writes
+  are 0 → **idempotent, race-free, no scatter → Serial AND OpenMP bit-identical.**
+- **Halo → device-halo** (`fesom_halo_field`, NOD2D). `uice`/`vice` stay device-resident across the
+  subcycle; the existing post-loop `sync_host` (`fesom_ice.cpp:491`) pulls them once for FCT / I/O /
+  the next step — so **nothing downstream changes** (no L48 risk, no cross-step risk).
+- **⚠️ Cleanup gotcha:** the cached mask is a `Kokkos::View` → a function-`static` View destructs
+  during teardown *after* `Kokkos::finalize()` and **aborts** (SIGABRT — caught it the first run). Fix:
+  file-static + `fesom_ice_evp_free()` called before `Kokkos::finalize()` (the `fesom_halo_device_free`
+  rule). Same trap for any cached device View.
+
+**Result (CORE2 dist_8): device-halo ~0.476 → ~0.464 s/step; `ice_dyn` 9.7% → 7.90%** (0.0465 →
+0.0372 s/step). Smaller than KPP because the remaining 7.9% is the **120 subcycles × ~6 kernel
+launches = ~720 launches/step** (launch-latency bound, not PCIe) — that's lever-C (kernel fusion).
+Validation: **Serial dist_16 all 5 ice keys bit-identical, `evp` 960 lines max|Δ|==0**, clean exit;
+CUDA host-vs-dev **byte-identical to the M5.7 binary** (the EVP flip adds *zero* divergence — proven
+by stashing M5.8 and re-running the A/B). `jobs/job_gpuaware_validate_core2` (CORE2 A/B) added.
+
+### ⚠️ M5.8-side discovery: a PRE-EXISTING CORE2 host-vs-dev OCEAN divergence (needs investigation)
+
+The first-ever **CORE2-active-ice** CUDA A/B (host-halo vs device-halo) revealed a large divergence —
+but it is **NOT from M5.8** (the M5.7 binary shows it byte-for-byte identical) and **NOT in the ice**
+(uice 27× the floor) — it is in the **OCEAN device-halo path**, latent since M5.1:
+
+| field | host-vs-dev @ step10 | dev-vs-dev' floor @ step10 | ratio |
+|---|---|---|---|
+| T | 1.6e-1 | 2.0e-4 | ~800× |
+| Kv | 2.2e-1 | 1.7e-5 | ~13000× |
+| u | 5.1e-2 | 1.1e-4 | ~460× |
+| uice | 1.6e-2 | 5.9e-4 | ~27× |
+
+It was never caught because **CORE2 was only timing-profiled, never A/B'd** — the M5.1–M5.7 fidelity
+gate was **pi dist_2** (1 node, no ice), where host-vs-dev is 1e-17. The divergence is **reproducible
+across separate SLURM jobs** (identical argmax/values) → deterministic, not random run-to-run noise.
+Two live hypotheses: (a) the **multi-node** GPU-aware-MPI halo (CORE2 dist_8 = 2 nodes, inter-node IB;
+pi dist_2 = 1 node, intra-node NVLink) gives different halo bytes than the host `MPI`; (b) the
+host-path's extra `sync_host`/`sync_device` deep-copies perturb atomic-scatter thread scheduling →
+different-but-valid scatter orderings, amplified chaotically. The **designed arbiter is the M3.2
+climate run** (in flight): if CUDA stays corr≈1 / drift≈0 vs the C-port over 1–2 yr, the divergence is
+benign (b); if it drifts, it is a real multi-node device-halo bug (a). A cheap localiser: a 1-node
+CORE2 run (dist_8 forced onto 4 GPUs, 2 ranks/GPU) — if clean like pi, (a) is inter-node IB. **This is
+orthogonal to the KPP/EVP halo-flip work and warrants a focused session.**
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

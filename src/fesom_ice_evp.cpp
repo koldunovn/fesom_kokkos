@@ -1,6 +1,7 @@
 #include "fesom_ice_evp.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.8: GPU-aware-MPI on-device halo for the EVP subcycle
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_types.h"
@@ -565,6 +566,35 @@ void fesom_ice_stress2rhs_kk(fesom_ice *ice, struct fesom_mesh *mesh)
     ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
 }
 
+/* M5.8: coastal-node mask for the ON-DEVICE EVP boundary condition. The host/Fortran BC zeros
+ * uice/vice at the endpoints of OWNED open-boundary edges (gid = myList_edge2D > edge2D_in — the
+ * rank-boundary-safe criterion, not edge_tri<0, see line ~430). myList_edge2D is host-only, so we
+ * precompute ONCE a per-node 0/1 device mask (built from the host myList_edge2D + edges + the
+ * edge2D_in threshold); the device BC kernel then zeros every marked node. All writes are 0
+ * (idempotent) → race-free, NO scatter → Serial AND OpenMP bit-identical. Cached for the run
+ * (the partition is fixed). */
+static Kokkos::View<int*> g_evp_coastal_mask;   /* file scope → released by fesom_ice_evp_free() */
+
+static Kokkos::View<int*> evp_coastal_mask(struct fesom_partit *partit, struct fesom_mesh *mesh)
+{
+    if (g_evp_coastal_mask.extent(0) != 0) return g_evp_coastal_mask;
+    const int Nn = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    Kokkos::View<int*, Kokkos::HostSpace> h("evp_coastal_h", Nn);
+    for (int n = 0; n < Nn; ++n) h(n) = 0;
+    for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
+        if (partit->myList_edge2D[ed] <= mesh->edge2D_in) continue;   /* interior edge */
+        h(mesh->edges[ed*2 + 0]) = 1;
+        h(mesh->edges[ed*2 + 1]) = 1;
+    }
+    g_evp_coastal_mask = Kokkos::View<int*>("evp_coastal_mask", Nn);
+    Kokkos::deep_copy(g_evp_coastal_mask, h);
+    return g_evp_coastal_mask;
+}
+
+/* Release the cached mask View before Kokkos::finalize() (a static View destructed during teardown,
+ * after finalize, aborts — same rule as fesom_halo_device_free). No-op if never built. */
+void fesom_ice_evp_free(void) { g_evp_coastal_mask = Kokkos::View<int*>(); }
+
 void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
                                struct fesom_partit  *partit,
                                struct fesom_mesh    *mesh)
@@ -654,8 +684,10 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
     ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
     ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();
 
-    /* Step 5: the EVP subcycle (host loop + device kernels + per-subcycle uice/vice halo bracket). */
-    const int parallel = (partit && partit->npes > 1);
+    /* M5.8: the coastal-node mask (built once) — captured by the on-device subcycle BC kernel. */
+    auto coastal = evp_coastal_mask(partit, mesh);
+
+    /* Step 5: the EVP subcycle (host loop + device kernels + per-subcycle ON-DEVICE BC + halo). */
     for (int sub = 0; sub < ice->evp_rheol_steps; ++sub) {
         fesom_ice_stress_tensor_kk(ice, mesh);
         fesom_ice_stress2rhs_kk(ice, mesh);
@@ -686,18 +718,19 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
             });
         ice->uice_fld.modify_device(); ice->vice_fld.modify_device();
 
-        /* Coastal BC + halo on the HOST (the BC needs partit->myList_edge2D; folded into the halo
-         * bracket's host phase — uice/vice round-trip is needed for the halo at np>1 regardless). */
-        ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
-        { real_t *u = ice->uice, *v = ice->vice;
-          for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
-              if (partit->myList_edge2D[ed] <= mesh->edge2D_in) continue;   /* interior edge */
-              int e0 = mesh->edges[ed*2+0], e1 = mesh->edges[ed*2+1];
-              u[e0]=0.0; v[e0]=0.0; u[e1]=0.0; v[e1]=0.0;
-          } }
-        if (parallel) { fesom_exchange_nod2D(ice->uice, partit); fesom_exchange_nod2D(ice->vice, partit); }
-        ice->uice_fld.modify_host(); ice->uice_fld.sync_device();
-        ice->vice_fld.modify_host(); ice->vice_fld.sync_device();
+        /* M5.8: coastal BC + halo ON THE DEVICE (was: sync_host → host BC + host exchange →
+         * re-push = 4 PCIe copies × 120 subcycles, the §M5.6 finding #2). The BC zeros uice/vice
+         * at the precomputed coastal-node mask — idempotent 0-writes per node → race-free (no
+         * scatter), Serial AND OpenMP bit-identical. Halo = the GPU-aware device-halo (exact host
+         * bracket on Serial; no-op at npes==1). uice/vice stay DEVICE-resident across the subcycle;
+         * the post-loop sync_host (fesom_ice.cpp) pulls them once for FCT / I/O / the next step. */
+        Kokkos::parallel_for("ice_evp_coastal_bc", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                if (coastal(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
+            });
+        ice->uice_fld.modify_device(); ice->vice_fld.modify_device();
+        fesom_halo_field(ice->uice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+        fesom_halo_field(ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
     }
 }
 

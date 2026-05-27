@@ -45,11 +45,16 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
 /* M4.3b: DEVICE twins. stress_tensor_kk (per-element, race-free) + stress2rhs_kk
  * (map + element→node atomic_add scatter + map) are called per subcycle by
  * evp_dynamics_kk, which runs the setup (4 kernels) + the 120-subcycle host loop
- * (device kernels + the per-subcycle uice/vice halo bracket; coastal BC on the host).
+ * (device kernels + the per-subcycle uice/vice halo bracket). M5.8: the per-subcycle
+ * coastal BC + halo are ON THE DEVICE (race-free per-node 0-mask + GPU-aware device-halo).
  * Serial bit-identical (the scatters ordered); OpenMP/CUDA climate-close (D22). */
 void fesom_ice_stress_tensor_kk(fesom_ice *ice, struct fesom_mesh *mesh);
 void fesom_ice_stress2rhs_kk   (fesom_ice *ice, struct fesom_mesh *mesh);
 void fesom_ice_evp_dynamics_kk (fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh);
+/* M5.8: release the cached coastal-node mask View. MUST be called before Kokkos::finalize()
+ * (a Kokkos::View destructed during static teardown, after finalize, aborts — same rule as
+ * fesom_halo_device_free). No-op if the mask was never built. */
+void fesom_ice_evp_free(void);
 void fesom_ice_evp_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
                           int step_n, const std::vector<real_t> &pre_u, const std::vector<real_t> &pre_v,
                           const std::vector<real_t> &pre_s11, const std::vector<real_t> &pre_s12,
