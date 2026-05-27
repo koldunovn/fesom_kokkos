@@ -997,13 +997,24 @@ skip_rest_state:
         double    t_loop_start = 0.0;
         extern double g_fesom_cg_wall; extern long g_fesom_cg_iters;  /* M5.2 CG-share (fesom_ssh.cpp) */
 
+        /* M5.3: per-phase step profiler (env FESOM_STEP_PROFILE=1; fence-bounded so
+         * it captures HOST+DEVICE wall, accumulated over the timed window, printed by
+         * the loop timer). Finds which phase dominates the GPU step (forcing / sea-ice
+         * / ice-ocean coupling / ocean). Gated → zero cost in production. */
+        const bool step_prof = (getenv("FESOM_STEP_PROFILE") != NULL);
+        double tp_force = 0.0, tp_ice = 0.0, tp_coupl = 0.0, tp_ocean = 0.0, _tp = 0.0;
+        #define TP_BEG()    do { if (step_prof) { Kokkos::fence(); _tp = MPI_Wtime(); } } while (0)
+        #define TP_END(acc) do { if (step_prof) { Kokkos::fence(); (acc) += MPI_Wtime() - _tp; } } while (0)
+
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
                 Kokkos::fence();
                 MPI_Barrier(MPI_COMM_WORLD);
                 t_loop_start = MPI_Wtime();
                 g_fesom_cg_wall = 0.0; g_fesom_cg_iters = 0;   /* measure CG over the timed window */
+                tp_force = tp_ice = tp_coupl = tp_ocean = 0.0;
             }
+            TP_BEG();
             if (use_jra) {
                 /* Calendar crosses year boundaries cleanly now that
                  * fesom_jra55_step_cal calls open_year on rollover; the
@@ -1016,6 +1027,7 @@ skip_rest_state:
                 fesom_sss_runoff_step_cal(&sr, &mesh, &tracers, &forcing, &mpi,
                                           n, &io.prev_calendar, &io.calendar);
             }
+            TP_END(tp_force);
             /* Physics-bisect toggles (env-gated). Applied AFTER bulk+runoff
              * writes forcing, BEFORE fesom_timestep reads it. */
             if (no_wind) {
@@ -1046,11 +1058,14 @@ skip_rest_state:
              *   4. oce_fluxes — overwrites heat_flux/water_flux/virtual_salt/relax_salt
              *      from the ice-mediated fluxes (Phase C2).
              * The ocean step that follows then sees the updated forcing. */
+            TP_BEG();
             fesom_ice_step(n, &ice, &mpi, &mesh,
                            &dyn, &tracers, &forcing,
                            use_jra ? &jra : NULL,
                            use_sr  ? &sr  : NULL,
                            &stiff);
+            TP_END(tp_ice);
+            TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
 
             /* Phase D5 — ice-mediated surface momentum flux. Must be after
              * fesom_ice_step (uses post-EVP ice->uice/vice halo) and before
@@ -1103,6 +1118,7 @@ skip_rest_state:
                 }
                 fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);
             }
+            TP_END(tp_coupl);
 
             /* Per-step heartbeat on rank 0 — independent of print_every so
              * we always see SOMETHING happening even if the model is hung
@@ -1114,8 +1130,10 @@ skip_rest_state:
             /* M1.5: sync the ocean step's forcing inputs to the device first (no-op in production). */
             forcing_synccheck_roundtrip(&forcing);
 #endif
+            TP_BEG();
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
+            TP_END(tp_ocean);
             if (mpi.mype == 0) {
                 fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
             }
@@ -1275,9 +1293,20 @@ skip_rest_state:
                            g_fesom_cg_wall, 100.0 * g_fesom_cg_wall / loop_s, g_fesom_cg_iters,
                            (double)g_fesom_cg_iters / (double)timed,
                            g_fesom_cg_iters ? 1e3 * g_fesom_cg_wall / (double)g_fesom_cg_iters : 0.0);
+                if (step_prof && loop_s > 0.0) {
+                    const double per = 100.0 / loop_s;
+                    printf("[fesom_port] STEP PROFILE (rank0, %% of loop): forcing %.1f%% (%.4f s/step)  "
+                           "sea-ice %.1f%% (%.4f)  coupling %.1f%% (%.4f)  ocean %.1f%% (%.4f)  "
+                           "[sum %.1f%%; rest = halos/host/MPI not in a phase]\n",
+                           tp_force*per, tp_force/timed, tp_ice*per, tp_ice/timed,
+                           tp_coupl*per, tp_coupl/timed, tp_ocean*per, tp_ocean/timed,
+                           (tp_force+tp_ice+tp_coupl+tp_ocean)*per);
+                }
                 fflush(stdout);
             }
         }
+        #undef TP_BEG
+        #undef TP_END
         free(T_ic); free(S_ic);
 
         /* Mid-window flush + close monthly stream files. */

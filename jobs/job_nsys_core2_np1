@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=kk_nsys_core2
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/nsys_core2.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/nsys_core2.%j.err
+#
+# M5.3 drill-down: which OCEAN kernels dominate (the ocean step = 82% of the GPU
+# step, per the phase profile). nsys on np=1 CORE2 (1 A100, no MPI halos — pure
+# kernel + intra-step memcpy view). --stats prints per-kernel device-time
+# (gpukernsum) + memcpy time (gpumemtimesum = the eos/kpp smoothing round-trips).
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_MEMTYPE_CACHE=n
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/scratch/a/a270088/nsys_core2; rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+
+# 12 steps is enough for a representative kernel mix; nsys traces every launch.
+srun nsys profile -t cuda -o "$OUT/prof" --force-overwrite=true --stats=true \
+     "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 12 999999 "$PHC" 1958 \
+     > "$OUT/nsys_stats.txt" 2>&1
+echo "rc=$?"
+echo "############ TOP GPU KERNELS (by total device time) ############"
+awk '/CUDA GPU Kernel Summary|gpukernsum/{f=1} f{print} /CUDA API Summary|cudaapisum/{if(f)exit}' \
+    "$OUT/nsys_stats.txt" | head -40
+echo "############ GPU MEMOPS (HtoD/DtoH = halo/smoothing PCIe) ############"
+awk '/CUDA GPU MemOps Summary \(by time\)|gpumemtimesum/{f=1} f{print} /CUDA GPU MemOps Summary \(by size\)/{if(f)exit}' \
+    "$OUT/nsys_stats.txt" | head -15
