@@ -391,9 +391,13 @@ out a race). **FIX: `sync_host()` after each of those 4 device halos** (`fesom_s
 Serial → the bit-identity oracle is untouched). Result: **CORE2 dev-vs-Serial @ step20 T 0.41 → 1.1e-3**
 (= the host-halo path / the CUDA climate-close floor) + Serial np1 still BIT-IDENTICAL to golden. The
 shipped GPU path is now as close to byte-identical as CUDA allows (the 1e-3 residual is the inherent
-atomic-scatter + fmad non-determinism, same as the host path). Cost: re-adds ~5 `sync_host`/step (keeps
-the GPU-aware MPI → still < the original 2-copy host-staging); the exact host-reader (to optimise to a
-minimal/earlier sync) + the M5.4a/b/c bisect verdicts remain follow-ups.
+atomic-scatter + fmad non-determinism, same as the host path).
+
+**Final perf (CORE2 dist_8, clean timing, no I/O, the M5.9-fixed binary):** device-halo **0.493 s/step**
+vs host-staged **0.812** = **39.3% faster (1.65×)**; vs pre-M5 (M4 = 0.731) **32.6% faster**. The
+correctness fix cost only **+6.2%** (the broken 0.464 → 0.493 = the ~5 `sync_host`/step) — so the M5
+device-halo campaign nets a **correct ~39% speedup** on this config. Follow-ups: pin the exact host-reader
+(to optimise to a minimal/earlier sync and claw back the 6%) + the M5.4a/b/c bisect verdicts.
 
 **THE GATE (run before committing ANY device-halo / sync-rail / device-residency change):**
 `./scripts/gpu_fidelity_gate.sh` → builds the build-serial CORE2 oracle (bit-identical to C),
