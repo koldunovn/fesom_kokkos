@@ -351,21 +351,29 @@ int fesom_timestep(int                          step_n,
 
         fesom_kpp_mixing_kk(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
 
-        /* OUT rail: pull Av/Kv to host — mo_convect's rail (below) + the L212/213 halos read
-         * them host-authoritative (uniform with the PP branch), and the verify needs them host. */
-        aux->Av_fld.sync_host();
-        aux->Kv_fld.sync_host();
-        if (s_verify_kpp) fesom_kpp_verify(ctx->kpp, aux, tracers, forcing, dyn, mesh, p, step_n);
+        /* M5.7b: Av/Kv stay DEVICE-resident from KPP → mo_convect → the device-halo (below) →
+         * ivisc (Av, substep 6) / trdiff (Kv, substep 13b) — the OUT-rail sync_host + mo_convect
+         * IN re-push round trip is gone. KPP marked them modify_device(); mo_convect reads them on
+         * device. The verify reads the raw alias (= device on Serial, the gate) → sync only when
+         * verifying. (Kv/Av are also snapshot outputs → pre-I/O sync_host in fesom_main.cpp, L48.) */
+        if (s_verify_kpp) {
+            aux->Av_fld.sync_host();
+            aux->Kv_fld.sync_host();
+            fesom_kpp_verify(ctx->kpp, aux, tracers, forcing, dyn, mesh, p, step_n);
+        }
     } else {
         /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: bvfreq (host-written by
          * smooth_nod3D, substep 1) → device. M5.4: uvnode is device-resident (substep 3, no re-push). */
         /* M5.5 (B): bvfreq is device-resident (device smoother) — no re-push. */
         fesom_pp_mixing_kk(mesh, dyn, aux);             /* device: Kv (node), Av (elem) */
-        aux->Kv_fld.sync_host();                        /* OUT rail: before the Kv/Av halos */
-        aux->Av_fld.sync_host();
-        if (s_verify_pp) fesom_pp_mixing_verify(mesh, dyn, aux, step_n);
-        fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
-        fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
+        if (s_verify_pp) {                              /* verify reads them host (Serial == device) */
+            aux->Kv_fld.sync_host();
+            aux->Av_fld.sync_host();
+            fesom_pp_mixing_verify(mesh, dyn, aux, step_n);
+        }
+        /* M5.7b: Kv/Av device-halo (was sync_host + host exchange) — device-resident into mo_convect. */
+        fesom_halo_field(aux->Kv_fld, FESOM_HALO_NOD3D,  nl, 1, p);
+        fesom_halo_field(aux->Av_fld, FESOM_HALO_ELEM3D, nl, 1, p);
     }
 
     /* mo_convect (always-on, after either scheme). INPUT rail: bvfreq is host-written by
@@ -382,14 +390,17 @@ int fesom_timestep(int                          step_n,
         mc_Av_in.assign(aux->Av, aux->Av + nAv);
     }
     /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
-    aux->Kv_fld.modify_host();     aux->Kv_fld.sync_device();
-    aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
+    /* M5.7b: Kv/Av are device-resident (KPP modify_device / PP device-halo above) — no IN re-push. */
     fesom_mo_convect_kk(mesh, aux);                     /* device: Kv, Av */
-    aux->Kv_fld.sync_host();                            /* OUT rail: before the Kv/Av halos */
-    aux->Av_fld.sync_host();
-    if (s_verify_pp) fesom_mo_convect_verify(mesh, aux, step_n, mc_Kv_in.data(), mc_Av_in.data());
-    fesom_exchange_nod3D (aux->Kv_fld.h_checked(), nl, p);
-    fesom_exchange_elem3D(aux->Av_fld.h_checked(), nl, p);
+    if (s_verify_pp) {                                  /* verify reads them host (Serial == device) */
+        aux->Kv_fld.sync_host();
+        aux->Av_fld.sync_host();
+        fesom_mo_convect_verify(mesh, aux, step_n, mc_Kv_in.data(), mc_Av_in.data());
+    }
+    /* M5.7b: Kv/Av device-halo (was sync_host + host exchange) — device-resident into ivisc (Av,
+     * substep 6) + trdiff (Kv, substep 13b); their IN re-pushes are removed too. */
+    fesom_halo_field(aux->Kv_fld, FESOM_HALO_NOD3D,  nl, 1, p);
+    fesom_halo_field(aux->Av_fld, FESOM_HALO_ELEM3D, nl, 1, p);
 
     PMARK("3_mixing");
     /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF) — M2.4: device kernel.
@@ -462,7 +473,7 @@ int fesom_timestep(int                          step_n,
     /* M5.4: uv_rhs is device-resident with its halo from substep 5 — no IN re-push. */
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
     dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
-    aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
+    /* M5.7b: Av is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
     mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
     {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
         fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();   }
@@ -847,7 +858,7 @@ int fesom_timestep(int                          step_n,
                              tracers->data[FESOM_TRACER_S].values + total);
         }
         /* IN rail (L28: sync every input the body reads). */
-        aux->Kv_fld.modify_host(); aux->Kv_fld.sync_device();
+        /* M5.7b: Kv is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
         mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
         {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
             fnc->heat_flux_fld.modify_host();    fnc->heat_flux_fld.sync_device();

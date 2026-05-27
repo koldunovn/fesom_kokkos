@@ -1573,15 +1573,17 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
     k->diffK_fld.modify_device();
     k->viscA_fld.modify_device();
     k->ghats_fld.modify_device();
-    k->diffK_fld.sync_host();
-    k->viscA_fld.sync_host();
+    /* M5.7a: diffK (2 slabs) + viscA via the device-halo (GPU-aware MPI on CUDA, exact host
+     * bracket on Serial) — removes the sync_host → host-exchange → re-push round trip. Both are
+     * read at HALO right below: viscA by the node→elem average (element vertices can be halo
+     * nodes), diffK slab-0 by the single-Kv deep_copy. The slab offset is the M5.5b blmc recipe
+     * (base_off = j*slab). ghats stays HOST (gated off in CORE2, not read on device after — see
+     * the comment above) → its sync_host + host exchange remain unchanged. */
+    fesom_halo_field(k->diffK_fld, FESOM_HALO_NOD3D, nl, 1, partit, 0 * slab);
+    fesom_halo_field(k->diffK_fld, FESOM_HALO_NOD3D, nl, 1, partit, 1 * slab);
+    fesom_halo_field(k->viscA_fld, FESOM_HALO_NOD3D, nl, 1, partit);
     k->ghats_fld.sync_host();
-    fesom_exchange_nod3D(k->diffK_fld.h_checked() + 0 * slab, nl, partit);
-    fesom_exchange_nod3D(k->diffK_fld.h_checked() + 1 * slab, nl, partit);
     fesom_exchange_nod3D(k->ghats_fld.h_checked(), nl - 1, partit);
-    fesom_exchange_nod3D(k->viscA_fld.h_checked(), nl, partit);
-    k->diffK_fld.modify_host(); k->diffK_fld.sync_device();
-    k->viscA_fld.modify_host(); k->viscA_fld.sync_device();
 
     /* node→elem viscAE = Σ(viscA over 3 vertices)/3 + bottom fill + minmix (:475-490) */
     Kokkos::parallel_for("kpp_viscAE", Kokkos::RangePolicy<>(0, mesh->myDim_elem2D),

@@ -239,6 +239,35 @@ separate branch) or already small. So the **actionable remaining wins are #1 (KP
 #2 (EVP host halos)** — together ~19% of the loop currently spent host-staging, both removable with the
 proven device-halo. `13_fct` (17.4%) is the largest but it is genuine device kernels → lever C.
 
+### M5.7 — flip the KPP/mixing host-staged halos (the §M5.6 ~10% finding) — DONE (2026-05-27)
+
+The §M5.6 profiler found `3_mixing` = 11.0% with KPP *kernels* ~1% → ~10% host-staged. Two halo clusters
+carried it, both now on the device-halo:
+- **M5.7a — KPP-internal `combine` (`fesom_kpp.cpp`):** `diffK` (2 slabs) + `viscA` were sync_host →
+  host-exchange → re-push; flipped to `fesom_halo_field` (slab-offset, the M5.5b `blmc` recipe). They are
+  read at HALO right below (the node→elem `viscAE` average reads `viscA` at element vertices that may be
+  halo nodes; the single-Kv `deep_copy` reads `diffK` slab-0). `ghats` stays HOST (line 1572: gated off in
+  CORE2, not read on device after) → its one sync_host + host exchange remain.
+- **M5.7b — driver `Kv`/`Av` (`fesom_step.cpp`):** made `Kv`/`Av` **device-resident across KPP → mo_convect
+  → ivisc (substep 6) → trdiff (substep 13b)**. Removed: the KPP OUT sync_host, the mo_convect IN re-push,
+  the mo_convect OUT + host exchange (→ device-halo `Kv` NOD3D / `Av` ELEM3D), the ivisc Av re-push, the
+  trdiff Kv re-push. The PP branch (opt-in) flipped to match. The verify sync_host calls are now guarded by
+  their verify flags (Serial host==device → the gate still reads correct values). **⚠️ Kv/Av are snapshot
+  outputs → added the L48 pre-I/O `sync_host` (gated on the snapshot step, `fesom_main.cpp`).**
+
+**Result (CORE2 dist_8): device-halo 0.503 → ~0.476 s/step (~5.4%); `3_mixing` 11.0% → 6.15%** (0.0563 →
+0.0296 s/step — nearly half the substep, the host-staged part, gone; the residual 6.15% is the genuine KPP
+kernels + the kept `ghats` sync + the IN-syncs). Validation: Serial np1+np2 **bit-identical** + KPP verify
+**max|Δ|==0** + SYNCCHECK **0 guard-hits** + CUDA A/B **at the run-to-run noise floor** — host-vs-dev ==
+dev-vs-dev' to machine ε (Kv/Av the flipped fields: 1–4e-17 == the dev-vs-dev' floor 0.9–2.7e-17; T/u/w
+identical to the floor). The L48 Kv/Av snapshot staleness is ruled out: the all-fields A/B shows Kv/Av at
+the noise floor (a staleness bug would be O(field) ≈ 1e-3). `jobs/job_gpuaware_noisefloor_pi` (the dev-vs-dev'
+reference) added.
+
+Running totals (CORE2 dist_8 device path): M5.1 0.716 → M5.4c 0.592 → M5.5b 0.503 → **M5.7 ~0.476 s/step**
+(~33% vs M5.1's device-halo start; ~39% vs the original ~0.78 all-host). **Next: EVP** (`ice_dyn` 8.8–9.7%,
+the §M5.6 finding #2 — 120 host-staged subcycle halos + host coastal-BC).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

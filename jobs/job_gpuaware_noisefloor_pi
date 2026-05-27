@@ -1,0 +1,27 @@
+#!/bin/bash
+#SBATCH --job-name=kk_nf_pi
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/nf_pi.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/nf_pi.%j.err
+# Noise-floor reference (mirrors job_gpuaware_validate_pi binding): run the DEVICE-halo binary
+# TWICE. dev-vs-dev' = the pure CUDA run-to-run noise floor (atomic scatters). M5.7 is clean iff
+# the host-vs-dev A/B sits at this same floor (esp. the flipped Kv/Av fields).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+A=$BASE/nf_pi_devA; B=$BASE/nf_pi_devB; rm -rf "$A" "$B"; mkdir -p "$A" "$B"
+nvidia-smi -L
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$A" 100 20 10; echo "[devA] $?"
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$B" 100 20 10; echo "[devB] $?"
+echo "=== done ==="
