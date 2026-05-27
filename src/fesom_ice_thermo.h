@@ -229,4 +229,28 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
                               const struct fesom_jra55      *jra,
                               const struct fesom_sss_runoff *sr);
 
+/* M4.3d-a: DEVICE twin of the thermodynamics. Per-node column physics over [0,N) (race-free →
+ * Serial AND OpenMP bit-identical, NO scatter) — therm_ice/obudget/budget/flooding/tfrez are
+ * KOKKOS_INLINE_FUNCTION device twins taking a POD IceThermC. Loop 1 (ustar map) owns its ustar
+ * nod2D halo bracket (D21). Marks every written ice/thermo Field modify_device(). Driver IN rail
+ * pushes the inputs (jra/forcing/ice/srfoce/thermo state); OUT sync_host the consumed outputs. */
+void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
+                                 struct fesom_partit           *partit,
+                                 struct fesom_mesh             *mesh,
+                                 const struct fesom_forcing    *forcing,
+                                 const struct fesom_jra55      *jra,
+                                 const struct fesom_sss_runoff *sr);
+
+/* FESOM_KK_VERIFY=icethermo gate: L26 capture-before over the 5 RMW inputs (m_ice/m_snow/a_ice/
+ * t_skin/thdgr). The driver snapshots them PRE-thermo; this snapshots the 9 consumed KK outputs,
+ * restores the 5 inputs, runs the C twin (on ALL ranks — its ustar halo is collective), diffs,
+ * restores KK. Asserts max|Δ|==0 on Serial. ⚠️ Meaningful only on CORE2 (L42). */
+void fesom_ice_thermodynamics_verify(fesom_ice *ice, struct fesom_partit *partit,
+                                     struct fesom_mesh *mesh, const struct fesom_forcing *forcing,
+                                     const struct fesom_jra55 *jra, const struct fesom_sss_runoff *sr,
+                                     int step_n,
+                                     const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s,
+                                     const std::vector<real_t> &pre_a, const std::vector<real_t> &pre_t,
+                                     const std::vector<real_t> &pre_thdgr);
+
 #endif /* FESOM_ICE_THERMO_H */

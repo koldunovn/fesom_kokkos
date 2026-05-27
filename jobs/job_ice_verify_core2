@@ -27,10 +27,10 @@ NSTEPS=60
 SNAP_EVERY=60
 JRA55_YEAR=1958
 export FESOM_PRINT_EVERY=20
-# All ice device kernels so far: M4.3a maps (icemap) + M4.3b EVP (evp) + M4.3c FCT (icefct).
-# The evp/icefct verifies run the whole C EVP (120 subcycles) / C FCT (3 tracers, ~21 halos)
-# beside the device kernel each step -> short NSTEPS.
-export FESOM_KK_VERIFY=evp,icemap,icefct
+# All ice device kernels so far: M4.3a maps (icemap) + M4.3b EVP (evp) + M4.3c FCT (icefct) +
+# M4.3d-a thermo (icethermo). The evp/icefct/icethermo verifies run the whole C kernel beside the
+# device kernel each step -> short NSTEPS.
+export FESOM_KK_VERIFY=evp,icemap,icefct,icethermo
 
 BIN=/home/a/a270088/port_kokkos/build-serial/fesom_port
 OUT_DIR=/scratch/a/a270088/m43a_verify

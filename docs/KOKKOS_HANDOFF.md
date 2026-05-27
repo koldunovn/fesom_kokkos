@@ -20,8 +20,21 @@ across all 60 steps × 16 ranks on a CORE2 dist_16 run with ACTIVE ice (`job 251
 AND np=2 CMA-off — FCT trivial on pi's zero ice but the 21 D21 halo brackets + 3 scatters are exercised
 under MPI); `ctest` 4/4; SYNCCHECK np=1+np=2 clean + bit-identical; **CUDA (A100) builds** (`fesom_ice_fct.cpp.o`
 under nvcc — `INFINITY`/`atomic_add`/the lambdas all GPU-valid). Lesson **L44**; SYNC_MAP §3 FCT row +
-plan M4.3c box updated; key `icefct`. **NEXT = M4.3d (thermodynamics + `oce_fluxes`) → M4 acceptance/tag
-`m4-full-device`.** The M4.3a/b detail follows.
+plan M4.3c box updated; key `icefct`. The M4.3a/b detail follows.
+
+**Session 17a — M4.3d-a: the sea-ice thermodynamics (per-node column physics) on the device.** Commit
+**`<m4.3d-a-sha>`** — `fesom_ice_thermodynamics_kk` (`src/fesom_ice_thermo.cpp`). A single race-free map
+over [0,N) (the M2.7 TDMA shape → bit-identical Serial AND OpenMP, NO scatter): `therm_ice`/`obudget`/
+`budget`/`flooding`/`tfrez` became `KOKKOS_INLINE_FUNCTION` device twins taking a POD `IceThermC` (the
+fesom_ice_thermo scalars — its Field members can't cross to device); Loop 1 (`ustar`) owns its nod2D halo.
+**JRA55 was the only non-Field thermo input → its 8 physics arrays were Field-wrapped** (the M1.4 pattern,
+`src/fesom_jra55.{h,cpp}`; jra is CORE2-only — pi never allocates it). Gate ALL GREEN: `FESOM_KK_VERIFY=icethermo`
+Serial `max|Δ|=0` for m/a/ms/t_skin/flx_h/flx_fw/thdgr across 60 steps × 16 ranks on a CORE2 dist_16
+ACTIVE-ice run (`job 25159173`, 960 lines, 0 nonzero — the 960 lines prove the thermo block IS entered);
+pi==golden np1+np2; ctest 4/4; SYNCCHECK clean; CUDA builds (Newton-Raphson `budget`, `exp`/`pow`, the
+POD capture all GPU-valid). Lesson **L45**; SYNC_MAP §3 thermo row + plan M4.3d-a box; key `icethermo`.
+**NEXT = M4.3d-b (`oce_fluxes`: flux overwrite + 2 `integrate_nod_2D` reductions) → M4 acceptance/tag
+`m4-full-device`.**
 
 ---
 

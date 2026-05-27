@@ -593,3 +593,410 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
 
     (void)nl;  /* unused for now; reserved if surface-level extraction is moved here */
 }
+
+/* ======================================================================== *
+ *  M4.3d-a — DEVICE (Kokkos) twin of the sea-ice thermodynamics. The column  *
+ *  physics is per-node and race-free (each node read-modify-writes only its   *
+ *  own a/m/ms + t_skin + flx_* + thdgr*), so it is a single map over [0,N)    *
+ *  (the M2.7 bc_surface_kk / per-node-TDMA shape) — bit-identical Serial AND   *
+ *  OpenMP, NO scatter. therm_ice + obudget/budget/flooding/tfrez become        *
+ *  KOKKOS_INLINE_FUNCTION device twins (the kpp_wscale_kk precedent), taking    *
+ *  a POD `IceThermC` (the scalar mirror of fesom_ice_thermo — its Field         *
+ *  members can't cross to the device, so the scalars are copied into a POD      *
+ *  captured by value). The C originals stay the verify oracle (D19). ⚠️         *
+ *  FORCED-ONLY → meaningful only on CORE2 (L42).                                *
+ * ======================================================================== */
+
+/* POD scalar mirror of fesom_ice_thermo (drop the Field members; capture by value). */
+struct IceThermC {
+    real_t rhoair, inv_rhoair, rhowat, inv_rhowat, rhoice, inv_rhoice, rhosno, inv_rhosno;
+    real_t cpair, clhw, clhi, cc, cl, tmelt, boltzmann;
+    real_t hmin, armin, con, consn, Sice;
+    real_t emiss_ice, emiss_wat, albsn, albsnm, albi, albim, albw, c_melt;
+    int    iclasses, snowdist, open_water_albedo;
+};
+static IceThermC make_therm_c(const fesom_ice_thermo *t)
+{
+    IceThermC c;
+    c.rhoair=t->rhoair; c.inv_rhoair=t->inv_rhoair; c.rhowat=t->rhowat; c.inv_rhowat=t->inv_rhowat;
+    c.rhoice=t->rhoice; c.inv_rhoice=t->inv_rhoice; c.rhosno=t->rhosno; c.inv_rhosno=t->inv_rhosno;
+    c.cpair=t->cpair; c.clhw=t->clhw; c.clhi=t->clhi; c.cc=t->cc; c.cl=t->cl;
+    c.tmelt=t->tmelt; c.boltzmann=t->boltzmann;
+    c.hmin=t->hmin; c.armin=t->armin; c.con=t->con; c.consn=t->consn; c.Sice=t->Sice;
+    c.emiss_ice=t->emiss_ice; c.emiss_wat=t->emiss_wat;
+    c.albsn=t->albsn; c.albsnm=t->albsnm; c.albi=t->albi; c.albim=t->albim; c.albw=t->albw;
+    c.c_melt=t->c_melt;
+    c.iclasses=t->iclasses; c.snowdist=t->snowdist; c.open_water_albedo=t->open_water_albedo;
+    return c;
+}
+
+KOKKOS_INLINE_FUNCTION real_t tfrez_kk(real_t s)
+{ return -0.0575*s + 1.7105e-3*Kokkos::sqrt(s*s*s) - 2.155e-4*s*s; }
+
+KOKKOS_INLINE_FUNCTION real_t fmin_kk(real_t a, real_t b) { return a < b ? a : b; }
+KOKKOS_INLINE_FUNCTION real_t fmax_kk(real_t a, real_t b) { return a > b ? a : b; }
+
+/* device twin of fesom_ice_flooding */
+KOKKOS_INLINE_FUNCTION
+void flooding_kk(const IceThermC &th, real_t *h, real_t *hsn)
+{
+    real_t hdraft = (th.rhosno*(*hsn) + (*h)*th.rhoice) * th.inv_rhowat;
+    real_t hmin   = (hdraft < *h) ? hdraft : *h;
+    real_t hflood = hdraft - hmin;
+    *h   += hflood;
+    *hsn -= hflood * th.rhoice * th.inv_rhosno;
+}
+
+/* device twin of fesom_ice_obudget (open_water_albedo==0 branch only). */
+KOKKOS_INLINE_FUNCTION
+void obudget_kk(const IceThermC &th, real_t qa, real_t fsh, real_t flo,
+                real_t t, real_t ug, real_t ta, real_t ch, real_t ce,
+                real_t *fh_out, real_t *evap_out,
+                real_t *hflatow, real_t *hfsenow, real_t *hflwrdout,
+                real_t *hfswrow, real_t *hflwrow, real_t *hfradow)
+{
+    const real_t c1 = 3.8e-3, c4 = 17.27, c5 = 237.3;
+    real_t b = c1 * Kokkos::exp(c4 * t / (t + c5));
+    real_t _hfswr  = (1.0 - th.albw) * fsh;
+    real_t _hflwr  = flo;
+    real_t _hflwrd = -th.emiss_wat * th.boltzmann * Kokkos::pow(t + th.tmelt, 4.0);
+    real_t _hfrad  = _hfswr + _hflwr + _hflwrd;
+    real_t _hfsen  = th.rhoair * th.cpair * ch * ug * (ta - t);
+    real_t _evap_kgm2s = th.rhoair * ce * ug * (qa - b);
+    real_t _hflat  = th.clhw * _evap_kgm2s;
+    real_t _hftot  = _hfrad + _hfsen + _hflat;
+    *fh_out   = -_hftot / th.cl;
+    *evap_out = _evap_kgm2s * th.inv_rhowat;
+    *hfswrow = _hfswr; *hflwrow = _hflwr; *hflwrdout = _hflwrd; *hfradow = _hfrad;
+    *hfsenow = _hfsen; *hflatow = _hflat;
+}
+
+/* device twin of fesom_ice_budget (5-iteration Newton-Raphson on t). */
+KOKKOS_INLINE_FUNCTION
+void budget_kk(const IceThermC &th, real_t hice, real_t hsn, real_t *t,
+               real_t ta, real_t qa, real_t fsh, real_t flo,
+               real_t ug, real_t S_oc, real_t ch_i, real_t ce_i,
+               real_t *fh, real_t *subli)
+{
+    real_t alb;
+    if (*t < 0.0) alb = (hsn > 0.0) ? th.albsn  : th.albi;
+    else          alb = (hsn > 0.0) ? th.albsnm : th.albim;
+
+    const real_t q1 = 11637800.0, q2 = -5897.8;
+    const int imax = 5;
+    real_t d1 = th.rhoair * th.cpair * ch_i;
+    real_t d2 = th.rhoair * ce_i;
+    real_t d3 = d2 * th.clhi;
+    real_t A1 = (1.0 - alb) * fsh + flo + d1 * ug * ta + d3 * ug * qa;
+
+    real_t B = 0.0;
+    for (int iter = 0; iter < imax; ++iter) {
+        real_t tk = *t + th.tmelt;
+        B = q1 * th.inv_rhoair * Kokkos::exp(q2 / tk);
+        real_t A2 = -d1*ug*(*t) - d3*ug*B - th.emiss_ice*th.boltzmann*(tk*tk*tk*tk);
+        real_t A3 = -d3*ug*B*q2/(tk*tk);
+        real_t C  = th.con / hice;
+        A3 += C + d1*ug + 4.0*th.emiss_ice*th.boltzmann*(tk*tk*tk);
+        C *= (tfrez_kk(S_oc) - *t);
+        *t += (A1 + A2 + C) / A3;
+    }
+    if (*t > 0.0) *t = 0.0;
+
+    real_t tk = *t + th.tmelt;
+    real_t hfrad = (1.0 - alb)*fsh + flo - th.emiss_ice*th.boltzmann*(tk*tk*tk*tk);
+    real_t hfsen = d1 * ug * (ta - *t);
+    real_t _subli = d2 * ug * (qa - B);
+    real_t hflat  = th.clhi * _subli;
+    real_t hftot  = hfrad + hfsen + hflat;
+    *fh    = -hftot / th.cl;
+    *subli = _subli * th.inv_rhowat;
+}
+
+/* device twin of fesom_therm_ice (snowdist==1, the CORE2 path). use_virt_salt passed in. */
+KOKKOS_INLINE_FUNCTION
+void therm_ice_kk(const IceThermC &th, int use_virt_salt,
+                  real_t *h, real_t *hsn, real_t *A,
+                  real_t fsh, real_t flo, real_t Ta, real_t qa,
+                  real_t rain, real_t snow, real_t runo, real_t rsss,
+                  real_t ug, real_t ustar, real_t T_oc, real_t S_oc,
+                  real_t H_ML, real_t *t, real_t ice_dt,
+                  real_t ch, real_t ce, real_t ch_i, real_t ce_i,
+                  real_t *fw, real_t *fwice, real_t *fwsnw,
+                  real_t *ehf, real_t *evap, real_t *rsf,
+                  real_t *dhgrowth, real_t *dhsngrowth, real_t *dAgrowth,
+                  real_t *iflice, real_t lid_clo)
+{
+    real_t _dhgrowth = *h;
+    real_t snthick = (*hsn) * (th.con / th.consn) / fmax_kk(*A, th.armin);
+    real_t thick   = (*h) / fmax_kk(*A, th.armin);
+    thick = snthick + thick;
+
+    real_t rhow = 0.0, _evap = 0.0;
+    real_t d_a=0.0,d_b=0.0,d_c=0.0,d_d=0.0,d_e=0.0,d_f=0.0;   /* obudget diagnostics (unused here) */
+    obudget_kk(th, qa, fsh, flo, T_oc, ug, Ta, ch, ce,
+               &rhow, &_evap, &d_a, &d_b, &d_c, &d_d, &d_e, &d_f);
+    real_t one_minus_A = 1.0 - (*A);
+
+    real_t rhice = 0.0, _subli = 0.0;
+    if (thick > th.hmin) {
+        for (int k = 1; k <= th.iclasses; ++k) {
+            real_t thact = (real_t)(2*k - 1) * thick / (real_t)th.iclasses;
+            real_t shice = 0.0, subli_i = 0.0;
+            budget_kk(th, thact, *hsn, t, Ta, qa, fsh, flo, ug, S_oc, ch_i, ce_i, &shice, &subli_i);
+            rhice  += shice;
+            _subli += subli_i;
+        }
+        rhice  /= (real_t)th.iclasses;
+        _subli /= (real_t)th.iclasses;
+    }
+
+    rhow  *= ice_dt;
+    rhice *= ice_dt;
+    real_t show  = rhow  * one_minus_A;
+    real_t shice = rhice * (*A);
+    real_t sh    = show + shice;
+    real_t ahf   = -th.cl * sh / ice_dt;
+    real_t prec  = rain + runo + snow * one_minus_A;
+
+    *hsn += snow * ice_dt * (*A) * 1000.0 * th.inv_rhosno;
+    real_t _dhsngrowth = *hsn;
+
+    _evap  *= one_minus_A;
+    _subli *= (*A);
+
+    real_t hsntmp = -fmin_kk(sh, 0.0) * th.rhoice * th.inv_rhosno;
+    hsntmp = fmin_kk(hsntmp, *hsn);
+    *hsn -= hsntmp;
+
+    real_t rh = sh + hsntmp * th.rhosno / th.rhoice;
+    *h = fmax_kk(*h, 0.0);
+
+    real_t Tfrez_S = tfrez_kk(S_oc);
+    real_t o2ihf = (T_oc - Tfrez_S) * 0.006 * ustar * th.cc * (*A)
+                 + (T_oc - Tfrez_S) * H_ML / ice_dt * th.cc * one_minus_A;
+    rh -= o2ihf * ice_dt / th.cl;
+    real_t qhst = *h + rh;
+
+    real_t sn = *hsn + fmin_kk(qhst, 0.0) * th.rhoice * th.inv_rhosno;
+    sn = fmax_kk(sn, 0.0);
+    *hsn = sn;
+    *h   = fmax_kk(qhst, 0.0);
+    if (*h < 1.0e-6) *h = 0.0;
+
+    _dhgrowth   = (*h   - _dhgrowth)   / ice_dt;
+    _dhsngrowth = (*hsn - _dhsngrowth) / ice_dt;
+    *dhgrowth   = _dhgrowth;
+    *dhsngrowth = _dhsngrowth;
+
+    *ehf = ahf + th.cl * (_dhgrowth + (th.rhosno / th.rhoice) * _dhsngrowth);
+
+    real_t _fwice, _fwsnw, _fw, _rsf;
+    if (!use_virt_salt) {
+        _fwice = -_dhgrowth   * th.rhoice * th.inv_rhowat;
+        _fwsnw = -_dhsngrowth * th.rhosno * th.inv_rhowat;
+        _fw    = prec + _evap + _fwice + _fwsnw;
+        _rsf   = _fwice * th.Sice;
+    } else {
+        _fwice = -_dhgrowth   * th.rhoice * th.inv_rhowat * (rsss - th.Sice) / rsss;
+        _fwsnw = -_dhsngrowth * th.rhosno * th.inv_rhowat;
+        _fw    = prec + _evap + _fwice + _fwsnw;
+        _rsf   = 0.0;
+    }
+    *fwice = _fwice; *fwsnw = _fwsnw;
+
+    rh = -fmin_kk(*h, -rh);
+    real_t rA   = rhow - o2ihf * ice_dt / th.cl;
+    real_t Aold = *A;
+    *A = *A + th.c_melt * fmin_kk(rh, 0.0) * (*A) / fmax_kk(*h, th.hmin)
+            + fmax_kk(rA, 0.0) * (1.0 - *A) / lid_clo;
+    *A = fmin_kk(*A, *h * 1.0e6);
+    *A = fmin_kk(fmax_kk(*A, 0.0), 1.0);
+    *dAgrowth = (*A - Aold) / ice_dt;
+
+    real_t _iflice = *h;
+    flooding_kk(th, h, hsn);
+    _iflice = (*h - _iflice) / ice_dt;
+    *iflice = _iflice;
+
+    if (!use_virt_salt) _rsf -= _iflice * th.rhoice * th.inv_rhowat * th.Sice;
+    else                _fw  += _iflice * th.rhoice * th.inv_rhowat * th.Sice / rsss;
+    *rsf = _rsf;
+    *fw  = _fw;
+    *evap = _evap + _subli;
+}
+
+/* D21 internal-halo bracket on a nod2D Field (the FCT/EVP idiom): modify_device() always so the
+ * driver OUT sync_host copies the result at np==1; the host round-trip only at np>1. */
+static inline void therm_halo_nod2D(fesom::Field &f, struct fesom_partit *partit)
+{
+    f.modify_device();
+    if (partit && partit->npes > 1) {
+        f.sync_host();
+        fesom_exchange_nod2D(f.h_checked(), partit);
+        f.modify_host();
+        f.sync_device();
+    }
+}
+
+#include "fesom_jra55.h"   /* M4.3d-a: the Field-backed jra physics arrays (device Views) */
+
+void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
+                                 struct fesom_partit           *partit,
+                                 struct fesom_mesh             *mesh,
+                                 const struct fesom_forcing    *forcing,
+                                 const struct fesom_jra55      *jra,
+                                 const struct fesom_sss_runoff *sr)
+{
+    const int    myDim = mesh->myDim_nod2D;
+    const int    N     = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const real_t cd    = ice->cd_oce_ice;
+    const real_t ice_dt = ice->ice_dt;
+    const real_t h_ml  = ice->thermo.h_ml;
+    const real_t h0    = ice->thermo.h0;
+    const real_t h0_s  = ice->thermo.h0_s;
+    const int    uvs   = sr->use_virt_salt;
+    const int    ref_sss_local = sr->ref_sss_local;
+    const real_t rsss_default  = sr->ref_sss;
+    const real_t ch_i  = (real_t)FESOM_CH_ATM_ICE;
+    const real_t ce_i  = (real_t)FESOM_CE_ATM_ICE;
+    const IceThermC thc = make_therm_c(&ice->thermo);
+
+    auto uice  = ice->uice_fld.d();      auto vice  = ice->vice_fld.d();
+    auto sru   = ice->srfoce_u_fld.d();  auto srv   = ice->srfoce_v_fld.d();
+    auto srt   = ice->srfoce_temp_fld.d(); auto srs = ice->srfoce_salt_fld.d();
+    auto a_ice = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snw = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    auto vold_a = ice->data[FESOM_ICE_AICE].values_old_fld.d();
+    auto vold_m = ice->data[FESOM_ICE_MICE].values_old_fld.d();
+    auto vold_s = ice->data[FESOM_ICE_MSNOW].values_old_fld.d();
+    auto ustarv = ice->thermo.ustar_fld.d();
+    auto tskin  = ice->thermo.t_skin_fld.d();
+    auto thdgr  = ice->thermo.thdgr_fld.d();
+    auto thdgrsn = ice->thermo.thdgrsn_fld.d();
+    auto thdgra  = ice->thermo.thdgra_fld.d();
+    auto thdgr_old = ice->thermo.thdgr_old_fld.d();
+    auto flxfw  = ice->flx_fw_fld.d();   auto flxh = ice->flx_h_fld.d();
+    auto sw     = jra->shortwave_fld.d(); auto lw  = jra->longwave_fld.d();
+    auto tair   = jra->Tair_fld.d();      auto qair = jra->shum_fld.d();
+    auto prain  = jra->prec_rain_fld.d(); auto psnow = jra->prec_snow_fld.d();
+    auto uw     = jra->u_wind_fld.d();    auto vw  = jra->v_wind_fld.d();
+    auto runoff = forcing->runoff_fld.d();
+    auto chatm  = forcing->Ch_atm_oce_fld.d(); auto ceatm = forcing->Ce_atm_oce_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto geo    = mesh->geo_coord_nod2D_fld.d();
+
+    /* Loop 1: friction velocity over OWNED, then the ustar halo (Loop 2 reads ustar at halo n). */
+    Kokkos::parallel_for("ice_therm_ustar", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) { ustarv(n) = 0.0; return; }
+            const real_t du = uice(n) - sru(n);
+            const real_t dv = vice(n) - srv(n);
+            ustarv(n) = Kokkos::sqrt((du*du + dv*dv) * cd);
+        });
+    therm_halo_nod2D(ice->thermo.ustar_fld, partit);
+
+    /* Loop 2: per-node column physics over [0,N) (halo included — the C bound). Race-free map. */
+    Kokkos::parallel_for("ice_therm_col", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;                      /* cavity skip */
+            real_t h    = m_ice(n);
+            real_t hsn  = m_snw(n);
+            real_t A    = a_ice(n);
+            const real_t fsh  = sw(n);
+            const real_t flo  = lw(n);
+            const real_t Ta   = tair(n);
+            const real_t qa   = qair(n);
+            const real_t rain = prain(n);
+            const real_t snow = psnow(n);
+            const real_t runo = runoff(n);
+            const real_t ug   = Kokkos::sqrt(uw(n)*uw(n) + vw(n)*vw(n));
+            const real_t ustar = ustarv(n);
+            const real_t T_oc  = srt(n);
+            const real_t S_oc  = srs(n);
+            const real_t rsss  = ref_sss_local ? S_oc : rsss_default;
+            real_t t           = tskin(n);
+            const real_t ch    = chatm(n);
+            const real_t ce    = ceatm(n);
+            const real_t lid_clo = (geo(2*n + 1) > 0.0) ? h0 : h0_s;
+
+            real_t fw=0, fwice=0, fwsnw=0, ehf=0, evap=0, rsf=0;
+            real_t ithdgr=0, ithdgrsn=0, ithdgra=0, iflice=0;
+            therm_ice_kk(thc, uvs, &h, &hsn, &A, fsh, flo, Ta, qa, rain, snow, runo, rsss,
+                         ug, ustar, T_oc, S_oc, h_ml, &t, ice_dt, ch, ce, ch_i, ce_i,
+                         &fw, &fwice, &fwsnw, &ehf, &evap, &rsf,
+                         &ithdgr, &ithdgrsn, &ithdgra, &iflice, lid_clo);
+
+            /* backup old (Fortran lines 311-314) */
+            vold_m(n) = m_ice(n); vold_s(n) = m_snw(n); vold_a(n) = a_ice(n);
+            thdgr_old(n) = thdgr(n);
+            /* new values */
+            m_ice(n) = h; m_snw(n) = hsn; a_ice(n) = A;
+            tskin(n) = t; flxfw(n) = fw; flxh(n) = ehf;
+            thdgr(n) = ithdgr; thdgrsn(n) = ithdgrsn; thdgra(n) = ithdgra;
+        });
+
+    ice->data[FESOM_ICE_AICE].values_fld.modify_device();
+    ice->data[FESOM_ICE_MICE].values_fld.modify_device();
+    ice->data[FESOM_ICE_MSNOW].values_fld.modify_device();
+    ice->data[FESOM_ICE_AICE].values_old_fld.modify_device();
+    ice->data[FESOM_ICE_MICE].values_old_fld.modify_device();
+    ice->data[FESOM_ICE_MSNOW].values_old_fld.modify_device();
+    ice->thermo.t_skin_fld.modify_device();
+    ice->flx_fw_fld.modify_device(); ice->flx_h_fld.modify_device();
+    ice->thermo.thdgr_fld.modify_device();   ice->thermo.thdgrsn_fld.modify_device();
+    ice->thermo.thdgra_fld.modify_device();  ice->thermo.thdgr_old_fld.modify_device();
+}
+
+/* FESOM_KK_VERIFY=icethermo — thermo read-modify-writes m_ice/m_snow/a_ice + t_skin + thdgr
+ * (read as inputs, then overwritten). L26 capture-before those 5 (the driver snapshots PRE-thermo);
+ * here snapshot the KK result of the 9 consumed outputs (the 3 values + t_skin + flx_h/flx_fw +
+ * thdgr/thdgrsn/thdgra), restore the 5 inputs, run the C twin (recomputes ustar from intact
+ * uice/srfoce + the column physics; its internal ustar halo is collective → run on ALL ranks),
+ * diff the 9, restore KK. The inputs jra/forcing/srfoce are intact (thermo doesn't modify them).
+ * Race-free per-node → max|Δ|==0 on Serial AND OpenMP. ⚠️ Meaningful only with ACTIVE ice (CORE2). */
+void fesom_ice_thermodynamics_verify(fesom_ice *ice, struct fesom_partit *partit,
+                                     struct fesom_mesh *mesh, const struct fesom_forcing *forcing,
+                                     const struct fesom_jra55 *jra, const struct fesom_sss_runoff *sr,
+                                     int step_n,
+                                     const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s,
+                                     const std::vector<real_t> &pre_a, const std::vector<real_t> &pre_t,
+                                     const std::vector<real_t> &pre_thdgr)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    real_t *m  = ice->data[FESOM_ICE_MICE].values;
+    real_t *s  = ice->data[FESOM_ICE_MSNOW].values;
+    real_t *a  = ice->data[FESOM_ICE_AICE].values;
+    real_t *tk = ice->thermo.t_skin;
+    real_t *fh = ice->flx_h;
+    real_t *ff = ice->flx_fw;
+    real_t *g  = ice->thermo.thdgr;
+    real_t *gs = ice->thermo.thdgrsn;
+    real_t *ga = ice->thermo.thdgra;
+    /* snapshot the 9 consumed KK outputs */
+    std::vector<real_t> km(m,m+N), ks(s,s+N), ka(a,a+N), kt(tk,tk+N), kfh(fh,fh+N),
+                        kff(ff,ff+N), kg(g,g+N), kgs(gs,gs+N), kga(ga,ga+N);
+    /* restore the 5 RMW inputs to PRE-thermo (the C-twin reads these) */
+    std::copy(pre_m.begin(),pre_m.end(),m); std::copy(pre_s.begin(),pre_s.end(),s);
+    std::copy(pre_a.begin(),pre_a.end(),a); std::copy(pre_t.begin(),pre_t.end(),tk);
+    std::copy(pre_thdgr.begin(),pre_thdgr.end(),g);
+    fesom_ice_thermodynamics(ice, partit, mesh, forcing, jra, sr);   /* C twin */
+    auto mx=[&](const std::vector<real_t>&kk,const real_t*c){ double d=0.0;
+        for(int i=0;i<N;++i){double x=std::fabs((double)kk[i]-(double)c[i]); if(x>d)d=x;} return d; };
+    double dm=mx(km,m), ds=mx(ks,s), da=mx(ka,a), dt=mx(kt,tk), dfh=mx(kfh,fh),
+           dff=mx(kff,ff), dg=mx(kg,g), dgs=mx(kgs,gs), dga=mx(kga,ga);
+    /* restore the 9 KK outputs (production state) */
+    std::copy(km.begin(),km.end(),m); std::copy(ks.begin(),ks.end(),s); std::copy(ka.begin(),ka.end(),a);
+    std::copy(kt.begin(),kt.end(),tk); std::copy(kfh.begin(),kfh.end(),fh); std::copy(kff.begin(),kff.end(),ff);
+    std::copy(kg.begin(),kg.end(),g); std::copy(kgs.begin(),kgs.end(),gs); std::copy(kga.begin(),kga.end(),ga);
+    double dmax=dm; for(double x:{ds,da,dt,dfh,dff,dg,dgs,dga}) if(x>dmax) dmax=x;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=icethermo] step %d backend=%s  max|Δ|: m_ice=%.3e a_ice=%.3e m_snow=%.3e "
+                "t_skin=%.3e flx_h=%.3e flx_fw=%.3e thdgr=%.3e\n",
+                step_n, be.c_str(), dm, da, ds, dt, dfh, dff, dg);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=icethermo] FAIL step %d: ice thermo Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax); std::abort();
+    }
+}

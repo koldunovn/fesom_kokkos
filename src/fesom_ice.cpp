@@ -5,6 +5,8 @@
 #include "fesom_ice_evp.h"
 #include "fesom_ice_fct.h"
 #include "fesom_ice_thermo.h"
+#include "fesom_forcing.h"   // M4.3d-a: forcing->{runoff,Ch_atm_oce,Ce_atm_oce}_fld IN-rail push
+#include "fesom_jra55.h"     // M4.3d-a: the 8 jra physics Fields IN-rail push
 #include "fesom_halo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -336,13 +338,15 @@ static int s_ice_verify_loaded = 0;
 static int s_verify_icemap     = 0;
 static int s_verify_evp        = 0;
 static int s_verify_icefct     = 0;
+static int s_verify_icethermo  = 0;
 static void load_ice_verify_once(void)
 {
     if (s_ice_verify_loaded) return;
     const char *e = getenv("FESOM_KK_VERIFY");
-    s_verify_icemap = (e && strstr(e, "icemap")) ? 1 : 0;   /* collision-free token (L25) */
-    s_verify_evp    = (e && strstr(e, "evp"))    ? 1 : 0;   /* M4.3b */
-    s_verify_icefct = (e && strstr(e, "icefct")) ? 1 : 0;   /* M4.3c (collision-free, L25) */
+    s_verify_icemap    = (e && strstr(e, "icemap"))    ? 1 : 0;   /* collision-free token (L25) */
+    s_verify_evp       = (e && strstr(e, "evp"))       ? 1 : 0;   /* M4.3b */
+    s_verify_icefct    = (e && strstr(e, "icefct"))    ? 1 : 0;   /* M4.3c (collision-free, L25) */
+    s_verify_icethermo = (e && strstr(e, "icethermo")) ? 1 : 0;   /* M4.3d (collision-free, L25) */
     s_ice_verify_loaded = 1;
 }
 
@@ -535,11 +539,64 @@ void fesom_ice_step(int                            step,
     }
 
     /* Thermodynamics + ice→ocean flux update. Both need forcing+jra+sr; without
-     * them (e.g. pi-mesh smoke test) the step is silently a no-op. */
+     * them (e.g. pi-mesh smoke test) the step is silently a no-op. M4.3d-a: thermodynamics ON
+     * THE DEVICE — per-node column physics over [0,N) (race-free → Serial AND OpenMP bit-identical,
+     * NO scatter; therm_ice/obudget/budget/flooding device twins) + the ustar map + its halo. IN
+     * rail (L28): push every input the body reads — the 8 jra physics arrays (jra const→const_cast),
+     * forcing runoff/Ch/Ce, ice uice/vice/srfoce/values/t_skin/thdgr. OUT: sync_host the 9 consumed
+     * outputs (the 3 values + t_skin + flx_h/flx_fw + thdgr/thdgrsn/thdgra) for the host oce_fluxes
+     * (flx_*) + h_diag (values) + next-step thermo. capture-before (L26) the 5 RMW inputs. oce_fluxes
+     * STAYS HOST (M4.3d-b). */
     if (!s_no_ice_thermo && forcing && jra && sr) {
-        fesom_ice_thermodynamics(ice, partit, mesh, forcing, jra, sr);
+        std::vector<real_t> tm, ts, ta, tt, tg;
+        if (s_verify_icethermo) {
+            tm.assign(ice->data[FESOM_ICE_MICE].values,  ice->data[FESOM_ICE_MICE].values  + N);
+            ts.assign(ice->data[FESOM_ICE_MSNOW].values, ice->data[FESOM_ICE_MSNOW].values + N);
+            ta.assign(ice->data[FESOM_ICE_AICE].values,  ice->data[FESOM_ICE_AICE].values  + N);
+            tt.assign(ice->thermo.t_skin, ice->thermo.t_skin + N);
+            tg.assign(ice->thermo.thdgr,  ice->thermo.thdgr  + N);
+        }
+        struct fesom_jra55 *j = const_cast<struct fesom_jra55 *>(jra);
+        /* IN rail — jra (8): freshly time-interpolated on the host each step via the raw alias (L14). */
+        j->u_wind_fld.modify_host();    j->u_wind_fld.sync_device();
+        j->v_wind_fld.modify_host();    j->v_wind_fld.sync_device();
+        j->shum_fld.modify_host();      j->shum_fld.sync_device();
+        j->shortwave_fld.modify_host(); j->shortwave_fld.sync_device();
+        j->longwave_fld.modify_host();  j->longwave_fld.sync_device();
+        j->Tair_fld.modify_host();      j->Tair_fld.sync_device();
+        j->prec_rain_fld.modify_host(); j->prec_rain_fld.sync_device();
+        j->prec_snow_fld.modify_host(); j->prec_snow_fld.sync_device();
+        /* forcing (3) + ice inputs (uice/vice/srfoce/values/t_skin/thdgr). */
+        forcing->runoff_fld.modify_host();     forcing->runoff_fld.sync_device();
+        forcing->Ch_atm_oce_fld.modify_host(); forcing->Ch_atm_oce_fld.sync_device();
+        forcing->Ce_atm_oce_fld.modify_host(); forcing->Ce_atm_oce_fld.sync_device();
+        ice->uice_fld.modify_host();        ice->uice_fld.sync_device();
+        ice->vice_fld.modify_host();        ice->vice_fld.sync_device();
+        ice->srfoce_u_fld.modify_host();    ice->srfoce_u_fld.sync_device();
+        ice->srfoce_v_fld.modify_host();    ice->srfoce_v_fld.sync_device();
+        ice->srfoce_temp_fld.modify_host(); ice->srfoce_temp_fld.sync_device();
+        ice->srfoce_salt_fld.modify_host(); ice->srfoce_salt_fld.sync_device();
+        ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        ice->thermo.t_skin_fld.modify_host(); ice->thermo.t_skin_fld.sync_device();
+        ice->thermo.thdgr_fld.modify_host();  ice->thermo.thdgr_fld.sync_device();
+
+        fesom_ice_thermodynamics_kk(ice, partit, mesh, forcing, jra, sr);
+
+        /* OUT rail — the 9 consumed outputs to the host (oce_fluxes reads flx_*, h_diag reads values). */
+        ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        ice->thermo.t_skin_fld.sync_host();
+        ice->flx_fw_fld.sync_host();  ice->flx_h_fld.sync_host();
+        ice->thermo.thdgr_fld.sync_host();   ice->thermo.thdgrsn_fld.sync_host();
+        ice->thermo.thdgra_fld.sync_host();
+        if (s_verify_icethermo)
+            fesom_ice_thermodynamics_verify(ice, partit, mesh, forcing, jra, sr, step, tm, ts, ta, tt, tg);
+
         /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the
-         * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt. */
+         * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt. STILL HOST (M4.3d-b). */
         fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);
     }
 

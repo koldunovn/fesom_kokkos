@@ -2,6 +2,7 @@
 #define FESOM_JRA55_H
 
 #include "fesom_types.h"
+#include "fesom_field.hpp"   // M4.3d-a: DualView storage for the 8 JRA55 physics arrays
 
 #include "fesom_calendar.h"
 
@@ -120,6 +121,14 @@ typedef struct fesom_jra55 {
     real_t *Tair;       /* [nod2D]  °C  */
     real_t *prec_rain;  /* [nod2D]  m/s */
     real_t *prec_snow;  /* [nod2D]  m/s */
+
+    /* M4.3d-a: DualView owners for the 8 physics arrays above (the M1.4 pattern). The raw
+     * pointers are NON-OWNING aliases = field.h(), re-pointed once in fesom_jra55_init; the
+     * per-step time-interpolation fill writes them in-place via the alias (L14), so the ice-
+     * thermo IN rail does modify_host()+sync_device() each step. Released by fesom_jra55_free's
+     * *jra = fesom_jra55{} (D13). jra is CORE2-only (pi never allocates it). */
+    fesom::Field u_wind_fld, v_wind_fld, shum_fld, shortwave_fld;
+    fesom::Field longwave_fld, Tair_fld, prec_rain_fld, prec_snow_fld;
 
     /* Namelist scalars (defaults from work_core/namelist.forcing). */
     int     nm_nc_iyear;   /* 1900 */

@@ -523,7 +523,9 @@ static void getcoeffld(fesom_jra55_field *flf,
 
 void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
 {
-    memset(jra, 0, sizeof(*jra));
+    /* M4.3d-a: value-initialise (the struct now holds fesom::Field members → memset is UB, L13).
+     * Default-constructs each Field (empty DualView) + zeros every POD. */
+    *jra = fesom_jra55{};
 
     /* Namelist defaults from work_core/namelist.forcing */
     static const char *prefixes[FESOM_JRA_NFLD] = {
@@ -563,17 +565,16 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
     /* Physics arrays sized myDim+eDim: thermo's compute-over-halo loop in
      * fesom_ice_thermo.c reads jra->shortwave[halo_n] etc.; this used to
      * be an out-of-bounds read when arrays were sized myDim only. */
-    jra->u_wind    = (decltype(jra->u_wind))calloc((size_t)N, sizeof(real_t));
-    jra->v_wind    = (decltype(jra->v_wind))calloc((size_t)N, sizeof(real_t));
-    jra->shum      = (decltype(jra->shum))calloc((size_t)N, sizeof(real_t));
-    jra->shortwave = (decltype(jra->shortwave))calloc((size_t)N, sizeof(real_t));
-    jra->longwave  = (decltype(jra->longwave))calloc((size_t)N, sizeof(real_t));
-    jra->Tair      = (decltype(jra->Tair))calloc((size_t)N, sizeof(real_t));
-    jra->prec_rain = (decltype(jra->prec_rain))calloc((size_t)N, sizeof(real_t));
-    jra->prec_snow = (decltype(jra->prec_snow))calloc((size_t)N, sizeof(real_t));
-    FESOM_CHECK(jra->u_wind && jra->v_wind && jra->shum && jra->shortwave
-                && jra->longwave && jra->Tair && jra->prec_rain && jra->prec_snow,
-                "fesom_jra55_init: physics arrays alloc");
+    /* M4.3d-a: Field-owned (the M1.4 pattern). .alloc zero-inits like calloc; the raw pointers
+     * stay valid non-owning aliases = field.h() (the per-step fill writes them in-place). */
+    jra->u_wind_fld.alloc("jra.u_wind", (size_t)N);       jra->u_wind    = jra->u_wind_fld.h();
+    jra->v_wind_fld.alloc("jra.v_wind", (size_t)N);       jra->v_wind    = jra->v_wind_fld.h();
+    jra->shum_fld.alloc("jra.shum", (size_t)N);           jra->shum      = jra->shum_fld.h();
+    jra->shortwave_fld.alloc("jra.shortwave", (size_t)N); jra->shortwave = jra->shortwave_fld.h();
+    jra->longwave_fld.alloc("jra.longwave", (size_t)N);   jra->longwave  = jra->longwave_fld.h();
+    jra->Tair_fld.alloc("jra.Tair", (size_t)N);           jra->Tair      = jra->Tair_fld.h();
+    jra->prec_rain_fld.alloc("jra.prec_rain", (size_t)N); jra->prec_rain = jra->prec_rain_fld.h();
+    jra->prec_snow_fld.alloc("jra.prec_snow", (size_t)N); jra->prec_snow = jra->prec_snow_fld.h();
 
     jra->nm_nc_iyear   = 1900;
     jra->nm_nc_imm     = 1;
@@ -601,12 +602,11 @@ void fesom_jra55_free(fesom_jra55 *jra)
         free(flf->sbcdata1);
         free(flf->sbcdata2);
     }
-    free(jra->u_wind);    free(jra->v_wind);
-    free(jra->shum);
-    free(jra->shortwave); free(jra->longwave);
-    free(jra->Tair);
-    free(jra->prec_rain); free(jra->prec_snow);
-    memset(jra, 0, sizeof(*jra));
+    /* M4.3d-a: the 8 physics arrays are now Field-owned (raw ptrs = non-owning aliases) — do NOT
+     * free() them. *jra = fesom_jra55{} releases every Field (Kokkos refcount) + zeros the PODs,
+     * the D13 release pattern (replaces the memset, which is UB on a struct with Field members,
+     * L13). The fld[]/nc_* raw arrays were freed in the loop above; the assignment nulls them. */
+    *jra = fesom_jra55{};
 }
 
 void fesom_jra55_open_year(fesom_jra55 *jra,
