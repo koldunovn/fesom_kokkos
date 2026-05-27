@@ -2,6 +2,9 @@
 #define FESOM_EOS_H
 
 #include "fesom_types.h"
+#ifdef __cplusplus
+#include <cstddef>   /* std::size_t for the *_kk device-twin signatures */
+#endif
 
 struct fesom_mesh;
 struct fesom_aux;
@@ -71,7 +74,8 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
 #ifdef __cplusplus
 namespace fesom { template <class> class FieldT; using Field = FieldT<double>; }
 void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
-                           const struct fesom_mesh *mesh, struct fesom_partit *p);
+                           const struct fesom_mesh *mesh, struct fesom_partit *p,
+                           std::size_t base = 0);   /* base: slab offset for multi-channel fields */
 #endif
 
 /*

@@ -484,7 +484,8 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
  * (smoothed). The mesh adjacency (nod_in_elem2D[_offsets], elem_nodes, elem_area,
  * u/nlevels[_nod2D]) is set-once device-current. */
 void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
-                           const struct fesom_mesh *mesh, struct fesom_partit *p)
+                           const struct fesom_mesh *mesh, struct fesom_partit *p,
+                           std::size_t base)
 {
     if (n_smooth < 1) return;
     const int Nmy = mesh->myDim_nod2D;
@@ -522,9 +523,9 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                     const int v0 = en(3*el+0), v1 = en(3*el+1), v2 = en(3*el+2);
                     for (int nz = ule; nz <= nle; ++nz) {
                         if (sw == 0) volv((size_t)n*NL + nz) += a;
-                        workv((size_t)n*NL + nz) += a * ( arr((size_t)v0*NL + nz)
-                                                        + arr((size_t)v1*NL + nz)
-                                                        + arr((size_t)v2*NL + nz) );
+                        workv((size_t)n*NL + nz) += a * ( arr(base + (size_t)v0*NL + nz)
+                                                        + arr(base + (size_t)v1*NL + nz)
+                                                        + arr(base + (size_t)v2*NL + nz) );
                     }
                 }
                 if (sw == 0)
@@ -535,10 +536,10 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
             KOKKOS_LAMBDA(const int n) {
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
                 for (int nz = uln; nz <= nlnz; ++nz)
-                    arr((size_t)n*NL + nz) = workv((size_t)n*NL + nz) * volv((size_t)n*NL + nz);
+                    arr(base + (size_t)n*NL + nz) = workv((size_t)n*NL + nz) * volv((size_t)n*NL + nz);
             });
         arr_fld.modify_device();
-        fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p);   /* halo for the next sweep / exit */
+        fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p, base);   /* halo (slab) for the next sweep / exit */
     }
 }
 

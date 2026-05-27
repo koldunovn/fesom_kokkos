@@ -11,6 +11,7 @@
 #include "fesom_eos.h"      /* fesom_smooth_nod3D (smooth_blmc) */
 #include "fesom_forcing.h"
 #include "fesom_halo.h"     /* fesom_exchange_nod3D (combine exchanges) */
+#include "fesom_halo_device.hpp"   /* M5.5 (B): blmc device smoother + slab device-halo */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -1537,14 +1538,15 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
     /* ---- INTERNAL HALO BRACKET 1: smooth_blmc (:437-447) ---------------------
      * smooth_blmc=.true.: exchange each blmc channel then 3-sweep smooth_nod3D (HOST).
      * Device-compute → sync_host → halo+smooth (h_checked) → sync_device. */
-    k->blmc_fld.modify_device();
-    k->blmc_fld.sync_host();
-    for (int j = 0; j < 3; ++j)
-        fesom_exchange_nod3D(k->blmc_fld.h_checked() + (size_t)j * slab, nl, partit);
-    for (int j = 0; j < 3; ++j)
-        fesom_smooth_nod3D(k->blmc_fld.h_checked() + (size_t)j * slab, nl, 3, mesh, partit);
-    k->blmc_fld.modify_host();
-    k->blmc_fld.sync_device();
+    k->blmc_fld.modify_device();   /* blmix wrote blmc (device) */
+    /* M5.5 (B): DEVICE smoother per slab — no host round-trip. Per channel j: initial
+     * device-halo of the slab, then 3-sweep device smooth (each sweep does its own slab
+     * device-halo). blmc stays device-resident; the combine below reads it at OWNED nodes. */
+    for (int j = 0; j < 3; ++j) {
+        const std::size_t base = (std::size_t)j * slab;
+        fesom_halo_field(k->blmc_fld, FESOM_HALO_NOD3D, nl, 1, partit, base);
+        fesom_smooth_nod3D_kk(k->blmc_fld, 3, mesh, partit, base);
+    }
 
     /* combine blmc into viscA/diffK within the BL; zero ghats outside (:451-463) */
     Kokkos::parallel_for("kpp_combine", Kokkos::RangePolicy<>(0, Nmy),

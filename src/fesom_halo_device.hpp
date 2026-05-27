@@ -45,11 +45,14 @@ void fesom_halo_device_free();
 // DEVICE-authoritative with owned unchanged + halo filled (f.modify_device()
 // is set inside). Mirrors fesom_halo_exchange's tag / PE order / MPI_DOUBLE
 // counts exactly so the moved bytes are identical to the host path.
+// base_off (element offset into f) lets a SLAB of a multi-channel field be
+// exchanged on its own (e.g. KPP blmc[3] = 3 slabs at j*slab) — default 0.
 void fesom_halo_exchange_device(fesom::Field   &f,
                                 fesom_halo_kind kind,
                                 int             n_levels,
                                 int             n_components,
-                                fesom_partit   *p);
+                                fesom_partit   *p,
+                                std::size_t     base_off = 0);
 #endif // KOKKOS_ENABLE_CUDA
 
 // The standard D21 device-output halo bracket, with GPU-aware-MPI dispatch.
@@ -63,19 +66,21 @@ void fesom_halo_exchange_device(fesom::Field   &f,
 // Else (Serial/OpenMP, or FESOM_HOST_HALO=1): the EXACT legacy host-staged
 // bracket. (At npes<=1 it just marks device-dirty — the device already holds
 // the data, so it also skips the legacy path's pointless npes==1 round-trip.)
+// base_off (element offset into f) exchanges a SLAB of a multi-channel field; default 0.
 inline void fesom_halo_field(fesom::Field &f, fesom_halo_kind kind,
-                             int n_levels, int n_components, fesom_partit *p)
+                             int n_levels, int n_components, fesom_partit *p,
+                             std::size_t base_off = 0)
 {
     f.modify_device();
     if (!p || p->npes <= 1) return;
 #ifdef KOKKOS_ENABLE_CUDA
     if (fesom_halo_device_active()) {
-        fesom_halo_exchange_device(f, kind, n_levels, n_components, p);
+        fesom_halo_exchange_device(f, kind, n_levels, n_components, p, base_off);
         return;
     }
 #endif
     f.sync_host();
-    fesom_halo_exchange(f.h_checked(), kind, n_levels, n_components, p);
+    fesom_halo_exchange(f.h_checked() + base_off, kind, n_levels, n_components, p);
     f.modify_host();
     f.sync_device();
 }

@@ -119,7 +119,8 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                                 fesom_halo_kind kind,
                                 int             n_levels,
                                 int             n_components,
-                                fesom_partit   *p)
+                                fesom_partit   *p,
+                                std::size_t     base_off)
 {
     if (!p || p->npes == 1) { f.modify_device(); return; }
     fesom_com_struct *cs = dev_get_com(p, kind);
@@ -143,13 +144,14 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     auto recv  = s.recv_d;
     auto slist = s.slist_d;
     auto rlist = s.rlist_d;
-    const int st = stride;
+    const int  st = stride;
+    const long bo = (long)base_off;   // slab offset into the field (0 for whole-field)
 
     // PACK: gather slist-indexed entries into the send buffer (slist order).
     if (send_count > 0) {
         Kokkos::parallel_for("fesom_halo_pack", Kokkos::RangePolicy<>(0, send_count),
             KOKKOS_LAMBDA(const int g) {
-                const long src = (long)(slist(g) - 1) * st;
+                const long src = bo + (long)(slist(g) - 1) * st;
                 const long dst = (long)g * st;
                 for (int c = 0; c < st; ++c) send(dst + c) = field(src + c);
             });
@@ -184,7 +186,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     if (recv_count > 0) {
         Kokkos::parallel_for("fesom_halo_unpack", Kokkos::RangePolicy<>(0, recv_count),
             KOKKOS_LAMBDA(const int g) {
-                const long dst = (long)(rlist(g) - 1) * st;
+                const long dst = bo + (long)(rlist(g) - 1) * st;
                 const long src = (long)g * st;
                 for (int c = 0; c < st; ++c) field(dst + c) = recv(src + c);
             });
