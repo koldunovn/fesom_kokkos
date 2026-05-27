@@ -11,13 +11,18 @@ Commits `a1726cd` (M5.2), `4934a43` (M5.3), `4120d02` (M5.4). Full story: lesson
   (`jobs/job_nsys_core2_np1`): the ocean's 82% = ~half **3-D kernels** (FCT advection ~30% biggest, momentum
   ~15%, diffusion ~14%, GM ~10%) + ~half **full-field PCIe** (`cudaMemcpy` = 83% of API time, ~13 GB/step at
   np=1) = the **host-staged ocean halos NOT flipped in M5.1** + EOS/KPP `smooth_nod3D` round-trips.
-- **M5.4 — lever A: flip the remaining ocean halos to `fesom_halo_field`** (the removable PCIe). The M1.5
-  split-rail halos: replace OUT-rail+halo with `fesom_halo_field`, **remove the downstream IN re-push**.
-  Done `uv_rhs` (elem3D, 3×/step): **0.716 → 0.658 s/step (+8%; total device-halo gain now 14.3%)**, Serial
-  np1+np2 bit-identical, CUDA A/B at the noise floor. **Template proven.** ⚠️ IN PROGRESS — remaining:
-  `pgf_x/y` (next, elem3D, big), FCT internal halos, `uvnode`, `ssh_rhs`, tracer-diff; the **GM chain** reads
-  OWNED on device (halos may be verify-only — trace first); NOT EOS/KPP (smoothing-bound). Each flip:
-  trace the field's re-push(es), flip, re-validate (Serial bit-id + CUDA pi A/B + CORE2 re-time).
+- **M5.4 — lever A: flip the remaining ocean halos to `fesom_halo_field`** (the removable PCIe). Two patterns:
+  **self-contained** brackets (replace wholesale) and **split-rail** (replace OUT-rail+halo, REMOVE the
+  downstream IN re-push). **DONE + validated** (each Serial np1+np2 bit-id + SYNCCHECK-clean + CUDA A/B at
+  the noise floor): M5.4a `uv_rhs` (`4120d02`), M5.4b `pgf`+`uvnode` (`bfa71ff`), M5.4c FCT internal halos
+  `fct_LO`/`tr_xy`/`fct_plus`/`fct_minus` (`d3e0726`). **CORE2 dist_8: host-staged 0.772 → device-halo 0.592
+  = 23.3% cumulative device-halo gain** (M5.1 8.2% → 14.3% → 16.7% → 23.3%). Verifies read the RAW alias
+  (SYNCCHECK-safe). ⚠️ REMAINING (lower/uncertain payoff): the **GM chain** (8 halos — its device kernels
+  read OWNED, so most halos are verify-only on the device path → flipping gives no device benefit unless a
+  later substep [Redi] reads them at halo; only `fer_gamma` is clearly read-at-halo → trace per-field),
+  `ssh_rhs` (nod2D small, CG reads owned), tracer-diff; NOT EOS/KPP (smoothing-bound — need `smooth_nod3D`
+  on device). On farc each flip pays ~1.5× more (the M5.1 8%→farc 12% scaling). Tools: `FESOM_STEP_PROFILE=1`,
+  `FESOM_CG_PROFILE=1`, `FESOM_HOST_HALO=1` (A/B toggle), `jobs/job_gpuaware_{prof,validate,repro,time}_*`.
 
 **Session 18 (2026-05-27) — M5.1a COMPLETE: GPU-aware MPI on-device halo exchange (the perf track).**
 Commit **`d6b0a1f`**. The whole story is lesson **L47** + `docs/GPU_FIDELITY.md` §M5.1 + `docs/NEXT_GPU_AWARE_MPI.md`.

@@ -160,12 +160,21 @@ CUDA pi dist_2 A/B at the run-to-run noise floor + re-time CORE2 dist_8.
 | flipped | device s/step | total gain |
 |---|---|---|
 | M5.1: CG, momentum (`uvnode_rhs`/`u_b`/`v_b`), gm (`tr_xy`/`tr_z`), ice-FCT | 0.716 | 8.2% |
-| **M5.4: + `uv_rhs`** (elem3D, 3×/step across momentum substeps 4–6) | **0.658** | **14.3%** |
+| M5.4a: + `uv_rhs` (elem3D, 3×/step, momentum substeps 4–6) | 0.658 | 14.3% |
+| M5.4b: + `pgf_x`/`pgf_y` (elem3D) + `uvnode` (nod3D 2-comp) | 0.643 | 16.7% |
+| **M5.4c: + FCT internal halos** (`fct_LO`/`tr_xy`/`fct_plus`/`fct_minus`, 8 exch/step) | **0.592** | **23.3%** |
 
-`uv_rhs` alone added ~8% (0.716→0.658) — confirming the PCIe finding. **Remaining targets** (by payoff):
-`pgf_x`/`pgf_y` (elem3D, big), the FCT internal halos (`fesom_tracer_adv.cpp`), `uvnode` (nod3D), `ssh_rhs`
-(nod2D, small), tracer-diff; the **GM chain** (8 halos — its device kernels read *owned*, so some halos may
-be verify-only → trace before flipping); **NOT** EOS/KPP (smoothing-bound — need `smooth_nod3D` on device).
+**host-staged 0.772 → device-halo 0.592 = 23.3%** (the clean self-contained + split-rail flips, each
+Serial np1+np2 bit-identical + SYNCCHECK-clean + CUDA A/B at the noise floor). Two flip patterns proven:
+**self-contained** brackets (CG, FCT internal — replace wholesale with `fesom_halo_field`) and **split-rail**
+(`uv_rhs`/`pgf`/`uvnode` — replace OUT-rail+halo, remove the downstream IN re-push). Diminishing per-flip at
+dist_8 (small per-rank fields); the high-frequency fields dominate (`uv_rhs` 3×/step, FCT 8×/step gave ~8%
+each; `pgf`+`uvnode` 1×/step gave ~2%). **Remaining** (lower/uncertain payoff): the **GM chain** (8 halos —
+its device kernels read *owned*, so most halos are verify-only on the device path → flipping gives no device
+benefit unless a later substep [Redi] reads them at halo; needs per-field tracing — only `fer_gamma` is
+clearly read-at-halo), `ssh_rhs` (nod2D, small — CG reads it owned), tracer-diff; **NOT** EOS/KPP
+(smoothing-bound — need `smooth_nod3D` on device first). On a bigger mesh (farc) each flip pays more (the
+M5.1 8%→farc 12% scaling).
 
 ## The comparison
 
