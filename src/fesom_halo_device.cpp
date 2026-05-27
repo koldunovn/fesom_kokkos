@@ -41,6 +41,8 @@ void fesom_halo_device_free() { /* no device Views on host backends */ }
 #include <mpi.h>
 #include <string>
 #include <vector>
+#include <cmath>     // FESOM_HALO_SELFCHECK: std::fabs
+#include <cstdio>    // FESOM_HALO_SELFCHECK: std::printf
 
 #include "fesom_types.h"
 
@@ -194,6 +196,49 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     Kokkos::fence();   // halo writes visible before the next device reader
 
     f.modify_device();   // device authoritative: owned (unchanged) + halo (new)
+}
+
+// FESOM_HALO_SELFCHECK: run the device exchange AND the host exchange on the SAME owned data,
+// compare the halo. Pinpoints a device-transport bug (kind + magnitude) isolated from the physics.
+// (Owned data is identical to the host path — the dispatcher's modify_device() then our sync_host()
+// pull the device-current owned to host; we host-exchange a COPY, device-exchange the Field, diff.)
+void fesom_halo_device_selfcheck(fesom::Field &f, fesom_halo_kind kind,
+                                 int n_levels, int n_components,
+                                 fesom_partit *p, std::size_t base_off)
+{
+    const int stride = n_levels * n_components;
+    const std::size_t Nf = f.size();
+
+    f.sync_host();                                   // device owned -> host (auth Device->Synced)
+    std::vector<double> ref(f.h(), f.h() + Nf);      // copy of owned (+ stale halo)
+    fesom_halo_exchange(ref.data() + base_off, kind, n_levels, n_components, p);  // HOST reference
+
+    f.modify_device();                               // device owned is still current
+    fesom_halo_exchange_device(f, kind, n_levels, n_components, p, base_off);     // DEVICE under test
+    f.sync_host();
+
+    fesom_com_struct *cs = dev_get_com(p, kind);
+    const int rcount = cs->rptr[cs->rPEnum] - cs->rptr[0];
+    int    fails = 0;
+    double maxd  = 0.0;
+    for (int g = 0; g < rcount; ++g) {
+        const long idx = (long)base_off + (long)(cs->rlist[g] - 1) * stride;
+        for (int c = 0; c < stride; ++c) {
+            double d = std::fabs(f.h()[idx + c] - ref[idx + c]);
+            if (d > maxd) maxd = d;
+            if (d > 1e-9) ++fails;
+        }
+    }
+    long gfails = 0, lf = fails;
+    MPI_Allreduce(&lf, &gfails, 1, MPI_LONG, MPI_SUM, p->MPI_COMM_FESOM);
+    double gmax = 0.0;
+    MPI_Allreduce(&maxd, &gmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+    static const char *knames[5] = {"NOD2D","NOD3D","ELEM2D","ELEM3D","ELEM2D_FULL"};
+    if (p->mype == 0 && (gfails > 0 || gmax > 0.0))
+        std::printf("[devhalo-selfcheck] kind=%s nl=%d nc=%d base=%zu  rPEnum=%d  "
+                    "halo mismatches=%ld  max|dev-host|=%.3e\n",
+                    knames[(int)kind], n_levels, n_components, base_off,
+                    cs->rPEnum, gfails, gmax);
 }
 
 #endif // KOKKOS_ENABLE_CUDA

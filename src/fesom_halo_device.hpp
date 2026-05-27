@@ -28,6 +28,7 @@
 #include "fesom_field.hpp"
 #include "fesom_halo.h"      // fesom_halo_kind, the host fesom_halo_exchange
 #include "fesom_partit.h"
+#include <cstdlib>          // getenv (FESOM_HALO_SELFCHECK dispatch)
 
 // Is the on-device halo path active? true only on a CUDA build with the env
 // override FESOM_HOST_HALO unset/!=1. Always defined (returns false elsewhere)
@@ -53,6 +54,15 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                                 int             n_components,
                                 fesom_partit   *p,
                                 std::size_t     base_off = 0);
+
+// FESOM_HALO_SELFCHECK debug path: device exchange + host exchange on the same owned data, diff
+// the halo (pinpoints a device-transport bug). Same signature as the exchange.
+void fesom_halo_device_selfcheck(fesom::Field   &f,
+                                 fesom_halo_kind kind,
+                                 int             n_levels,
+                                 int             n_components,
+                                 fesom_partit   *p,
+                                 std::size_t     base_off = 0);
 #endif // KOKKOS_ENABLE_CUDA
 
 // The standard D21 device-output halo bracket, with GPU-aware-MPI dispatch.
@@ -75,7 +85,10 @@ inline void fesom_halo_field(fesom::Field &f, fesom_halo_kind kind,
     if (!p || p->npes <= 1) return;
 #ifdef KOKKOS_ENABLE_CUDA
     if (fesom_halo_device_active()) {
-        fesom_halo_exchange_device(f, kind, n_levels, n_components, p, base_off);
+        static int selfcheck = -1;
+        if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }
+        if (selfcheck) fesom_halo_device_selfcheck(f, kind, n_levels, n_components, p, base_off);
+        else           fesom_halo_exchange_device (f, kind, n_levels, n_components, p, base_off);
         return;
     }
 #endif

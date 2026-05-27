@@ -1,0 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=kk_halochk
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/halochk.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/halochk.%j.err
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_HALO_SELFCHECK=1
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/halochk; rm -rf "$OUT"; mkdir -p "$OUT"
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 3 999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "=== device-vs-host halo mismatches (per kind) — empty = device exchange byte-correct ==="
+grep "devhalo-selfcheck" "$OUT/run.log" | sort -u
+echo "=== done ==="

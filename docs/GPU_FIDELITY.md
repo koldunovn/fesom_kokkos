@@ -329,6 +329,25 @@ across separate SLURM jobs** (identical argmax/values) → deterministic, not ra
 path): PASS (CUDA-vs-C ≤ C-vs-Fortran, drift≈0) ⇒ benign (b); drift ⇒ real (c). **Orthogonal to the
 KPP/EVP halo-flip work — warrants a focused session.**
 
+**ROOT CAUSE (2026-05-27, hypothesis (c) confirmed — it is a real bug, NOT benign):** the device-halo
+**exchange is byte-perfect** — a per-call self-check (`FESOM_HALO_SELFCHECK=1`, `fesom_halo_device_selfcheck`:
+device exchange + host exchange on the SAME owned data, diff the halo) found **0 mismatches** across all
+kinds on CORE2 (multi-neighbour, inter-node). The bug is **stale HOST copies**: the M5.1+ flips removed the
+OUT-rail `sync_host`, leaving fields **device-authoritative (host stale)**; a remaining **host** operation
+(salinity floor / eta_n map / reductions / coupling — the per-step CPU compute) reads the **raw stale host
+copy**, injecting a per-step perturbation that amplifies chaotically. **Proof:** vs the Serial oracle
+(bit-identical to C) at step 20 — device-halo **host-stale** (shipped) T=**0.41**; device-halo **host-fresh**
+(self-check syncs every call) T=**1.4e-3** == the all-host-halo path. Keeping host fresh collapses 0.41→1e-3.
+Invisible everywhere it was tested: pi (1e-17, idealised/no-ice), Serial (host==device), the host path +
+self-check (both `sync_host`). `SYNCCHECK` did NOT trip on CUDA → the stale read is a **raw `h()`** (an
+unguarded CPU read), not an `h_checked()` halo/IO entry. **Severity:** the shipped GPU path is wrong on
+CORE2; the in-flight M3.2 run is on it → re-run after the fix. **FIX (decided): bisect the M5.x flips vs the
+Serial oracle on CORE2 to find the first flip that breaks fidelity, then restore a *targeted* `sync_host`
+only for the host-read field (preserves the perf).** Tools added: `fesom_halo_device_selfcheck` +
+`jobs/job_halo_selfcheck_core2` (exchange byte-check), `job_core2_serial_ref` (the CORE2 Serial oracle),
+`job_gpuaware_validate_core2` (3-way A/B), `job_gpuaware_validate_pi_2node` (inter-node localiser),
+`job_dbg_{serial,dev,host}_step1` + `job_dbg_selfcheck20` (step-1 onset + the host-fresh proof).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

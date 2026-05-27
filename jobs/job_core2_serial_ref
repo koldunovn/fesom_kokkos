@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH --job-name=kk_serref
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:25:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/serref.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/serref.%j.err
+# The ORACLE for the CORE2 divergence question: build-serial (bit-identical to the C port) at the
+# SAME dist_8 / dt / steps as job_gpuaware_validate_core2. Comparing Serial-vs-dev and Serial-vs-host
+# tells us whether the DEVICE-halo path (what we ship) is as close to truth as the host-halo path
+# (=> atomic-scatter non-determinism, dev is fine) or systematically further (=> a device-halo bug).
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/serref_core2; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-serial/fesom_port "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "[serref] $? ; $(grep -E 'loop timing' "$OUT/log" | head -1)"
