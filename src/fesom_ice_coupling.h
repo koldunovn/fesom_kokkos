@@ -59,6 +59,20 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
                           struct fesom_forcing          *forcing,
                           const struct fesom_sss_runoff *sr);
 
+/* M4.3d-b: DEVICE twin of oce_fluxes. Maps + 2 integrate_nod_2D reductions (parallel_reduce +
+ * Allreduce, the CG-dot shape) + the owned net-subtracts; owns its 4 forcing halos (sync_host →
+ * host exchange → ocean step re-pushes). flx_h/flx_fw are device-current from the M4.3d-a thermo.
+ * Driver IN pushes tracers S + forcing Ssurf. + the EOS-style verify (key iceflux). */
+void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
+                             struct fesom_partit           *partit,
+                             struct fesom_mesh             *mesh,
+                             const struct fesom_tracers    *tracers,
+                             struct fesom_forcing          *forcing,
+                             const struct fesom_sss_runoff *sr);
+void fesom_ice_oce_fluxes_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                                 const struct fesom_tracers *tracers, struct fesom_forcing *forcing,
+                                 const struct fesom_sss_runoff *sr, int step_n);
+
 /*
  * Ice-mediated surface momentum flux. Mirror of Fortran oce_fluxes_mom
  * (ice_oce_coupling.F90:53). Must be called AFTER fesom_ice_step (so

@@ -300,6 +300,137 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
     fesom_exchange_nod2D(forcing->water_flux, partit);
 }
 
+/* ====================================================================== *
+ *  M4.3d-b — DEVICE (Kokkos) twin of fesom_ice_oce_fluxes. Maps over [0,N) *
+ *  (heat/water flux = -flx_h/-flx_fw; virtual_salt; relax_salt) + 2         *
+ *  integrate_nod_2D GLOBAL reductions (parallel_reduce + MPI_Allreduce —    *
+ *  the M4.2 cg_dot shape: Serial seq-reduce → bit-identical, OpenMP/CUDA     *
+ *  climate-close, D22) + the owned-node net-subtract maps. The kernel owns   *
+ *  its 4 forcing halos (sync_host → host exchange; the ocean step's IN rail  *
+ *  re-pushes the host forcing → device, the "→host(forcing)" handoff). The   *
+ *  flx_h/flx_fw inputs are device-current from the M4.3d-a thermo (no push). *
+ * ====================================================================== */
+
+/* integrate_nod_2D on device: Σ_{n<myDim} data(n)·areasvol(node3d(n,ulevels-1)) + Allreduce.
+ * The first ice device reduction; Serial sums in index order == the C loop → bit-identical. */
+static real_t integrate_nod_2D_kk(fesom::Field            &dfld,
+                                  const struct fesom_mesh *mesh,
+                                  struct fesom_partit     *partit)
+{
+    const int myDim = mesh->myDim_nod2D;
+    const int nl    = mesh->nl;
+    auto data     = dfld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    real_t lval = 0.0;
+    Kokkos::parallel_reduce("ice_integrate_nod2D", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n, real_t &s) {
+            const int ul = ulev_n(n) - 1;          /* 0-based surface level */
+            s += data(n) * areasvol(FESOM_NODE3D(n, ul, nl));
+        }, lval);
+    if (partit && partit->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, &lval, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+    return lval;
+}
+
+void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
+                             struct fesom_partit           *partit,
+                             struct fesom_mesh             *mesh,
+                             const struct fesom_tracers    *tracers,
+                             struct fesom_forcing          *forcing,
+                             const struct fesom_sss_runoff *sr)
+{
+    const int    N     = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    myDim = mesh->myDim_nod2D;
+    const int    nl    = mesh->nl;
+    const int    uvs   = sr->use_virt_salt;
+    const int    rssl  = sr->ref_sss_local;
+    const real_t rsss_def = sr->ref_sss;
+    const real_t srlx  = sr->surf_relax_S;
+    const real_t ocean_area = mesh->ocean_area;
+
+    auto hf    = forcing->heat_flux_fld.d();
+    auto wf    = forcing->water_flux_fld.d();
+    auto vs    = forcing->virtual_salt_fld.d();
+    auto rs    = forcing->relax_salt_fld.d();
+    auto ssurf = forcing->Ssurf_fld.d();
+    auto flxh  = ice->flx_h_fld.d();
+    auto flxfw = ice->flx_fw_fld.d();
+    auto trS   = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+
+    /* heat_flux/water_flux = -flx_h/-flx_fw over [0,N) (C lines 259-262). */
+    Kokkos::parallel_for("ice_ocefl_hwf", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) { hf(n) = -flxh(n); wf(n) = -flxfw(n); });
+
+    if (uvs) {
+        /* virtual_salt = rsss·water_flux over [0,N) (C lines 270-275). */
+        Kokkos::parallel_for("ice_ocefl_vs", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                const real_t rsss = rssl ? trS(FESOM_NODE3D(n, 0, nl)) : rsss_def;
+                vs(n) = rsss * wf(n);
+            });
+        forcing->virtual_salt_fld.modify_device();
+        const real_t net = integrate_nod_2D_kk(forcing->virtual_salt_fld, mesh, partit) / ocean_area;
+        /* subtract net over OWNED non-cavity (C lines 278-281). */
+        Kokkos::parallel_for("ice_ocefl_vssub", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int n) { if (ulev_n(n) > 1) return; vs(n) -= net; });
+    }
+
+    /* relax_salt = surf_relax_S·(Ssurf − S) over [0,N) (C lines 286-290). */
+    Kokkos::parallel_for("ice_ocefl_rs", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) { rs(n) = srlx * (ssurf(n) - trS(FESOM_NODE3D(n, 0, nl))); });
+    forcing->relax_salt_fld.modify_device();
+    const real_t net_relax = integrate_nod_2D_kk(forcing->relax_salt_fld, mesh, partit) / ocean_area;
+    /* subtract net_relax over OWNED (C lines 293-295 — NO cavity skip, unlike virtual_salt). */
+    Kokkos::parallel_for("ice_ocefl_rssub", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) { rs(n) -= net_relax; });
+
+    forcing->heat_flux_fld.modify_device();    forcing->water_flux_fld.modify_device();
+    forcing->virtual_salt_fld.modify_device(); forcing->relax_salt_fld.modify_device();
+
+    /* OUT: → host(forcing), then the 4 halos on the HOST (the ocean step's IN rail re-pushes the
+     * halo'd host forcing → device). Matches the C exchange set; order is field-independent. */
+    forcing->heat_flux_fld.sync_host();   forcing->water_flux_fld.sync_host();
+    forcing->relax_salt_fld.sync_host();  if (uvs) forcing->virtual_salt_fld.sync_host();
+    if (uvs) fesom_exchange_nod2D(forcing->virtual_salt, partit);
+    fesom_exchange_nod2D(forcing->relax_salt, partit);
+    fesom_exchange_nod2D(forcing->heat_flux,  partit);
+    fesom_exchange_nod2D(forcing->water_flux, partit);
+}
+
+/* FESOM_KK_VERIFY=iceflux — oce_fluxes OVERWRITES heat_flux/water_flux/virtual_salt/relax_salt as a
+ * full map from intact inputs (flx_h/flx_fw/S/Ssurf — unmodified by it), so this is the EOS-style
+ * verify (no capture-before): snapshot the KK forcing (4 fields), run the C twin (recomputes from the
+ * intact inputs; its integrate_nod_2D Allreduce + the 4 halos are collective → run on ALL ranks), diff,
+ * restore KK. The 2 reductions are seq on Serial → max|Δ|==0; OpenMP/CUDA climate-close (D22). */
+void fesom_ice_oce_fluxes_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
+                                 const struct fesom_tracers *tracers, struct fesom_forcing *forcing,
+                                 const struct fesom_sss_runoff *sr, int step_n)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    std::vector<real_t> kh(forcing->heat_flux,    forcing->heat_flux    + N);
+    std::vector<real_t> kw(forcing->water_flux,   forcing->water_flux   + N);
+    std::vector<real_t> kv(forcing->virtual_salt, forcing->virtual_salt + N);
+    std::vector<real_t> kr(forcing->relax_salt,   forcing->relax_salt   + N);
+    fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);   /* C twin */
+    auto mx = [&](const std::vector<real_t> &kk, const real_t *c) {
+        double d = 0.0; for (int i = 0; i < N; ++i) { double x = std::fabs((double)kk[i]-(double)c[i]); if (x>d) d=x; } return d; };
+    double dh = mx(kh, forcing->heat_flux),  dw = mx(kw, forcing->water_flux),
+           dv = mx(kv, forcing->virtual_salt), dr = mx(kr, forcing->relax_salt);
+    std::copy(kh.begin(),kh.end(),forcing->heat_flux);    std::copy(kw.begin(),kw.end(),forcing->water_flux);
+    std::copy(kv.begin(),kv.end(),forcing->virtual_salt); std::copy(kr.begin(),kr.end(),forcing->relax_salt);
+    double dmax = dh; for (double x : {dw, dv, dr}) if (x > dmax) dmax = x;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=iceflux] step %d backend=%s  max|Δ|: heat_flux=%.3e water_flux=%.3e "
+                "virtual_salt=%.3e relax_salt=%.3e\n", step_n, be.c_str(), dh, dw, dv, dr);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=iceflux] FAIL step %d: oce_fluxes Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax); std::abort();
+    }
+}
+
 /* [forcing-diff dig] iceforce dump getter: 10 comps/node — a_ice, m_ice, u_ice,
  * v_ice, srfoce_u, srfoce_v, stress_iceoce_x/y, stress_node_surf_x/y. */
 typedef struct {

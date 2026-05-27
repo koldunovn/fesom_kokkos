@@ -612,15 +612,18 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       `fct_massmatrix` one-shot push (shares ssh_stiff sparsity). Serial `max|Δ|=0` on a 60-step CORE2
       dist_16 ice-active run (job 25158693), pi==golden np1+np2, ctest 4/4, SYNCCHECK, CUDA builds.
       Key `icefct`, L44.
-- [~] **M4.3d** — thermodynamics + `oce_fluxes` (column physics + the flux coupling overwriting forcing).
+- [x] **M4.3d** — thermodynamics + `oce_fluxes` (column physics + the flux coupling overwriting forcing).
+      **DONE — the whole sea-ice step is now device-resident.**
   - [x] **M4.3d-a** — thermodynamics: per-node column physics over [0,N), race-free map → Serial AND
         OpenMP bit-identical (NO scatter). `therm_ice`/`obudget`/`budget`/`flooding`/`tfrez` =
         `KOKKOS_INLINE_FUNCTION` device twins taking a POD `IceThermC`; the 8 JRA55 physics arrays
         Field-wrapped (the only non-Field input). Serial `max|Δ|=0` on a 60-step CORE2 dist_16 ice-active
         run (job 25159173, 960 lines), pi==golden np1+np2, ctest 4/4, SYNCCHECK, CUDA builds. Key
         `icethermo`, L45.
-  - [ ] **M4.3d-b** — `oce_fluxes`: flux overwrite (heat/water/virtual_salt/relax_salt) + 2
-        `integrate_nod_2D` reductions (parallel_reduce + Allreduce) + halos; `→host(forcing)`.
+  - [x] **M4.3d-b** — `oce_fluxes`: flux overwrite (heat/water/virtual_salt/relax_salt) + 2
+        `integrate_nod_2D` reductions (parallel_reduce + Allreduce, the cg_dot shape) + the `→host(forcing)`
+        handoff + 4 halos. Serial `max|Δ|=0` on the CORE2 dist_16 ice-active run (job 25159374, 960 lines;
+        all 5 ice keys green), pi==golden np1+np2, ctest 4/4, SYNCCHECK, CUDA builds. Key `iceflux`, L46.
 - [ ] **M4 acceptance**: whole model on device; 1-yr CORE2 Serial bit-identical to cref; 2-yr+5-yr CUDA
       re-validated; tag `m4-full-device`
 

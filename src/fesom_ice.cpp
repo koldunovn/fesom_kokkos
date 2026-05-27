@@ -339,6 +339,7 @@ static int s_verify_icemap     = 0;
 static int s_verify_evp        = 0;
 static int s_verify_icefct     = 0;
 static int s_verify_icethermo  = 0;
+static int s_verify_iceflux    = 0;
 static void load_ice_verify_once(void)
 {
     if (s_ice_verify_loaded) return;
@@ -346,7 +347,8 @@ static void load_ice_verify_once(void)
     s_verify_icemap    = (e && strstr(e, "icemap"))    ? 1 : 0;   /* collision-free token (L25) */
     s_verify_evp       = (e && strstr(e, "evp"))       ? 1 : 0;   /* M4.3b */
     s_verify_icefct    = (e && strstr(e, "icefct"))    ? 1 : 0;   /* M4.3c (collision-free, L25) */
-    s_verify_icethermo = (e && strstr(e, "icethermo")) ? 1 : 0;   /* M4.3d (collision-free, L25) */
+    s_verify_icethermo = (e && strstr(e, "icethermo")) ? 1 : 0;   /* M4.3d-a (collision-free, L25) */
+    s_verify_iceflux   = (e && strstr(e, "iceflux"))   ? 1 : 0;   /* M4.3d-b (collision-free, L25) */
     s_ice_verify_loaded = 1;
 }
 
@@ -595,9 +597,18 @@ void fesom_ice_step(int                            step,
         if (s_verify_icethermo)
             fesom_ice_thermodynamics_verify(ice, partit, mesh, forcing, jra, sr, step, tm, ts, ta, tt, tg);
 
-        /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the
-         * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt. STILL HOST (M4.3d-b). */
-        fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);
+        /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the ice-mediated flx_h/flx_fw
+         * and computes virtual_salt + relax_salt. M4.3d-b: ON THE DEVICE. flx_h/flx_fw are device-
+         * current from the thermo above (device→device, no push). IN: push tracers S (the surface S
+         * it reads; tracers const→const_cast) + forcing Ssurf. The kernel owns the 2 integrate_nod_2D
+         * reductions + the 4 forcing halos (sync_host → host exchange); the ocean step's IN rail
+         * re-pushes the host forcing → device (the "→host(forcing)" handoff). EOS-style verify
+         * (oce_fluxes is a full overwrite from intact inputs → no capture-before). */
+        struct fesom_tracers *tr2 = const_cast<struct fesom_tracers *>(tracers);
+        tr2->data[FESOM_TRACER_S].values_fld.modify_host(); tr2->data[FESOM_TRACER_S].values_fld.sync_device();
+        forcing->Ssurf_fld.modify_host(); forcing->Ssurf_fld.sync_device();
+        fesom_ice_oce_fluxes_kk(ice, partit, mesh, tracers, forcing, sr);
+        if (s_verify_iceflux) fesom_ice_oce_fluxes_verify(ice, partit, mesh, tracers, forcing, sr, step);
     }
 
     /* Post-step diagnostic h_ice/h_snow (Fortran ice_setup_step.F90:319-330). M4.3a: ON THE

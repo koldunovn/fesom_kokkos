@@ -22,8 +22,24 @@ under MPI); `ctest` 4/4; SYNCCHECK np=1+np=2 clean + bit-identical; **CUDA (A100
 under nvcc — `INFINITY`/`atomic_add`/the lambdas all GPU-valid). Lesson **L44**; SYNC_MAP §3 FCT row +
 plan M4.3c box updated; key `icefct`. The M4.3a/b detail follows.
 
+**Session 17b — M4.3d-b: `oce_fluxes` (the ice→ocean flux coupling) on the device — the LAST sea-ice
+kernel. M4.3 is COMPLETE: the WHOLE sea-ice step is now device-resident, and with it the whole model.**
+Commit **`<m4.3d-b-sha>`** — `fesom_ice_oce_fluxes_kk` (`src/fesom_ice_coupling.cpp`): maps over [0,N)
+(heat/water flux = -flx_h/-flx_fw; virtual_salt; relax_salt) + **2 `integrate_nod_2D` GLOBAL reductions**
+(`Kokkos::parallel_reduce` + `MPI_Allreduce` — the M4.2 `cg_dot` shape; Serial seq → bit-identical,
+OpenMP/CUDA climate-close, D22; the FIRST sea-ice reductions) + the owned net-subtract maps (⚠️ virtual_salt
+subtract skips cavity, relax_salt does NOT — literal C). The kernel owns its 4 forcing halos: `→host(forcing)`
+then host exchange; the **ocean step's tracer-diff IN rail re-pushes** the halo'd host forcing → device (the
+device-island handoff). `flx_h/flx_fw` flow **device→device from the M4.3d-a thermo (no push)** — the first
+ice device→device handoff. EOS-style verify (full overwrite → no capture-before), key `iceflux`. **Gate ALL
+GREEN**: CORE2 dist_16 ACTIVE-ice run (`job 25159374`) — **all 5 ice keys 0 nonzero** (evp 960, icemap 2880,
+icefct 960, icethermo 960, iceflux 960); pi==golden np1+np2; ctest 4/4; SYNCCHECK clean; CUDA builds
+(`parallel_reduce`/`integrate_nod_2D_kk` under nvcc). Lesson **L46**; SYNC_MAP §3 oce_fluxes row + plan
+M4.3d-b box; key `iceflux`. **NEXT = the M4 ACCEPTANCE (1-yr CORE2 Serial bit-identical to cref) → tag
+`m4-full-device`.** The M4.3a–d detail follows.
+
 **Session 17a — M4.3d-a: the sea-ice thermodynamics (per-node column physics) on the device.** Commit
-**`<m4.3d-a-sha>`** — `fesom_ice_thermodynamics_kk` (`src/fesom_ice_thermo.cpp`). A single race-free map
+**`596f497`** — `fesom_ice_thermodynamics_kk` (`src/fesom_ice_thermo.cpp`). A single race-free map
 over [0,N) (the M2.7 TDMA shape → bit-identical Serial AND OpenMP, NO scatter): `therm_ice`/`obudget`/
 `budget`/`flooding`/`tfrez` became `KOKKOS_INLINE_FUNCTION` device twins taking a POD `IceThermC` (the
 fesom_ice_thermo scalars — its Field members can't cross to device); Loop 1 (`ustar`) owns its nod2D halo.
