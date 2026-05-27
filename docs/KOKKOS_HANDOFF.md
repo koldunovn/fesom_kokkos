@@ -560,44 +560,59 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
   (`dist_16/32/144/256/288/432/512`) · Kokkos submodule `externals/kokkos` (4.4.01) · SLURM `ab0995`;
   GPU `gpu`/`gpu-devel`.
 
-## 5. NEXT-SESSION PROMPT (post-M4: M5 performance OR M3.2 CUDA/OpenMP validation — ASK the user; paste this verbatim)
+## 5. NEXT-SESSION PROMPT (M3.2 — CUDA/OpenMP CORE2 multi-year climate validation; paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
 > `git log --oneline -15` to orient. **M0–M4 are ALL COMPLETE — the WHOLE MODEL (ocean + sea ice) is
-> device-resident on the bit-identity oracle, tag `m4-full-device`.** M0 (`m0-baseline`) + M1
-> (`m1-datalayer`, 126 arrays Field-backed + sync rails) + M2 (`m2-ocean-device`, whole ocean step on
-> device) + M3.1 (multi-GPU rank→GPU, `acadce2`) + M4.2 (§5 SSH RHS + CG + update_vel + hbar,
-> `4de3230`/`67fb2e1`/`718cbfd`) + M4.3 sea-ice on device: M4.3a maps (`473c15b`), M4.3b EVP (`e428372`),
-> M4.3c FCT (`ff11119`), M4.3d-a thermo + JRA55 Field-wrap (`596f497`), M4.3d-b oce_fluxes (`9cb5d5b`).
-> **M4 acceptance PASSED** (1-yr CORE2 Serial, job `25159501`, all 13 monthly snaps ALL FIELDS
-> BIT-IDENTICAL to `/scratch/a/a270088/m1_accept/cref`). The only per-step host compute left is the trivial
-> `eta_n` nod2D map + the salinity floor (L39, idempotent — both deliberately host). **NEXT — ASK the
-> user which:**
+> device-resident on the bit-identity oracle, tag `m4-full-device`** (M4 acceptance: 1-yr CORE2 Serial job
+> `25159501`, all 13 monthly snaps ALL FIELDS BIT-IDENTICAL to `/scratch/a/a270088/m1_accept/cref`).
+> **THIS SESSION = M3.2: confirm the CUDA and OpenMP backends are CLIMATE-FAITHFUL over a multi-year CORE2
+> run** — the gate M4 (Serial bit-identity) does NOT cover. Serial is bit-identical; OpenMP/CUDA are
+> climate-close (D22): the edge/element→node `atomic_add` SCATTERS (ocean visc/momentum/vert_vel/Redi/FCT/
+> SSH + ice EVP×2/FCT×3/oce_fluxes) and the `parallel_reduce` REDUCTIONS (CG dots, `integrate_nod_2D`)
+> reassociate across threads/lanes and **COMPOUND over a year on ACTIVE ice — UNMEASURED** (the per-kernel
+> gate is Serial-only; pi has ZERO ice so the sea-ice scatters never fired in anger). M3.2 measures the
+> compounding and writes the budget to **`docs/GPU_FIDELITY.md`** (skeleton already there).
 >
-> **Option A — M5 (PERFORMANCE).** The whole model is on device but every per-step host↔device round-trip
-> is still naive: the EVP/FCT/CG/oce_fluxes halos are host-staged (device→host→MPI→host→device), the
-> ice/ocean device-islands sync_host their boundary fields each step, and the layouts are LayoutRight
-> (CPU-shaped). Candidates: (a) GPU-aware MPI to halo on-device (kills the per-iter CG/EVP/FCT round-trips);
-> (b) per-field layout flips for hot device-only fields (re-validate Serial bit-identical — only memory
-> order changes, not arithmetic order); (c) fuse the ice device-islands (e.g. thermo→oce_fluxes is already
-> device→device for flx_*; extend to the values/forcing handoffs); (d) a real multi-GPU CORE2 benchmark vs
-> the CPU (M3.1 measured CPU ~17× faster node-for-node WITH the CG+ice on host — now they're on device, so
-> re-measure). See the M3.1 perf note + `docs/RUN_GPU.md`.
+> **EVERYTHING IS PREPARED — the workflow (all scaffolding committed this session):**
+> 1. **Rebuild `build-omp`** — it is STALE (last built at M4.3c, before M4.3d-a/b). `source ./env.sh &&
+>    cmake --build build-omp -j 16`. (`build-cuda` is current — rebuilt through M4.3d-b.) If you touched
+>    any struct layout since, `touch src/*` first (L18).
+> 2. **Time the GPU step (post-M4)**: `sbatch jobs/job_gpu_time_core2` → `grep TIMING …/gtime.<jid>.out`.
+>    M3.1 measured 0.86 s/step but that was WITH the CG+ice round-tripping to host every step; M4.2/M4.3
+>    moved those to device, so expect faster. Use the number to confirm the 2-yr GPU run (34560 steps)
+>    fits the gpu partition's **12 h** wall (`jobs/job_m32_cuda_core2` is set to `--time=12:00:00`); if the
+>    step is >~0.5 s, drop that job's `NSTEPS` to 17280 (1 yr still shows the drift) or split into 2×1-yr.
+> 3. **Launch both 2-yr runs**: `sbatch jobs/job_m32_cuda_core2` (CUDA dist_8, ~2–8 h) + `sbatch
+>    jobs/job_m32_omp_core2` (OpenMP 32 ranks × 8 threads, ~1–2 h). Both write
+>    `<var>.fesom.{1958,1959}.monthly.nc` → `/work/…/{kokkos_gpu_runs/m32_cuda, m32_omp}`. ⚠️ Confirm the
+>    JRA55 **1958→1959 year rollover** fired (the job greps for it) — 2-yr is the first multi-year run.
+> 4. **Compare**: `scripts/m32_climate_compare.py <dir> --label CUDA|OpenMP` — annual-mean surface
+>    corr/bias/RMS/|Δ|max per field per year + a year-to-year DRIFT check, vs the **C-port** (`eps_2yr_dt1800`
+>    == Serial == bit-identical — this diff IS the scatter/reduce drift, the headline metric) AND vs
+>    **Fortran** (`fortran_pp_2yr` — the absolute budget). For the C↔Fortran reference budget run the
+>    existing `scripts/eps_climate_compare_2yr.py`.
+> 5. **Fill `docs/GPU_FIDELITY.md`** (Results + Verdict). **PASS** = corr≈1, backend-vs-C bias/RMS bounded
+>    and ≤ the C-vs-Fortran budget, **DRIFT≈0** (no runaway across years), no NaN/blow-up. If a field
+>    drifts, name the suspect scatter/reduction and whether a deterministic reduction / edge-coloring (M5)
+>    is warranted. Commit GPU_FIDELITY.md + a lesson (L47) + the handoff/plan update in one commit.
 >
-> **Option B — M3.2 (CUDA/OpenMP CORE2 CLIMATE VALIDATION).** Serial is bit-identical; OpenMP/CUDA are
-> climate-close (the scatter/reduce D22 regime). The ice EVP/FCT scatters + the oce_fluxes reductions
-> COMPOUND over a year on active ice — UNMEASURED so far (the per-kernel gate is Serial; pi has zero ice).
-> Run a multi-year CUDA + OpenMP CORE2 (dist_16/dist_8-GPU, ACTIVE ice) vs the Serial oracle (same rank
-> count, L40) AND vs `/scratch/a/a270088/fortran_pp_2yr`; confirm SST/SSS/ice RMS stays within the
-> Fortran↔C budget; document it in `docs/GPU_FIDELITY.md`. This is the "is the GPU port climate-faithful
-> over a full run?" gate that M4 (Serial bit-identity) doesn't cover.
+> ⚠️ The climate metric (annual-mean RMS/corr) is ROBUST to rank count — so CUDA dist_8 vs the C-port
+> (whatever its rank count) is valid for the climate comparison; the L40 same-rank-oracle rule is for
+> BIT-identity, not this coarse statistical check. (If backend-vs-C looks concerning, a short same-rank
+> CUDA-vs-Serial run isolates the GPU drift from the partition effect — optional deeper check.)
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (Session 17/17a/17b headers = M4.3c/d + the M4 acceptance; §2 build/run/VERIFY/SYNCCHECK/CUDA recipe; §3 the next-task detail; §4 key paths)
-> - `/home/a/a270088/port_kokkos/docs/plans/20260525-kokkos-port.md`  ← M0–M4 ticked; **M5 box** (coarse — expand it) + the M3.2 acceptance row
-> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md` (the per-step host↔device round-trips M5 would fuse; §3 sea-ice, §5 SSH) · `docs/RUN_GPU.md` (multi-GPU mapping + the M3.1 perf finding) · `docs/GPU_FIDELITY.md` (the M3.2 budget doc)
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← D1–D22, L1–L46 (esp. **D22** scatter/reduce → OpenMP/CUDA climate-close; **L40** the M3.1 perf finding + the same-rank-oracle rule; **L41** M4.2 the CG dot reduce; **L18** struct-layout → `touch src/*`)
-> - project memory `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md` = the CUDA budget; `feedback-hpc-run-hygiene.md` = OUTPUT → `/work` or `/scratch`, NEVER `$HOME`)
+> - `/home/a/a270088/port_kokkos/docs/GPU_FIDELITY.md`  ← **THE M3.2 doc** (why, the runs table, the compare, the PASS criteria, the Results/Verdict to fill) + `memory/reference-cuda-eos-divergence.md` (the known CUDA pi budget — zero ice, so it says nothing about the ice scatters)
+> - `/home/a/a270088/port_kokkos/jobs/job_m32_cuda_core2` + `job_m32_omp_core2` + `job_gpu_time_core2` (the prepared runs) · `scripts/m32_climate_compare.py` + `scripts/eps_climate_compare_2yr.py` (the C↔Fortran baseline)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (Session 17b = the M4 acceptance; §2 build/CUDA recipe; §4 key paths) · `docs/RUN_GPU.md` (multi-GPU mapping, the M3.1 0.86 s/step finding, the same-rank-oracle rule)
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← D1–D22, L1–L46 (esp. **D22** scatter/reduce → OpenMP/CUDA climate-close; **L40** M3.1 perf + same-rank-oracle; **L41** the CG dot reduce; **L46** the ice oce_fluxes reductions)
+> - project memory `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `feedback-hpc-run-hygiene.md` = report wall-time/perf parity; OUTPUT → `/work` or `/scratch`, NEVER `$HOME`)
+>
+> **AFTER M3.2 → M5 (performance):** GPU-aware MPI to halo on-device (kill the per-iter CG/EVP/FCT
+> host-staged round-trips) · per-field layout flips for hot device-only fields (re-validate Serial
+> bit-identical) · fuse the ice/ocean device-islands · a fair multi-GPU CORE2 benchmark vs the CPU now the
+> whole model is on device (M3.1's CPU-17×-faster was WITH CG+ice on host). Expand the plan's M5 box.
 >
 > The standing gates still apply to any change: `FESOM_KK_VERIFY` per-kernel Serial `max|Δ|==0` (ocean keys
 > on pi: `eos,pp,kpp,pgf,vrhs,vfilt,ivisc,ale,gm,tradv,trdiff,ssh`; ice keys on CORE2

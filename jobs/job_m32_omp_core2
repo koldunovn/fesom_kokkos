@@ -1,0 +1,51 @@
+#!/bin/bash
+# M3.2 — OpenMP CLIMATE VALIDATION: a 2-year CORE2 run on the OpenMP backend with REAL THREADS
+# (OMP_NUM_THREADS>1 — the whole point: the ice EVP/FCT atomic_add scatters + the oce_fluxes/CG
+# parallel_reduce reassociate across threads, climate-close not bit-identical, D22). Writes
+# monthly-mean <var>.fesom.{1958,1959}.monthly.nc -> compared vs Fortran + the C-port 2-yr with
+# scripts/m32_climate_compare.py. Cheap (~1-2 h) — the CPU counterpart to the expensive GPU run.
+#
+# ⚠️ REBUILD build-omp FIRST: it is stale (last built at M4.3c, before M4.3d-a/b). Run
+#    `source ./env.sh && cmake --build build-omp -j 16` before sbatch.
+# Layout: 2 compute nodes, 16 ranks/node (32 ranks) x 8 threads = 256 cores. (Rank count is not
+# critical for the climate metric — annual-mean RMS is robust to the partition; threads are what
+# matter here.) compute max wall = 8 h. Output -> /work (never $HOME).
+#SBATCH --job-name=m32_omp
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks=32
+#SBATCH --ntasks-per-node=16
+#SBATCH --cpus-per-task=8
+#SBATCH --time=06:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/m32_omp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m32_omp/slurm.%j.err
+
+set -u
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+export OMP_NUM_THREADS=8
+export OMP_PROC_BIND=close OMP_PLACES=cores
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=34560          # 2 years (1 yr = 17280)
+SNAP_EVERY=1440
+JRA55_YEAR=1958       # rolls -> 1959
+export FESOM_PRINT_EVERY=1000
+
+BIN=/home/a/a270088/port_kokkos/build-omp/fesom_port
+OUT=/work/ab0995/a270088/port2/m32_omp
+mkdir -p "$OUT"
+echo "=== M3.2 OpenMP 2-yr CORE2 (OMP_NUM_THREADS=$OMP_NUM_THREADS, 32 ranks) — $(date) ==="
+srun -l --cpu-bind=cores "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+echo "--- year rollover + monthly files ---"
+ls "$OUT"/*.fesom.1958.monthly.nc "$OUT"/*.fesom.1959.monthly.nc 2>/dev/null | wc -l
+grep -E " it=" "$OUT/run.log" 2>/dev/null | tail -1
+tail -5 "$OUT/run.err" 2>/dev/null
+exit $EC

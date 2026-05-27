@@ -1,0 +1,65 @@
+#!/bin/bash
+#SBATCH --job-name=m32_cuda
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=12:00:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda.%j.err
+#
+# M3.2 — CUDA CLIMATE VALIDATION: a 2-year CORE2 run (dist_8 = 8 A100 / 2 gpu nodes,
+# JRA55 1958->1959, PHC winter IC) on the FULL device port (M4 = whole model on device).
+# Writes monthly-mean <var>.fesom.{1958,1959}.monthly.nc -> compared vs the Fortran 2-yr
+# reference + the C-port 2-yr with scripts/m32_climate_compare.py. CUDA is CLIMATE-CLOSE,
+# not bit-identical (D5/D22): the ice EVP/FCT atomic_add scatters + the oce_fluxes / CG
+# reductions reassociate on the GPU and COMPOUND over the run — this job measures whether
+# that stays within the Fortran<->C budget.
+#
+# *** RUN jobs/job_gpu_time_core2 FIRST (post-M4) to get the real per-step time, then size
+#     this. 2 yr = 34560 steps. gpu partition max wall = 12:00:00. At M3.1's 0.86 s/step the
+#     run is ~8.3 h (fits); post-M4 (CG+ice now on device, no per-step round-trip) it should
+#     be faster. If the timing says >~0.5 s/step, drop NSTEPS to 17280 (1 yr) — 1 yr still
+#     shows the climate-close drift; or split into 2x1yr restart jobs. ***
+#
+# Output -> /work (NEVER $HOME: 60 GB home quota; a 2-yr CORE2 monthly set is several GB).
+
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+module --force purge
+module unload netcdf-c cdo ncview git 2>/dev/null      # sticky-module fix (L17)
+module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 \
+            openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
+export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+
+# Standard Levante UCX/IB transport for MULTI-RANK / MULTI-NODE (verbatim from job_gpu_core2).
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self OMPI_MCA_osc=pt2pt UCX_IB_ADDR_TYPE=ib_global
+export OMPI_MCA_coll="^ml,hcoll" OMPI_MCA_coll_hcoll_enable=0 HCOLL_ENABLE_MCAST_ALL=0
+export HCOLL_MAIN_IB=mlx5_0:1 UCX_NET_DEVICES=mlx5_0:1
+export UCX_TLS=mm,knem,cma,dc_mlx5,dc_x,self UCX_UNIFIED_MODE=y OMPI_MCA_io=romio321
+export HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2          # 8 ranks -> reads dist_8
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=34560          # 2 years @ dt=1800 (1 yr = 17280). Drop to 17280 if the timing run says too slow.
+SNAP_EVERY=1440       # monthly instantaneous snaps (the .monthly.nc means are auto-written regardless)
+JRA55_YEAR=1958       # rolls 1958 -> 1959 on the calendar year change (confirm the rollover in the log)
+export FESOM_PRINT_EVERY=1000
+
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda
+mkdir -p "$OUT"
+echo "=== M3.2 CUDA 2-yr CORE2 dist_8 (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+echo "--- year rollover (expect a 1959 jra open + 1959 monthly files) ---"
+grep -iE "open.*1959|year.*1959" "$OUT/run.log" 2>/dev/null | head -3
+ls "$OUT"/*.fesom.1958.monthly.nc "$OUT"/*.fesom.1959.monthly.nc 2>/dev/null | wc -l
+echo "--- last step (sanity: T/S bounded, no nan) ---"; grep -E " it=" "$OUT/run.log" 2>/dev/null | tail -1
+echo "--- run.err tail ---"; tail -5 "$OUT/run.err" 2>/dev/null
+exit $EC
