@@ -310,14 +310,24 @@ but it is **NOT from M5.8** (the M5.7 binary shows it byte-for-byte identical) a
 It was never caught because **CORE2 was only timing-profiled, never A/B'd** — the M5.1–M5.7 fidelity
 gate was **pi dist_2** (1 node, no ice), where host-vs-dev is 1e-17. The divergence is **reproducible
 across separate SLURM jobs** (identical argmax/values) → deterministic, not random run-to-run noise.
-Two live hypotheses: (a) the **multi-node** GPU-aware-MPI halo (CORE2 dist_8 = 2 nodes, inter-node IB;
-pi dist_2 = 1 node, intra-node NVLink) gives different halo bytes than the host `MPI`; (b) the
-host-path's extra `sync_host`/`sync_device` deep-copies perturb atomic-scatter thread scheduling →
-different-but-valid scatter orderings, amplified chaotically. The **designed arbiter is the M3.2
-climate run** (in flight): if CUDA stays corr≈1 / drift≈0 vs the C-port over 1–2 yr, the divergence is
-benign (b); if it drifts, it is a real multi-node device-halo bug (a). A cheap localiser: a 1-node
-CORE2 run (dist_8 forced onto 4 GPUs, 2 ranks/GPU) — if clean like pi, (a) is inter-node IB. **This is
-orthogonal to the KPP/EVP halo-flip work and warrants a focused session.**
+
+**Localised (2026-05-27):**
+- **NOT inter-node IB.** pi dist_2 forced onto **2 separate nodes** (1 GPU/node → GPU-aware MPI over
+  inter-node IB, `jobs/job_gpuaware_validate_pi_2node`) is at the noise floor (T 1.2e-14, Kv 1.1e-17)
+  — identical to 1-node pi. So the device-halo's inter-node GPU-aware MPI is byte-correct.
+- **NOT the ice / NOT M5.8** (ocean fields dominate; M5.7 binary byte-identical).
+- ⇒ **scale/dynamics-dependent**: pi (≈3k nodes, weak idealised dynamics) is clean at any node count;
+  CORE2 (≈126k nodes, realistic ice+ocean, strong gradients) diverges. The remaining hypotheses:
+  **(b)** the host path's extra `sync_host`/`sync_device` deep-copies perturb **atomic-scatter** thread
+  scheduling → different-but-valid scatter orderings, whose seed grows with the number of colliding
+  `atomic_add`s (tiny on pi, large on CORE2) and amplifies chaotically — benign; **(c)** a device-halo
+  pack/unpack correctness issue that only bites at CORE2 halo size — real. To split (b)/(c): dump a
+  flipped field's halo device-vs-host on CORE2 step 1 (if byte-equal → (b); else (c)), and/or build
+  with all ocean halos host-staged (`FESOM_HOST_HALO=1` is exactly that) — which is the A/B's host leg.
+
+**The designed arbiter is the M3.2 climate run** (in flight, **also CORE2 dist_8 = 2 nodes**, the same
+path): PASS (CUDA-vs-C ≤ C-vs-Fortran, drift≈0) ⇒ benign (b); drift ⇒ real (c). **Orthogonal to the
+KPP/EVP halo-flip work — warrants a focused session.**
 
 ## The comparison
 

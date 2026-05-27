@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=kk_pi_2node
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/pi2node.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/pi2node.%j.err
+# Localiser for the pre-existing CORE2 host-vs-dev divergence: pi dist_2, but the 2 ranks on
+# SEPARATE nodes (1 GPU each) -> GPU-aware MPI over inter-node IB. The 1-node pi A/B is clean
+# (1e-17). If THIS diverges -> inter-node IB GPU-aware MPI is the culprit (clean test: same mesh,
+# no ice, only the node boundary differs).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+H=$BASE/pi2node_host; D=$BASE/pi2node_dev; rm -rf "$H" "$D"; mkdir -p "$H" "$D"
+echo "nodes=$SLURM_JOB_NODELIST"
+FESOM_HOST_HALO=1 srun "$ROOT/build-cuda/fesom_port" "$MESH" "$H" 100 20 10 > "$H/log" 2>&1; echo "[host] $?"
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$D" 100 20 10 > "$D/log" 2>&1; echo "[dev] $?"
+echo "=== done ==="
