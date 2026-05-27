@@ -63,6 +63,40 @@ divergence — data path, not arithmetic). The next real GPU levers: port the kp
 batch/fuse the CG's ~1000 launches/step, or a **bigger mesh** to fill the A100s. (Validated; not bit-identity
 — CUDA is non-deterministic run-to-run via the atomic scatters, L47.)
 
+### M5.1b — bigger mesh (farc, 638k nodes × 48 lev ≈ 30 M 3-D pts, ~5× CORE2) — measured 2026-05-27
+
+Tested the "CORE2 is too small / a bigger mesh fills the A100" hypothesis on **farc** (high-res, ~638k
+nodes). De-risk: np=1 on one A100 reads + runs + **fits in ~8.3 GB** of 3-D fields (so any `dist_N` fits on
+a 40 GB card), stable at dt=900, but **8.66 s/step with ~276 CG iters** (the stiff high-res SSH does ~2×
+CORE2's CG iterations). Then host-staged vs device-halo (internal timer, 2 reps, dt=900, snap off):
+
+| farc config | hardware | host-staged s/step | device-halo s/step | device gain |
+|---|---|---|---|---|
+| `dist_4` | 4 A100 / **1** gpu node | 7.28 | **6.38** | **+12.3%** |
+| `dist_8` | 8 A100 / **2** gpu nodes | 3.73 | **3.30** | **+11.5%** |
+| `dist_256` | 256 cores / **2** compute nodes (CPU, build-serial) | — | **0.445** | — |
+
+Three findings:
+1. **The device-halo gain GREW with the mesh: 8.2% (CORE2 dist_8) → ~12% (farc).** Bigger per-rank nod3D
+   fields ⇒ the eliminated full-field PCIe sync moves more bytes. Confirms the L47 mechanism.
+2. **The GPU strong-scales near-linearly: dist_4 → dist_8 = 6.38 → 3.30 = 1.93× on 2× GPUs.** The A100s are
+   NOT saturated — adding GPUs helps (the CG iter count is partition-independent, so per-iter work halves).
+3. **Node-for-node the CPU is still ~7.4× faster** (2 compute nodes 0.445 vs 2 gpu nodes 3.30) — **a bigger
+   mesh did NOT flip the GPU↔CPU verdict.** The wall is the **CG**: ~200 iters/step, each **latency-bound on
+   the GPU** (~10 kernel launches + **2 blocking `MPI_Allreduce`** [the dot products] + 2 halo fences ⇒ ~400
+   GPU-drain/host-sync points/step). The GPU does ~**16.5 ms/CG-iter** vs the 256-rank CPU's ~**2.2 ms** —
+   the CG's nod2D kernels (80–160k rows/GPU) are far too small to keep an A100 busy, and the per-iter
+   collective latency is fixed. np=1 farc (638k rows on ONE GPU) was still 8.66 s/step, so **even a huge
+   per-GPU load can't amortize the CG's per-iteration latency** — the bottleneck is algorithmic, not
+   mesh-size or halo-PCIe.
+
+**Conclusion / real levers (now quantified, not speculated):** chasing bigger meshes or more halo flips will
+NOT make the GPU competitive. The CG is *the* GPU bottleneck. (a) **Cut CG iterations** — a stronger
+preconditioner than the current diagonal one (~200 iters is high; helps CPU and, disproportionately, the
+latency-bound GPU). (b) **Cut per-iteration sync** — fuse the two dot-products into one `Allreduce`,
+fuse/batch the CG kernels, or a communication-avoiding / pipelined CG to overlap the collective. Jobs:
+`jobs/job_farc_gpu_np1`, `jobs/job_gpuaware_time_farc_dist{4,8}`, `jobs/job_farc_cpu_dist256`.
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

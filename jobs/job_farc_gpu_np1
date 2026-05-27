@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=kk_farc_np1
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_np1.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_np1.%j.err
+#
+# farc DE-RISK: np=1 on ONE A100 (dist_1 is synthesized — no partition file).
+# Confirms (a) the port READS the farc mesh, (b) the IC/forcing interpolate to
+# 638k nodes, (c) the WHOLE mesh (638387 nod × 48 lev, ~30M 3D pts) FITS in a
+# 40 GB A100 (if it does, any dist_N trivially does), (d) dt stability, and gives
+# a single-GPU farc s/step (internal loop timer). np=1 => device-halo is a no-op.
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_MEMTYPE_CACHE=n
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/farc_np1
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=1            # per-step T/S range = blow-up detector
+
+echo "=== host=$(hostname) GPU: $(nvidia-smi -L | head -1) ==="
+echo "=== farc np=1, dt=900, 15 steps, no I/O ==="
+# args: mesh out dt nsteps snap_every PHC jra_year
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 900 15 999999 "$PHC" 1958
+echo "Exit: $?"
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv 2>/dev/null | tail -1

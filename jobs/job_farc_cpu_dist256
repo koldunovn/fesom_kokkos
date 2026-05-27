@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=kk_farc_cpu256
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=256
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_cpu256.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_cpu256.%j.err
+#
+# farc dist_256 on CPU = the NODE-FOR-NODE reference for the GPU runs: 2 compute
+# nodes (256 cores, 1 MPI rank/core, build-serial) vs 2 gpu nodes (8 A100, dist_8).
+# Same farc mesh, dt=900, startup-free internal loop timer, 2 reps. (RUN_GPU §8
+# methodology: fill each architecture the way it naturally runs.)
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env.sh"                 # Serial/OpenMP toolchain (openmpi/4.1.2) — NOT env_cuda.sh
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/farc_cpu256
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+
+if [ ! -d "$MESH/dist_256" ]; then echo "ERROR: $MESH/dist_256 missing"; exit 2; fi
+
+run() {  # $1=tag — 55 steps, internal timer
+  srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" 900 55 999999 "$PHC" 1958 > "$OUT/log_$1.txt" 2>&1
+  local rc=$?
+  printf "%-8s rc=%s  %s\n" "$1" "$rc" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+echo "=== nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS (farc dist_256 CPU, build-serial, dt=900) ==="
+run cpu_a
+run cpu_b
+echo "--- CG iters / T-S sanity (cpu_a last step) ---"
+grep -E "it=" "$OUT/log_cpu_a.txt" | tail -1
+echo "=== node-for-node: compare this to GPU farc dist_8 (8 A100, 2 nodes) ==="

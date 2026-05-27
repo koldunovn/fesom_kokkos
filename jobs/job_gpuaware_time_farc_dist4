@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=kk_farc_t4
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_t4.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/farc_t4.%j.err
+#
+# M5.1 payoff on a BIG mesh: farc dist_4 (4 A100 / 1 gpu node, ~160k nodes/GPU =
+# ~7.7M 3D pts/GPU = ~10x CORE2 dist_8's per-GPU fill). host-staged vs device-halo,
+# SAME CUDA-aware binary, startup-free internal loop timer, 2 reps each.
+# Tests: (a) does the bigger per-GPU load fill the A100 (compute-bound)?,
+#        (b) does the device-halo gain beat CORE2's 8% (per-rank nod3D fields ~10x
+#           bigger => ~10x more PCIe avoided per halo)?
+# REQUIRES farc/dist_4/ to exist (4 ranks -> the model reads dist_<npes>=dist_4).
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/farc_t4
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+
+if [ ! -d "$MESH/dist_4" ]; then echo "ERROR: $MESH/dist_4 missing — create the partition first"; exit 2; fi
+
+run() {  # $1=tag $2=extra-env  — 55 steps (farc CG is ~250 iters/step => slower); internal timer
+  env $2 srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 900 55 999999 "$PHC" 1958 > "$OUT/log_$1.txt" 2>&1
+  local rc=$?
+  printf "%-12s rc=%s  %s\n" "$1" "$rc" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+echo "=== nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS (farc dist_4, dt=900) ==="
+nvidia-smi -L | head -1
+run host_a "FESOM_HOST_HALO=1"
+run dev_a  ""
+run host_b "FESOM_HOST_HALO=1"
+run dev_b  ""
+echo "--- CG iters + T/S sanity (last printed step, dev_a) ---"
+grep -E "it=" "$OUT/log_dev_a.txt" | tail -1
+echo "=== compare host vs dev s/step above; baselines: CORE2 dist_8 = 0.780 host / 0.716 dev ==="

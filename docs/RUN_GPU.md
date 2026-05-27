@@ -248,8 +248,13 @@ is a GPU↔CPU wall-time comparison meaningful. Do **not** quote a GPU speedup f
   win is the nod3D big fields; nod2D hot loops are PCIe-cheap; kpp/eos are host-smoothing-bound. See
   `docs/GPU_FIDELITY.md` §M5.1, lesson L47, `docs/NEXT_GPU_AWARE_MPI.md`. `FESOM_HOST_HALO=1` forces the
   legacy host path (A/B toggle).
-- **Next perf levers** (bigger than the remaining halo flips): port the kpp/eos `fesom_smooth_nod3D` to
-  device (kills those host round-trips); batch/fuse the CG's ~1000 kernel launches/step; a higher-res mesh
-  to fill the A100s. Remaining halo flips (EVP nod2D + device coastal-BC; kpp/eos once smoothing is on
-  device) are low/blocked payoff.
+- **M5.1b — bigger-mesh test (farc, ~638k nodes, 2026-05-27):** device-halo gain GREW to ~12% (dist_4/dist_8)
+  and the GPU strong-scales near-linearly (dist_4→dist_8 1.93×), BUT node-for-node the CPU is still ~7.4×
+  faster (farc dist_256 = 0.445 vs dist_8 = 3.30 s/step). **A bigger mesh does NOT flip GPU↔CPU — the wall is
+  the CG (~200 latency-bound iters/step: kernel launches + 2 blocking Allreduce + halo fences).** Details in
+  `docs/GPU_FIDELITY.md` §M5.1b + lesson L47.
+- **Real perf levers (now quantified):** cut CG iterations (a real preconditioner — ~200 is high) and cut
+  per-iter sync (fuse the 2 CG dots into 1 Allreduce; fuse/batch the CG kernels; communication-avoiding CG).
+  Porting kpp/eos `fesom_smooth_nod3D` to device removes those host round-trips. Remaining halo flips (EVP
+  nod2D + device coastal-BC) are low payoff. Chasing bigger meshes / more halo flips will NOT make the GPU win.
 - **M3.2** — CUDA climate-fidelity run (orthogonal); compare per `docs/GPU_FIDELITY.md`.
