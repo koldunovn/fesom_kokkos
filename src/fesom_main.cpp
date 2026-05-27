@@ -1272,6 +1272,13 @@ skip_rest_state:
                 }
             }
             if (out_dir && snap_every > 0 && (n % snap_every == 0)) {
+                /* M5.4/M5.5: device-resident I/O-output fields whose OUT-rail sync_host was
+                 * removed when flipped to device-halo (M5.4b pgf, M5.5 bvfreq) must be pulled
+                 * to host for the rank-0 gather (the I/O reads them via h_checked()). Only at
+                 * snapshot steps, so no per-step cost. (density/Kv/Av keep their OUT rails.) */
+                aux.pgf_x_fld.sync_host();
+                aux.pgf_y_fld.sync_host();
+                aux.bvfreq_fld.sync_host();
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,

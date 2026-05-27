@@ -195,15 +195,15 @@ int fesom_timestep(int                          step_n,
      * on the device (docs/SYNC_MAP.md §1). */
     fesom_exchange_nod3D(aux->density_m_rho0_fld.h_checked(), nl, p);
     fesom_exchange_nod3D(aux->hpressure_fld.h_checked(),      nl, p);
-    fesom_exchange_nod3D(aux->bvfreq_fld.h_checked(),         nl, p);
+    /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
+    fesom_halo_field(aux->bvfreq_fld, FESOM_HALO_NOD3D, nl, 1, p);
     fesom_exchange_nod3D(aux->sw_alpha_fld.h_checked(),       nl, p);
     fesom_exchange_nod3D(aux->sw_beta_fld.h_checked(),        nl, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
-     * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). The exchange above
-     * populated the halo bvfreq the sweep reads (Fortran fills bvfreq on
-     * myDim+eDim then smooths); fesom_smooth_nod3D re-exchanges after. Must precede
-     * every bvfreq consumer (GM, PP/KPP, mo_convect). */
-    fesom_smooth_nod3D(aux->bvfreq_fld.h_checked(), nl, 1, mesh, p);
+     * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). M5.5 (B): DEVICE smoother
+     * (no host round-trip) — bvfreq stays device-resident + halo'd through to its
+     * consumers (GM, PP/KPP, mo_convect), whose bvfreq IN re-pushes are now removed. */
+    fesom_smooth_nod3D_kk(aux->bvfreq_fld, 1, mesh, p);
 
     /*  1b. GM/Redi prerequisites + per-step coefficient builder + streamfunction
      *      solve + bolus velocity reconstruction — M2.5b: device kernels.
@@ -227,7 +227,7 @@ int fesom_timestep(int                          step_n,
          * sw_alpha/sw_beta were halo'd on the host (substep 1); T/S were pushed by the
          * substep-1 EOS rail + unchanged, re-pushed here for self-containment; hnode_new
          * (last step's 12a) + helem (last step's 14) are evolving mesh, host-current. */
-        aux->bvfreq_fld.modify_host();   aux->bvfreq_fld.sync_device();
+        /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
         aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
         aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
         {
@@ -323,7 +323,7 @@ int fesom_timestep(int                          step_n,
          * sync them all explicitly. bvfreq is the L27 device→host(smooth)→device hand-off;
          * forcing is host-produced; sw_alpha, sw_beta, dbsfc, uvnode, S, hnode are device-current
          * from substep 1 but re-synced for robustness. (No-op on Serial/OpenMP.) */
-        aux->bvfreq_fld.modify_host();   aux->bvfreq_fld.sync_device();
+        /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
         aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
         aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
         aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
@@ -349,7 +349,7 @@ int fesom_timestep(int                          step_n,
     } else {
         /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: bvfreq (host-written by
          * smooth_nod3D, substep 1) → device. M5.4: uvnode is device-resident (substep 3, no re-push). */
-        aux->bvfreq_fld.modify_host(); aux->bvfreq_fld.sync_device();
+        /* M5.5 (B): bvfreq is device-resident (device smoother) — no re-push. */
         fesom_pp_mixing_kk(mesh, dyn, aux);             /* device: Kv (node), Av (elem) */
         aux->Kv_fld.sync_host();                        /* OUT rail: before the Kv/Av halos */
         aux->Av_fld.sync_host();
@@ -371,7 +371,7 @@ int fesom_timestep(int                          step_n,
         mc_Kv_in.assign(aux->Kv, aux->Kv + nKv);
         mc_Av_in.assign(aux->Av, aux->Av + nAv);
     }
-    aux->bvfreq_fld.modify_host(); aux->bvfreq_fld.sync_device();
+    /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
     aux->Kv_fld.modify_host();     aux->Kv_fld.sync_device();
     aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
     fesom_mo_convect_kk(mesh, aux);                     /* device: Kv, Av */

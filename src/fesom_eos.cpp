@@ -4,6 +4,7 @@
 #include "fesom_mesh.h"
 #include "fesom_tracers.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.5 (B): device smoother uses fesom_halo_field between sweeps
 
 #include <Kokkos_Core.hpp>   // M2.1: first device kernels (parallel_for) + Kokkos:: math
 #include <math.h>
@@ -470,6 +471,75 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
     }
     free(vol);
     free(work);
+}
+
+/*--- fesom_smooth_nod3D_kk — DEVICE twin of fesom_smooth_nod3D (M5.5, lever B) -----
+ * Per-owned-node area-weighted patch gather, on the device — removes the host
+ * round-trip (device→host→smooth→device) the host smoother forced. Two race-free
+ * kernels per sweep (gather: read arr at element vertices → work + vol; scale:
+ * arr = work·vol — SEPARATE so arr is read-then-written across the sweep, no race),
+ * then a device-halo (fesom_halo_field). Same per-node element-order sum as the C
+ * → Serial AND OpenMP bit-identical; CUDA climate-close. CONTRACT: arr_fld is
+ * DEVICE-current with a valid halo on entry; on exit DEVICE-authoritative + halo'd
+ * (smoothed). The mesh adjacency (nod_in_elem2D[_offsets], elem_nodes, elem_area,
+ * u/nlevels[_nod2D]) is set-once device-current. */
+void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
+                           const struct fesom_mesh *mesh, struct fesom_partit *p)
+{
+    if (n_smooth < 1) return;
+    const int Nmy = mesh->myDim_nod2D;
+    const int NL  = mesh->nl;
+
+    Kokkos::View<double*> vol ("smooth.vol",  (size_t)Nmy * NL);
+    Kokkos::View<double*> work("smooth.work", (size_t)Nmy * NL);
+
+    auto arr    = arr_fld.d();
+    auto nie    = mesh->nod_in_elem2D_fld.d();
+    auto off    = mesh->nod_in_elem2D_offsets_fld.d();
+    auto en     = mesh->elem_nodes_fld.d();
+    auto ea     = mesh->elem_area_fld.d();
+    auto uln_n  = mesh->ulevels_nod2D_fld.d();
+    auto nln_n  = mesh->nlevels_nod2D_fld.d();
+    auto ule_e  = mesh->ulevels_fld.d();
+    auto nle_e  = mesh->nlevels_fld.d();
+    auto volv = vol; auto workv = work;
+
+    for (int sweep = 0; sweep < n_smooth; ++sweep) {
+        const int sw = sweep;
+        Kokkos::parallel_for("fesom_smooth_gather", Kokkos::RangePolicy<>(0, Nmy),
+            KOKKOS_LAMBDA(const int n) {
+                const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
+                for (int nz = uln; nz <= nlnz; ++nz) {
+                    if (sw == 0) volv((size_t)n*NL + nz) = 0.0;
+                    workv((size_t)n*NL + nz) = 0.0;
+                }
+                const int o0 = off(n), o1 = off(n + 1);
+                for (int k = o0; k < o1; ++k) {
+                    const int el = nie(k);
+                    int ule = ule_e(el) - 1; if (ule < uln)  ule = uln;
+                    int nle = nle_e(el) - 1; if (nle > nlnz) nle = nlnz;
+                    const double a = ea(el);
+                    const int v0 = en(3*el+0), v1 = en(3*el+1), v2 = en(3*el+2);
+                    for (int nz = ule; nz <= nle; ++nz) {
+                        if (sw == 0) volv((size_t)n*NL + nz) += a;
+                        workv((size_t)n*NL + nz) += a * ( arr((size_t)v0*NL + nz)
+                                                        + arr((size_t)v1*NL + nz)
+                                                        + arr((size_t)v2*NL + nz) );
+                    }
+                }
+                if (sw == 0)
+                    for (int nz = uln; nz <= nlnz; ++nz)
+                        volv((size_t)n*NL + nz) = 1.0 / (3.0 * volv((size_t)n*NL + nz));
+            });
+        Kokkos::parallel_for("fesom_smooth_scale", Kokkos::RangePolicy<>(0, Nmy),
+            KOKKOS_LAMBDA(const int n) {
+                const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
+                for (int nz = uln; nz <= nlnz; ++nz)
+                    arr((size_t)n*NL + nz) = workv((size_t)n*NL + nz) * volv((size_t)n*NL + nz);
+            });
+        arr_fld.modify_device();
+        fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p);   /* halo for the next sweep / exit */
+    }
 }
 
 /*--- pressure_force_4_linfs_fullcell ---------------------------------------

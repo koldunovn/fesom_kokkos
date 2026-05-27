@@ -66,6 +66,14 @@ void fesom_pressure_bv_kk(const struct fesom_tracers *tracers,
 void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
                         const struct fesom_mesh *mesh, struct fesom_partit *p);
 
+/* DEVICE twin (M5.5, lever B): same smoother on-device (no host round-trip).
+ * arr_fld DEVICE-current with a valid halo in; DEVICE-authoritative + halo'd out. */
+#ifdef __cplusplus
+namespace fesom { template <class> class FieldT; using Field = FieldT<double>; }
+void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
+                           const struct fesom_mesh *mesh, struct fesom_partit *p);
+#endif
+
 /*
  * Pressure gradient force at elements (Phase 1: linfs + full cells).
  *   pgf_x[e][nz] = Σ_i ∇N_i^x * hpressure[nz][V_i(e)] / density_0
