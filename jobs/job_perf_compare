@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=kk_perfcmp
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/perf/perfcmp.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/perf/perfcmp.%j.err
+# M5.9-pin clean (no-I/O) timing: run the all-syncs and the final (surface-uvnode) binaries BACK-TO-BACK
+# on the SAME allocation/nodes so the s/step delta is the sync-recovery, free of node-to-node variation.
+# CORE2 dist_8, ICE ACTIVE, 30 steps (timer excludes 5 warmup), snap_every=100 => no snapshot I/O in
+# the timed window. Both binaries pre-built + copied to PERF/ (so a build can't race a pending job).
+ROOT=/home/a/a270088/port_kokkos; source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PERF=/work/ab0995/a270088/port2/perf
+for BIN in allsync final; do
+  OUT="$PERF/run_$BIN"; rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=== $BIN ==="
+  srun "$PERF/fesom_port_$BIN" "$MESH" "$OUT" 1800 30 100 "$PHC" 1958 > "$OUT/log" 2>&1
+  echo "$BIN exit=$? : $(grep 'loop timing' "$OUT/log" | head -1)"
+done

@@ -204,9 +204,13 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(aux->hpressure_fld.h_checked(),      nl, p);
     /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
     fesom_halo_field(aux->bvfreq_fld, FESOM_HALO_NOD3D, nl, 1, p);
-    aux->bvfreq_fld.sync_host();   /* M5.9 FIX: device-halo left bvfreq device-auth; a host op reads it
-                                    * stale on CORE2 → re-sync (leave-one-out bisect; GPU_FIDELITY §M5.9).
-                                    * No-op on Serial (host==device). */
+    /* M5.9-pin (session 20): the M5.9 blanket sync_host here was a PLACEBO (the leave-one-out's 0.4
+     * for bvfreq was sync-FENCE chaos sensitivity, not a stale read). The NaN-poison discriminator —
+     * keep the sync, then NaN the host copy so only a HOST reader is affected — proved bvfreq has NO
+     * model-feedback host reader on the device path (poisoned: model byte-for-byte the clean run).
+     * KPP / mo_convect / GM read it on the DEVICE; the device smoother below re-dirties it anyway.
+     * Its only host readers are the read-only min/max print + the netCDF snapshot, both covered by
+     * the snapshot-gated pre-I/O sync_host in fesom_main.cpp (L48). So: no per-step sync. */
     fesom_exchange_nod3D(aux->sw_alpha_fld.h_checked(),       nl, p);
     fesom_exchange_nod3D(aux->sw_beta_fld.h_checked(),        nl, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
@@ -308,7 +312,10 @@ int fesom_timestep(int                          step_n,
      * with its halo (vel_rhs reads it on-device). */
     fesom_halo_field(aux->pgf_x_fld, FESOM_HALO_ELEM3D, nl, 1, p);
     fesom_halo_field(aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
-    aux->pgf_x_fld.sync_host(); aux->pgf_y_fld.sync_host();  /* M5.9 FIX (see §M5.9; no-op on Serial) */
+    /* M5.9-pin (session 20): placebo sync dropped — compute_vel_rhs (substep 4) reads pgf_x/pgf_y on
+     * the DEVICE (device-resident with its halo); the NaN-poison discriminator proved no model-feedback
+     * host reader. The only host readers are the diagnostic min/max print + netCDF snapshot, both
+     * covered by the pre-I/O sync_host in fesom_main.cpp (L48). */
 
     PMARK("2_pgf");
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
@@ -328,7 +335,17 @@ int fesom_timestep(int                          step_n,
     /* M5.4: uvnode device-halo (GPU-aware MPI on CUDA, host-staged on Serial); the OUT sync_host
      * + the KPP/PP IN re-pushes are gone — uvnode stays device-resident with its halo. */
     fesom_halo_field(dyn->uvnode_fld, FESOM_HALO_NOD3D, nl, 2, p);
-    dyn->uvnode_fld.sync_host();   /* M5.9 FIX (see §M5.9; no-op on Serial) */
+    dyn->uvnode_fld.sync_host();   /* M5.9-pin (session 20): the ONE genuinely-required M5.9 sync —
+                                    * fesom_bulk_compute (fesom_main.cpp, every CORE2 step) reads uvnode's
+                                    * surface on the host for the wind stress (wind relative to ocean
+                                    * current). Proven the SOLE real host reader by the NaN-poison
+                                    * discriminator: poisoning uvnode → NaN stress → CG abort, while the
+                                    * other 3 fields poisoned had ZERO model effect (their M5.9 syncs were
+                                    * placebos — sync-fence chaos sensitivity, not stale reads). KPP reads
+                                    * uvnode on the DEVICE via its device-resident halo. No-op on Serial.
+                                    * (bulk reads only nz=0; a surface-only refresh was tried but its
+                                    * per-step Kokkos buffer alloc + host unpack canceled the PCIe win —
+                                    * a persistent-buffer version is a future micro-opt, ~1%.) */
 
     if (s_use_kpp) {
         /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
@@ -485,7 +502,10 @@ int fesom_timestep(int                          step_n,
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */
-    dyn->uv_rhs_fld.sync_host();   /* M5.9 FIX (see §M5.9; no-op on Serial) */
+    /* M5.9-pin (session 20): placebo sync dropped — uv_rhs is read by impl_vert_visc (substep 6) and
+     * compute_ssh_rhs (substep 7) on the DEVICE (device-resident with its halo), and is NOT a snapshot
+     * or diagnostic-print field, so it has NO host reader at all. The NaN-poison discriminator confirmed
+     * zero model effect. */
 
     /*  7-10. The §5 SSH block — M4.2: ON THE DEVICE (closes the SYNC_MAP §5 mid-step
      *  host CG round-trip; substeps 1-14 now flow on device except the trivial host eta_n

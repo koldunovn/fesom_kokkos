@@ -1,5 +1,15 @@
 # Next session — pin the M5.9 host-reader, make the sync minimal (recover ~6%)
 
+> **✅ RESOLVED (session 20, 2026-05-28).** The host reader is **`uvnode` → `fesom_bulk_compute`** (the
+> JRA55 bulk wind-stress formula, surface row, every CORE2 step) — and it is the ONLY one. `bvfreq`,
+> `pgf_x/y`, `uv_rhs` are read **only by device kernels**; their M5.9 syncs were placebos (the
+> leave-one-out's 0.4 was sync-FENCE chaos sensitivity, not a stale read). Proven by a **NaN-poison
+> discriminator** (keep the sync, NaN the host copy → only a host reader sees it): poisoning the three →
+> model byte-identical; poisoning `uvnode` → CG NaN-abort. **Fix: dropped the 3 placebo syncs, kept
+> `uvnode`'s** (`src/fesom_step.cpp`). Gate PASS, Serial pi np1+np2 bit-identical, **~3.1%** recovered
+> (0.4931→0.4777 s/step). Full write-up: `docs/GPU_FIDELITY.md` §M5.9-pin + lessons L49/L50. The text
+> below is the original prompt, kept for provenance.
+
 ## The one-line goal
 M5.9 fixed a CORE2 GPU correctness bug by `sync_host()`-ing **4 device-resident fields after every device
 halo**. That is correct but blunt (re-adds ~5 full-field PCIe copies/step = +6.2%). **Find the exact host

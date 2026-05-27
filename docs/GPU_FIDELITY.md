@@ -407,6 +407,55 @@ no ice + idealised dynamics, so this whole class of bug stays at ~1e-17 and is i
 only ever timed, never accuracy-checked, which is how M5.1–M5.8 shipped the regression.** Jobs:
 `job_core2_serial_ref` (oracle) + `job_gpu_fidelity_dev` (CUDA leg).
 
+### M5.9-pin — the host reader is `uvnode`→bulk ALONE; the other 3 syncs were placebos (session 20, 2026-05-28)
+
+The M5.9 fix `sync_host`'d **four** device-halo'd fields after their halo (`bvfreq` :207, `pgf_x/y` :311,
+`uvnode` :331, `uv_rhs` :488), on a leave-one-out (`FESOM_DBG_SYNC`, toggle each on/off) that found all
+four required. **Pinning the actual reader showed only ONE is real.**
+
+**Static trace (CUDA path).** `bvfreq` (KPP/mo_convect/GM + the device smoother), `pgf` (compute_vel_rhs),
+`uv_rhs` (impl_vert_visc, compute_ssh_rhs) are read **only by device kernels** (device-resident with their
+halos); their only host readers are the read-only min/max print + the netCDF snapshot, both covered by the
+snapshot-gated pre-I/O `sync_host` (L48). `uvnode` alone has a per-step **host** reader: `fesom_bulk_compute`
+(`fesom_main.cpp:1027`, the JRA55 bulk wind-stress formula — wind relative to ocean surface current, read at
+`uvnode[2*(n*nl)]` over owned+halo, **surface only**). That call exists only under `use_jra` (CORE2), never
+on pi (analytical stress) — **exactly the pi-invisibility / active-forcing signature.**
+
+**The discriminator (NaN-poison).** A leave-one-out is confounded on a chaotic backend: removing a `sync_host`
+removes a device FENCE, which reshuffles atomic/launch ordering enough to slide the CUDA run to the same ~0.4
+attractor *without any stale read*. So instead: **keep each `sync_host` (device scheduling byte-identical to the
+fixed run) and overwrite the host copy with NaN AFTER it** (no `modify_host` → device stays correct; only a
+genuine HOST read sees the NaN). `FESOM_POISON_HOST={bvfreq,pgf,uvnode,uvrhs}`, `jobs/job_poison_dev`. Three
+CORE2 dist_8 (ICE active) runs vs the Serial oracle:
+
+| run | host-poisoned | model state @ step 20 | outcome |
+|---|---|---|---|
+| clean | — | u/v vs oracle ~1.1–1.7e-4 | completes (floor) |
+| poison_others | `bvfreq,pgf,uv_rhs` | u 5e-5 / v 1.7e-4 / bvfreq 3.8e-7, **0 NaN** | **completes — model identical** |
+| poison_uvnode | `uvnode` | — | **CRASH: `CG_kk: pp·App = nan`** (NaN stress→momentum→CG) |
+
+So NaN in `bvfreq`/`pgf`/`uv_rhs` host copies is inert (the netCDF snapshot was even healed by the pre-I/O
+sync; only the cosmetic min/max print showed it) — **they have no model-feedback host reader**. NaN in `uvnode`
+blows the model up via bulk → these were the ~0.4 *fence-chaos* placebos, not stale reads.
+
+**Fix (`fesom_step.cpp`):** delete the `bvfreq`/`pgf`/`uv_rhs` per-step `sync_host`; keep `uvnode`'s. `uv_rhs`
+has NO host reader at all (not even a snapshot field). `bvfreq`/`pgf` snapshot+print diagnostics stay correct
+via the existing L48 pre-I/O sync (the per-step min/max print may read a stale device-resident value — cosmetic,
+like `Kv`/`Av` already do).
+
+**Validation.** GATE PASS (drop-3 and a tried surface-`uvnode` variant both): worst field ~4–5e-3, T ~1.1e-3,
+no NaN, no crash — at the CUDA climate-close floor. Serial pi np1 + np2 BIT-IDENTICAL to the C golden (the
+dropped/kept syncs are no-ops on Serial; `FESOM_KK_VERIFY` unaffected — no kernel changed). **Perf (CORE2
+dist_8, clean no-I/O, same nodes l40360/69, 25 timed steps, two runs): all-syncs 0.4931 → fix (drop 3, keep
+full `uvnode` sync) 0.4777 s/step = 3.1% recovered** — the measured cost of the 3 placebo PCIe copies (4
+fields: `bvfreq`+`pgf_x`+`pgf_y`+`uv_rhs`). That is near the achievable ceiling: `uvnode` genuinely needs a
+sync, so the full M5.9 +6.2% was never fully recoverable. A surface-only `uvnode` refresh (bulk reads only
+nz=0) reached 0.4752 (3.6%) but the extra ~0.5% did not justify its custom pack kernel + per-step `Kokkos::View`
+scratch alloc + host unpack (which nearly cancel the ~94 MB PCIe saving); a persistent-buffer version is a
+future micro-opt. Tooling: `jobs/job_poison_dev` (the NaN discriminator), `jobs/job_perf_compare` (same-node
+all-syncs-vs-fix timing). See lessons L49/L50. ⚠️ The GPU-partition device-ptr UCX segfault (L47) hit a perf
+run mid-campaign — just re-run (it is transient, not a code bug).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

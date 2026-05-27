@@ -1,5 +1,27 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 20 (2026-05-28) — M5.9-pin: only `uvnode`→bulk is a real host reader; dropped 3 placebo syncs.**
+Commit `3842a0d`. Full story: lessons L49/L50 + GPU_FIDELITY §M5.9-pin.
+- The M5.9 fix `sync_host`'d 4 device-halo'd fields (`bvfreq`, `pgf_x/y`, `uvnode`, `uv_rhs`) after a
+  leave-one-out said all 4 were needed. **A leave-one-out is confounded on a chaotic CUDA run** —
+  removing a `sync_host` removes a device FENCE that alone can slide the run to the ~0.4 attractor with
+  no stale read. The clean discriminator (the **NaN-poison**, `jobs/job_poison_dev`): keep each sync,
+  then overwrite the host copy with NaN AFTER it (no `modify_host` → device stays correct) so only a
+  genuine HOST read sees it. Result: poison `{bvfreq,pgf,uv_rhs}` → model byte-identical to clean;
+  poison `uvnode` → NaN stress → `CG_kk: pp·App=nan` abort.
+- **Only `uvnode` has a real host reader: `fesom_bulk_compute`** (`fesom_main.cpp:1027`, the JRA55 bulk
+  wind-stress formula, surface row, every CORE2 step) — exactly why the class was pi-invisible (pi uses
+  analytical stress, never calls bulk). `bvfreq`/`pgf`/`uv_rhs` are read only by device kernels.
+- **Fix:** dropped the `bvfreq`/`pgf`/`uv_rhs` per-step syncs, kept `uvnode`'s (`fesom_step.cpp`).
+  `bvfreq`/`pgf` snapshot+print diagnostics stay correct via the existing L48 pre-I/O sync; `uv_rhs` has
+  no host reader at all. **This RESOLVES the session-19 "OPEN DISCOVERY"** (the large CORE2 host-vs-dev
+  ocean divergence) — it was this stale-host bug, benign-class (a host stale-read, not a halo bug).
+- **Validation:** gate PASS on the committed binary (worst 1.35e-3, no NaN; `bisect/m59pin_final`),
+  Serial pi np1+np2 bit-identical to the C golden. **Perf (CORE2 dist_8 clean, same-node, 2 runs):
+  all-syncs 0.4931 → 0.4777 s/step = 3.1% recovered** (near the ceiling — `uvnode` genuinely needs its
+  sync; a surface-only `uvnode` refresh reached 3.6% but its per-step alloc overhead wasn't worth the
+  +0.5%, not shipped). Tooling: `jobs/job_poison_dev`, `jobs/job_perf_compare`.
+
 **Session 18b (2026-05-27) — M5.2/M5.3/M5.4: found the REAL GPU bottleneck + flipping the ocean halos.**
 Commits `a1726cd` (M5.2), `4934a43` (M5.3), `4120d02` (M5.4). Full story: lesson L47/L48 + GPU_FIDELITY
 §M5.2/§M5.3/§M5.4.
