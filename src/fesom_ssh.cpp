@@ -566,6 +566,12 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
 using DV  = fesom::Field::dev_view_t;
 using IDV = fesom::IntField::dev_view_t;
 
+/* M5.2 perf: cumulative wall spent in the CG iteration loop over the timed window
+ * (reset by fesom_main at the loop-timer warmup boundary). Lets the loop timer
+ * report the CG's SHARE of the step — the GPU's dominant cost (L47/M5.1b). */
+double g_fesom_cg_wall  = 0.0;
+long   g_fesom_cg_iters = 0;
+
 /* y = A·v over owned rows [0,N): per-row CSR gather. Each row writes only y(row)
  * and reads its own matrix row [rowptr(row),rowptr(row+1)) + gathers v at colind
  * (which can reach into the halo → v must be halo-current before this call). The
@@ -593,18 +599,8 @@ static real_t cg_dot(DV a, DV b, int N)
     return s;
 }
 
-/* (Σ x·y, Σ x·z) in one pass — the C's single sp0/sp1 loop (one fused reduce keeps
- * the same per-accumulator order as the C, so Serial stays bit-identical). */
-static void cg_dot2(DV x, DV y, DV z, int N, real_t &d0, real_t &d1)
-{
-    real_t s0 = 0.0, s1 = 0.0;
-    Kokkos::parallel_reduce("fesom_cg_dot2", Kokkos::RangePolicy<>(0, N),
-        KOKKOS_LAMBDA(const int i, real_t &l0, real_t &l1) {
-            l0 += x(i) * y(i);
-            l1 += x(i) * z(i);
-        }, s0, s1);
-    d0 = s0; d1 = s1;
-}
+/* (cg_dot2 removed in M5.2 — the in-loop sp0/sp1 dot is now fused into the
+ * preconditioner SpMV; the only remaining dot is the single-accumulator cg_dot.) */
 
 void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
                                     struct fesom_dyn        *dyn)
@@ -755,11 +751,24 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     int iter = 0;
     int verbose         = (getenv("FESOM_VERBOSE_CG") != NULL);
     int heartbeat_every = 100;
+    static const bool cg_prof = (getenv("FESOM_CG_PROFILE") != NULL);
+    double _cg_t0 = 0.0;
+    if (cg_prof) { Kokkos::fence(); _cg_t0 = MPI_Wtime(); }   /* M5.2: opt-in CG-share timer (fences cost ~2-3%) */
     for (iter = 1; iter <= si->maxiter; ++iter) {
         exch(si->pp_fld);                            /* solver.F90:442 EXCH(pp) */
-        cg_spmv(rowptr, colind, vals, pp, App, N);
-
-        real_t s_aux = cg_dot(pp, App, N);
+        /* M5.2: fuse SpMV (App=A·pp) with the dot (s_aux=Σ pp·App) into ONE
+         * parallel_reduce — App(row) is computed and pp(row)·App(row) accumulated
+         * in row order, identical to the separate cg_spmv+cg_dot (Serial bit-id),
+         * saving a kernel launch + a full device read of App per iteration. */
+        real_t s_aux = 0.0;
+        Kokkos::parallel_reduce("fesom_cg_spmv_dot", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l) {
+                real_t s = 0.0;
+                const int rstart = rowptr(row), rend = rowptr(row + 1);
+                for (int n = rstart; n < rend; ++n) s += vals(n) * pp(colind(n));
+                App(row) = s;
+                l += pp(row) * s;
+            }, s_aux);
         ALLREDUCE_SUM(s_aux);
         if (s_aux == 0.0 || s_aux != s_aux) {        /* NaN/zero check */
             if (partit == NULL || partit->mype == 0) {
@@ -777,12 +786,25 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             });
         exch(si->rr_fld);                            /* solver.F90:462 EXCH(rr) */
 
-        cg_spmv(rowptr, colind, prvals, rr, zz, N);
-
-        real_t sp0, sp1;
-        cg_dot2(rr, zz, rr, N, sp0, sp1);            /* sp0 = Σ rr·zz ; sp1 = Σ rr·rr */
-        ALLREDUCE_SUM(sp0);
-        ALLREDUCE_SUM(sp1);
+        /* M5.2: fuse the preconditioner SpMV (zz=M⁻¹·rr) with cg_dot2 (sp0=Σrr·zz,
+         * sp1=Σrr·rr) into ONE parallel_reduce (row order → Serial bit-id), then ONE
+         * 2-element MPI_Allreduce instead of two (same SUM per component, fewer
+         * blocking collectives → the per-iter sync count the GPU is latency-bound on). */
+        real_t sp0 = 0.0, sp1 = 0.0;
+        Kokkos::parallel_reduce("fesom_cg_psolve_dot2", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
+                real_t s = 0.0;
+                const int rstart = rowptr(row), rend = rowptr(row + 1);
+                for (int n = rstart; n < rend; ++n) s += prvals(n) * rr(colind(n));
+                zz(row) = s;
+                l0 += rr(row) * s;
+                l1 += rr(row) * rr(row);
+            }, sp0, sp1);
+        if (parallel) {
+            double sbuf[2] = { (double)sp0, (double)sp1 };
+            MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+            sp0 = sbuf[0]; sp1 = sbuf[1];
+        }
 
         real_t residual = sqrt(sp1 / (real_t)N_global);
         if ((partit == NULL || partit->mype == 0)
@@ -805,6 +827,11 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         s_old = sp0;
         Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
+    }
+    if (cg_prof) {
+        Kokkos::fence();
+        g_fesom_cg_wall  += MPI_Wtime() - _cg_t0;
+        g_fesom_cg_iters += (iter <= si->maxiter) ? iter : si->maxiter;
     }
     if (iter > si->maxiter) {
         if (partit == NULL || partit->mype == 0) {

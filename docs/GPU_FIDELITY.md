@@ -82,20 +82,44 @@ Three findings:
 2. **The GPU strong-scales near-linearly: dist_4 → dist_8 = 6.38 → 3.30 = 1.93× on 2× GPUs.** The A100s are
    NOT saturated — adding GPUs helps (the CG iter count is partition-independent, so per-iter work halves).
 3. **Node-for-node the CPU is still ~7.4× faster** (2 compute nodes 0.445 vs 2 gpu nodes 3.30) — **a bigger
-   mesh did NOT flip the GPU↔CPU verdict.** The wall is the **CG**: ~200 iters/step, each **latency-bound on
-   the GPU** (~10 kernel launches + **2 blocking `MPI_Allreduce`** [the dot products] + 2 halo fences ⇒ ~400
-   GPU-drain/host-sync points/step). The GPU does ~**16.5 ms/CG-iter** vs the 256-rank CPU's ~**2.2 ms** —
-   the CG's nod2D kernels (80–160k rows/GPU) are far too small to keep an A100 busy, and the per-iter
-   collective latency is fixed. np=1 farc (638k rows on ONE GPU) was still 8.66 s/step, so **even a huge
-   per-GPU load can't amortize the CG's per-iteration latency** — the bottleneck is algorithmic, not
-   mesh-size or halo-PCIe.
+   mesh did NOT flip the GPU↔CPU verdict.** ⚠️ **I first blamed the CG here — that was WRONG (see §M5.2):
+   measured, the CG is only 1–5 % of the step.** The "16.5 ms/CG-iter" was a miscalculation (3.3 s ÷ 200 iters
+   conflates the CG iterations with the *whole* step; the CG actually runs once/step at ~1.75 ms/iter and is
+   a tiny slice). The real bottleneck is the **bulk ocean + sea-ice kernels** (~95–99 % of the step) — still
+   to be profiled per-substep. (np=1 farc was 8.66 s/step, but that too is dominated by the bulk kernels, not
+   the CG.)
 
-**Conclusion / real levers (now quantified, not speculated):** chasing bigger meshes or more halo flips will
-NOT make the GPU competitive. The CG is *the* GPU bottleneck. (a) **Cut CG iterations** — a stronger
-preconditioner than the current diagonal one (~200 iters is high; helps CPU and, disproportionately, the
-latency-bound GPU). (b) **Cut per-iteration sync** — fuse the two dot-products into one `Allreduce`,
-fuse/batch the CG kernels, or a communication-avoiding / pipelined CG to overlap the collective. Jobs:
-`jobs/job_farc_gpu_np1`, `jobs/job_gpuaware_time_farc_dist{4,8}`, `jobs/job_farc_cpu_dist256`.
+**Conclusion:** chasing bigger meshes or more halo flips will NOT make the GPU competitive node-for-node. The
+*why* was nailed down in §M5.2 below — and it is **NOT** the CG (my first guess). Jobs: `jobs/job_farc_gpu_np1`,
+`jobs/job_gpuaware_time_farc_dist{4,8}`, `jobs/job_farc_cpu_dist256`.
+
+### M5.2 — the CG is NOT the bottleneck (measured, 2026-05-27)
+
+Added a startup-free **CG-share timer** (env `FESOM_CG_PROFILE=1`; fence+`MPI_Wtime` around the CG iteration
+loop, accumulated over the timed window, printed by the loop timer) + applied two **bit-identity-preserving**
+CG optimizations (fuse each SpMV with its following dot into one `parallel_reduce` — same row-order reduction
+→ Serial np1+np2 still byte-identical to golden; fuse the sp0/sp1 dots into ONE 2-element `MPI_Allreduce`,
+3→2 collectives/iter). farc dist_4 (CG-opt build):
+
+| leg | s/step | **CG share** | CG iters/step | CG ms/iter |
+|---|---|---|---|---|
+| host-staged | 7.44 | **5.2 %** (0.38 s) | 219 | 1.75 |
+| device-halo | 6.55 | **1.0 %** (0.067 s) | 219 | 0.305 |
+
+**The CG is only 1–5 % of the step → it is NOT the bottleneck (this corrects §M5.1b).** Consequences:
+- The CG fusions are correct + safe but **immaterial to the step** (the CG is tiny). The valuable artifact is
+  the CG-share timer, which revealed the truth. (The 2 % apparent slowdown vs the m5.1 baseline is the
+  timer's per-step fences — now gated behind `FESOM_CG_PROFILE`.)
+- The device-halo makes the **CG itself 5.7× faster** (1.75 → 0.305 ms/iter — the per-iter cost was the 2
+  host-staged nod2D halo syncs; at farc's bigger nod2D + 219 iters these are NOT cheap, unlike the CORE2
+  finding). But since the CG is tiny, that's only ~⅓ of the device-halo's 0.89 s/step total gain; the other
+  ⅔ is the ocean nod3D halos.
+- **The real bottleneck is the bulk ocean + sea-ice kernels (~95–99 % of the step), un-profiled.** Likely
+  suspects: the per-node/per-element TDMA solves (KPP, `impl_vert_visc`, vertical tracer diffusion, GM
+  `fer_gamma`) — serial-within-column, low arithmetic intensity; the many FCT launches; the host-bound
+  kpp/eos `fesom_smooth_nod3D`, the salinity floor, and the ice host parts. **Next: a per-substep timer in
+  `fesom_step.cpp` (the CG-share pattern, applied to each substep) to find which kernels dominate** — that,
+  not the CG, is the path to a GPU win.
 
 ## The comparison
 

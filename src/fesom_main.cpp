@@ -995,12 +995,14 @@ skip_rest_state:
          * first `warmup` steps). Printed once at the end by rank 0. */
         const int time_warmup  = (nsteps > 10) ? 5 : 0;
         double    t_loop_start = 0.0;
+        extern double g_fesom_cg_wall; extern long g_fesom_cg_iters;  /* M5.2 CG-share (fesom_ssh.cpp) */
 
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
                 Kokkos::fence();
                 MPI_Barrier(MPI_COMM_WORLD);
                 t_loop_start = MPI_Wtime();
+                g_fesom_cg_wall = 0.0; g_fesom_cg_iters = 0;   /* measure CG over the timed window */
             }
             if (use_jra) {
                 /* Calendar crosses year boundaries cleanly now that
@@ -1264,9 +1266,15 @@ skip_rest_state:
             double t_loop_end = MPI_Wtime();
             int    timed      = nsteps - time_warmup;
             if (mpi.mype == 0 && timed > 0) {
+                const double loop_s = t_loop_end - t_loop_start;
                 printf("[fesom_port] loop timing: %d steps (excl %d warmup) = %.3f s  ->  %.4f s/step\n",
-                       timed, time_warmup, t_loop_end - t_loop_start,
-                       (t_loop_end - t_loop_start) / (double)timed);
+                       timed, time_warmup, loop_s, loop_s / (double)timed);
+                if (loop_s > 0.0 && g_fesom_cg_iters > 0)   /* only when FESOM_CG_PROFILE set */
+                    printf("[fesom_port] CG share: %.3f s (%.1f%% of loop), %ld iters total "
+                           "(%.1f/step, %.3f ms/iter)\n",
+                           g_fesom_cg_wall, 100.0 * g_fesom_cg_wall / loop_s, g_fesom_cg_iters,
+                           (double)g_fesom_cg_iters / (double)timed,
+                           g_fesom_cg_iters ? 1e3 * g_fesom_cg_wall / (double)g_fesom_cg_iters : 0.0);
                 fflush(stdout);
             }
         }
