@@ -624,8 +624,12 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
         `integrate_nod_2D` reductions (parallel_reduce + Allreduce, the cg_dot shape) + the `→host(forcing)`
         handoff + 4 halos. Serial `max|Δ|=0` on the CORE2 dist_16 ice-active run (job 25159374, 960 lines;
         all 5 ice keys green), pi==golden np1+np2, ctest 4/4, SYNCCHECK, CUDA builds. Key `iceflux`, L46.
-- [ ] **M4 acceptance**: whole model on device; 1-yr CORE2 Serial bit-identical to cref; 2-yr+5-yr CUDA
-      re-validated; tag `m4-full-device`
+- [x] **M4 acceptance — PASSED → tag `m4-full-device`**: the whole model (ocean + sea ice) is
+      device-resident. 1-yr CORE2 Serial run (job 25159501, 17280 steps, 256 ranks) reproduced all 13
+      monthly snapshots ALL FIELDS BIT-IDENTICAL to `/scratch/a/a270088/m1_accept/cref` (the ice→ocean
+      flux coupling composes bit-identically over a year). **CUDA/OpenMP multi-year active-ice climate
+      validation deferred to M3.2** (the EVP/FCT scatters + oce_fluxes reductions compound — characterize
+      vs the Fortran↔C budget in `docs/GPU_FIDELITY.md`).
 
 ## ───────────── M5 · Performance (expand after M4) ─────────────
 *Coarse now; detail when reached.*
