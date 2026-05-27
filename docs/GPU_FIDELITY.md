@@ -197,6 +197,48 @@ clearly read-at-halo), `ssh_rhs` (nod2D, small — CG reads it owned), tracer-di
 (smoothing-bound — need `smooth_nod3D` on device first). On a bigger mesh (farc) each flip pays more (the
 M5.1 8%→farc 12% scaling).
 
+### M5.6 — per-substep timing diagnostics through the WHOLE model (2026-05-27)
+
+The §M5.3 phase profiler stopped at 4 coarse phases; §M5.5 then found a hidden +13% host-compute cost
+(`blmc`) that *no GPU profiler saw* because it was host *compute*, not a kernel. To find the rest of those,
+`fesom_profile.{hpp,cpp}` (`FESOM_STEP_PROFILE=1`) now marks **every ocean substep** (`fesom_step.cpp`,
+`PMARK`) **and every ice phase** (`fesom_ice.cpp`, `PMARK_ICE`) — fence-bounded host+device wall, gated so
+production/Serial are unchanged. Full breakdown, CORE2 dist_8, device-halo + smoother (**0.511 s/step**):
+
+| phase | % loop | s/step | what |
+|---|---|---|---|
+| **13_fct** | **17.4%** | 0.0889 | FCT tracer advection — heavy kernels (~24 launches), the single biggest |
+| **3_mixing** | **11.0%** | 0.0563 | KPP/PP — **kernels ~1% → ~10% is HIDDEN host-staged** (`diffK`/`viscA`/`ghats` split-rail halos) |
+| 1b_gm | 9.9% | 0.0506 | GM chain (`fer_gamma` TDMA + sigma/Redi) |
+| 7_ssh | 9.1% | 0.0463 | SSH RHS + CG (CG itself 5.9% per the CG-share timer) |
+| **ice_dyn (o2i+EVP)** | **8.8%** | 0.0452 | **the entire ice cost (10.1%) is here** — EVP 120 host-staged subcycle halos + host coastal-BC |
+| 12_ale | 6.7% | 0.0344 | ALE thickness + `vert_vel` scatter |
+| 13b_trdiff | 6.1% | 0.0312 | implicit vertical tracer diffusion (per-node TDMA) |
+| 4_velrhs | 5.3% | 0.0272 | `compute_vel_rhs` + `momentum_adv` |
+| 6_ivisc | 5.1% | 0.0261 | `impl_vert_visc` (per-elem TDMA) |
+| 1_eos | 3.3% | 0.0167 | EOS + density smoothing |
+| 5_viscfilt | 1.5% | 0.0079 | `visc_filt_bidiff` |
+| 13c_bolus+14 | 1.2% | 0.0059 | bolus subtract + step commit |
+| ice_thermo+flux | 0.7% | 0.0036 | column thermodynamics + `oce_fluxes` |
+| ice_fct | 0.5% | 0.0026 | ice FCT (2-D, cheap) |
+| 2_pgf | 0.4% | 0.0022 | pressure-gradient force |
+| ice_hdiag | 0.04% | 0.0002 | h_ice/h_snow diagnostics |
+
+**Two blmc-like hidden host-time sinks found "through the model"** (the user's ask — where we *unnecessarily*
+spend time):
+1. **`3_mixing` ~10% host-staged.** The KPP device kernels are ~1% (nsys/§M5.3 confirmed), so the other ~10%
+   is the `diffK`/`viscA`/`ghats` split-rail halos still going host. **Flippable now** with the slab-offset
+   device-halo (exactly the `blmc`/`bvfreq` recipe) — the highest-payoff remaining lever-B flip.
+2. **`ice_dyn` (EVP) 8.8%** — *all* of the ice. The EVP runs **120 subcycles on a host loop**, each staging
+   `uice`/`vice` halos host + a host coastal-BC (needs `partit->myList_edge2D`). This is the ice analogue of
+   the CG: a host-loop-over-device-kernels with a per-iteration host halo. Flipping the subcycle halo to
+   device-halo (and folding the coastal-BC into the bracket) is the ice equivalent of lever A/B.
+
+Everything below `1b_gm` is either a heavy kernel (lever C — FCT/momentum/trdiff/ivisc, memory-layout work,
+separate branch) or already small. So the **actionable remaining wins are #1 (KPP host halos, lever B) and
+#2 (EVP host halos)** — together ~19% of the loop currently spent host-staging, both removable with the
+proven device-halo. `13_fct` (17.4%) is the largest but it is genuine device kernels → lever C.
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

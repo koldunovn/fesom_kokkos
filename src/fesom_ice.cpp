@@ -1,4 +1,5 @@
 #include "fesom_ice.h"
+#include "fesom_profile.hpp"   // M5.6: per-phase ice-step timing (FESOM_STEP_PROFILE)
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_ice_coupling.h"
@@ -427,6 +428,11 @@ void fesom_ice_step(int                            step,
 
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
 
+    /* M5.6: per-phase ice timing (FESOM_STEP_PROFILE; host+device). PMARK_ICE closes the current
+     * phase + opens the next; final toc + #undef before the synccheck. No-op when profiling off. */
+#define PMARK_ICE(nm) do { fesom_prof::toc((nm), _it); _it = fesom_prof::tic(); } while (0)
+    double _it = fesom_prof::tic();
+
     /* Phase C1: ocean2ice — populate ice->srfoce_* from ocean state. M4.3a: ON THE DEVICE
      * (a device island within the still-host ice step — EVP/FCT/thermo move in M4.3b-d).
      * IN rail (L28): push the ocean state it reads — tracers T/S (surface), mesh hbar, dyn uv
@@ -491,6 +497,7 @@ void fesom_ice_step(int                            step,
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
+    PMARK_ICE("ice_dyn(o2i+EVP)");
     /* Phase E — FCT advection. Mirrors Fortran ice_setup_step.F90:258-261:
      * call ice_TG_rhs; call ice_fct_solve. cut_off (line 295) follows
      * unconditionally below. M4.3c: ON THE DEVICE. tg_rhs (element→node SCATTER into values_rhs)
@@ -540,6 +547,7 @@ void fesom_ice_step(int                            step,
         if (s_verify_icemap) fesom_ice_cut_off_verify(ice, partit, mesh, step, ca, cm, cs);
     }
 
+    PMARK_ICE("ice_fct");
     /* Thermodynamics + ice→ocean flux update. Both need forcing+jra+sr; without
      * them (e.g. pi-mesh smoke test) the step is silently a no-op. M4.3d-a: thermodynamics ON
      * THE DEVICE — per-node column physics over [0,N) (race-free → Serial AND OpenMP bit-identical,
@@ -611,6 +619,7 @@ void fesom_ice_step(int                            step,
         if (s_verify_iceflux) fesom_ice_oce_fluxes_verify(ice, partit, mesh, tracers, forcing, sr, step);
     }
 
+    PMARK_ICE("ice_thermo+flux");
     /* Post-step diagnostic h_ice/h_snow (Fortran ice_setup_step.F90:319-330). M4.3a: ON THE
      * DEVICE. IN: push a_ice/m_ice/m_snow (the host thermo, if it ran, wrote them via the raw
      * alias). OUT: sync_host(h_ice/h_snow) for I/O + the FESOM_DIAG_MICE block below. */
@@ -713,6 +722,9 @@ void fesom_ice_step(int                            step,
             break;
         }
     }
+
+    PMARK_ICE("ice_hdiag");   /* M5.6: close the last ice phase bucket */
+#undef PMARK_ICE
 
 #ifdef FESOM_KK_SYNCCHECK
     /* M1.5: exercise the host<->device rails on this step's ice state (no-op in production). */
