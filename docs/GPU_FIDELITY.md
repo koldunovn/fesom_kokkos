@@ -380,6 +380,29 @@ build (per-field "device-halo'd this step, then host-touched" tracker) would pin
 GPU. **Proven-correct fallback: `sync_host` in the `fesom_halo_field` device path → 1e-3** (the
 `FESOM_HALO_SELFCHECK` run), at one PCIe copy/halo (still < the original 2-copy host-staging).
 
+### M5.9 — FIXED + a permanent fidelity GATE (`6ba27e9`, 2026-05-27)
+
+The M5.4a/b/c commits hit an intermittent device-ptr GPU-MPI crash that blocked the git-bisect, so the
+culprit was localised **at HEAD** (which runs) with a `FESOM_DBG_SYNC` env-gated per-field `sync_host` +
+a **leave-one-out** sweep: **all four of `bvfreq`, `pgf_x/y`, `uvnode`, `uv_rhs` must be host-fresh** —
+each, when left device-stale, alone decorrelates the chaotic CORE2 run to the same ~0.4 attractor by
+step 20 (so the device exchange is fine, the *host data* is read stale; the halo already fences, ruling
+out a race). **FIX: `sync_host()` after each of those 4 device halos** (`fesom_step.cpp`; no-op on
+Serial → the bit-identity oracle is untouched). Result: **CORE2 dev-vs-Serial @ step20 T 0.41 → 1.1e-3**
+(= the host-halo path / the CUDA climate-close floor) + Serial np1 still BIT-IDENTICAL to golden. The
+shipped GPU path is now as close to byte-identical as CUDA allows (the 1e-3 residual is the inherent
+atomic-scatter + fmad non-determinism, same as the host path). Cost: re-adds ~5 `sync_host`/step (keeps
+the GPU-aware MPI → still < the original 2-copy host-staging); the exact host-reader (to optimise to a
+minimal/earlier sync) + the M5.4a/b/c bisect verdicts remain follow-ups.
+
+**THE GATE (run before committing ANY device-halo / sync-rail / device-residency change):**
+`./scripts/gpu_fidelity_gate.sh` → builds the build-serial CORE2 oracle (bit-identical to C),
+runs build-cuda CORE2 dist_8 (device-halo, ICE ACTIVE), and `scripts/gpu_fidelity_check.py` asserts
+dev-vs-Serial ≤ the per-field CUDA-floor ceiling (PASS ~1e-3, FAIL ~1e-1). **pi is INSUFFICIENT — it has
+no ice + idealised dynamics, so this whole class of bug stays at ~1e-17 and is invisible there; CORE2 was
+only ever timed, never accuracy-checked, which is how M5.1–M5.8 shipped the regression.** Jobs:
+`job_core2_serial_ref` (oracle) + `job_gpu_fidelity_dev` (CUDA leg).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats

@@ -698,6 +698,14 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > CORE2 Serial acceptance still bit-identical to cref after any change. ⚠️ Run OUTPUT →
 > `/work/ab0995/a270088/port2` or `/scratch`, never `$HOME`.
 >
+> ⚠️⚠️ **NEW MANDATORY GATE (M5.9) — for ANY device-halo / sync-rail / device-residency change: run
+> `./scripts/gpu_fidelity_gate.sh` (CORE2 dist_8 CUDA device-halo vs the build-serial oracle, ICE ACTIVE)
+> and confirm PASS before committing.** pi is INSUFFICIENT for this class of bug (no ice + idealised →
+> a stale-host/device-residency regression stays ~1e-17 and is invisible; that is exactly how M5.1–M5.8
+> shipped the CORE2 staleness bug). The gate asserts dev-vs-Serial ≤ the CUDA climate-close floor
+> (PASS ~1e-3, FAIL ~1e-1). Also: **always diff ALL output fields, never a subset** (L48). (CUDA is
+> non-deterministic run-to-run, so the gate compares vs the deterministic Serial oracle, not bit-identity.)
+>
 > BUILD (recipe §2): Serial/OpenMP via `source ./env.sh` then `cmake --build build-serial -j 16` (+
 > build-omp, build-synccheck). ⚠️ `source ./env.sh` does NOT persist across shells — source it in the SAME
 > command as any `mpirun` (or `mpirun` is not-found). pi smoke + verify on build-serial with the login-node
