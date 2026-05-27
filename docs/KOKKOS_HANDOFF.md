@@ -560,8 +560,25 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
   (`dist_16/32/144/256/288/432/512`) · Kokkos submodule `externals/kokkos` (4.4.01) · SLURM `ab0995`;
   GPU `gpu`/`gpu-devel`.
 
-## 5. NEXT-SESSION PROMPT (M3.2 — CUDA/OpenMP CORE2 multi-year climate validation; paste this verbatim)
+## 5. NEXT-SESSION PROMPT — two tracks
 
+> **THE DECLARED NEXT SESSION = GPU-aware MPI (the perf unlock). Its full plan/handover is its own file:
+> paste `docs/NEXT_GPU_AWARE_MPI.md` verbatim** — it has the measured motivation (0.731 s/step, halo-bound),
+> the current halo architecture, the two approaches (A unified / B separate-device-path, B recommended), the
+> prerequisites (verify Levante CUDA-aware MPI → device comm-list wrap → device buffers), the incremental
+> plan (nod2D first), and the validation (GPU-aware MPI = data-path only → must byte-match the current CUDA
+> run; Serial untouched under Approach B).
+>
+> **IN FLIGHT — M3.2 climate fidelity (orthogonal, a separate gate):** the CUDA 1-yr climate run is
+> LAUNCHED (job `25165660`, ~3.5 h → `/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda_1yr`). When it
+> finishes, compare with `scripts/m32_climate_compare.py --label CUDA` per `docs/GPU_FIDELITY.md` (the full
+> M3.2 workflow + PASS criteria live there). Do it whenever — it does NOT block the GPU-aware-MPI work, and
+> GPU-aware MPI must not change the climate result (data-path only). The detailed M3.2 reference below is
+> kept for when you run the OpenMP leg / the 2-yr runs.
+>
+> ---
+> **M3.2 REFERENCE (climate validation — for when you return to fidelity):**
+>
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
 > `git log --oneline -15` to orient. **M0–M4 are ALL COMPLETE — the WHOLE MODEL (ocean + sea ice) is
 > device-resident on the bit-identity oracle, tag `m4-full-device`** (M4 acceptance: 1-yr CORE2 Serial job

@@ -632,7 +632,9 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       vs the Fortran↔C budget in `docs/GPU_FIDELITY.md`).
 
 ## ───────────── M5 · Performance (expand after M4) ─────────────
-*Coarse now; detail when reached.*
+*Coarse now; detail when reached.* **M5.1 = GPU-aware MPI is the FIRST + highest-leverage task** — the
+post-M4 GPU step is **0.731 s/step, halo-bound** (job 25163175; only ~15% faster than M3.1 despite CG+ice
+on device — the per-iter host-staged halos dominate). **Full plan/handover: `docs/NEXT_GPU_AWARE_MPI.md`.**
 - [ ] per-field layout flip for hot fields whose kernels are all on-device; re-validate (Serial
       still bit-identical — only memory order changes, not arithmetic order). ⚠️ For a **1-D flat
       `Field`, LayoutLeft==LayoutRight (no-op for coalescing)** — the interleaved 2-component
@@ -641,7 +643,10 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       become **layout-agnostic accessor functions** over the `View`. Extend the same
       layout-agnostic-accessor work to halo pack/unpack + I/O gather
 - [ ] data residency: keep state on device across steps; sync host only for halo (pre-GPU-MPI) + I/O cadence
-- [ ] GPU-aware MPI: device-pointer halo exchange (CUDA-aware OpenMPI); on-device pack/unpack kernels
+- [ ] **M5.1 GPU-aware MPI: device-pointer halo exchange (CUDA-aware OpenMPI) + on-device pack/unpack
+      kernels — `docs/NEXT_GPU_AWARE_MPI.md`.** Prereq: prove Levante MPI is CUDA-aware + device-wrap the
+      `fesom_com_struct` rlist/slist. Approach B (separate device path, Serial untouched) first. Validation:
+      CUDA-GPU-aware must byte-match the current host-staged CUDA run (data-path only); re-time vs 0.731 s/step.
 - [ ] profiling + tuning (`TeamPolicy`/hierarchical over levels where it pays); tag `m5-perf`
 
 ## ───────────── M6 · HIP / LUMI bring-up (expand after M5) ─────────────

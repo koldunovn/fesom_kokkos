@@ -45,12 +45,14 @@ export HDF5_USE_FILE_LOCKING=FALSE
 MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2          # 8 ranks -> reads dist_8
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 DT=1800
-NSTEPS=34560          # 2 years @ dt=1800 (1 yr = 17280). Drop to 17280 if the timing run says too slow.
+# Override NSTEPS+M32_TAG via sbatch --export to run 1 yr instead of the 2-yr default, e.g.:
+#   sbatch --export=ALL,M32_NSTEPS=17280,M32_TAG=_1yr jobs/job_m32_cuda_core2
+NSTEPS=${M32_NSTEPS:-34560}   # default 2 years @ dt=1800 (1 yr = 17280). Measured 0.731 s/step -> 2yr~7h.
 SNAP_EVERY=1440       # monthly instantaneous snaps (the .monthly.nc means are auto-written regardless)
 JRA55_YEAR=1958       # rolls 1958 -> 1959 on the calendar year change (confirm the rollover in the log)
 export FESOM_PRINT_EVERY=1000
 
-OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda${M32_TAG:-}
 mkdir -p "$OUT"
 echo "=== M3.2 CUDA 2-yr CORE2 dist_8 (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
 srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
