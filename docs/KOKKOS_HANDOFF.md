@@ -1,5 +1,24 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 18b (2026-05-27) — M5.2/M5.3/M5.4: found the REAL GPU bottleneck + flipping the ocean halos.**
+Commits `a1726cd` (M5.2), `4934a43` (M5.3), `4120d02` (M5.4). Full story: lesson L47/L48 + GPU_FIDELITY
+§M5.2/§M5.3/§M5.4.
+- **M5.2 — the CG is NOT the bottleneck (it's 1–5% of the step).** Built a CG-share timer (`FESOM_CG_PROFILE=1`)
+  + 2 bit-identity-safe CG opts (fuse SpMV+dot; fuse sp0/sp1→one Allreduce) — but immaterial (CG is tiny).
+  Corrected the earlier (wrong) "CG is the wall" claim. Serial re-validated bit-identical.
+- **M5.3 — profiled the step. The OCEAN is 82%** (sea-ice only 7.4% — the "it's the ice" intuition does NOT
+  hold on GPU). Per-phase timer (`FESOM_STEP_PROFILE=1`, `jobs/job_gpuaware_prof_core2`) + `nsys`
+  (`jobs/job_nsys_core2_np1`): the ocean's 82% = ~half **3-D kernels** (FCT advection ~30% biggest, momentum
+  ~15%, diffusion ~14%, GM ~10%) + ~half **full-field PCIe** (`cudaMemcpy` = 83% of API time, ~13 GB/step at
+  np=1) = the **host-staged ocean halos NOT flipped in M5.1** + EOS/KPP `smooth_nod3D` round-trips.
+- **M5.4 — lever A: flip the remaining ocean halos to `fesom_halo_field`** (the removable PCIe). The M1.5
+  split-rail halos: replace OUT-rail+halo with `fesom_halo_field`, **remove the downstream IN re-push**.
+  Done `uv_rhs` (elem3D, 3×/step): **0.716 → 0.658 s/step (+8%; total device-halo gain now 14.3%)**, Serial
+  np1+np2 bit-identical, CUDA A/B at the noise floor. **Template proven.** ⚠️ IN PROGRESS — remaining:
+  `pgf_x/y` (next, elem3D, big), FCT internal halos, `uvnode`, `ssh_rhs`, tracer-diff; the **GM chain** reads
+  OWNED on device (halos may be verify-only — trace first); NOT EOS/KPP (smoothing-bound). Each flip:
+  trace the field's re-push(es), flip, re-validate (Serial bit-id + CUDA pi A/B + CORE2 re-time).
+
 **Session 18 (2026-05-27) — M5.1a COMPLETE: GPU-aware MPI on-device halo exchange (the perf track).**
 Commit **`d6b0a1f`**. The whole story is lesson **L47** + `docs/GPU_FIDELITY.md` §M5.1 + `docs/NEXT_GPU_AWARE_MPI.md`.
 - ⚠️⚠️ **build-cuda's MPI CHANGED.** Levante `openmpi/4.1.2-gcc-11.2.0` (env.sh) is `--without-cuda` and its

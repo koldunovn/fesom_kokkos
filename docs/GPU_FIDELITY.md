@@ -121,6 +121,52 @@ CG optimizations (fuse each SpMV with its following dot into one `parallel_reduc
   `fesom_step.cpp` (the CG-share pattern, applied to each substep) to find which kernels dominate** — that,
   not the CG, is the path to a GPU win.
 
+### M5.3 — where the ocean's 82% goes: ~half kernels, ~half full-field PCIe (2026-05-27)
+
+Per-phase step profiler (`FESOM_STEP_PROFILE=1`, `jobs/job_gpuaware_prof_core2`) on CORE2 dist_8
+(device-halo, 0.738 s/step):
+
+| phase | % of step |
+|---|---|
+| **ocean** (`fesom_timestep`) | **82.2%** |
+| sea-ice | 7.4% |
+| forcing | 5.3% |
+| CG (within ocean) | 4.6% |
+| coupling | 1.5% |
+
+⇒ **the sea ice is NOT the GPU trouble (only 7.4%); the ocean dominates** (the Fortran/CPU "it's the ice"
+intuition does not carry over — the ice is 2-D and cheap, the ocean carries the heavy 3-D physics).
+
+`nsys` on np=1 CORE2 (`jobs/job_nsys_core2_np1`, per-kernel + memcpy) split the ocean's 82% ~half/half:
+- **3-D physics KERNELS**: FCT tracer advection **~30%** (the biggest — ~20 kernels × 2 tracers), momentum
+  ~15%, diffusion (Redi `diff_hor` + vertical TDMA `diff_ver`) ~14%, GM (`sigma_xy` 5.6% alone) ~10%,
+  ALE `vert_vel` ~5%, KPP ~1%.
+- **FULL-FIELD PCIe**: `cudaMemcpy` = **82.8% of CUDA-API time**, **~13 GB/step** at np=1 (copies up to
+  188 MB = full elemvec fields) = the host-staged ocean halos NOT flipped in M5.1 (full-field `sync_host`/
+  `sync_device`) + the EOS/KPP `smooth_nod3D` round-trips. **This is the removable cost.**
+
+### M5.4 — lever A: flip the remaining ocean halos to device-halo (in progress)
+
+The host-staged ocean halos use the M1.5 **split-rail** pattern: device kernel → `sync_host` (OUT) → host
+`fesom_halo_exchange` → the consumer's `modify_host(); sync_device()` (IN re-push). Flipping each: replace
+the OUT-rail + halo with `fesom_halo_field`, and **remove the downstream IN re-push** (the field stays
+device-resident with its halo; else the re-push clobbers the device halo). Safe because: the per-kernel
+verifies read the **raw alias** (not `h_checked()` → no SYNCCHECK assert), and on Serial every sync is a
+no-op (host==device), so removing them is a no-op there. Validate EACH: Serial np1+np2 bit-identical +
+CUDA pi dist_2 A/B at the run-to-run noise floor + re-time CORE2 dist_8.
+
+**Progress (CORE2 dist_8, device-halo s/step; host-staged baseline ~0.77):**
+
+| flipped | device s/step | total gain |
+|---|---|---|
+| M5.1: CG, momentum (`uvnode_rhs`/`u_b`/`v_b`), gm (`tr_xy`/`tr_z`), ice-FCT | 0.716 | 8.2% |
+| **M5.4: + `uv_rhs`** (elem3D, 3×/step across momentum substeps 4–6) | **0.658** | **14.3%** |
+
+`uv_rhs` alone added ~8% (0.716→0.658) — confirming the PCIe finding. **Remaining targets** (by payoff):
+`pgf_x`/`pgf_y` (elem3D, big), the FCT internal halos (`fesom_tracer_adv.cpp`), `uvnode` (nod3D), `ssh_rhs`
+(nod2D, small), tracer-diff; the **GM chain** (8 halos — its device kernels read *owned*, so some halos may
+be verify-only → trace before flipping); **NOT** EOS/KPP (smoothing-bound — need `smooth_nod3D` on device).
+
 ## The comparison
 
 `scripts/m32_climate_compare.py <backend_dir> --label <CUDA|OpenMP>` — annual-mean surface stats
