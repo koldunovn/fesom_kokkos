@@ -28,10 +28,18 @@ within the Fortran↔C budget (i.e. the GPU/OpenMP port is climate-faithful).
 
 | backend | job | partition | run | time est. | output |
 |---|---|---|---|---|---|
-| CUDA   | `jobs/job_m32_cuda_core2` | gpu (8×A100/2 nodes, dist_8) | 2-yr CORE2 (34560 steps) | **measure first** (`jobs/job_gpu_time_core2`, post-M4); M3.1 was 0.86 s/step → ~8.3 h, post-M4 faster (CG+ice on device) — likely ~2–8 h; gpu max wall 12 h | `/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda` |
+| CUDA   | `jobs/job_m32_cuda_core2` | gpu (8×A100/2 nodes, dist_8) | 2-yr CORE2 (34560 steps) | **measured 0.731 s/step** (job 25163175, post-M4) → **2-yr ≈ 7.0 h** (1-yr ≈ 3.5 h); fits the 12 h gpu wall | `/work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda` |
 | OpenMP | `jobs/job_m32_omp_core2`  | compute (2 nodes, 32 ranks × 8 threads) | 2-yr CORE2 | ~1–2 h (CPU; ⚠️ rebuild `build-omp` first — stale since M4.3c) | `/work/ab0995/a270088/port2/m32_omp` |
 
 Both write monthly means `<var>.fesom.{1958,1959}.monthly.nc` (JRA55 1958→1959 rollover — confirm in the log).
+
+**Perf note (post-M4 GPU step, job 25163175):** 0.731 s/step on dist_8 — only ~15% faster than M3.1's
+0.86 s/step *despite* moving the CG (M4.2) + the whole ice step (M4.3) onto the device. The per-step time
+is now dominated by the **host-staged halos** (device→host→MPI→host→device): the CG's ~90–127 iters/step
+× its pp/rr exchanges, the EVP's 120 subcycles × uice/vice, the FCT's ~21 brackets — and moving the CG/EVP
+to the device actually *added* PCIe round-trips for those halos (they were host↔host at M3.1). **GPU-aware
+MPI to halo on-device is the M5 unlock**, not more kernel porting. (CORE2 is also small/bandwidth-bound,
+M3.1 note.) M3.2 is about *fidelity*, not speed — but this is the headline for the M5 prompt.
 
 ## The comparison
 

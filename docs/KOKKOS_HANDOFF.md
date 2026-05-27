@@ -578,12 +578,12 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
 > 1. **Rebuild `build-omp`** — it is STALE (last built at M4.3c, before M4.3d-a/b). `source ./env.sh &&
 >    cmake --build build-omp -j 16`. (`build-cuda` is current — rebuilt through M4.3d-b.) If you touched
 >    any struct layout since, `touch src/*` first (L18).
-> 2. **Time the GPU step (post-M4)**: `sbatch jobs/job_gpu_time_core2` → `grep TIMING …/gtime.<jid>.out`.
->    M3.1 measured 0.86 s/step but that was WITH the CG+ice round-tripping to host every step; M4.2/M4.3
->    moved those to device, so expect faster. Use the number to confirm the 2-yr GPU run (34560 steps)
->    fits the gpu partition's **12 h** wall (`jobs/job_m32_cuda_core2` is set to `--time=12:00:00`); if the
->    step is >~0.5 s, drop that job's `NSTEPS` to 17280 (1 yr still shows the drift) or split into 2×1-yr.
-> 3. **Launch both 2-yr runs**: `sbatch jobs/job_m32_cuda_core2` (CUDA dist_8, ~2–8 h) + `sbatch
+> 2. **GPU step timing — DONE (job `25163175`): 0.731 s/step** post-M4 (only ~15% faster than M3.1's
+>    0.86 despite CG+ice now on device — the per-iter host-staged halos dominate; M5 territory, see
+>    `docs/GPU_FIDELITY.md` perf note). So **2-yr ≈ 7.0 h, fits the 12 h gpu wall** → launch
+>    `jobs/job_m32_cuda_core2` AS-IS (NSTEPS=34560). (Re-time only if you change the halo path. To
+>    re-measure: `sbatch jobs/job_gpu_time_core2` → `grep TIMING …/gtime.<jid>.out`.)
+> 3. **Launch both 2-yr runs**: `sbatch jobs/job_m32_cuda_core2` (CUDA dist_8, ~7 h, measured) + `sbatch
 >    jobs/job_m32_omp_core2` (OpenMP 32 ranks × 8 threads, ~1–2 h). Both write
 >    `<var>.fesom.{1958,1959}.monthly.nc` → `/work/…/{kokkos_gpu_runs/m32_cuda, m32_omp}`. ⚠️ Confirm the
 >    JRA55 **1958→1959 year rollover** fired (the job greps for it) — 2-yr is the first multi-year run.
