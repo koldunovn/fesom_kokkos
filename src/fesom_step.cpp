@@ -13,6 +13,7 @@
 #include "fesom_forcing.h"
 #include "fesom_gm.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.4: flip ocean halos to GPU-aware-MPI (fesom_halo_field)
 #include "fesom_ice.h"
 #include "fesom_kpp.h"
 #include "fesom_mesh.h"
@@ -402,12 +403,13 @@ int fesom_timestep(int                          step_n,
     aux->pgf_y_fld.modify_host();    aux->pgf_y_fld.sync_device();
     mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
-    dyn->uv_rhs_fld.sync_host();     /* OUT rail: before the elem3D halos */
-    dyn->uv_rhsAB_fld.sync_host();
+    dyn->uv_rhsAB_fld.sync_host();   /* OUT rail (uv_rhsAB stays host-staged — cross-step AB history) */
     if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
                                                     vrhs_uv_rhsAB_in.data());
-    /* uv_rhs needed by visc_filt_bidiff on halo elements */
-    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(),   FESOM_HALO_ELEM3D, nl, 2, p);
+    /* M5.4: uv_rhs needed by visc_filt_bidiff on HALO elements → device-halo (GPU-aware MPI on
+     * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:
+     * uv_rhs now stays device-resident with its halo across substeps 4-6. */
+    fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
     fesom_halo_exchange(dyn->uv_rhsAB_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
@@ -425,13 +427,12 @@ int fesom_timestep(int                          step_n,
         vfb_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before (full extent) */
     }
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
-    dyn->uv_rhs_fld.modify_host(); dyn->uv_rhs_fld.sync_device();
+    /* M5.4: uv_rhs is device-resident with its halo from substep 4 — no IN re-push. */
     fesom_visc_filt_bidiff_kk(mesh, dyn, p);   /* device: uv_rhs += biharmonic; internal Uc/Vc halo (D21) */
-    dyn->uv_rhs_fld.sync_host();               /* OUT rail: before the elem3D halo */
     if (s_verify_vfilt) fesom_visc_filt_bidiff_verify(mesh, dyn, p, step_n, vfb_uv_rhs_in.data());
-    /* uv_rhs is the final output; needed at halo for impl_vert_visc neighbour
-     * reads through the TDMA SpMV. */
-    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
+    /* uv_rhs (final output) needed at halo for impl_vert_visc neighbour reads (TDMA SpMV) →
+     * device-halo (GPU-aware MPI on CUDA, host-staged on Serial). */
+    fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
      *  SYNC_MAP §2 row 6. IN rail: sync ALL inputs explicitly (L28) — uv_rhs (the
@@ -446,7 +447,7 @@ int fesom_timestep(int                          step_n,
         const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;
         ivv_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before */
     }
-    dyn->uv_rhs_fld.modify_host(); dyn->uv_rhs_fld.sync_device();
+    /* M5.4: uv_rhs is device-resident with its halo from substep 5 — no IN re-push. */
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
     dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
     aux->Av_fld.modify_host();     aux->Av_fld.sync_device();
@@ -454,9 +455,8 @@ int fesom_timestep(int                          step_n,
     {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
         fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();   }
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
-    dyn->uv_rhs_fld.sync_host();                        /* OUT rail: before the elem3D halo */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
-    fesom_halo_exchange(dyn->uv_rhs_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */
 
     /*  7-10. The §5 SSH block — M4.2: ON THE DEVICE (closes the SYNC_MAP §5 mid-step
      *  host CG round-trip; substeps 1-14 now flow on device except the trivial host eta_n
@@ -488,7 +488,7 @@ int fesom_timestep(int                          step_n,
         ssh_pre_etan.assign  (dyn->eta_n,       dyn->eta_n       + Nn_ssh);
     }
     dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
-    dyn->uv_rhs_fld.modify_host();      dyn->uv_rhs_fld.sync_device();
+    /* M5.4: uv_rhs is device-resident with its halo from substep 6 — no re-push. */
     dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
     dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
     mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
