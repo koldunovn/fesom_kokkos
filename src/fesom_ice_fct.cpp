@@ -21,6 +21,7 @@
 #include "fesom_ice_fct.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_ice.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -579,18 +580,13 @@ using DV  = fesom::Field::dev_view_t;
 using IDV = fesom::IntField::dev_view_t;
 
 /* D21 internal-halo bracket on a nod2D Field: a device kernel wrote f's OWNED rows;
- * make the halo current for the next device reader. modify_device() always (so the
- * driver's OUT sync_host copies the result at np==1 too); the host round-trip only
- * at np>1 (the EVP/CG idiom — eDim_nod2D==0 at np==1 so there is no halo). */
+ * make the halo current for the next device reader. M5.1: fesom_halo_field dispatches
+ * to GPU-aware-MPI on-device exchange under CUDA (no full-field PCIe sync); host-staged
+ * on Serial/OpenMP. modify_device() always (the driver's OUT sync_host copies the result
+ * at np==1 too); the halo only at np>1 (eDim_nod2D==0 at np==1 so there is no halo). */
 static inline void fct_halo_nod2D(fesom::Field &f, struct fesom_partit *partit)
 {
-    f.modify_device();
-    if (partit && partit->npes > 1) {
-        f.sync_host();
-        fesom_exchange_nod2D(f.h_checked(), partit);
-        f.modify_host();
-        f.sync_device();
-    }
+    fesom_halo_field(f, FESOM_HALO_NOD2D, 1, 1, partit);
 }
 
 /* ---- E2 device twin: ice_TG_rhs (ice_fct.F90:91) ---------------------------- */

@@ -32,6 +32,7 @@
 #include <algorithm>          // M4.2-b: verify snapshot/restore copies (host-only diagnostic)
 
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.1: on-device (GPU-aware-MPI) halo exchange
 #include "fesom_partit.h"
 
 /*===========================================================================
@@ -707,11 +708,16 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
      * The leading modify_device() captures the device-kernel write so sync_host() copies
      * it; sync_device() at the end re-pushes the halo'd field for the next SpMV (D21). */
     auto exch = [&](fesom::Field &f) {
-        if (parallel) {
-            f.modify_device(); f.sync_host();
-            fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
-            f.modify_host();   f.sync_device();
+        if (!parallel) return;
+#ifdef KOKKOS_ENABLE_CUDA
+        if (fesom_halo_device_active()) {            /* M5.1: device pack -> GPU-aware MPI -> device unpack */
+            fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit);
+            return;
         }
+#endif
+        f.modify_device(); f.sync_host();            /* legacy host-staged (Serial/OpenMP; FESOM_HOST_HALO=1) */
+        fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+        f.modify_host();   f.sync_device();
     };
     #define ALLREDUCE_SUM(var) do { if (parallel) \
         MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); \

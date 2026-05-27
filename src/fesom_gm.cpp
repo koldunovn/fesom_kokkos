@@ -11,6 +11,7 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -1785,14 +1786,10 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
                 txy((size_t)el * nl1 * 2 + nz * 2 + 1) = g3*T0 + g4*T1 + g5*T2;
             }
         });
-    gm->tr_xy_fld.modify_device();
-
     /* Internal halo (D21): exchange_elem(tr_xy) — full element halo, both comps.
      * The per-node gather below reads tr_xy at the surrounding elements, which can
-     * be HALO elements, so the exchanged values must be device-current. */
-    gm->tr_xy_fld.sync_host();
-    fesom_halo_exchange(gm->tr_xy_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl1, 2, partit);
-    gm->tr_xy_fld.modify_host(); gm->tr_xy_fld.sync_device();
+     * be HALO elements. M5.1: GPU-aware-MPI on-device under CUDA, host-staged else. */
+    fesom_halo_field(gm->tr_xy_fld, FESOM_HALO_ELEM2D_FULL, nl1, 2, partit);
 
     /* Step 2: per-node Redi vertical-explicit flux → += values (each node owns
      * its column → race-free map). */
@@ -1916,13 +1913,9 @@ void fesom_diff_part_hor_redi_kk(int                      tr_idx,
                 trz((size_t)n * nl + nz) = (T_up - T_dn) / dz;
             }
         });
-    gm->tr_z_fld.modify_device();
-
     /* Internal halo (D21): exchange_nod3D(tr_z). The edge loop reads tr_z at the
-     * two endpoints, which can be HALO nodes. */
-    gm->tr_z_fld.sync_host();
-    fesom_exchange_nod3D(gm->tr_z_fld.h_checked(), nl, partit);
-    gm->tr_z_fld.modify_host(); gm->tr_z_fld.sync_device();
+     * two endpoints, which can be HALO nodes. M5.1: GPU-aware-MPI on-device. */
+    fesom_halo_field(gm->tr_z_fld, FESOM_HALO_NOD3D, nl, 1, partit);
 
     /* Step 2: edge loop → edge→node SCATTER into `values` (atomic_add, D22). */
     Kokkos::parallel_for("fesom_gm_redi_hor_edge", Kokkos::RangePolicy<>(0, EG),

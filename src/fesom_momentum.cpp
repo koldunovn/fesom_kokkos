@@ -9,6 +9,7 @@
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 
@@ -411,13 +412,9 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
         });
 
     /* 4. exchange uvnode_rhs (Fortran 559) — INTERNAL nod3D halo bracket (D21).
-       Device-compute → sync_host → halo (h_checked) → sync_device → device-compute.
-       Exchange unconditional like the C twin (a no-op at np=1); round-trip no-op on Serial. */
-    dyn->uvnode_rhs_fld.modify_device();
-    dyn->uvnode_rhs_fld.sync_host();
-    fesom_halo_exchange(dyn->uvnode_rhs_fld.h_checked(), FESOM_HALO_NOD3D, nl, 2, partit);
-    dyn->uvnode_rhs_fld.modify_host();
-    dyn->uvnode_rhs_fld.sync_device();
+       Device-compute → halo → device-compute. M5.1: fesom_halo_field dispatches to
+       GPU-aware-MPI on-device exchange under CUDA; host-staged on Serial/OpenMP. */
+    fesom_halo_field(dyn->uvnode_rhs_fld, FESOM_HALO_NOD3D, nl, 2, partit);
 
     /* 5. vertex → element: uv_rhsAB += elem_area·mean(3 vertices) (Fortran 565-573).
        Per-element gather (each element writes only its own uv_rhsAB) → race-free, no atomic. */
@@ -1453,21 +1450,11 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
         });
 
     /* ---- INTERNAL HALO BRACKET: exchange_elem(U_c, V_c) (Fortran 670-672) ----
-     * Stage 1 wrote Uc/Vc on device → sync_host → halo (h_checked) → sync_device,
-     * so stage 2 reads halo-current Uc/Vc on the device (D21). The exchange is gated
-     * on npes>1 like the C twin (a no-op at np=1); the round-trip is a no-op on Serial. */
-    dyn->u_b_fld.modify_device();
-    dyn->v_b_fld.modify_device();
-    dyn->u_b_fld.sync_host();
-    dyn->v_b_fld.sync_host();
-    if (partit && partit->npes > 1) {
-        fesom_halo_exchange(dyn->u_b_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 1, partit);
-        fesom_halo_exchange(dyn->v_b_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 1, partit);
-    }
-    dyn->u_b_fld.modify_host();
-    dyn->v_b_fld.modify_host();
-    dyn->u_b_fld.sync_device();
-    dyn->v_b_fld.sync_device();
+     * Stage 1 wrote Uc/Vc on device → halo → stage 2 reads halo-current Uc/Vc on
+     * device (D21). M5.1: fesom_halo_field dispatches to GPU-aware-MPI on-device
+     * under CUDA; host-staged on Serial/OpenMP (a no-op round-trip at np=1). */
+    fesom_halo_field(dyn->u_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
+    fesom_halo_field(dyn->v_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
 
     /* Stage 2 edge loop (Fortran 677-742, non-subcycl) — EDGE→ELEMENT scatter into uv_rhs. */
     Kokkos::parallel_for("fesom_visc_bidiff_stage2", Kokkos::RangePolicy<>(0, Eedg),

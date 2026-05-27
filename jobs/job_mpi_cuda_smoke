@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=mpi_cuda_smoke
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:10:00
+#SBATCH -o /scratch/a/a270088/smoke_out/smoke.%j.out
+#SBATCH -e /scratch/a/a270088/smoke_out/smoke.%j.err
+#
+# M5.1 PREREQ (§4.1): prove device-pointer MPI works on Levante.
+# RESULT so far: openmpi/4.1.2-gcc-11.2.0 (--without-cuda, spack UCX 1.12 has NO
+# cuda transports) SEGFAULTS on a device-ptr Sendrecv. This job tests the
+# CUDA-aware NVIDIA stack: openmpi/4.1.5-nvhpc-24.7 (bundles a CUDA UCX with
+# libuct_cuda/gdrcopy). Each srun is timeout-guarded.
+
+SMOKE=/scratch/a/a270088/mpi_cuda_smoke_nvhpc
+mkdir -p /scratch/a/a270088/smoke_out
+
+source /sw/etc/profile.levante
+module --force purge
+module unload netcdf-c cdo ncview git 2>/dev/null
+module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0
+module unload openmpi 2>/dev/null               # drop any default that conflicts
+module load openmpi/4.1.5-nvhpc-24.7
+export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+
+echo "############ nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS ############"
+echo "mpirun -> $(which mpirun)"; ompi_info 2>/dev/null | grep -iE "Open MPI:" | head -1
+ompi_info 2>/dev/null | grep -i cuda | head
+nvidia-smi -L || true
+echo ""
+
+# common OMPI: ucx PML, IB device, no hcoll
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl="^openib"
+export UCX_NET_DEVICES=mlx5_0:1
+export OMPI_MCA_io=romio321
+export HDF5_USE_FILE_LOCKING=FALSE
+
+run_cfg () {  # $1=label
+  echo "================= CONFIG $1 ================="
+  env | grep -E '^UCX_(TLS|MEMTYPE_CACHE|RNDV)' | sort
+  timeout 60 srun -l "$SMOKE"
+  echo "--- CONFIG $1 srun rc=$? ---"; echo ""
+}
+
+# [B] nvhpc-openmpi defaults (UCX auto-selects, incl. cuda) + memtype cache off.
+unset  UCX_TLS
+export UCX_MEMTYPE_CACHE=n
+run_cfg "B_nvhpc_default_autocuda"
+
+# [C] explicit cuda transports (intra-node P2P: cuda_ipc/cuda_copy; +gdr for inter-node).
+export UCX_TLS=sm,self,cuda_copy,cuda_ipc,gdr_copy,rc_x,dc_x
+export UCX_MEMTYPE_CACHE=n
+run_cfg "C_explicit_cuda_tls"
+
+echo "############ DONE ############"

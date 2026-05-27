@@ -15,6 +15,7 @@
 #include "fesom_ice_fct.h"
 #include "fesom_io.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.1 GPU-aware-MPI on-device halo
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_sss_runoff.h"
@@ -988,7 +989,19 @@ skip_rest_state:
             fflush(stdout);
         }
 
+        /* M5.1 perf: startup-free loop timer. Wall over steps [warmup+1, nsteps],
+         * with Kokkos::fence + MPI_Barrier at both ends so it measures the
+         * synchronised GPU/host steady-state (excludes CUDA context init + the
+         * first `warmup` steps). Printed once at the end by rank 0. */
+        const int time_warmup  = (nsteps > 10) ? 5 : 0;
+        double    t_loop_start = 0.0;
+
         for (int n = 1; n <= nsteps; ++n) {
+            if (n == time_warmup + 1) {
+                Kokkos::fence();
+                MPI_Barrier(MPI_COMM_WORLD);
+                t_loop_start = MPI_Wtime();
+            }
             if (use_jra) {
                 /* Calendar crosses year boundaries cleanly now that
                  * fesom_jra55_step_cal calls open_year on rollover; the
@@ -1245,6 +1258,18 @@ skip_rest_state:
                                         &mesh, &dyn, &tracers, &aux, &ice, &mpi);
             }
         }
+        {   /* M5.1 perf: report startup-free per-step wall (see time_warmup above). */
+            Kokkos::fence();
+            MPI_Barrier(MPI_COMM_WORLD);
+            double t_loop_end = MPI_Wtime();
+            int    timed      = nsteps - time_warmup;
+            if (mpi.mype == 0 && timed > 0) {
+                printf("[fesom_port] loop timing: %d steps (excl %d warmup) = %.3f s  ->  %.4f s/step\n",
+                       timed, time_warmup, t_loop_end - t_loop_start,
+                       (t_loop_end - t_loop_start) / (double)timed);
+                fflush(stdout);
+            }
+        }
         free(T_ic); free(S_ic);
 
         /* Mid-window flush + close monthly stream files. */
@@ -1266,6 +1291,7 @@ skip_rest_state:
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);
     fesom_mesh_free(&mesh);
+    fesom_halo_device_free();   // device Views must not outlive Kokkos::finalize()
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;

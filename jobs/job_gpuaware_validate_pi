@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=kk_gpuaware_pi
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/gpuaware_pi.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/gpuaware_pi.%j.err
+#
+# M5.1 A/B regression gate: pi dist_2 (2 ranks / 2 A100s, 1 node) run TWICE with
+# the SAME CUDA-aware binary, differing ONLY in the halo data path:
+#   [HOST]  FESOM_HOST_HALO=1 -> legacy device->host->MPI->host->device bracket
+#   [DEV]   default            -> on-device pack -> GPU-aware MPI -> device unpack
+# GPU-aware MPI changes the DATA PATH, not the arithmetic, and the CG owned
+# compute is induction-identical, so the two snapshot dirs MUST be BYTE-IDENTICAL
+# (max|Δ|==0) -- a regression check, NOT a new divergence. Diff on the login node:
+#   python scripts/diff_snap.py $OUT_HOST $OUT_DEV       # expect BIT-IDENTICAL
+# Also climate-close vs the np=2 Serial oracle (no new divergence):
+#   python scripts/diff_snap.py /scratch/a/a270088/pi_np2_ref_m13_nocma $OUT_DEV
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"                       # CUDA-aware openmpi/4.1.5-nvhpc-24.7
+
+# UCX env proven by jobs/job_mpi_cuda_smoke (config B): device-ptr MPI works.
+export OMPI_MCA_pml=ucx
+export OMPI_MCA_btl=self
+export UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n                        # required for cuda memtype detection
+export OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321
+export HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+OUT_HOST=$BASE/gpuaware_pi_host
+OUT_DEV=$BASE/gpuaware_pi_dev
+rm -rf "$OUT_HOST" "$OUT_DEV"; mkdir -p "$OUT_HOST" "$OUT_DEV"
+
+echo "=== host=$(hostname) nodes=$SLURM_JOB_NODELIST ranks=$SLURM_NTASKS ==="
+echo "=== ompi: $(ompi_info 2>/dev/null | grep -m1 'Open MPI:') ==="
+nvidia-smi -L
+export FESOM_PRINT_EVERY=1       # per-step T/S ranges + CG it= (the blow-up + parity check)
+
+echo ""; echo "############ [HOST] FESOM_HOST_HALO=1 (legacy host-staged) ############"
+FESOM_HOST_HALO=1 srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT_HOST" 100 20 10
+echo "[HOST] Exit: $?"
+
+echo ""; echo "############ [DEV] device halo (GPU-aware MPI, default) ############"
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT_DEV" 100 20 10
+echo "[DEV] Exit: $?"
+
+echo ""; echo "############ DONE — diff on login node:"
+echo "  python $ROOT/scripts/diff_snap.py $OUT_HOST $OUT_DEV   # expect BIT-IDENTICAL"

@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_gpuaware_repro
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/gpuaware_repro.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/gpuaware_repro.%j.err
+#
+# M5.1 diagnostic: is host-vs-device at the CUDA run-to-run NOISE floor (the
+# atomic-scatter kernels: momentum_adv/vert_vel/... are non-deterministic
+# run-to-run on CUDA, perturbing ssh_rhs -> the CG) or does device-halo add a
+# NEW divergence? Run host-staged TWICE + device ONCE; diff on the login node:
+#   host1 vs host2 == the run-to-run floor (legacy path, no halo change)
+#   host1 vs dev   == device-halo vs host-staged
+# PASS = host-vs-dev is the SAME order/field-pattern as host-vs-host (no new
+# divergence; data path only).
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+H1=$BASE/repro_host1; H2=$BASE/repro_host2; D1=$BASE/repro_dev1
+rm -rf "$H1" "$H2" "$D1"; mkdir -p "$H1" "$H2" "$D1"
+export FESOM_PRINT_EVERY=999
+
+echo "### host1 (FESOM_HOST_HALO=1)";  FESOM_HOST_HALO=1 srun "$ROOT/build-cuda/fesom_port" "$MESH" "$H1" 100 20 10 >/dev/null 2>&1; echo " rc=$?"
+echo "### host2 (FESOM_HOST_HALO=1)";  FESOM_HOST_HALO=1 srun "$ROOT/build-cuda/fesom_port" "$MESH" "$H2" 100 20 10 >/dev/null 2>&1; echo " rc=$?"
+echo "### dev1  (device halo)";                          srun "$ROOT/build-cuda/fesom_port" "$MESH" "$D1" 100 20 10 >/dev/null 2>&1; echo " rc=$?"
+echo "### DONE. Diff on login node:"
+echo "  python $ROOT/scripts/diff_snap.py $H1 $H2   # run-to-run floor"
+echo "  python $ROOT/scripts/diff_snap.py $H1 $D1   # device-halo vs host-staged"
