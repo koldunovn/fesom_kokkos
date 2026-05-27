@@ -290,12 +290,12 @@ int fesom_timestep(int                          step_n,
      *  nlevels are set-once device-current (mesh_sync_geometry_device). No-op on Serial/OpenMP. */
     aux->hpressure_fld.modify_host(); aux->hpressure_fld.sync_device();
     fesom_pressure_force_linfs_fullcell_kk(mesh, aux);   /* device: pgf_x, pgf_y (elem) */
-    /* OUTPUT rail: pull pgf to host before the elem3D halos (read via h_checked). */
-    aux->pgf_x_fld.sync_host();
-    aux->pgf_y_fld.sync_host();
     if (s_verify_pgf) fesom_pressure_force_verify(mesh, aux, step_n);
-    fesom_exchange_elem3D(aux->pgf_x_fld.h_checked(), nl, p);
-    fesom_exchange_elem3D(aux->pgf_y_fld.h_checked(), nl, p);
+    /* M5.4: pgf device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
+     * sync_host + the vel_rhs IN re-push (substep 4) are gone — pgf stays device-resident
+     * with its halo (vel_rhs reads it on-device). */
+    fesom_halo_field(aux->pgf_x_fld, FESOM_HALO_ELEM3D, nl, 1, p);
+    fesom_halo_field(aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
 
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment — M2.2: device kernels.
      *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
@@ -310,9 +310,10 @@ int fesom_timestep(int                          step_n,
      * Mesh CSR / elem_area / levels are set-once device-current. (No-op on Serial/OpenMP.) */
     dyn->uv_fld.modify_host(); dyn->uv_fld.sync_device();
     fesom_compute_vel_nodes_kk(mesh, dyn);              /* device: writes dyn->uvnode (owned) */
-    dyn->uvnode_fld.sync_host();                        /* OUT rail: before the halo + host KPP/PP */
     if (s_verify_pp) fesom_compute_vel_nodes_verify(mesh, dyn, step_n);
-    fesom_halo_exchange(dyn->uvnode_fld.h_checked(), FESOM_HALO_NOD3D, nl, 2, p);
+    /* M5.4: uvnode device-halo (GPU-aware MPI on CUDA, host-staged on Serial); the OUT sync_host
+     * + the KPP/PP IN re-pushes are gone — uvnode stays device-resident with its halo. */
+    fesom_halo_field(dyn->uvnode_fld, FESOM_HALO_NOD3D, nl, 2, p);
 
     if (s_use_kpp) {
         /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
@@ -326,7 +327,7 @@ int fesom_timestep(int                          step_n,
         aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
         aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
         aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
-        dyn->uvnode_fld.modify_host();   dyn->uvnode_fld.sync_device();
+        /* M5.4: uvnode device-resident with its halo (substep 3) — no re-push. */
         tracers->data[FESOM_TRACER_S].values_fld.modify_host();
         tracers->data[FESOM_TRACER_S].values_fld.sync_device();
         mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
@@ -346,9 +347,8 @@ int fesom_timestep(int                          step_n,
         aux->Kv_fld.sync_host();
         if (s_verify_kpp) fesom_kpp_verify(ctx->kpp, aux, tracers, forcing, dyn, mesh, p, step_n);
     } else {
-        /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: uvnode (host-halo'd above)
-         * + bvfreq (host-written by smooth_nod3D, substep 1) → device. */
-        dyn->uvnode_fld.modify_host(); dyn->uvnode_fld.sync_device();
+        /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: bvfreq (host-written by
+         * smooth_nod3D, substep 1) → device. M5.4: uvnode is device-resident (substep 3, no re-push). */
         aux->bvfreq_fld.modify_host(); aux->bvfreq_fld.sync_device();
         fesom_pp_mixing_kk(mesh, dyn, aux);             /* device: Kv (node), Av (elem) */
         aux->Kv_fld.sync_host();                        /* OUT rail: before the Kv/Av halos */
@@ -399,8 +399,7 @@ int fesom_timestep(int                          step_n,
     dyn->uv_rhsAB_fld.modify_host(); dyn->uv_rhsAB_fld.sync_device();
     dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
     dyn->w_e_fld.modify_host();      dyn->w_e_fld.sync_device();
-    aux->pgf_x_fld.modify_host();    aux->pgf_x_fld.sync_device();
-    aux->pgf_y_fld.modify_host();    aux->pgf_y_fld.sync_device();
+    /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
     dyn->uv_rhsAB_fld.sync_host();   /* OUT rail (uv_rhsAB stays host-staged — cross-step AB history) */
