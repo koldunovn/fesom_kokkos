@@ -163,14 +163,21 @@ CUDA pi dist_2 A/B at the run-to-run noise floor + re-time CORE2 dist_8.
 | M5.4a: + `uv_rhs` (elem3D, 3×/step, momentum substeps 4–6) | 0.658 | 14.3% |
 | M5.4b: + `pgf_x`/`pgf_y` (elem3D) + `uvnode` (nod3D 2-comp) | 0.643 | 16.7% |
 | M5.4c: + FCT internal halos (`fct_LO`/`tr_xy`/`fct_plus`/`fct_minus`, 8 exch/step) | 0.592 | 23.3% |
-| **M5.5 (lever B): `bvfreq` device smoother** (`smooth_nod3D_kk`) + 4 re-pushes removed | **0.577** | **~25%** |
+| M5.5a (lever B): `bvfreq` device smoother (`smooth_nod3D_kk`) + 4 re-pushes removed | 0.577 | ~25% |
+| **M5.5b (lever B done): KPP `blmc` device smoother** (3 slabs × 3 sweeps, slab-offset) | **0.503** | **~30–35%** |
 
 **Lever B (M5.5) — `smooth_nod3D` on the device (+ an I/O-staleness fix).** `fesom_smooth_nod3D_kk`
 (`fesom_eos.cpp`): the node-patch smoother on-device (2 race-free kernels/sweep — gather then scale,
 *separate* so `arr` is read-then-written, no race; + device-halo between sweeps). Serial bit-identical to the
 C smoother. Wired `bvfreq`: device-halo + device-smooth + **removed the 4 consumer `bvfreq` IN re-pushes**
-(GM/KPP/PP/mo_convect) → device-resident; ~2.5% + the smoothing compute moves off the host. (Remaining for B:
-KPP `blmc` — 3-slab × 3-sweep, needs a slab-offset smoother/halo.) ⚠️ **I/O-staleness gotcha it caught (an
+(GM/KPP/PP/mo_convect) → device-resident; ~2.5%. **M5.5b finished B with KPP `blmc`** (3 slabs × 3 sweeps;
+added a `base` element-offset to `fesom_halo_exchange_device`/`fesom_halo_field`/`smooth_nod3D_kk` so a slab
+exchanges/smooths on its own) → **dev 0.577 → 0.503 = ~13%!** The host `smooth_nod3D` ran blmc's **9 sweeps
+single-threaded on the host** (the GPU build's Serial host) — a large hidden cost that **`nsys` never saw**
+(GPU-kernel-only) but the phase profiler counted inside the ocean's 82%. So **lever B ≈ 15% total** (bvfreq
+2.5% + blmc 13%) — much more than the nsys kernel view (KPP ~1%) implied, because the dominant cost was
+host *compute*, not a GPU kernel. **Cumulative device-halo + smoother: M5.1 0.716 → 0.503 s/step (~30% on
+the device path; ~35% vs the original ~0.78 all-host).** Lever B DONE. ⚠️ **I/O-staleness gotcha it caught (an
 M5.4b regression):** flipping a field that is *also a snapshot output* (`pgf`, `bvfreq`) removes its OUT-rail
 `sync_host`, so it's DEVICE-authoritative at I/O time and the gather (`h_checked()`) reads the **stale host
 copy** on CUDA — the *model* is correct (device-resident), only the *diagnostic output* is wrong. Fix: a

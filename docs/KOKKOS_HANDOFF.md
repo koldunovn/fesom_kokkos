@@ -15,17 +15,21 @@ Commits `a1726cd` (M5.2), `4934a43` (M5.3), `4120d02` (M5.4). Full story: lesson
   **self-contained** brackets (replace wholesale) and **split-rail** (replace OUT-rail+halo, REMOVE the
   downstream IN re-push). **DONE + validated** (each Serial np1+np2 bit-id + SYNCCHECK-clean + CUDA A/B at
   the noise floor): M5.4a `uv_rhs` (`4120d02`), M5.4b `pgf`+`uvnode` (`bfa71ff`), M5.4c FCT internal halos
-  `fct_LO`/`tr_xy`/`fct_plus`/`fct_minus` (`d3e0726`), **M5.5 lever B: `bvfreq` DEVICE smoother
-  `fesom_smooth_nod3D_kk` + 4 re-pushes removed (`0b329e3`)**. **CORE2 dist_8: host-staged 0.766 → device-halo
-  0.577 = ~25% cumulative device-halo gain** (8.2 → 14.3 → 16.7 → 23.3 → 25). Verifies read the RAW alias
-  (SYNCCHECK-safe). ⚠️ **M5.5 also FIXED a silent M5.4b regression**: flipping a field that is a snapshot
-  OUTPUT (pgf, bvfreq) removes its OUT-rail sync_host → DEVICE-authoritative at I/O → the gather (`h_checked`)
-  read STALE host on CUDA (model fine, only the diagnostic output wrong). Fix = pre-I/O `sync_host` of those
-  fields gated on the snapshot step (`fesom_main.cpp`). NOT caught by Serial/SYNCCHECK → **always diff ALL
-  output fields** (L48). ⚠️ REMAINING (lower/uncertain payoff): **GM chain** (reads OWNED → mostly verify-only,
-  trace per-field; only `fer_gamma` read-at-halo), `ssh_rhs` (nod2D small), tracer-diff, **KPP `blmc`** (lever
-  B but 3-slab × 3-sweep — needs a slab-offset device smoother/halo). On farc each flip pays ~1.5× more. Tools:
-  `FESOM_STEP_PROFILE=1`, `FESOM_CG_PROFILE=1`, `FESOM_HOST_HALO=1` (A/B toggle), `jobs/job_gpuaware_*`.
+  `fct_LO`/`tr_xy`/`fct_plus`/`fct_minus` (`d3e0726`), **M5.5 lever B DONE: device smoother
+  `fesom_smooth_nod3D_kk` for `bvfreq` (`0b329e3`) + KPP `blmc` (`c9c1fe7`, 3-slab via a `base` element-offset
+  added to the device-halo + smoother)**. **CORE2 dist_8: device-halo+smoother 0.716 → 0.503 s/step (~30% on
+  the device path; ~35% vs the original ~0.78 all-host).** ⚠️ **blmc was a +13% surprise**: the host
+  `smooth_nod3D` ran its 9 sweeps SINGLE-THREADED on the host (the GPU build's Serial host) — a big hidden cost
+  INVISIBLE to `nsys` (GPU-kernel-only) but counted by the phase profiler. So lever B ≈ 15% total (the host
+  *compute*, not the PCIe). Verifies read the RAW alias (SYNCCHECK-safe). ⚠️ **M5.5 also FIXED a silent M5.4b
+  regression**: flipping a field that is a snapshot OUTPUT (pgf, bvfreq) removed its OUT-rail sync_host →
+  DEVICE-authoritative at I/O → the gather (`h_checked`) read STALE host on CUDA (model fine, only the
+  diagnostic output wrong). Fix = pre-I/O `sync_host` of those fields gated on the snapshot step
+  (`fesom_main.cpp`). NOT caught by Serial/SYNCCHECK → **always diff ALL output fields** (L48). ⚠️ REMAINING
+  (low/uncertain payoff): **GM chain** (reads OWNED → mostly verify-only, trace per-field; only `fer_gamma`
+  read-at-halo), `ssh_rhs` (nod2D small), tracer-diff. **C (the heavy kernels — FCT ~30%, layout/coalescing) =
+  separate session + branch.** On farc each flip pays ~1.5× more. Tools: `FESOM_STEP_PROFILE=1`,
+  `FESOM_CG_PROFILE=1`, `FESOM_HOST_HALO=1` (A/B toggle), `jobs/job_gpuaware_*`, `jobs/job_nsys_core2_np1`.
 
 **Session 18 (2026-05-27) — M5.1a COMPLETE: GPU-aware MPI on-device halo exchange (the perf track).**
 Commit **`d6b0a1f`**. The whole story is lesson **L47** + `docs/GPU_FIDELITY.md` §M5.1 + `docs/NEXT_GPU_AWARE_MPI.md`.
