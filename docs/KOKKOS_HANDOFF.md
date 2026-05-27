@@ -1,5 +1,30 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 17 (2026-05-27) — M4.3c COMPLETE: the sea-ice FCT advection on the device.** Commit
+**`<this>`** — `fesom_ice_tg_rhs_kk` + `fesom_ice_fct_solve_kk` (`src/fesom_ice_fct.cpp`), the M2.6
+ocean-FCT analogue but 2-D (single surface layer), reusing the M4.2 SSH-CSR machinery. **Three toolkit
+patterns composed:** (1) `tg_rhs` = the EVP `stress2rhs` shape (zero-map + element→node SCATTER into
+`values_rhs`, no halo); (2) `ice_solve_low/high_order` = the **M4.2 CG per-row CSR-gather SpMV** over the
+`ssh_stiff` sparsity + `fct_massmatrix` (race-free → bit-id Serial AND OpenMP) — `high_order` is the
+CG/EVP **host-loop** (iterate device sweeps + per-iter `dvalues` halo); (3) 3× Zalesak `ice_fem_fct` =
+antidiff-flux map + cluster-min/max gather + `icepplus/icepminus` SCATTER + correction/limit maps + apply
+(overwrite `vals=valuesl` + `vals += fluxes` SCATTER). **3 element→node SCATTERS (D22, `atomic_add`):**
+tg_rhs assemble, fem_fct +/- sum, fem_fct vals apply — Serial bit-identical, OpenMP/CUDA climate-close.
+`fct_massmatrix` shares the ssh_stiff sparsity → **one-shot push in `fesom_ice_mass_matrix_fill`** (the
+M4.2-a CSR pattern; rowptr/colind already device-current from the preconditioner). Driver: IN push
+`uice/vice` + the 3 `data[*].values` (L28; FCT-internal scratch fully recomputed → not pushed), OUT
+`sync_host(data[*].values)` for the host cut_off+thermo, **L26 capture-before the 3 values** (verify
+`icefct`). **M4.3c gate — ALL GREEN:** `FESOM_KK_VERIFY=icefct` Serial `max|Δ|=0` for a_ice/m_ice/m_snow
+across all 60 steps × 16 ranks on a CORE2 dist_16 run with ACTIVE ice (`job 25158693`: 960 verify lines,
+0 nonzero — alongside evp 960 + icemap 2880, all 0; ~116 CG iters/step → real dynamics); pi==golden (np=1
+AND np=2 CMA-off — FCT trivial on pi's zero ice but the 21 D21 halo brackets + 3 scatters are exercised
+under MPI); `ctest` 4/4; SYNCCHECK np=1+np=2 clean + bit-identical; **CUDA (A100) builds** (`fesom_ice_fct.cpp.o`
+under nvcc — `INFINITY`/`atomic_add`/the lambdas all GPU-valid). Lesson **L44**; SYNC_MAP §3 FCT row +
+plan M4.3c box updated; key `icefct`. **NEXT = M4.3d (thermodynamics + `oce_fluxes`) → M4 acceptance/tag
+`m4-full-device`.** The M4.3a/b detail follows.
+
+---
+
 **Session 16 (2026-05-26) — M4.3a + M4.3b COMPLETE: sea-ice coupling/maps AND the EVP dynamics on the
 device.** Two commits: **M4.3a `473c15b`** (`ocean2ice` gather + `cut_off` clamp + h_ice/h_snow diag);
 **M4.3b `<this>`** (the EVP 120-subcycle rheology island). **M4.3b — `fesom_ice_evp_dynamics_kk`
@@ -492,90 +517,88 @@ OpenMP = climate-identical (race-free) or climate-close (scatter/reduce, D22); C
   (`dist_16/32/144/256/288/432/512`) · Kokkos submodule `externals/kokkos` (4.4.01) · SLURM `ab0995`;
   GPU `gpu`/`gpu-devel`.
 
-## 5. NEXT-SESSION PROMPT (M4.3c — ice FCT advection; paste this verbatim)
+## 5. NEXT-SESSION PROMPT (M4.3d — ice thermodynamics + oce_fluxes; paste this verbatim)
 
 > Continue the FESOM2 C→C++/Kokkos port in `/home/a/a270088/port_kokkos` (git; branch `master`).
 > `git log --oneline -12` to orient. **M0 + ALL of M1 (tag `m1-datalayer`) + ALL of M2 (whole ocean step
 > device-resident, tag `m2-ocean-device`) + M3.1 (multi-GPU rank→GPU mapping, `acadce2`) + M4.2 (the §5
 > SSH RHS + CG solver + update_vel + hbar on device, `4de3230`/`67fb2e1`/`718cbfd`) + M4.3a (sea-ice
-> coupling/maps: ocean2ice + cut_off + h_ice/h_snow diag, `473c15b`) + M4.3b (the EVP sea-ice dynamics,
-> `e428372`) are COMPLETE.** The whole OCEAN step flows on device (M4.2 closed the §5 mid-step CG
-> round-trip); the only host ocean compute left is the trivial `eta_n` map + the salinity floor. The
-> SEA-ICE step (`fesom_ice_step`, runs BEFORE the ocean step each iteration) is being moved to device in
-> M4.3: M4.3a (the simple coupling/maps) + M4.3b (EVP dynamics) are DONE; **THIS SESSION = M4.3c (ice
-> FCT advection), then M4.3d (thermodynamics + oce_fluxes) closes M4.3.**
+> coupling/maps: ocean2ice + cut_off + h_ice/h_snow diag, `473c15b`) + M4.3b (EVP sea-ice dynamics,
+> `e428372`) + M4.3c (the ice FCT advection, `<m4.3c-sha>`) are COMPLETE.** The whole OCEAN step flows on
+> device; the only host ocean compute left is the trivial `eta_n` map + the salinity floor. Of the SEA-ICE
+> step (`fesom_ice_step`, runs BEFORE the ocean step each iteration), coupling/maps + EVP + FCT are now on
+> device; **THIS SESSION = M4.3d (thermodynamics + `oce_fluxes`) — the LAST piece — then the M4 acceptance
+> + tag `m4-full-device`.**
 >
-> **⚠️ TWO DEFINING M4.3 FACTS (L42/L43):** (1) **NO data-layer step** — M1.4 already `Field`-wrapped
-> EVERY ice array (incl. the FCT work `fct_tmax/tmin/plus/minus/fluxes/massmatrix` + `data[*].values*`),
-> so M4.3 is pure kernel work. (2) **The sea-ice physics is FORCED-ONLY** — the pi smoke is a warm basin
-> (no freezing → zero ice → FCT/EVP/cut_off run on trivial state, thermo gated off), so the per-kernel
-> `FESOM_KK_VERIFY=<icekey>` gate is only MEANINGFUL on a short **CORE2** run (SLURM, real JRA55 forcing
-> → polar ice). Use **`jobs/job_ice_verify_core2`** (dist_16, 1 node, ice active from step 0 via the
-> cold-start IC, output → `/scratch`) — add your new FCT key to its `FESOM_KK_VERIFY=evp,icemap` list.
-> pi is still run (sanity: must stay == golden + not crash), but the COMPUTE gate is the CORE2 run.
+> **⚠️ TWO DEFINING M4.3 FACTS (L42/L43/L44):** (1) **NO data-layer step** — M1.4 already `Field`-wrapped
+> EVERY ice array (incl. `thermo.*` t_skin/thdgr*/ustar/apnd/hpnd/ipnd + flx_h/flx_fw), so M4.3 is pure
+> kernel work. (2) **The sea-ice physics is FORCED-ONLY** — the pi smoke is a warm basin (no freezing →
+> zero ice, thermo gated OFF — `if(!s_no_ice_thermo && forcing && jra && sr)` is FALSE on pi since no jra),
+> so the `FESOM_KK_VERIFY=<icekey>` gate is only MEANINGFUL on a short **CORE2** run (SLURM, real JRA55
+> forcing → polar ice + the thermo path live). Use **`jobs/job_ice_verify_core2`** (dist_16, 1 node, ice
+> active from step 0 via the cold-start IC, output → `/scratch`) — add your new thermo key to its
+> `FESOM_KK_VERIFY=evp,icemap,icefct` list. pi is still run (sanity: == golden + not crash; but pi never
+> ENTERS the thermo block, so the pi verify can't exercise it at all — the CORE2 run is the ONLY gate).
 >
-> **M4.3c — ice FCT (the M2.6 ocean-FCT analogue).** TARGET: `src/fesom_ice_fct.cpp` (541 LoC) —
-> `fesom_ice_tg_rhs` (Taylor-Galerkin high-order RHS, a per-element→node SCATTER into `values_rhs`) +
-> `fesom_ice_fct_solve` (the driver), which calls `ice_solve_low_order` (lumped-mass LO solution →
-> `valuesl`, + halos), `ice_solve_high_order` (an ITERATIVE consistent-mass-matrix solve — a host loop of
-> ~`fct_iter` sweeps, each a device SpMV-like map over the `fct_massmatrix` CSR + a per-iter halo: the
-> **CG/EVP host-loop + device-kernel + per-iter-halo pattern**), and `ice_fem_fct` (the Zalesak limiter
-> per logical tracer: `tmax/tmin` cluster bounds, `icepplus/icepminus` antidiffusive sums, flux limiting,
-> final update — element SCATTERS + node maps + `icepplus/icepminus` halos). Runs per logical tracer
-> (a_ice, m_ice, m_snow). `fct_massmatrix` is set-once (built by `fesom_ice_mass_matrix_fill` sharing the
-> ssh_stiff CSR sparsity, Field-backed, pushed once — the M4.2-a CSR pattern). **The scatters use
-> `Kokkos::atomic_add` (D22) → Serial bit-identical, OpenMP/CUDA climate-close;** the internal halos are
-> D21 brackets owned by the FCT (the M2.6/§6 pattern). Verify is **L26 capture-before** on
-> `data[*].values` (the FCT read-modify-writes them) + any RMW work.
+> **M4.3d — ice thermodynamics + ocean-flux coupling.** TARGETS: `src/fesom_ice_thermo.cpp` (595 LoC) —
+> `fesom_ice_thermodynamics` = per-node column physics (the M2.7 `bc_surface_kk` / per-node-TDMA shape:
+> growth/melt budgets, the 7-class thickness distribution, albedo, ustar, the thdgr/thdgrsn/thdgra
+> tendencies; LIKELY all race-free per-node maps → bit-identical Serial AND OpenMP, NO scatter — confirm
+> from the C body, L33) — and `src/fesom_ice_coupling.cpp:247` `fesom_ice_oce_fluxes` = computes the
+> ice-mediated `flx_h`/`flx_fw` then **OVERWRITES forcing `heat_flux`/`water_flux` + computes
+> `virtual_salt`/`relax_salt`** that the ocean step consumes → `sync_host(forcing.*)` on OUT. ⚠️
+> `oce_fluxes` calls **`integrate_nod_2D`** (a GLOBAL area integral = an `MPI_Allreduce` over a node sum —
+> the salt-conservation correction): that's the M4.1 device-reduction shape (the CG `cg_dot`
+> `parallel_reduce` + the scalar `MPI_Allreduce`; Serial seq-reduce → bit-identical, OpenMP/CUDA
+> climate-close, D22). Both gated behind `if(!s_no_ice_thermo && forcing && jra && sr)` in `fesom_ice_step`.
+> Verify = **L26 capture-before** on whatever thermo RMWs (the 3 `data[*].values` a/m/ms, `thermo.*`,
+> `flx_h/flx_fw`, and the 4 forcing fields `oce_fluxes` overwrites) + the C twin run on ALL ranks (the
+> `integrate_nod_2D` Allreduce is collective).
 >
 > READ FIRST (absolute paths):
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (Session 16 header = M4.3a+b; §0 status; build/run/VERIFY/SYNCCHECK/CUDA recipe §2; §3 ice-step detail; §4 key paths)
-> - **`/home/a/a270088/port_kokkos/src/fesom_ice_fct.cpp`** ← THE M4.3c TARGET (tg_rhs + fct_solve + ice_solve_low/high_order + ice_fem_fct) + `src/fesom_ice_fct.h` + `src/fesom_ice_types.h` (the Field-backed ice work arrays, incl. fct_*)
-> - **`/home/a/a270088/port_kokkos/src/fesom_ice.cpp`** ← the `fesom_ice_step` DRIVER (wire the FCT IN/OUT rails + the verify here, beside the M4.3a/M4.3b rails already there; `load_ice_verify_once` parses the icekeys); the FCT is called at the `if (!s_no_ice_adv && stiff)` block
-> - **TEMPLATE — the M2.6 ocean FCT: `/home/a/a270088/port_kokkos/src/fesom_tracer_adv.cpp`** (`fesom_tracer_advect_one_fct_kk` — the MFCT Zalesak pipeline: ~24 launches, 3 D21 internal-halo brackets, 3 edge→node atomic_add scatters, the L26 capture-before verify) — the closest shape to the ice FCT
-> - **TEMPLATE — M4.3b EVP just done: `/home/a/a270088/port_kokkos/src/fesom_ice_evp.cpp`** (`fesom_ice_evp_dynamics_kk` — the host-loop + device-kernel + per-iter-halo-bracket pattern for `ice_solve_high_order`'s mass-matrix iteration; the device-island IN/OUT rails in `fesom_ice.cpp`) + **M4.2 CG: `src/fesom_ssh.cpp`** (`fesom_ssh_solve_cg_kk` — the CSR-gather SpMV + host-loop-control idiom for the mass-matrix solve)
-> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← **§3 = the sea-ice step table** (ocean2ice/EVP/cut_off/diag rows DONE; **FCT row = M4.3c**; thermo row = M4.3d) + the §3 narrative; §6 intra-kernel exchanges (the FCT halo brackets); §9 kernel-author checklist
-> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← D1–D22, L1–L43; **esp. L37 (the M2.6 ocean FCT — the closest precedent: scatters, the "halo stays at prior value" rule, capture-before BOTH values+valuesold), D22 (scatter/atomic_add), D21 (internal-exchange bracket), L26 (capture-before), L28 (sync ALL inputs), L33 (derive shape from the C BODY), L42 (ice FORCED-ONLY → CORE2 verify; no data layer), L43 (M4.3b EVP = the CG host-loop pattern; coastal-BC-on-host trick)** — APPEND L44 this session
-> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22** (the ice FCT scatters); `docs/PORTING_LESSONS.md`  ← dt=1800 traps, tracer stride, halo bounds, `ice_gamma_fct=0.5`/`ice_diff=10.0` namelist scalars carry physics
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_HANDOFF.md`  ← this handoff (Session 17 header = M4.3c; §0 status; build/run/VERIFY/SYNCCHECK/CUDA recipe §2; §4 key paths)
+> - **`/home/a/a270088/port_kokkos/src/fesom_ice_thermo.cpp`** (the `fesom_ice_thermodynamics` column physics) + **`src/fesom_ice_coupling.cpp`** (`fesom_ice_oce_fluxes` at :247 — the flux overwrite + `integrate_nod_2D`) + `src/fesom_ice_types.h` (the Field-backed `thermo.*`/`flx_*`)
+> - **`/home/a/a270088/port_kokkos/src/fesom_ice.cpp`** ← the `fesom_ice_step` DRIVER (wire the thermo IN/OUT rails + verify beside the M4.3a/b/c rails; `load_ice_verify_once` parses the icekeys); thermo is the `if(!s_no_ice_thermo && forcing && jra && sr)` block
+> - **TEMPLATES — per-node column physics: `src/fesom_tracer_diff.cpp`** (`fesom_impl_vert_diff_tracers_kk` + `bc_surface_kk` — the M2.7 per-node-map/TDMA + forcing-View shape, race-free → bit-identical) · the flux-overwrite + reduction idiom: **`src/fesom_ssh.cpp`** (`cg_dot` `parallel_reduce` + scalar `MPI_Allreduce` = the `integrate_nod_2D` shape) · the ice device-island IN/OUT rails: **`src/fesom_ice.cpp`** (M4.3a/b/c blocks) + `src/fesom_ice_fct.cpp` (M4.3c, the just-finished example)
+> - `/home/a/a270088/port_kokkos/docs/SYNC_MAP.md`  ← **§3 = the sea-ice step table** (ocean2ice/EVP/cut_off/diag/FCT rows DONE; **thermo row = M4.3d**) + §6 intra-kernel exchanges; §9 kernel-author checklist
+> - `/home/a/a270088/port_kokkos/docs/KOKKOS_PORTING_LESSONS.md`  ← D1–D22, L1–L44; **esp. L39 (M2.7 per-node TDMA + bc_surface_kk + the S-floor-stays-host decision), L41 (M4.2 the dot `parallel_reduce` = the reduction shape for `integrate_nod_2D`), D22 (scatter/reduce → OpenMP/CUDA climate-close), L26 (capture-before), L28 (sync ALL inputs), L33 (derive shape from the C BODY), L42 (ice FORCED-ONLY → CORE2 verify; no data layer), L44 (M4.3c FCT)** — APPEND L45 this session
+> - `/home/a/a270088/port_kokkos/docs/SCATTER_STRATEGY.md`  ← **D22**; `docs/PORTING_LESSONS.md`  ← dt=1800 traps + the ice thermo namelist scalars (T_ICE_THERMO defaults in `fesom_ice.cpp` init carry physics)
 > - project memory `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/` (incl. `reference-cuda-eos-divergence.md`, `feedback-hpc-run-hygiene.md` = OUTPUT → `/work` or `/scratch`, NEVER `$HOME`)
 >
-> CORE CHANGE: port `fesom_ice_tg_rhs` + `fesom_ice_fct_solve` (+ its 3 statics `ice_solve_low_order`/
-> `ice_solve_high_order`/`ice_fem_fct`) to device `_kk` twins beside the untouched C originals (D19 — the C
-> stays the verify oracle). The DRIVER (`fesom_ice_step`) gets the IN rail (push `data[*].values/_old`,
-> `uice/vice`, the FCT work, the set-once `fct_massmatrix` is device-current from its one-shot push — add
-> that push in `fesom_ice_mass_matrix_fill` like M4.2-a's CSR), the OUT `sync_host(data[*].values)` (the
-> host cut_off + thermo read them — both still host until M4.3d/already-done M4.3a), and the new verify.
-> The `ice_solve_high_order` mass-matrix iteration is a host loop over device sweeps + a per-iter halo
-> bracket (the EVP/CG pattern, D21). The 3-tracer loop (a_ice/m_ice/m_snow) mirrors the C.
+> CORE CHANGE: port `fesom_ice_thermodynamics` + `fesom_ice_oce_fluxes` to device `_kk` twins beside the
+> untouched C originals (D19 — the C stays the verify oracle). The DRIVER (`fesom_ice_step`) gets the IN
+> rail (push every input the thermo body reads — a/m/ms, uice/vice, srfoce_*, the forcing/jra/sr fields,
+> the thermo.* state; L28 sync ALL), the OUT `sync_host` on every field a HOST consumer reads (the 3
+> values for next-step EVP/FCT/cut_off, `flx_*`, and CRUCIALLY the 4 forcing fields `heat_flux`/
+> `water_flux`/`virtual_salt`/`relax_salt` the OCEAN step reads — `forcing` is `const` in the driver →
+> localized `const_cast`, the M4.3a ocean2ice pattern), and the new verify. The thermo column physics is
+> per-node maps (no halo likely); `oce_fluxes`'s `integrate_nod_2D` is a `parallel_reduce` + `MPI_Allreduce`.
 >
-> GATE: new `FESOM_KK_VERIFY=icefct` (collision-free token — `icefct`⊄ any of eos/pp/kpp/pgf/vrhs/vfilt/
-> ivisc/ale/gm/tradv/trdiff/ssh/icemap/evp and none ⊄ it, plain `strstr`, L25) Serial `max|Δ|==0` on the
-> **short CORE2 dist_16 run with ACTIVE ice** (`jobs/job_ice_verify_core2`, add `icefct` to its key list);
-> pi == golden (np=1 AND np=2 CMA-off, `OMPI_MCA_btl_vader_single_copy_mechanism=none` L18 — the FCT runs
-> trivially on pi's zero ice but the rails/halos are exercised); `ctest` 4/4; SYNCCHECK np=1+np=2 clean +
-> bit-identical; OpenMP (the FCT scatters → climate-close on ACTIVE ice, but pi shows 0 since ice is zero —
-> the active-ice OpenMP/CUDA fidelity is confirmed at the M4 acceptance); CUDA builds + the pi smoke
-> climate-close. Commit per step; append **L44** + update the **handoff §3/§5 + SYNC_MAP §3 FCT row + the
-> plan M4.3c box** in the SAME commit. ⚠️ Run OUTPUT → `/work/ab0995/a270088/port2` or `/scratch`, never `$HOME`.
+> GATE: new `FESOM_KK_VERIFY=icethermo` (collision-free token, plain `strstr`, L25 — check it ⊄ and ⊅ any
+> of eos/pp/kpp/pgf/vrhs/vfilt/ivisc/ale/gm/tradv/trdiff/ssh/icemap/evp/icefct) Serial `max|Δ|==0` on the
+> **short CORE2 dist_16 run with ACTIVE ice** (`jobs/job_ice_verify_core2`, add `icethermo` to its key
+> list); pi == golden (np=1 AND np=2 CMA-off, `OMPI_MCA_btl_vader_single_copy_mechanism=none` L18 — pi
+> never enters the thermo block so this just proves no regression/crash); `ctest` 4/4; SYNCCHECK np=1+np=2
+> clean + bit-identical; CUDA builds + the pi smoke climate-close. Commit; append **L45** + update the
+> **handoff §3/§5 + SYNC_MAP §3 thermo row + the plan M4.3d box** in the SAME commit. ⚠️ Run OUTPUT →
+> `/work/ab0995/a270088/port2` or `/scratch`, never `$HOME`.
 >
-> AFTER M4.3c → **M4.3d (thermodynamics + `oce_fluxes`)** = `src/fesom_ice_thermo.cpp` (526 LoC, column
-> physics — per-node, the tracer-diff/`bc_surface_kk` shape; growth/melt budgets) + `src/fesom_ice_coupling.cpp`
-> (`fesom_ice_oce_fluxes` — computes `flx_h`/`flx_fw` → OVERWRITES forcing `heat_flux`/`water_flux`/
-> `virtual_salt`/`relax_salt` that the ocean step consumes, so `→host(forcing)` after; SYNC_MAP §3 thermo
-> row). Then the **M4 acceptance**: 1-yr CORE2 Serial bit-identical to `/scratch/a/a270088/m1_accept/cref`
-> (`sbatch jobs/job_m1accept_serial`; `scripts/m1_accept_compare.sh`) + a CUDA + OpenMP CORE2 climate-close
-> run (the ice scatters compound → expect a larger-but-bounded climate-close floor; document the budget);
-> tag **`m4-full-device`** (the whole model on device).
+> AFTER M4.3d → **M4 ACCEPTANCE** (the whole model on device): 1-yr CORE2 Serial bit-identical to
+> `/scratch/a/a270088/m1_accept/cref` (`sbatch jobs/job_m1accept_serial`; `scripts/m1_accept_compare.sh` —
+> real JRA55 forcing exercises the thermo + flux-coupling path) + a CUDA + OpenMP CORE2 climate-close run
+> (the ice EVP/FCT scatters compound over the year → expect a larger-but-bounded climate-close floor;
+> document the budget in `docs/GPU_FIDELITY.md`). Tag **`m4-full-device`**.
 >
 > BUILD (recipe §2): Serial/OpenMP via `source ./env.sh` then `cmake --build build-serial -j 16` (+
-> build-omp, build-synccheck). pi smoke + verify on build-serial with the login-node MPI override
-> (`export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader`; unset the UCX/HCOLL vars); the CORE2 ice verify via
-> `sbatch jobs/job_ice_verify_core2`. CUDA: `source /sw/etc/profile.levante; module --force purge; module
-> unload netcdf-c cdo ncview git; module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0
+> build-omp, build-synccheck). ⚠️ `source ./env.sh` does NOT persist across shells — source it in the SAME
+> command as any `mpirun` (or `mpirun` is not-found). pi smoke + verify on build-serial with the login-node
+> MPI override (`export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader`; unset the UCX/HCOLL vars); the CORE2 ice
+> verify via `sbatch jobs/job_ice_verify_core2`. CUDA: `source /sw/etc/profile.levante; module --force
+> purge; module unload netcdf-c cdo ncview git; module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0
 > openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0; export NVCC_WRAPPER_DEFAULT_COMPILER=g++;
 > cmake --build build-cuda --target fesom_port -j 16` (verify "Built target fesom_port", L17).
 >
 > INVARIANTS: never simplify physics; Serial stays the bit-identity oracle (`max|Δ|==0` vs the C twin);
-> OpenMP race-free-bit-identical / scatter-climate-close (D22); CUDA climate-close (≈ Fortran↔C). C twin
-> oracle `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623). First fresh checkout:
+> OpenMP race-free-bit-identical / scatter-reduce-climate-close (D22); CUDA climate-close (≈ Fortran↔C). C
+> twin oracle `/home/a/a270088/port2/fesom2_port/src` (SHA 75de623). First fresh checkout:
 > `git submodule update --init --recursive`. ⚠️ struct-layout change → `touch src/*` before building (L18).

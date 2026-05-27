@@ -330,16 +330,19 @@ static void load_ice_env_once(void)
     s_ice_env_loaded = 1;
 }
 
-/* FESOM_KK_VERIFY ice gates: icemap (M4.3a ocean2ice+cut_off+diag), evp (M4.3b). Cached. */
+/* FESOM_KK_VERIFY ice gates: icemap (M4.3a ocean2ice+cut_off+diag), evp (M4.3b),
+ * icefct (M4.3c FCT advection). Cached. */
 static int s_ice_verify_loaded = 0;
 static int s_verify_icemap     = 0;
 static int s_verify_evp        = 0;
+static int s_verify_icefct     = 0;
 static void load_ice_verify_once(void)
 {
     if (s_ice_verify_loaded) return;
     const char *e = getenv("FESOM_KK_VERIFY");
     s_verify_icemap = (e && strstr(e, "icemap")) ? 1 : 0;   /* collision-free token (L25) */
     s_verify_evp    = (e && strstr(e, "evp"))    ? 1 : 0;   /* M4.3b */
+    s_verify_icefct = (e && strstr(e, "icefct")) ? 1 : 0;   /* M4.3c (collision-free, L25) */
     s_ice_verify_loaded = 1;
 }
 
@@ -484,10 +487,31 @@ void fesom_ice_step(int                            step,
     }
     /* Phase E — FCT advection. Mirrors Fortran ice_setup_step.F90:258-261:
      * call ice_TG_rhs; call ice_fct_solve. cut_off (line 295) follows
-     * unconditionally below. */
+     * unconditionally below. M4.3c: ON THE DEVICE. tg_rhs (element→node SCATTER into values_rhs)
+     * + fct_solve (high/low-order CSR-gather mass-matrix solves [high_order = host-loop iter +
+     * per-iter dvalues halo] + 3× Zalesak fem_fct [scatters + icepplus/icepminus/values halos]).
+     * IN rail (L28): push uice/vice (EVP output) + data[*].values (the FCT reads then RMWs them);
+     * the set-once fct_massmatrix + the ssh_stiff CSR are device-current from their one-shot pushes.
+     * OUT: sync_host(data[*].values) for the host cut_off + thermo. capture-before (L26) the 3
+     * values. The FCT-internal values_rhs/valuesl/dvalues/fct_* are fully recomputed → not pushed. */
     if (!s_no_ice_adv && stiff) {
-        fesom_ice_tg_rhs   (ice,       partit, mesh);
-        fesom_ice_fct_solve(ice, stiff, partit, mesh);
+        std::vector<real_t> fa, fm, fms;
+        if (s_verify_icefct) {
+            fa.assign (ice->data[FESOM_ICE_AICE].values,  ice->data[FESOM_ICE_AICE].values  + N);
+            fm.assign (ice->data[FESOM_ICE_MICE].values,  ice->data[FESOM_ICE_MICE].values  + N);
+            fms.assign(ice->data[FESOM_ICE_MSNOW].values, ice->data[FESOM_ICE_MSNOW].values + N);
+        }
+        ice->uice_fld.modify_host(); ice->uice_fld.sync_device();
+        ice->vice_fld.modify_host(); ice->vice_fld.sync_device();
+        ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        fesom_ice_tg_rhs_kk   (ice,       partit, mesh);
+        fesom_ice_fct_solve_kk(ice, stiff, partit, mesh);
+        ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        if (s_verify_icefct) fesom_ice_fct_verify(ice, stiff, partit, mesh, step, fa, fm, fms);
     }
     /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics regardless of
      * NO_ICE_ADV. M4.3a: ON THE DEVICE. IN: push the ice tracer values (host EVP/FCT wrote

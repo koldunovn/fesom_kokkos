@@ -27,11 +27,15 @@
 #include "fesom_ssh.h"
 #include "fesom_types.h"
 
+#include <Kokkos_Core.hpp>   // M4.3c: device FCT kernels (parallel_for + atomic_add scatters)
 #include <math.h>
 #include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <string>            // M4.3c: FESOM_KK_VERIFY backend name
+#include <algorithm>         // M4.3c: verify snapshot/restore copies
+#include <vector>
 
 #ifndef FESOM_ICE_SCALE_AREA
 #define FESOM_ICE_SCALE_AREA 2.0e8   /* oce_modules.F90:29 — global, used by ice_diff scaling */
@@ -137,6 +141,14 @@ void fesom_ice_mass_matrix_fill(fesom_ice                    *ice,
                     partit ? partit->mype : 0, q, (double)aa, (double)a_node, ul);
         }
     }
+
+    /* M4.3c: one-shot push of the set-once mass matrix to the device (the M4.2-a CSR pattern,
+     * fesom_ssh.cpp:280). fct_massmatrix shares the ssh_stiff sparsity and is never updated after
+     * this fill, so the device copy stays valid for the whole run. The ssh_stiff rowptr/colind/
+     * values are already device-current from fesom_ssh_preconditioner (called before this in
+     * fesom_main). The Field is filled above via the raw host alias (L14) → modify_host() first. */
+    ice->work.fct_massmatrix_fld.modify_host();
+    ice->work.fct_massmatrix_fld.sync_device();
 }
 
 /* ============================================================ */
@@ -538,4 +550,448 @@ void fesom_ice_fct_solve(fesom_ice                    *ice,
     ice_fem_fct(FCT_LOG_M,  ice, stiff, partit, mesh);
     ice_fem_fct(FCT_LOG_A,  ice, stiff, partit, mesh);
     ice_fem_fct(FCT_LOG_MS, ice, stiff, partit, mesh);
+}
+
+/* ======================================================================== *
+ *  M4.3c — DEVICE (Kokkos) twins of the sea-ice FCT advection. The M2.6     *
+ *  ocean-FCT analogue, but 2-D (single surface layer) so much simpler:      *
+ *    - tg_rhs           = zero-map + element→node SCATTER into values_rhs    *
+ *    - solve_low_order  = per-row CSR gather (ssh_stiff sparsity + the set-  *
+ *                         once fct_massmatrix) + map, then 3 valuesl halos    *
+ *    - solve_high_order = first-approx map + a HOST loop over 2 device       *
+ *                         sweeps (CSR gather + map + copy) with per-iter      *
+ *                         dvalues halos — the CG/EVP host-loop pattern        *
+ *    - fem_fct (×3)     = the Zalesak limiter: init maps, per-elem antidiff   *
+ *                         fluxes (race-free), cluster min/max (CSR gather),    *
+ *                         icepplus/icepminus SCATTER, correction map,          *
+ *                         icepplus/icepminus halos, limit map, apply           *
+ *                         (overwrite-map + vals SCATTER), vals halo            *
+ *  The 3 element→node SCATTERS (tg_rhs assemble, fem_fct's +/- sum, fem_fct's *
+ *  final vals update) use Kokkos::atomic_add in natural element order (D22 →  *
+ *  Serial bit-identical, OpenMP/CUDA climate-close). All halos are D21         *
+ *  brackets OWNED by the FCT (the §6 pattern). The ssh_stiff CSR rowptr/colind *
+ *  is device-current from fesom_ssh_preconditioner; fct_massmatrix from its    *
+ *  one-shot push in fesom_ice_mass_matrix_fill. ⚠️ FORCED-ONLY → the verify    *
+ *  is meaningful only on CORE2 (L42/L43).                                      *
+ * ======================================================================== */
+
+using DV  = fesom::Field::dev_view_t;
+using IDV = fesom::IntField::dev_view_t;
+
+/* D21 internal-halo bracket on a nod2D Field: a device kernel wrote f's OWNED rows;
+ * make the halo current for the next device reader. modify_device() always (so the
+ * driver's OUT sync_host copies the result at np==1 too); the host round-trip only
+ * at np>1 (the EVP/CG idiom — eDim_nod2D==0 at np==1 so there is no halo). */
+static inline void fct_halo_nod2D(fesom::Field &f, struct fesom_partit *partit)
+{
+    f.modify_device();
+    if (partit && partit->npes > 1) {
+        f.sync_host();
+        fesom_exchange_nod2D(f.h_checked(), partit);
+        f.modify_host();
+        f.sync_device();
+    }
+}
+
+/* ---- E2 device twin: ice_TG_rhs (ice_fct.F90:91) ---------------------------- */
+void fesom_ice_tg_rhs_kk(fesom_ice                *ice,
+                         struct fesom_partit      *partit,
+                         const struct fesom_mesh  *mesh)
+{
+    (void)partit;
+    const int    myDim = mesh->myDim_nod2D;
+    const int    E     = mesh->myDim_elem2D;
+    const real_t dt    = ice->ice_dt;
+    const real_t idiff = ice->ice_diff;
+    const real_t scale = (real_t)FESOM_ICE_SCALE_AREA;
+
+    auto u_ice  = ice->uice_fld.d();
+    auto v_ice  = ice->vice_fld.d();
+    auto a_ice  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snow = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    auto rhs_a  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    auto rhs_m  = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    auto rhs_ms = ice->data[FESOM_ICE_MSNOW].values_rhs_fld.d();
+    auto en     = mesh->elem_nodes_fld.d();
+    auto gs     = mesh->gradient_sca_fld.d();
+    auto ea     = mesh->elem_area_fld.d();
+    auto ulev   = mesh->ulevels_fld.d();
+
+    /* zero rhs over OWNED only (C bound myDim; halo rhs is scattered-but-unused, L37). */
+    Kokkos::parallel_for("ice_tg_rhs_zero", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int row) { rhs_m(row)=0.0; rhs_a(row)=0.0; rhs_ms(row)=0.0; });
+
+    /* assemble: element→node SCATTER (atomic_add, D22), cavity skip. */
+    Kokkos::parallel_for("ice_tg_rhs_assemble", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int elem) {
+            if (ulev(elem) > 1) return;                       /* cavity (C line 178) */
+            const int    nn[3] = { en(3*elem+0), en(3*elem+1), en(3*elem+2) };
+            const int    g  = 6*elem;
+            const real_t dx[3] = { gs(g+0), gs(g+1), gs(g+2) };
+            const real_t dy[3] = { gs(g+3), gs(g+4), gs(g+5) };
+            const real_t vol = ea(elem);
+            const real_t uq[3]  = { u_ice(nn[0]),  u_ice(nn[1]),  u_ice(nn[2])  };
+            const real_t vq[3]  = { v_ice(nn[0]),  v_ice(nn[1]),  v_ice(nn[2])  };
+            const real_t mq[3]  = { m_ice(nn[0]),  m_ice(nn[1]),  m_ice(nn[2])  };
+            const real_t aq[3]  = { a_ice(nn[0]),  a_ice(nn[1]),  a_ice(nn[2])  };
+            const real_t msq[3] = { m_snow(nn[0]), m_snow(nn[1]), m_snow(nn[2]) };
+            const real_t um = uq[0] + uq[1] + uq[2];          /* sum, NOT /3 (C line 188) */
+            const real_t vm = vq[0] + vq[1] + vq[2];
+            const real_t diff = idiff * Kokkos::sqrt(vol / scale);
+            for (int n = 0; n < 3; ++n) {
+                real_t entries[3];
+                for (int q = 0; q < 3; ++q) {
+                    real_t a = (dx[n]*(um + uq[q]) + dy[n]*(vm + vq[q])) / 12.0;
+                    real_t b = diff * (dx[n]*dx[q] + dy[n]*dy[q]);
+                    real_t c = 0.5 * dt * (um*dx[n] + vm*dy[n]) * (um*dx[q] + vm*dy[q]) / 9.0;
+                    entries[q] = vol * dt * (a - b - c);
+                }
+                real_t sm  = entries[0]*mq[0]  + entries[1]*mq[1]  + entries[2]*mq[2];
+                real_t sa  = entries[0]*aq[0]  + entries[1]*aq[1]  + entries[2]*aq[2];
+                real_t sms = entries[0]*msq[0] + entries[1]*msq[1] + entries[2]*msq[2];
+                Kokkos::atomic_add(&rhs_m (nn[n]), sm);
+                Kokkos::atomic_add(&rhs_a (nn[n]), sa);
+                Kokkos::atomic_add(&rhs_ms(nn[n]), sms);
+            }
+        });
+    ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
+    ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();
+    ice->data[FESOM_ICE_MSNOW].values_rhs_fld.modify_device();
+    /* No halo: the C ice_TG_rhs does not exchange rhs (consumers read OWNED only). */
+}
+
+/* ---- E3 device twin: ice_solve_low_order (ice_fct.F90:243) ------------------ */
+static void ice_solve_low_order_kk(fesom_ice                    *ice,
+                                   const struct fesom_ssh_stiff *stiff,
+                                   struct fesom_partit          *partit,
+                                   const struct fesom_mesh      *mesh)
+{
+    const int    myDim = mesh->myDim_nod2D;
+    const int    nl    = mesh->nl;
+    const real_t gamma = ice->ice_gamma_fct;
+
+    auto rowptr = stiff->rowptr_fld.d();
+    auto colind = stiff->colind_fld.d();
+    auto mm     = ice->work.fct_massmatrix_fld.d();
+    auto a_ice  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto m_ice  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    auto m_snow = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    auto rhs_a  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    auto rhs_m  = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    auto rhs_ms = ice->data[FESOM_ICE_MSNOW].values_rhs_fld.d();
+    auto a_l    = ice->data[FESOM_ICE_AICE].valuesl_fld.d();
+    auto m_l    = ice->data[FESOM_ICE_MICE].valuesl_fld.d();
+    auto ms_l   = ice->data[FESOM_ICE_MSNOW].valuesl_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto area   = mesh->area_fld.d();
+
+    Kokkos::parallel_for("ice_lo_solve", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int row) {
+            if (ulev_n(row) > 1) return;                      /* cavity (C line 246) */
+            const int rs = rowptr(row), re = rowptr(row + 1);
+            real_t sm = 0.0, sa = 0.0, sms = 0.0;
+            for (int k = rs; k < re; ++k) {
+                const int j = colind(k);
+                sm  += mm(k) * m_ice (j);
+                sa  += mm(k) * a_ice (j);
+                sms += mm(k) * m_snow(j);
+            }
+            const real_t inv_area = 1.0 / area(row*nl + 0);
+            m_l (row) = (rhs_m (row) + gamma*sm ) * inv_area + (1.0 - gamma) * m_ice (row);
+            a_l (row) = (rhs_a (row) + gamma*sa ) * inv_area + (1.0 - gamma) * a_ice (row);
+            ms_l(row) = (rhs_ms(row) + gamma*sms) * inv_area + (1.0 - gamma) * m_snow(row);
+        });
+
+    /* D21 halo: fem_fct's cluster min/max reads valuesl at CSR-neighbour (halo) nodes. */
+    fct_halo_nod2D(ice->data[FESOM_ICE_MICE].valuesl_fld,  partit);
+    fct_halo_nod2D(ice->data[FESOM_ICE_AICE].valuesl_fld,  partit);
+    fct_halo_nod2D(ice->data[FESOM_ICE_MSNOW].valuesl_fld, partit);
+}
+
+/* ---- E3 device twin: ice_solve_high_order (ice_fct.F90:347) ----------------- *
+ * The consistent-mass-matrix iteration: first-approx map then a HOST loop over    *
+ * num_iter_solve-1 device sweeps, each a CSR-gather correction + map + copy-back   *
+ * + the per-iter dvalues halo (the M4.2 CG / M4.3b EVP host-loop-control pattern). *
+ * Writes the high-order increment into dvalues (consumed by fem_fct); valuesl is   *
+ * scratch here (overwritten by ice_solve_low_order afterwards, per the C order).   */
+static void ice_solve_high_order_kk(fesom_ice                    *ice,
+                                    const struct fesom_ssh_stiff *stiff,
+                                    struct fesom_partit          *partit,
+                                    const struct fesom_mesh      *mesh)
+{
+    const int myDim          = mesh->myDim_nod2D;
+    const int nl             = mesh->nl;
+    const int num_iter_solve = 3;                              /* C line 293 */
+
+    auto rowptr = stiff->rowptr_fld.d();
+    auto colind = stiff->colind_fld.d();
+    auto mm     = ice->work.fct_massmatrix_fld.d();
+    auto rhs_a  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    auto rhs_m  = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    auto rhs_ms = ice->data[FESOM_ICE_MSNOW].values_rhs_fld.d();
+    auto a_l    = ice->data[FESOM_ICE_AICE].valuesl_fld.d();
+    auto m_l    = ice->data[FESOM_ICE_MICE].valuesl_fld.d();
+    auto ms_l   = ice->data[FESOM_ICE_MSNOW].valuesl_fld.d();
+    auto da     = ice->data[FESOM_ICE_AICE].dvalues_fld.d();
+    auto dm     = ice->data[FESOM_ICE_MICE].dvalues_fld.d();
+    auto dms    = ice->data[FESOM_ICE_MSNOW].dvalues_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto area   = mesh->area_fld.d();
+
+    /* First approximation: dvalues = rhs / area (C lines 296-302). */
+    Kokkos::parallel_for("ice_ho_first", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int row) {
+            if (ulev_n(row) > 1) return;
+            const real_t inv_area = 1.0 / area(row*nl + 0);
+            dm (row) = rhs_m (row) * inv_area;
+            da (row) = rhs_a (row) * inv_area;
+            dms(row) = rhs_ms(row) * inv_area;
+        });
+    fct_halo_nod2D(ice->data[FESOM_ICE_MICE].dvalues_fld,  partit);
+    fct_halo_nod2D(ice->data[FESOM_ICE_AICE].dvalues_fld,  partit);
+    fct_halo_nod2D(ice->data[FESOM_ICE_MSNOW].dvalues_fld, partit);
+
+    for (int it = 0; it < num_iter_solve - 1; ++it) {         /* 2 passes (C line 308) */
+        /* (a) update valuesl from the residual rhs - M·dvalues (C lines 310-329). */
+        Kokkos::parallel_for("ice_ho_update", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int row) {
+                if (ulev_n(row) > 1) return;
+                const int rs = rowptr(row), re = rowptr(row + 1);
+                real_t sm = 0.0, sa = 0.0, sms = 0.0;
+                for (int k = rs; k < re; ++k) {
+                    const int j = colind(k);
+                    sm  += mm(k) * dm (j);
+                    sa  += mm(k) * da (j);
+                    sms += mm(k) * dms(j);
+                }
+                const real_t inv_area = 1.0 / area(row*nl + 0);
+                m_l (row) = dm (row) + (rhs_m (row) - sm ) * inv_area;
+                a_l (row) = da (row) + (rhs_a (row) - sa ) * inv_area;
+                ms_l(row) = dms(row) + (rhs_ms(row) - sms) * inv_area;
+            });
+        /* (b) copy valuesl back to dvalues (C lines 332-337). */
+        Kokkos::parallel_for("ice_ho_copy", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int row) {
+                if (ulev_n(row) > 1) return;
+                dm (row) = m_l (row);
+                da (row) = a_l (row);
+                dms(row) = ms_l(row);
+            });
+        /* (c) per-iter dvalues halo (C line 340; read at CSR neighbours next pass / by fem_fct). */
+        fct_halo_nod2D(ice->data[FESOM_ICE_MICE].dvalues_fld,  partit);
+        fct_halo_nod2D(ice->data[FESOM_ICE_AICE].dvalues_fld,  partit);
+        fct_halo_nod2D(ice->data[FESOM_ICE_MSNOW].dvalues_fld, partit);
+    }
+}
+
+/* ---- E4 device twin: ice_fem_fct (ice_fct.F90:498) — Zalesak limiter -------- */
+static void ice_fem_fct_kk(int                           log_id,
+                           fesom_ice                    *ice,
+                           const struct fesom_ssh_stiff *stiff,
+                           struct fesom_partit          *partit,
+                           const struct fesom_mesh      *mesh)
+{
+    const int    d_active = data_idx_for_logical(log_id);
+    const int    myDim    = mesh->myDim_nod2D;
+    const int    N_full   = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    E        = mesh->myDim_elem2D;
+    const int    nl       = mesh->nl;
+    const real_t gamma    = ice->ice_gamma_fct;
+
+    auto vals   = ice->data[d_active].values_fld.d();
+    auto vals_l = ice->data[d_active].valuesl_fld.d();
+    auto dvals  = ice->data[d_active].dvalues_fld.d();
+    auto icefl  = ice->work.fct_fluxes_fld.d();
+    auto icepp  = ice->work.fct_plus_fld.d();
+    auto icepm  = ice->work.fct_minus_fld.d();
+    auto tmax   = ice->work.fct_tmax_fld.d();
+    auto tmin   = ice->work.fct_tmin_fld.d();
+    auto rowptr = stiff->rowptr_fld.d();
+    auto colind = stiff->colind_fld.d();
+    auto en     = mesh->elem_nodes_fld.d();
+    auto ea     = mesh->elem_area_fld.d();
+    auto area   = mesh->area_fld.d();
+    auto ulev   = mesh->ulevels_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+
+    /* init tmax/tmin over [0,N) (C lines 376-377). */
+    Kokkos::parallel_for("ice_fct_tmm_init", Kokkos::RangePolicy<>(0, N_full),
+        KOKKOS_LAMBDA(const int n) { tmax(n) = 0.0; tmin(n) = 0.0; });
+
+    /* antidiffusive fluxes per element — each elem writes its OWN 3 slots → race-free
+     * (C lines 389-407). icoef(n,q) = -2 on the diagonal, 1 off-diagonal. */
+    Kokkos::parallel_for("ice_fct_aflux", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int elem) {
+            if (ulev(elem) > 1) return;
+            const int    nn[3] = { en(3*elem+0), en(3*elem+1), en(3*elem+2) };
+            const real_t vol = ea(elem);
+            for (int q = 0; q < 3; ++q) {
+                real_t s = 0.0;
+                for (int n = 0; n < 3; ++n) {
+                    real_t v = gamma * vals(nn[n]) + dvals(nn[n]);
+                    real_t icoef = (n == q) ? -2.0 : 1.0;
+                    s += icoef * v;
+                }
+                const real_t inv_area_q = 1.0 / area(nn[q]*nl + 0);
+                icefl(elem*3 + q) = -s * (vol * inv_area_q) / 12.0;
+            }
+        });
+
+    /* cluster min/max over the CSR neighbourhood (gather), OWNED rows (C lines 412-431). */
+    Kokkos::parallel_for("ice_fct_cluster", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int row) {
+            if (ulev_n(row) > 1) return;
+            const int rs = rowptr(row), re = rowptr(row + 1);
+            real_t lo_l = INFINITY, hi_l = -INFINITY, lo_v = INFINITY, hi_v = -INFINITY;
+            for (int k = rs; k < re; ++k) {
+                const int j = colind(k);
+                const real_t a = vals_l(j), b = vals(j);
+                if (a > hi_l) hi_l = a;
+                if (a < lo_l) lo_l = a;
+                if (b > hi_v) hi_v = b;
+                if (b < lo_v) lo_v = b;
+            }
+            const real_t hi = hi_l > hi_v ? hi_l : hi_v;
+            const real_t lo = lo_l < lo_v ? lo_l : lo_v;
+            tmax(row) = hi - vals_l(row);
+            tmin(row) = lo - vals_l(row);
+        });
+
+    /* init icepplus/icepminus over [0,N) (C line 434). */
+    Kokkos::parallel_for("ice_fct_pm_init", Kokkos::RangePolicy<>(0, N_full),
+        KOKKOS_LAMBDA(const int n) { icepp(n) = 0.0; icepm(n) = 0.0; });
+
+    /* sum positive/negative fluxes per node — element→node SCATTER (atomic_add, D22)
+     * (C lines 439-450). */
+    Kokkos::parallel_for("ice_fct_pm_sum", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int elem) {
+            if (ulev(elem) > 1) return;
+            const int nn[3] = { en(3*elem+0), en(3*elem+1), en(3*elem+2) };
+            for (int q = 0; q < 3; ++q) {
+                const int    n    = nn[q];
+                const real_t flux = icefl(elem*3 + q);
+                if (flux > 0.0) Kokkos::atomic_add(&icepp(n), flux);
+                else            Kokkos::atomic_add(&icepm(n), flux);
+            }
+        });
+
+    /* correction factors, OWNED rows (C lines 453-471). */
+    Kokkos::parallel_for("ice_fct_corr", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;
+            real_t flux = icepp(n);
+            if (Kokkos::fabs(flux) > 0.0) {
+                const real_t denom = flux > 1e-12 ? flux : 1e-12;
+                const real_t v = tmax(n) / denom;
+                icepp(n) = v < 1.0 ? v : 1.0;
+            } else icepp(n) = 0.0;
+            flux = icepm(n);
+            if (Kokkos::fabs(flux) > 0.0) {
+                const real_t denom = flux < -1e-12 ? flux : -1e-12;
+                const real_t v = tmin(n) / denom;
+                icepm(n) = v < 1.0 ? v : 1.0;
+            } else icepm(n) = 0.0;
+        });
+    /* D21 halo: limit reads icepplus/icepminus at halo elnodes (C line 472-474). */
+    fct_halo_nod2D(ice->work.fct_plus_fld,  partit);
+    fct_halo_nod2D(ice->work.fct_minus_fld, partit);
+
+    /* limit element fluxes — each elem reads its 3 vertices, scales its OWN slots → race-free
+     * (C lines 478-493). */
+    Kokkos::parallel_for("ice_fct_limit", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int elem) {
+            if (ulev(elem) > 1) return;
+            const int nn[3] = { en(3*elem+0), en(3*elem+1), en(3*elem+2) };
+            real_t ae = 1.0;
+            for (int q = 0; q < 3; ++q) {
+                const real_t flux = icefl(elem*3 + q);
+                const real_t cand = (flux >= 0.0) ? icepp(nn[q]) : icepm(nn[q]);
+                if (cand < ae) ae = cand;
+            }
+            icefl(elem*3 + 0) *= ae;
+            icefl(elem*3 + 1) *= ae;
+            icefl(elem*3 + 2) *= ae;
+        });
+
+    /* apply: phase 1 overwrite vals=valuesl over OWNED (C lines 498-501); phase 2 element→node
+     * SCATTER vals += limited fluxes (atomic_add, D22; C lines 502-510). */
+    Kokkos::parallel_for("ice_fct_apply1", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;
+            vals(n) = vals_l(n);
+        });
+    Kokkos::parallel_for("ice_fct_apply2", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int elem) {
+            if (ulev(elem) > 1) return;
+            const int nn[3] = { en(3*elem+0), en(3*elem+1), en(3*elem+2) };
+            for (int q = 0; q < 3; ++q)
+                Kokkos::atomic_add(&vals(nn[q]), icefl(elem*3 + q));
+        });
+    /* D21 halo: exchange the per-tracer values (C line 516). */
+    fct_halo_nod2D(ice->data[d_active].values_fld, partit);
+}
+
+/* ---- E5 device driver: ice_fct_solve (ice_fct.F90:210) ---------------------- */
+void fesom_ice_fct_solve_kk(fesom_ice                    *ice,
+                            const struct fesom_ssh_stiff *stiff,
+                            struct fesom_partit          *partit,
+                            const struct fesom_mesh      *mesh)
+{
+    /* Same order as the C: high_order (writes dvalues; valuesl scratch) → low_order
+     * (writes valuesl) → 3× fem_fct (m_ice, a_ice, m_snow). */
+    ice_solve_high_order_kk(ice, stiff, partit, mesh);
+    ice_solve_low_order_kk (ice, stiff, partit, mesh);
+
+    ice_fem_fct_kk(FCT_LOG_M,  ice, stiff, partit, mesh);
+    ice_fem_fct_kk(FCT_LOG_A,  ice, stiff, partit, mesh);
+    ice_fem_fct_kk(FCT_LOG_MS, ice, stiff, partit, mesh);
+}
+
+/* FESOM_KK_VERIFY=icefct — the FCT read-modify-writes data[*].values (each fem_fct overwrites
+ * its tracer's values with valuesl then accumulates the limited fluxes; the LO/HO solves + the
+ * antidiffusive fluxes all read the ORIGINAL values), so this is L26 capture-before over the 3
+ * values. The driver snapshots them PRE-FCT; here snapshot the KK result, restore the pre-values,
+ * run the C twins (fesom_ice_tg_rhs + fesom_ice_fct_solve — they recompute every FCT-internal
+ * scratch: values_rhs/valuesl/dvalues/fct_* from scratch, and exchange their own halos — collective,
+ * so run on ALL ranks), diff the 3 values, restore KK. The inputs uice/vice/mm/CSR are intact.
+ * On Serial the atomic_add scatters are ordered → max|Δ|==0; OpenMP/CUDA climate-close (D22).
+ * ⚠️ Meaningful only with ACTIVE ice (CORE2). */
+void fesom_ice_fct_verify(fesom_ice                    *ice,
+                          const struct fesom_ssh_stiff *stiff,
+                          struct fesom_partit          *partit,
+                          const struct fesom_mesh      *mesh,
+                          int                           step_n,
+                          const std::vector<real_t>    &pre_a,
+                          const std::vector<real_t>    &pre_m,
+                          const std::vector<real_t>    &pre_ms)
+{
+    const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    real_t *a  = ice->data[FESOM_ICE_AICE].values;
+    real_t *m  = ice->data[FESOM_ICE_MICE].values;
+    real_t *ms = ice->data[FESOM_ICE_MSNOW].values;
+    std::vector<real_t> ka(a, a + N), km(m, m + N), kms(ms, ms + N);   /* KK result */
+    std::copy(pre_a.begin(),  pre_a.end(),  a);                        /* restore FCT inputs */
+    std::copy(pre_m.begin(),  pre_m.end(),  m);
+    std::copy(pre_ms.begin(), pre_ms.end(), ms);
+    fesom_ice_tg_rhs   (ice,       partit, mesh);                      /* C twins */
+    fesom_ice_fct_solve(ice, stiff, partit, mesh);
+    auto mx = [](const std::vector<real_t> &kk, const real_t *c, int n) {
+        double d = 0.0;
+        for (int i = 0; i < n; ++i) { double x = std::fabs((double)kk[i] - (double)c[i]); if (x > d) d = x; }
+        return d; };
+    double da = mx(ka, a, N), dm = mx(km, m, N), dms = mx(kms, ms, N);
+    std::copy(ka.begin(),  ka.end(),  a);                             /* restore KK production state */
+    std::copy(km.begin(),  km.end(),  m);
+    std::copy(kms.begin(), kms.end(), ms);
+    double dmax = da; if (dm > dmax) dmax = dm; if (dms > dmax) dmax = dms;
+    const std::string be = Kokkos::DefaultExecutionSpace::name();
+    std::printf("[FESOM_KK_VERIFY=icefct] step %d backend=%s  max|Δ|: a_ice=%.3e m_ice=%.3e m_snow=%.3e\n",
+                step_n, be.c_str(), da, dm, dms);
+    std::fflush(stdout);
+    if (be == "Serial" && dmax != 0.0) {
+        std::fprintf(stderr, "[FESOM_KK_VERIFY=icefct] FAIL step %d: ice FCT Serial must be "
+                             "bit-identical (max|Δ|=%.3e)\n", step_n, dmax);
+        std::abort();
+    }
 }

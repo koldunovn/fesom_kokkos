@@ -604,7 +604,14 @@ GPU — fine, slow-first is accepted). Order chosen so the Serial build stays gr
       `stress2rhs`/vel-update + the per-subcycle uice/vice halo bracket — the CG/M4.2 host-loop pattern;
       2 element→node scatters D22; coastal BC stays host). Serial `max|Δ|=0` on a 60-step CORE2 dist_16
       ice-active run (job 25149090; uice max 0.95 m/s), pi==golden np1+np2, SYNCCHECK. Key `evp`, L43.
-- [ ] **M4.3c** — ice FCT (`tg_rhs` + `fct_solve`) — the M2.6 ocean-FCT analogue (scatter decision, D22).
+- [x] **M4.3c** — ice FCT (`tg_rhs` + `fct_solve`) — the M2.6 ocean-FCT analogue (2-D), reusing the
+      M4.2 SSH-CSR machinery for the mass-matrix solves. `tg_rhs` = element→node SCATTER; `solve_low/
+      high_order` = CG per-row CSR-gather SpMV (high_order = host-loop iter + per-iter `dvalues` halo);
+      3× Zalesak `fem_fct` = antidiff map + cluster-min/max gather + `icepplus/icepminus` SCATTER +
+      correction/limit maps + apply (overwrite + `vals` SCATTER). 3 element→node scatters (D22).
+      `fct_massmatrix` one-shot push (shares ssh_stiff sparsity). Serial `max|Δ|=0` on a 60-step CORE2
+      dist_16 ice-active run (job 25158693), pi==golden np1+np2, ctest 4/4, SYNCCHECK, CUDA builds.
+      Key `icefct`, L44.
 - [ ] **M4.3d** — thermodynamics + `oce_fluxes` (column physics + the flux coupling overwriting forcing).
 - [ ] **M4 acceptance**: whole model on device; 1-yr CORE2 Serial bit-identical to cref; 2-yr+5-yr CUDA
       re-validated; tag `m4-full-device`

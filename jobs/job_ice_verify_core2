@@ -27,9 +27,10 @@ NSTEPS=60
 SNAP_EVERY=60
 JRA55_YEAR=1958
 export FESOM_PRINT_EVERY=20
-# All ice device kernels so far: M4.3a maps (icemap) + M4.3b EVP (evp). The evp verify runs
-# the whole C EVP (120 subcycles) beside the device EVP each step -> short NSTEPS.
-export FESOM_KK_VERIFY=evp,icemap
+# All ice device kernels so far: M4.3a maps (icemap) + M4.3b EVP (evp) + M4.3c FCT (icefct).
+# The evp/icefct verifies run the whole C EVP (120 subcycles) / C FCT (3 tracers, ~21 halos)
+# beside the device kernel each step -> short NSTEPS.
+export FESOM_KK_VERIFY=evp,icemap,icefct
 
 BIN=/home/a/a270088/port_kokkos/build-serial/fesom_port
 OUT_DIR=/scratch/a/a270088/m43a_verify
@@ -40,9 +41,11 @@ srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_Y
     > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
 EC=$?
 echo "=== done $(date) — exit $EC ==="
-echo "--- any NONZERO icemap Serial Δ (a FAIL aborts the run; empty = all bit-identical): ---"
-grep "FESOM_KK_VERIFY=icemap" "$OUT_DIR/run.log" 2>/dev/null | grep -v "0.000e+00" | head
-echo "--- last icemap lines (confirm ice is non-trivial: cut_off/h_diag nonzero values): ---"
-grep "FESOM_KK_VERIFY=icemap" "$OUT_DIR/run.log" 2>/dev/null | tail -6
+echo "--- any NONZERO Serial Δ across all keys (a FAIL aborts the run; empty = all bit-identical): ---"
+grep "FESOM_KK_VERIFY=" "$OUT_DIR/run.log" 2>/dev/null | grep -v "0.000e+00" | head
+echo "--- last icefct lines (confirm ice is non-trivial: a_ice/m_ice/m_snow magnitudes): ---"
+grep "FESOM_KK_VERIFY=icefct" "$OUT_DIR/run.log" 2>/dev/null | tail -6
+echo "--- last icemap lines (cut_off/h_diag): ---"
+grep "FESOM_KK_VERIFY=icemap" "$OUT_DIR/run.log" 2>/dev/null | tail -3
 echo "--- run.err tail (FAIL message if aborted): ---"; tail -5 "$OUT_DIR/run.err"
 exit $EC
