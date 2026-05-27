@@ -162,7 +162,21 @@ CUDA pi dist_2 A/B at the run-to-run noise floor + re-time CORE2 dist_8.
 | M5.1: CG, momentum (`uvnode_rhs`/`u_b`/`v_b`), gm (`tr_xy`/`tr_z`), ice-FCT | 0.716 | 8.2% |
 | M5.4a: + `uv_rhs` (elem3D, 3×/step, momentum substeps 4–6) | 0.658 | 14.3% |
 | M5.4b: + `pgf_x`/`pgf_y` (elem3D) + `uvnode` (nod3D 2-comp) | 0.643 | 16.7% |
-| **M5.4c: + FCT internal halos** (`fct_LO`/`tr_xy`/`fct_plus`/`fct_minus`, 8 exch/step) | **0.592** | **23.3%** |
+| M5.4c: + FCT internal halos (`fct_LO`/`tr_xy`/`fct_plus`/`fct_minus`, 8 exch/step) | 0.592 | 23.3% |
+| **M5.5 (lever B): `bvfreq` device smoother** (`smooth_nod3D_kk`) + 4 re-pushes removed | **0.577** | **~25%** |
+
+**Lever B (M5.5) — `smooth_nod3D` on the device (+ an I/O-staleness fix).** `fesom_smooth_nod3D_kk`
+(`fesom_eos.cpp`): the node-patch smoother on-device (2 race-free kernels/sweep — gather then scale,
+*separate* so `arr` is read-then-written, no race; + device-halo between sweeps). Serial bit-identical to the
+C smoother. Wired `bvfreq`: device-halo + device-smooth + **removed the 4 consumer `bvfreq` IN re-pushes**
+(GM/KPP/PP/mo_convect) → device-resident; ~2.5% + the smoothing compute moves off the host. (Remaining for B:
+KPP `blmc` — 3-slab × 3-sweep, needs a slab-offset smoother/halo.) ⚠️ **I/O-staleness gotcha it caught (an
+M5.4b regression):** flipping a field that is *also a snapshot output* (`pgf`, `bvfreq`) removes its OUT-rail
+`sync_host`, so it's DEVICE-authoritative at I/O time and the gather (`h_checked()`) reads the **stale host
+copy** on CUDA — the *model* is correct (device-resident), only the *diagnostic output* is wrong. Fix: a
+pre-I/O `sync_host` of those fields, gated on the snapshot step (`fesom_main.cpp`). Missed in M5.4b because
+the A/B grepped a subset → **always diff ALL output fields** (the Serial gate + SYNCCHECK can't catch it: on
+Serial `fesom_halo_field` leaves the field synced).
 
 **host-staged 0.772 → device-halo 0.592 = 23.3%** (the clean self-contained + split-rail flips, each
 Serial np1+np2 bit-identical + SYNCCHECK-clean + CUDA A/B at the noise floor). Two flip patterns proven:
