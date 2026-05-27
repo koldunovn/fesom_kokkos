@@ -37,6 +37,7 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M5.4c: FCT internal halos on device (fesom_halo_field)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -1541,11 +1542,9 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             fctLO(k) = numer / hnod_new;
         }
     });
-    sc->fct_LO_fld.modify_device();
-    /* D21 internal halo: exchange fct_LO (Zalesak a1 reads LO at halo nodes). */
-    sc->fct_LO_fld.sync_host();
-    fesom_exchange_nod3D(sc->fct_LO_fld.h_checked(), nl, partit);
-    sc->fct_LO_fld.modify_host(); sc->fct_LO_fld.sync_device();
+    /* D21 internal halo: exchange fct_LO (Zalesak a1 reads LO at halo nodes).
+     * M5.4c: device-halo (GPU-aware MPI on CUDA, exact host bracket on Serial). */
+    fesom_halo_field(sc->fct_LO_fld, FESOM_HALO_NOD3D, nl, 1, partit);
 
     /* ===== 5. HO horizontal (MFCT): element gradient FROM `values`, exchange, fill, flux FROM valuesAB ===== */
     Kokkos::parallel_for("fct_grad_zero", RP(0, (size_t)E_full * nl * 2),
@@ -1561,12 +1560,9 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             trxy((size_t)el*nl*2+nz*2+1) = g3*t0 + g4*t1 + g5*t2;
         }
     });
-    sc->tr_xy_fld.modify_device();
     /* D21 internal halo: exchange tr_xy (full element halo, 2-comp; fill_up_dn_grad +
-     * the node gather read it at HALO elements). */
-    sc->tr_xy_fld.sync_host();
-    fesom_halo_exchange(sc->tr_xy_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
-    sc->tr_xy_fld.modify_host(); sc->tr_xy_fld.sync_device();
+     * the node gather read it at HALO elements). M5.4c: device-halo (GPU-aware MPI). */
+    fesom_halo_field(sc->tr_xy_fld, FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
 
     /* fill_up_dn_grad: per-edge up/down + node-averaged gradients. */
     Kokkos::parallel_for("fct_eud_zero", RP(0, (size_t)Ee * nl * 4),
@@ -1765,14 +1761,10 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             real_t r_neg = fmin(k) / flux_neg; fminus(k) = (r_neg<1.0)?r_neg:1.0;
         }
     });
-    sc->fct_plus_fld.modify_device(); sc->fct_minus_fld.modify_device();
     /* D21 internal halo: exchange fct_plus/fct_minus (b3 horizontal reads at edge
-     * endpoints, which can be HALO nodes). Two single-field calls (no 2-field variant). */
-    sc->fct_plus_fld.sync_host(); sc->fct_minus_fld.sync_host();
-    fesom_exchange_nod3D(sc->fct_plus_fld.h_checked(),  nl, partit);
-    fesom_exchange_nod3D(sc->fct_minus_fld.h_checked(), nl, partit);
-    sc->fct_plus_fld.modify_host();  sc->fct_plus_fld.sync_device();
-    sc->fct_minus_fld.modify_host(); sc->fct_minus_fld.sync_device();
+     * endpoints, which can be HALO nodes). M5.4c: device-halo (GPU-aware MPI). */
+    fesom_halo_field(sc->fct_plus_fld,  FESOM_HALO_NOD3D, nl, 1, partit);
+    fesom_halo_field(sc->fct_minus_fld, FESOM_HALO_NOD3D, nl, 1, partit);
     /* b3 vertical: limit adf_v (per-node, own column). */
     Kokkos::parallel_for("fct_zal_b3v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
