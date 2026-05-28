@@ -485,14 +485,21 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
  * u/nlevels[_nod2D]) is set-once device-current. */
 void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                            const struct fesom_mesh *mesh, struct fesom_partit *p,
-                           std::size_t base)
+                           std::size_t base, int nslab, std::size_t slab_stride)
 {
-    if (n_smooth < 1) return;
+    if (n_smooth < 1 || nslab < 1) return;
     const int Nmy = mesh->myDim_nod2D;
     const int NL  = mesh->nl;
 
-    Kokkos::View<double*> vol ("smooth.vol",  (size_t)Nmy * NL);
-    Kokkos::View<double*> work("smooth.work", (size_t)Nmy * NL);
+    /* M5.12d: smooth `nslab` contiguous channels (slabs) in ONE set of gather/scale kernels
+     * per sweep, decoding (slab,node) from a flat RangePolicy(0, nslab*Nmy). The channels are
+     * INDEPENDENT (each reads/writes only arr at offset base + s*slab_stride), so the per-(s,n)
+     * arithmetic is identical to the old one-call-per-slab loop → Serial/OpenMP bit-identical.
+     * Collapses blmc's 3-channel smoother from 9 gather + 9 scale launches to 3 + 3 (nslab=1 →
+     * byte-identical to the original single-slab path; the bvfreq caller is unchanged). The
+     * per-sweep slab halos stay one-per-channel (halo aggregation is M5.12g, not here). */
+    Kokkos::View<double*> vol ("smooth.vol",  (size_t)nslab * Nmy * NL);
+    Kokkos::View<double*> work("smooth.work", (size_t)nslab * Nmy * NL);
 
     auto arr    = arr_fld.d();
     auto nie    = mesh->nod_in_elem2D_fld.d();
@@ -504,15 +511,19 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
     auto ule_e  = mesh->ulevels_fld.d();
     auto nle_e  = mesh->nlevels_fld.d();
     auto volv = vol; auto workv = work;
+    const std::size_t stride = slab_stride;
 
     for (int sweep = 0; sweep < n_smooth; ++sweep) {
         const int sw = sweep;
-        Kokkos::parallel_for("fesom_smooth_gather", Kokkos::RangePolicy<>(0, Nmy),
-            KOKKOS_LAMBDA(const int n) {
+        Kokkos::parallel_for("fesom_smooth_gather", Kokkos::RangePolicy<>(0, nslab * Nmy),
+            KOKKOS_LAMBDA(const int idx) {
+                const int s = idx / Nmy;
+                const int n = idx - s * Nmy;
+                const std::size_t sb = base + (std::size_t)s * stride;
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
                 for (int nz = uln; nz <= nlnz; ++nz) {
-                    if (sw == 0) volv((size_t)n*NL + nz) = 0.0;
-                    workv((size_t)n*NL + nz) = 0.0;
+                    if (sw == 0) volv((size_t)idx*NL + nz) = 0.0;
+                    workv((size_t)idx*NL + nz) = 0.0;
                 }
                 const int o0 = off(n), o1 = off(n + 1);
                 for (int k = o0; k < o1; ++k) {
@@ -522,24 +533,28 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                     const double a = ea(el);
                     const int v0 = en(3*el+0), v1 = en(3*el+1), v2 = en(3*el+2);
                     for (int nz = ule; nz <= nle; ++nz) {
-                        if (sw == 0) volv((size_t)n*NL + nz) += a;
-                        workv((size_t)n*NL + nz) += a * ( arr(base + (size_t)v0*NL + nz)
-                                                        + arr(base + (size_t)v1*NL + nz)
-                                                        + arr(base + (size_t)v2*NL + nz) );
+                        if (sw == 0) volv((size_t)idx*NL + nz) += a;
+                        workv((size_t)idx*NL + nz) += a * ( arr(sb + (size_t)v0*NL + nz)
+                                                          + arr(sb + (size_t)v1*NL + nz)
+                                                          + arr(sb + (size_t)v2*NL + nz) );
                     }
                 }
                 if (sw == 0)
                     for (int nz = uln; nz <= nlnz; ++nz)
-                        volv((size_t)n*NL + nz) = 1.0 / (3.0 * volv((size_t)n*NL + nz));
+                        volv((size_t)idx*NL + nz) = 1.0 / (3.0 * volv((size_t)idx*NL + nz));
             });
-        Kokkos::parallel_for("fesom_smooth_scale", Kokkos::RangePolicy<>(0, Nmy),
-            KOKKOS_LAMBDA(const int n) {
+        Kokkos::parallel_for("fesom_smooth_scale", Kokkos::RangePolicy<>(0, nslab * Nmy),
+            KOKKOS_LAMBDA(const int idx) {
+                const int s = idx / Nmy;
+                const int n = idx - s * Nmy;
+                const std::size_t sb = base + (std::size_t)s * stride;
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
                 for (int nz = uln; nz <= nlnz; ++nz)
-                    arr(base + (size_t)n*NL + nz) = workv((size_t)n*NL + nz) * volv((size_t)n*NL + nz);
+                    arr(sb + (size_t)n*NL + nz) = workv((size_t)idx*NL + nz) * volv((size_t)idx*NL + nz);
             });
         arr_fld.modify_device();
-        fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p, base);   /* halo (slab) for the next sweep / exit */
+        for (int s = 0; s < nslab; ++s)   /* per-channel slab halo for the next sweep / exit */
+            fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p, base + (std::size_t)s * stride);
     }
 }
 

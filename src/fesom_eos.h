@@ -75,7 +75,9 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
 namespace fesom { template <class> class FieldT; using Field = FieldT<double>; }
 void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                            const struct fesom_mesh *mesh, struct fesom_partit *p,
-                           std::size_t base = 0);   /* base: slab offset for multi-channel fields */
+                           std::size_t base = 0,           /* slab offset for multi-channel fields */
+                           int nslab = 1,                  /* M5.12d: # contiguous channels to smooth in one call */
+                           std::size_t slab_stride = 0);   /* byte... element offset between channels (n_nod*nl) */
 #endif
 
 /*

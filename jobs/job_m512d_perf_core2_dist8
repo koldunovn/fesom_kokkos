@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=m512d_perf
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m512d_perf.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m512d_perf.%j.err
+#
+# M5.12f-1 same-day perf baseline (L40): time BEFORE (11b33af) vs AFTER (m512-fusion CG
+# View-reducer) on the SAME 2-GPU-node allocation, back-to-back, so the only difference
+# is the binary. CORE2 dist_8, active ice (PHC + JRA55 1958), dt=1800, 200 steps
+# (5 warmup excluded -> 195 timed). 2 reps each. Internal startup-free loop timer.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/m512d_perf
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+BIN_BEFORE="$ROOT/build-cuda/fesom_port.before_m512f"   # 11b33af (M5.12 base)
+BIN_AFTER="$ROOT/build-cuda/fesom_port"                 # m512-fusion (smoother collapse (9 blmc calls -> 3))
+DT=1800; NSTEPS=200
+
+run() {  # $1=binary  $2=tag
+  srun "$1" "$MESH" "$OUT" "$DT" "$NSTEPS" 999999 "$PHC" 1958 > "$OUT/log_$2.txt" 2>&1
+  printf "%-16s rc=%s  %s\n" "$2" "$?" "$(grep 'loop timing' "$OUT/log_$2.txt" | tail -1)"
+}
+
+echo "=== M5.12f-1 perf: CORE2 dist_8 nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS on $SLURM_JOB_NODELIST  dt=$DT nsteps=$NSTEPS ==="
+nvidia-smi -L | head -1
+run "$BIN_BEFORE" before_rep_a
+run "$BIN_AFTER"  after_rep_a
+run "$BIN_BEFORE" before_rep_b
+run "$BIN_AFTER"  after_rep_b
+echo "--- summary (loop timing lines) ---"
+for t in before_rep_a after_rep_a before_rep_b after_rep_b; do
+  printf "%-16s %s\n" "$t" "$(grep 'loop timing' "$OUT/log_$t.txt" | tail -1)"
+done
+echo "--- CG iters/step sanity (after_rep_a) ---"
+grep -iE "loop timing|CG-share|cg .*iter" "$OUT/log_after_rep_a.txt" | tail -3
