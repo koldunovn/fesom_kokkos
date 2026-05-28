@@ -1,8 +1,9 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 21 (2026-05-28) — M5.12 start: f-1 reverted (perf-neutral), d landed (small win), reprioritized to b.**
-Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f docs), `09b27a8` (d), `f70f247` (d sha).
-Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT filled for f + d). Lessons L53 (f), L54 (d).
+**Session 21 (2026-05-28) — M5.12 fusion campaign: f reverted, d + b landed (both <1%), fusion thesis CAPPED, pivoting to mesh size (NG5 7M).**
+Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f docs), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295` (b).
+Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT filled for f + d + b). Lessons L53 (f), L54 (d), **L55 (the campaign cap)**.
+**Bottom line: launch fusion caps at <1%/lever (L55); the real lever is mesh size (SCALING_DARS). M5.12 cumulative d+b ≈ 1.3%. Next = NG5/dars-class runs, not g/e/h.**
 - **M5.12f-1 (CG-dot View-reducer) — REVERTED, perf-neutral (L53).** Converted the 2 in-loop CG
   `parallel_reduce` sites (`fesom_ssh.cpp`) from host-scalar to device-`View` reducers to defer the
   post-kernel fence to the `deep_copy` before the `MPI_Allreduce`. Mechanism is REAL (confirmed from
@@ -23,12 +24,17 @@ Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT filled for f + d). Lessons 
   compare to session-20's memory-recorded 0.4777 (cross-session Levante node-mix noise). Only same-day
   before/after deltas are valid. Perf harness: `jobs/job_m512d_perf_core2_dist8` (interleaved before/after,
   one allocation); base binary preserved at `build-cuda/fesom_port.before_m512f`.
-- **STRATEGIC FINDING (L54) — the launch-density thesis pays on MANY SMALL kernels, not few big ones.**
-  A launch-fusion lever's payoff ≈ (launches removed) × (per-launch OVERHEAD ~13µs), NOT × wall-time:
-  the smoother gather is ~350µs/call **bandwidth-bound**, so collapsing 9→3 only saved overhead+alloc
-  (~0.7%), not compute. **NEXT = M5.12b (EVP TeamPolicy fusion): ~480 launches of ~13µs subcycle kernels
-  → the real ~1–3% prize. Do b BEFORE g (halo aggregation).** f and d (CG, smoother) are the small ones;
-  b is where the launch-density wall actually is.
+- **M5.12b (EVP per-subcycle fusion) — COMMITTED `9d13295`, +0.61% (below the 1% bar; kept for the launch cut + cleaner code).** Fused the 7 per-subcycle kernels → **3** (`ice_s2rhs_zero` / `ice_evp_stress_scatter` = stress_tensor+rhs-scatter / `ice_evp_node_update` = final+saveold+velupd+coastal), saving **480 launches/step**. Bit-identity-safe by construction (fuse SAME-index-space adjacent kernels, scatter stays element-ordered, each node independent) — **NO team scratch, NO atomic reorder** (strictly safer than the plan's TeamPolicy+team-scratch design, which would have broken bit-identity + forced M3.2). Removed the dead `stress_tensor_kk`/`stress2rhs_kk` twins. Gates: `evp`+all-5-ice-keys Serial CORE2 dist_16 max|Δ|==0; full-model CORE2 `diff_snap` ALL FIELDS BIT-IDENTICAL; gate PASS worst 1.015e-2 (uice/vice 3.8e-4/6.6e-4 tight); **M3.2 SKIPPED** (no scatter reorder + Serial bit-identical → identical math). Same allocation: 0.4659 → 0.4630 s/step.
+- **STRATEGIC FINDING (L55) — kernel-launch fusion CAPS at <1% per lever; the real lever is mesh size.**
+  Payoff ≈ (launches removed) × per-launch OVERHEAD (~6-7µs, the bare launch+fence floor), NOT × per-call
+  wall-time (~13µs, mostly compute that fusion does NOT remove). Confirmed by the whole campaign: f (CG,
+  ~110 launches in a 1-5% solver) **−0.78% reverted**, d (smoother, 12 big bandwidth-bound) **+0.73%**,
+  b (EVP, 480 small) **+0.61%** — even the biggest target is sub-1%. So g/e/h would each be sub-1% too →
+  **M5.12 cumulative ~3-4%, not the planned 10-15%.** **`docs/SCALING_DARS.md` is the answer: mesh size
+  is the dominant lever (CORE2 7× → dars 4.1× GPU/CPU, zero code; strong-scaling 81%→97%).** **NEXT
+  (Session 22) = NG5 (7.4M) scaling runs** (user-built partitions: dist_8/16/32/64 GPU + dist_256/512/
+  1024/2048 CPU; priority pairs dist_16+512, dist_32+1024) to extend the CORE2→farc→dars→NG5 trend curve
+  and confirm whether the GPU/CPU gap keeps shrinking. The fusion levers g/e/h are deprioritized (sub-1%).
 
 **Session 20 (2026-05-28) — M5.9-pin: only `uvnode`→bulk is a real host reader; dropped 3 placebo syncs.**
 Commit `3842a0d`. Full story: lessons L49/L50 + GPU_FIDELITY §M5.9-pin.
