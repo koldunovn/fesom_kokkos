@@ -1,5 +1,35 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+**Session 21 (2026-05-28) — M5.12 start: f-1 reverted (perf-neutral), d landed (small win), reprioritized to b.**
+Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f docs), `09b27a8` (d), `f70f247` (d sha).
+Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT filled for f + d). Lessons L53 (f), L54 (d).
+- **M5.12f-1 (CG-dot View-reducer) — REVERTED, perf-neutral (L53).** Converted the 2 in-loop CG
+  `parallel_reduce` sites (`fesom_ssh.cpp`) from host-scalar to device-`View` reducers to defer the
+  post-kernel fence to the `deep_copy` before the `MPI_Allreduce`. Mechanism is REAL (confirmed from
+  Kokkos 4.4.1 `Cuda_Parallel_Range.hpp:373-378`; 3-agent adversarial review all-PASS) and gates passed
+  (`FESOM_KK_VERIFY=ssh` max|Δ|==0; gate worst 4.97e-3) — but **same-day CORE2 dist_8 = +0.78% SLOWER**:
+  the host needs each dot immediately for the Allreduce (no async window to fill) and the CG is only
+  ~1–5% of the step. Below the ≥1% bar → reverted. f-2 (device-ptr Allreduce) has a sub-0.2% ceiling →
+  abandoned.
+- **M5.12d (blmc smoother 3-channel collapse) — COMMITTED `09b27a8`, small win (L54).** Generalized
+  `fesom_smooth_nod3D_kk` with `(nslab, slab_stride)`: the 3 blmc channels smooth in ONE set of
+  gather/scale kernels per sweep (flat `RangePolicy(0, nslab*Nmy)`, slab decoded per thread) instead of
+  3 per-channel calls → **18 launches + 6 `View` alloc/zero-init → 6 + 2**. Channels independent →
+  **Serial bit-identical** (`FESOM_KK_VERIFY=kpp` max|Δ|==0 AND full-model CORE2 `diff_snap.py` ALL
+  FIELDS BIT-IDENTICAL → M3.2 skipped). `nslab=1` default keeps bvfreq + signature byte-identical →
+  **`fesom_step.cpp` untouched, no `--fresh-oracle`**. Gate PASS (worst 1.65e-3; bvfreq 3.9e-7). Same-day
+  CORE2 dist_8: **0.4852 → 0.4816 s/step (−0.73%)** (after-reps tight 0.4815–0.4817, below every base rep).
+- **⚠️ L40 reminder:** today's BASE (11b33af) measures **0.4836–0.4852 s/step** on CORE2 dist_8 — do NOT
+  compare to session-20's memory-recorded 0.4777 (cross-session Levante node-mix noise). Only same-day
+  before/after deltas are valid. Perf harness: `jobs/job_m512d_perf_core2_dist8` (interleaved before/after,
+  one allocation); base binary preserved at `build-cuda/fesom_port.before_m512f`.
+- **STRATEGIC FINDING (L54) — the launch-density thesis pays on MANY SMALL kernels, not few big ones.**
+  A launch-fusion lever's payoff ≈ (launches removed) × (per-launch OVERHEAD ~13µs), NOT × wall-time:
+  the smoother gather is ~350µs/call **bandwidth-bound**, so collapsing 9→3 only saved overhead+alloc
+  (~0.7%), not compute. **NEXT = M5.12b (EVP TeamPolicy fusion): ~480 launches of ~13µs subcycle kernels
+  → the real ~1–3% prize. Do b BEFORE g (halo aggregation).** f and d (CG, smoother) are the small ones;
+  b is where the launch-density wall actually is.
+
 **Session 20 (2026-05-28) — M5.9-pin: only `uvnode`→bulk is a real host reader; dropped 3 placebo syncs.**
 Commit `3842a0d`. Full story: lessons L49/L50 + GPU_FIDELITY §M5.9-pin.
 - The M5.9 fix `sync_host`'d 4 device-halo'd fields (`bvfreq`, `pgf_x/y`, `uvnode`, `uv_rhs`) after a
