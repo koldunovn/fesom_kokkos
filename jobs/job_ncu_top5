@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ncu_top5
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_profile_m511/ncu_top5/job.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_profile_m511/ncu_top5/job.%j.err
+#
+# M5.11 R3: ncu kernel-level metrics on the top-5 kernels. The regex below is
+# a PLACEHOLDER — fill it in after R1 (dist_8 timing) identifies the top 5.
+# `--set full` gives all sections (MemoryWorkloadAnalysis, SchedulerStats,
+# Occupancy, WarpStateStats, …). Fallback if --set full OOMs on FCT (largest
+# working set): swap to `--set roofline` with explicit sections — see commented
+# line below.
+#
+# ncu replays each matched kernel multiple times for full metrics → slow
+# (~20 min × 5 kernels = ~100 min). Stays on gpu-devel because np=1 fits.
+# Only 3 model steps to keep the replay window small.
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+# DO NOT set FESOM_STEP_PROFILE=1 here — the per-kernel fences interact with
+# ncu replay (each kernel replays ~10×; our begin/end fences inflate that).
+# ncu provides its own kernel-level timing.
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_profile_m511/ncu_top5
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+# === PLACEHOLDER REGEX — fill in after R1 reports top-5 ===
+# Example: KREGEX='fct_mfct_h|fct_qr4c_v|momentum_adv_horiz|kpp_blmix|gm_fer_solve_gamma'
+KREGEX='__PLACEHOLDER__top5_from_R1__'
+
+echo "=== M5.11 R3 ncu top-5, np=1, 3 steps, JRA55=1958 ==="
+echo "Kernel regex: $KREGEX"
+srun ncu --set full \
+         --kernel-name regex:"$KREGEX" \
+         -o "$OUT/prof" --force-overwrite=true \
+     "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 3 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+# Fallback if --set full OOMs:
+# srun ncu --set roofline \
+#          --section MemoryWorkloadAnalysis --section SchedulerStats \
+#          --section Occupancy --section WarpStateStats \
+#          --kernel-name regex:"$KREGEX" \
+#          -o "$OUT/prof" --force-overwrite=true \
+#      "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 3 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "=== done — fetch ${OUT}/prof.ncu-rep to view in ncu-ui ==="

@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_nsys_np1
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_profile_m511/nsys_np1/job.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_profile_m511/nsys_np1/job.%j.err
+#
+# M5.11 R2: nsys timeline at np=1 with our NVTX markers visible. Refreshes the
+# stale "13 GB/step / cudaMemcpy 83% of API time" stat from before the M5.1+M5.4+M5.7
+# halo flips. The -t nvtx flag picks up the pushRegion calls in fesom_prof
+# (kernel labels + phase names).
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1            # enables our NVTX bridge (push/pop_region)
+export FESOM_PRINT_EVERY=999
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_profile_m511/nsys_np1
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "=== M5.11 R2 nsys np=1, 30 steps, JRA55=1958 ==="
+srun nsys profile -t cuda,nvtx,mpi,osrt \
+                  -o "$OUT/prof" --force-overwrite=true --stats=true \
+     "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 30 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "--- gpukernsum (top 20) ---"
+grep -A 25 "gpukernsum" "$OUT/run.log" | head -30
+echo "--- gpumemtimesum ---"
+grep -A 10 "gpumemtimesum" "$OUT/run.log" | head -15
+echo "=== done — fetch ${OUT}/prof.nsys-rep to view in nsys-ui ==="

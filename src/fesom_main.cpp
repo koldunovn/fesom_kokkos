@@ -318,6 +318,11 @@ int main(int argc, char **argv)
     kokkos_settings.set_device_id(local_rank);     /* ignored by Serial/OpenMP */
     Kokkos::initialize(kokkos_settings);
 
+    /* M5.11: register the deep_copy callback that counts per-step PCIe traffic
+     * (no-op when FESOM_STEP_PROFILE is unset; atomics hold no Kokkos state so
+     * no cleanup-before-finalize needed, unlike the M5.8 EVP static View). */
+    fesom_prof::install_callbacks();
+
     /* Per-rank GPU-binding proof (the M3.1 gate has no FESOM_KK_VERIFY): on a GPU
      * backend Kokkos::device_id() is the bound device — it MUST be DISTINCT per
      * node-local rank (0,1,2,3,…); on Serial/OpenMP it returns -1 (no device). The

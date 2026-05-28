@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=kk_prof_d1
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_profile_m511/dist1/job.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_profile_m511/dist1/job.%j.err
+#
+# M5.11 R1a: per-kernel timing baseline at np=1 (no halos) on CORE2-active-ice.
+# Per-kernel buckets come from the Kokkos parallel_{for,reduce,scan} callbacks
+# registered by fesom_prof::install_callbacks; deep_copy counter prints the
+# PCIe traffic. JRA55=1958 keeps EVP/FCT/icethermo active.
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1
+export FESOM_PRINT_EVERY=999
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_profile_m511/dist1
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "=== M5.11 R1a: CORE2 dist_1 (np=1, 1 A100), 200 steps, JRA55=1958 ==="
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 200 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+grep -E "loop timing|fesom_prof|deep_copy|nan|abort" "$OUT/run.log"
+echo "=== done ==="
