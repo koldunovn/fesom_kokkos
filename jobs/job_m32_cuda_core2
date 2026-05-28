@@ -28,19 +28,13 @@
 # Output -> /work (NEVER $HOME: 60 GB home quota; a 2-yr CORE2 monthly set is several GB).
 
 ROOT=/home/a/a270088/port_kokkos
-source /sw/etc/profile.levante
-module --force purge
-module unload netcdf-c cdo ncview git 2>/dev/null      # sticky-module fix (L17)
-module load gcc/11.2.0-gcc-11.2.0 nvhpc/24.7-gcc-11.2.0 \
-            openmpi/4.1.2-gcc-11.2.0 netcdf-c/4.8.1-gcc-11.2.0
-export NVCC_WRAPPER_DEFAULT_COMPILER=g++
-
-# Standard Levante UCX/IB transport for MULTI-RANK / MULTI-NODE (verbatim from job_gpu_core2).
-export OMPI_MCA_pml=ucx OMPI_MCA_btl=self OMPI_MCA_osc=pt2pt UCX_IB_ADDR_TYPE=ib_global
-export OMPI_MCA_coll="^ml,hcoll" OMPI_MCA_coll_hcoll_enable=0 HCOLL_ENABLE_MCAST_ALL=0
-export HCOLL_MAIN_IB=mlx5_0:1 UCX_NET_DEVICES=mlx5_0:1
-export UCX_TLS=mm,knem,cma,dc_mlx5,dc_x,self UCX_UNIFIED_MODE=y OMPI_MCA_io=romio321
-export HDF5_USE_FILE_LOCKING=FALSE
+# M5.1a: build-cuda needs the CUDA-aware MPI (openmpi/4.1.5-nvhpc-24.7) — the env.sh
+# openmpi/4.1.2 is --without-cuda and segfaults on device-ptr MPI_Isend in fesom_halo_device.
+# See reference-cuda-aware-mpi + lesson L47.
+source "$ROOT/env_cuda.sh"
+# UCX env for CUDA-aware MPI (matches jobs/job_gpu_fidelity_dev — proven to work):
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
 
 MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2          # 8 ranks -> reads dist_8
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc

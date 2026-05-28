@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --job-name=fort_scal
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.err
+#
+# Fortran FESOM2 strong-scaling. Wall-diff timing: time(205) - time(5) divided by 200.
+# Submit:
+#   sbatch --nodes=1 --ntasks=128 --export=ALL,TAG=f_n1 jobs/job_scaling_fortran
+#   sbatch --nodes=2 --ntasks=256 --export=ALL,TAG=f_n2 jobs/job_scaling_fortran
+#   sbatch --nodes=4 --ntasks=512 --export=ALL,TAG=f_n4 jobs/job_scaling_fortran
+
+FROOT=/home/a/a270088/fesom27/fesom2
+source /sw/etc/profile.levante
+read -r USED_SHELL < "$FROOT/bin/current_shell_path"
+source "$USED_SHELL"
+ulimit -s 204800
+
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/scaling_${TAG:-default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+cd "$OUT" || exit 2
+
+# Stage the Fortran work-dir contents (namelists + fesom.x symlink)
+ln -sf "$FROOT/bin/fesom.x" .
+for f in namelist.config namelist.forcing namelist.oce namelist.ice namelist.icepack \
+         namelist.tra namelist.io namelist.cvmix namelist.dyn; do
+  cp -f "$FROOT/work_core/$f" . 2>/dev/null
+done
+
+MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2}
+DT=${DT:-1800}
+STEP_PER_DAY=$(python3 -c "print(86400 // int($DT))")
+
+set_run_length() {  # $1 = number of timesteps
+  python3 -c "
+import re
+with open('namelist.config') as f: t = f.read()
+t = re.sub(r'(run_length\s*=\s*)\d+', r'\g<1>$1', t, count=1)
+t = re.sub(r\"(run_length_unit\s*=\s*)'[^']*'\", r\"\g<1>'s'\", t, count=1)
+t = re.sub(r'(step_per_day\s*=\s*)\d+', r'\g<1>$STEP_PER_DAY', t, count=1)
+t = re.sub(r\"(MeshPath\s*=\s*)'[^']*'\", r\"\g<1>'$MESH/'\", t, count=1)
+open('namelist.config','w').write(t)
+# disable the opt_visc safety check (it refuses farc-class meshes with opt_visc=5)
+with open('namelist.dyn') as f: t = f.read()
+t = re.sub(r'(check_opt_visc\s*=\s*)\.true\.', r'\g<1>.false.', t, count=1)
+open('namelist.dyn','w').write(t)
+"
+}
+
+echo "=== Fortran scaling ${TAG} (nodes=$SLURM_NNODES ranks=$SLURM_NTASKS) on $SLURM_JOB_NODELIST ==="
+
+set_run_length 5
+t0=$(date +%s.%N)
+srun -l fesom.x > "fesom2.0_short.out" 2>&1
+t1=$(date +%s.%N)
+
+set_run_length 205
+t2=$(date +%s.%N)
+srun -l fesom.x > "fesom2.0_long.out"  2>&1
+t3=$(date +%s.%N)
+
+awk -v a="$t0" -v b="$t1" -v c="$t2" -v d="$t3" 'BEGIN {
+  ws = b-a; wl = d-c; per = (wl-ws)/200.0;
+  printf "[fortran] wall_short=%.2f s   wall_long=%.2f s   per_step=%.4f s/step\n", ws, wl, per;
+}'
+echo "--- last lines of long run (sanity) ---"
+tail -5 "fesom2.0_long.out"

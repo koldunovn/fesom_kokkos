@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=kk_scal_cpu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.err
+#
+# CPU strong-scaling. CODE = "kokkos" (Kokkos Serial, has the loop timer) or "cport" (the C port,
+# wall-time differential needed because it has no internal timer).
+# Submit:
+#   sbatch --nodes=1 --ntasks=128 --export=ALL,CODE=kokkos,TAG=k_n1 jobs/job_scaling_cpu
+#   sbatch --nodes=2 --ntasks=256 --export=ALL,CODE=kokkos,TAG=k_n2 jobs/job_scaling_cpu
+#   sbatch --nodes=4 --ntasks=512 --export=ALL,CODE=kokkos,TAG=k_n4 jobs/job_scaling_cpu
+#   sbatch --nodes=1 --ntasks=128 --export=ALL,CODE=cport, TAG=c_n1 jobs/job_scaling_cpu
+#   ... (cport same triplet)
+
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/scaling_${TAG:-default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=500
+
+case "$CODE" in
+  kokkos) BIN="$ROOT/build-serial/fesom_port" ;;
+  cport)  BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port ;;
+  *) echo "CODE must be 'kokkos' or 'cport'"; exit 1 ;;
+esac
+echo "=== ${CODE} scaling ${TAG} (nodes=$SLURM_NNODES ranks=$SLURM_NTASKS) on $SLURM_JOB_NODELIST ==="
+echo "BIN=$BIN"
+
+if [ "$CODE" = "kokkos" ]; then
+  # Kokkos has the built-in loop timer; one 205-step run is enough.
+  srun "$BIN" "$MESH" "$OUT" "${DT:-1800}" 205 999999 "$PHC" 1958 > "$OUT/log" 2>&1
+  echo "=== exit=$? ==="
+  grep -E "loop timing" "$OUT/log" | tail -1
+else
+  # C port has no loop timer; use wall-diff: time(205) - time(5) divided by 200.
+  rm -rf "${OUT}_s" "${OUT}_l"; mkdir -p "${OUT}_s" "${OUT}_l"
+  t0=$(date +%s.%N)
+  srun "$BIN" "$MESH" "${OUT}_s" "${DT:-1800}" 5   999999 "$PHC" 1958 > "$OUT/log_short" 2>&1
+  t1=$(date +%s.%N)
+  srun "$BIN" "$MESH" "${OUT}_l" "${DT:-1800}" 205 999999 "$PHC" 1958 > "$OUT/log_long"  2>&1
+  t2=$(date +%s.%N)
+  awk -v a="$t0" -v b="$t1" -v c="$t2" 'BEGIN {
+    ws = b-a; wl = c-b; per = (wl-ws)/200.0;
+    printf "[cport] wall_short=%.2f s   wall_long=%.2f s   per_step=%.4f s/step\n", ws, wl, per;
+  }'
+fi
+echo "--- last step (sanity) ---"
+grep -E " it=" "$OUT/log"* 2>/dev/null | tail -1

@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=kk_scal
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.err
+#
+# Strong-scaling test for CUDA. CORE2 mesh; FESOM auto-loads dist_<ntasks>.
+# 200 steps (5 warmup excluded by the internal loop timer in fesom_main.cpp); no I/O
+# (snap_every huge); JRA55 forcing (matches the realistic workload, not analytical).
+#
+# Submit:
+#   sbatch --nodes=2 --ntasks=8  --export=ALL,TAG=n2  jobs/job_gpu_scaling
+#   sbatch --nodes=4 --ntasks=16 --export=ALL,TAG=n4  jobs/job_gpu_scaling
+#   sbatch --nodes=8 --ntasks=32 --export=ALL,TAG=n8  jobs/job_gpu_scaling
+#
+# Output: /work/ab0995/a270088/port2/kokkos_gpu_runs/scaling_${TAG}/log
+# Look for: "[fesom_port] loop timing: ... s/step" — that's the answer.
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/scaling_${TAG:-default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=500          # minimal per-step print
+
+echo "=== scaling ${TAG} (nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS gpus=$((SLURM_NNODES*4))) on $SLURM_JOB_NODELIST ==="
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "${DT:-1800}" 200 999999 "$PHC" 1958 > "$OUT/log" 2>&1
+EC=$?
+echo "=== exit=$EC ==="
+grep -E "loop timing|s/step" "$OUT/log" | tail -3
+echo "--- last step (sanity) ---"; grep " it=" "$OUT/log" | tail -1
+exit $EC

@@ -6,30 +6,42 @@ EVP/FCT `atomic_add` scatters + the oce_fluxes / CG `parallel_reduce` reassociat
 and compound over the run. This script quantifies that compounding via annual-mean surface stats
 (corr / bias / RMS / |Δ|max) per year + a year-to-year DRIFT check, against TWO references:
 
-  * Fortran 2-yr (`fortran_pp_2yr`)  — the absolute "does the GPU reproduce the science?" budget
-    (already includes the Fortran<->C difference; see eps_climate_compare_2yr.py for that baseline).
-  * the C-port 2-yr (`eps_2yr_dt1800`) — backend-vs-C ISOLATES the GPU/OpenMP scatter/reduce drift
-    (the C twin == Serial == bit-identical). PASS = backend-vs-C is small & non-growing, and clearly
-    BELOW the (larger) C-vs-Fortran budget. corr~1.0, bias/RMS bounded, drift ~0.
+  * Fortran KPP (`fortran_kpp_5yr_fix`) — "does the GPU reproduce the science?" budget
+    (already includes the Fortran<->C-at-KPP budget; see commit 375f3eb "C+KPP reproduces F+KPP").
+  * the C-port KPP rebase (`kpp_2yr_rebase`) — backend-vs-C ISOLATES the GPU/OpenMP scatter/reduce
+    drift (the C twin == Serial == bit-identical). PASS = backend-vs-C is small & non-growing,
+    and clearly BELOW the (larger) C-vs-Fortran budget. corr~1.0, bias/RMS bounded, drift ~0.
+
+The default references match the Kokkos port HEAD physics config (KPP + ice_gamma_fct=0.5; the C-port
+default flipped to KPP @ 8d0cdbc and γ was fixed @ 7c6663b — see docs/REFERENCE_RUNS.md for the
+full ref-provenance table). If you ran the backend with a different physics config (e.g.
+FESOM_MIX_SCHEME=PP), override --cref/--fref to point at the matching reference run.
 
 Run (after the M3.2 run produces <var>.fesom.<yr>.monthly.nc in the backend dir):
   /work/ab0995/a270088/mambaforge/envs/nereus/bin/python scripts/m32_climate_compare.py \
-      /work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda --label CUDA
-  ...                                                     /work/ab0995/a270088/port2/m32_omp --label OpenMP
+      /work/ab0995/a270088/port2/kokkos_gpu_runs/m32_cuda_1yr_pin --label CUDA --years 1958
 Record the table in docs/GPU_FIDELITY.md.
 """
 import argparse, warnings; warnings.filterwarnings("ignore")
 import numpy as np, netCDF4 as nc
 
-FORT = "/scratch/a/a270088/fortran_pp_2yr"            # <var>.fesom.<yr>.nc        (Fortran)
-CREF = "/work/ab0995/a270088/port/eps_2yr_dt1800"     # <var>.fesom.<yr>.monthly.nc (the C port == Serial)
+# Defaults: matched to the Kokkos port HEAD (KPP, gamma=0.5). See docs/REFERENCE_RUNS.md.
+FORT_DEFAULT = "/scratch/a/a270088/fortran_kpp_5yr_fix"   # <var>.fesom.<yr>.nc        (Fortran-KPP, γ=0.5)
+CREF_DEFAULT = "/work/ab0995/a270088/port/kpp_5yr_fix"    # <var>.fesom.<yr>.monthly.nc (C-port-KPP @ 6ecabe8, γ=0.5, 5 yr)
+ICE_FIELDS = {"a_ice", "m_ice", "m_snow"}                  # need NaN→0 BEFORE temporal mean ([[feedback-ice-mask-averaging]])
 FIELDS = ("sst", "sss", "ssh", "a_ice", "m_ice", "uice")   # surface climate + ice drift; missing ones skip
 
 def surf_annual(path, var):
+    """Annual mean of surface field. For ice fields, nan_to_num per month BEFORE the temporal
+    mean (Fortran masks open water as NaN, C writes 0 — without the per-month nan->0 the
+    temporal nanmean drops open-water months at marginal-ice nodes and spuriously inflates
+    the Fortran mean → fake CUDA-vs-Fortran bias). See feedback-ice-mask-averaging memory."""
     d = nc.Dataset(path); a = d.variables[var]
     x = np.asarray(a[:, 0, :]) if a.ndim == 3 else np.asarray(a[:])   # (t,nz,n)->surf or (t,n)
     d.close()
     x = np.where(np.abs(x) < 1e30, x, np.nan)
+    if var in ICE_FIELDS:
+        x = np.nan_to_num(x, nan=0.0)
     return np.nanmean(x, axis=0)                       # annual mean per node
 
 def stats(a, b):
@@ -44,13 +56,17 @@ ap = argparse.ArgumentParser()
 ap.add_argument("backend_dir", help="dir with <var>.fesom.<yr>.monthly.nc from the M3.2 run")
 ap.add_argument("--label", default="KK")
 ap.add_argument("--years", nargs="+", type=int, default=[1958, 1959])
+ap.add_argument("--cref", default=CREF_DEFAULT,
+                help=f"C-port reference dir (default {CREF_DEFAULT} = C-port KPP, γ=0.5)")
+ap.add_argument("--fref", default=FORT_DEFAULT,
+                help=f"Fortran reference dir (default {FORT_DEFAULT} = Fortran KPP)")
 args = ap.parse_args()
 
 print(f"M3.2 climate validation — backend={args.label}  dir={args.backend_dir}")
-print(f"  Fortran ref: {FORT}    C-port ref: {CREF}")
+print(f"  Fortran ref: {args.fref}\n  C-port ref:  {args.cref}")
 print("  PASS = corr~1, bias/RMS bounded & non-growing; backend-vs-C (the scatter drift) <= C-vs-Fortran.\n")
 
-for ref_name, ref_dir, ref_suffix in (("Fortran", FORT, "nc"), ("C-port", CREF, "monthly.nc")):
+for ref_name, ref_dir, ref_suffix in (("Fortran", args.fref, "nc"), ("C-port", args.cref, "monthly.nc")):
     print(f"================= {args.label} vs {ref_name} =================")
     print(f"{'field':6s} {'year':4s} | {'corr':>8s} {'bias':>12s} {'RMS':>11s} {'|d|max':>10s}")
     first_bias, last_bias = {}, {}
