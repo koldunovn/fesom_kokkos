@@ -42,14 +42,12 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
                             struct fesom_partit  *partit,
                             struct fesom_mesh    *mesh);
 
-/* M4.3b: DEVICE twins. stress_tensor_kk (per-element, race-free) + stress2rhs_kk
- * (map + element→node atomic_add scatter + map) are called per subcycle by
- * evp_dynamics_kk, which runs the setup (4 kernels) + the 120-subcycle host loop
- * (device kernels + the per-subcycle uice/vice halo bracket). M5.8: the per-subcycle
- * coastal BC + halo are ON THE DEVICE (race-free per-node 0-mask + GPU-aware device-halo).
- * Serial bit-identical (the scatters ordered); OpenMP/CUDA climate-close (D22). */
-void fesom_ice_stress_tensor_kk(fesom_ice *ice, struct fesom_mesh *mesh);
-void fesom_ice_stress2rhs_kk   (fesom_ice *ice, struct fesom_mesh *mesh);
+/* M4.3b: DEVICE EVP. evp_dynamics_kk runs the setup (4 kernels) + the 120-subcycle host loop.
+ * M5.8: the per-subcycle coastal BC + halo are ON THE DEVICE (race-free per-node 0-mask +
+ * GPU-aware device-halo). M5.12b: the per-subcycle stress_tensor/stress2rhs/save-old/velupd/
+ * coastal kernels are FUSED inline (7 → 3 launches/subcycle); the standalone stress_tensor_kk /
+ * stress2rhs_kk twins were removed. Serial bit-identical (scatters element-ordered); OpenMP/CUDA
+ * climate-close (D22). */
 void fesom_ice_evp_dynamics_kk (fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh);
 /* M5.8: release the cached coastal-node mask View. MUST be called before Kokkos::finalize()
  * (a Kokkos::View destructed during static teardown, after finalize, aborts — same rule as

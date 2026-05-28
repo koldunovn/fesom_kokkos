@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=m512b_serdiff
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:25:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m512b_serdiff.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m512b_serdiff.%j.err
+# M5.12b full-model Serial bit-identity check: build-serial (with the EVP fusion) at the
+# SAME CORE2 dist_8 / dt=1800 / 20 steps as the oracle. Zero-tolerance diff vs serref_core2 (the
+# 466ea3e oracle, built today). BIT-IDENTICAL => the change is provably equivalent on Serial at
+# full scale (justifies skipping M3.2; confirms the cached oracle stays valid since fesom_step.cpp
+# source is unchanged).
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ORACLE=/work/ab0995/a270088/port2/kokkos_gpu_runs/serref_core2
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/m512b_serial; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-serial/fesom_port "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "[m512b_serdiff] run rc=$? ; $(grep -E 'loop timing' "$OUT/log" | head -1)"
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo "=== zero-tolerance diff vs oracle (diff_snap.py) ==="
+"$PY" /home/a/a270088/port_kokkos/scripts/diff_snap.py "$ORACLE" "$OUT"
+echo "[m512b_serdiff] diff exit=$?"

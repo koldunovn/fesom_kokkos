@@ -475,96 +475,11 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
  *  boundary-node mask is an M5 perf note for np=1 single-GPU).               *
  * ======================================================================== */
 
-void fesom_ice_stress_tensor_kk(fesom_ice *ice, struct fesom_mesh *mesh)
-{
-    const int    E       = mesh->myDim_elem2D;
-    const real_t vale    = 1.0 / (ice->ellipse * ice->ellipse);
-    const real_t dte     = ice->ice_dt / (real_t)ice->evp_rheol_steps;
-    const real_t det1    = 1.0 / (1.0 + 0.5 * ice->Tevp_inv * dte);
-    const real_t det2    = det1;
-    const real_t dmin_p  = ice->delta_min;
-    const real_t Tevp    = ice->Tevp_inv;
-    auto u_ice = ice->uice_fld.d(); auto v_ice = ice->vice_fld.d();
-    auto eps11 = ice->work.eps11_fld.d(); auto eps12 = ice->work.eps12_fld.d(); auto eps22 = ice->work.eps22_fld.d();
-    auto s11   = ice->work.sigma11_fld.d(); auto s12 = ice->work.sigma12_fld.d(); auto s22 = ice->work.sigma22_fld.d();
-    auto istr  = ice->work.ice_strength_fld.d();
-    auto en    = mesh->elem_nodes_fld.d(); auto gs = mesh->gradient_sca_fld.d();
-    auto mf    = mesh->metric_factor_fld.d(); auto ulev = mesh->ulevels_fld.d();
-
-    Kokkos::parallel_for("ice_stress_tensor", Kokkos::RangePolicy<>(0, E),
-        KOKKOS_LAMBDA(const int el) {
-            if (ulev(el) > 1)       return;     /* cavity */
-            if (istr(el) <= 0.0)    return;     /* ice-free */
-            const int n0 = en(3*el+0), n1 = en(3*el+1), n2 = en(3*el+2);
-            const int g = 6*el;
-            const real_t mfac = mf(el);
-            const real_t U0=u_ice(n0),U1=u_ice(n1),U2=u_ice(n2);
-            const real_t V0=v_ice(n0),V1=v_ice(n1),V2=v_ice(n2);
-            const real_t e11 = gs(g+0)*U0 + gs(g+1)*U1 + gs(g+2)*U2 - mfac*(V0+V1+V2)/3.0;
-            const real_t e22 = gs(g+3)*V0 + gs(g+4)*V1 + gs(g+5)*V2;
-            const real_t e12 = 0.5*( gs(g+3)*U0+gs(g+4)*U1+gs(g+5)*U2
-                                   + gs(g+0)*V0+gs(g+1)*V1+gs(g+2)*V2
-                                   + mfac*(U0+U1+U2)/3.0);
-            eps11(el)=e11; eps22(el)=e22; eps12(el)=e12;
-            const real_t delta = Kokkos::sqrt((e11*e11+e22*e22)*(1.0+vale)
-                                             + 4.0*vale*e12*e12 + 2.0*e11*e22*(1.0-vale));
-            const real_t dmin = (delta > dmin_p) ? delta : dmin_p;
-            real_t zeta = istr(el)/dmin; zeta *= Tevp;
-            const real_t r1 = zeta*(e11+e22) - istr(el)*Tevp;
-            const real_t r2 = zeta*(e11-e22)*vale;
-            const real_t r3 = zeta*e12*vale;
-            const real_t si1 = det1*(s11(el)+s22(el)+dte*r1);
-            const real_t si2 = det2*(s11(el)-s22(el)+dte*r2);
-            s12(el) = det2*(s12(el)+dte*r3);
-            s11(el) = 0.5*(si1+si2);
-            s22(el) = 0.5*(si1-si2);
-        });
-    ice->work.eps11_fld.modify_device(); ice->work.eps12_fld.modify_device(); ice->work.eps22_fld.modify_device();
-    ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device(); ice->work.sigma22_fld.modify_device();
-}
-
-void fesom_ice_stress2rhs_kk(fesom_ice *ice, struct fesom_mesh *mesh)
-{
-    const int    myDim = mesh->myDim_nod2D;
-    const int    E     = mesh->myDim_elem2D;
-    const real_t val3  = 1.0/3.0;
-    auto u_rhs = ice->uice_rhs_fld.d(); auto v_rhs = ice->vice_rhs_fld.d();
-    auto s11 = ice->work.sigma11_fld.d(); auto s12 = ice->work.sigma12_fld.d(); auto s22 = ice->work.sigma22_fld.d();
-    auto rhs_a = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
-    auto rhs_m = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
-    auto inv_am = ice->work.inv_areamass_fld.d(); auto istr = ice->work.ice_strength_fld.d();
-    auto en = mesh->elem_nodes_fld.d(); auto ea = mesh->elem_area_fld.d();
-    auto mf = mesh->metric_factor_fld.d(); auto gs = mesh->gradient_sca_fld.d();
-    auto ulev = mesh->ulevels_fld.d(); auto ulev_n = mesh->ulevels_nod2D_fld.d();
-
-    /* Loop 1: zero rhs over OWNED only (the C bound; halo rhs is scattered-but-unused). */
-    Kokkos::parallel_for("ice_s2rhs_zero", Kokkos::RangePolicy<>(0, myDim),
-        KOKKOS_LAMBDA(const int n) { u_rhs(n)=0.0; v_rhs(n)=0.0; });
-    /* Loop 2: element→node SCATTER (atomic_add, D22). */
-    Kokkos::parallel_for("ice_s2rhs_scatter", Kokkos::RangePolicy<>(0, E),
-        KOKKOS_LAMBDA(const int el) {
-            if (ulev(el) > 1)    return;
-            if (istr(el) <= 0.0) return;
-            const real_t a = ea(el), mfac = mf(el);
-            const real_t S11=s11(el), S12=s12(el), S22=s22(el);
-            const int g = 6*el;
-            for (int k = 0; k < 3; ++k) {
-                const int n = en(3*el+k);
-                Kokkos::atomic_add(&u_rhs(n), -(a*(S11*gs(g+k) + S12*gs(g+k+3) + S12*val3*mfac)));
-                Kokkos::atomic_add(&v_rhs(n), -(a*(S12*gs(g+k) + S22*gs(g+k+3) - S11*val3*mfac)));
-            }
-        });
-    /* Loop 3: per-node finalisation over OWNED. */
-    Kokkos::parallel_for("ice_s2rhs_final", Kokkos::RangePolicy<>(0, myDim),
-        KOKKOS_LAMBDA(const int n) {
-            if (ulev_n(n) > 1) return;
-            if (inv_am(n) > 0.0) {
-                u_rhs(n) = u_rhs(n)*inv_am(n) + rhs_a(n);
-                v_rhs(n) = v_rhs(n)*inv_am(n) + rhs_m(n);
-            } else { u_rhs(n)=0.0; v_rhs(n)=0.0; }
-        });
-    ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
-}
+/* M5.12b: the standalone device twins fesom_ice_stress_tensor_kk / fesom_ice_stress2rhs_kk were
+ * fused INTO the subcycle loop of fesom_ice_evp_dynamics_kk below (stress_tensor + the rhs scatter →
+ * one element kernel "ice_evp_stress_scatter"; zero/final stay; save-old + velupd + coastal merge
+ * into "ice_evp_node_update") to cut the per-subcycle launch count 7 → 3. The arithmetic is
+ * unchanged per entity → Serial bit-identical (verified). */
 
 /* M5.8: coastal-node mask for the ON-DEVICE EVP boundary condition. The host/Fortran BC zeros
  * uice/vice at the endpoints of OWNED open-boundary edges (gid = myList_edge2D > edge2D_in — the
@@ -687,48 +602,114 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
     /* M5.8: the coastal-node mask (built once) — captured by the on-device subcycle BC kernel. */
     auto coastal = evp_coastal_mask(partit, mesh);
 
-    /* Step 5: the EVP subcycle (host loop + device kernels + per-subcycle ON-DEVICE BC + halo). */
+    /* M5.12b: extra captures + scalars for the fused per-subcycle kernels (stress+scatter, node-update).
+     * dte == rdt (ice_dt/evp_rheol_steps); det1 == det2 in the rheology. */
+    auto eps11 = ice->work.eps11_fld.d(); auto eps12 = ice->work.eps12_fld.d(); auto eps22 = ice->work.eps22_fld.d();
+    auto s11   = ice->work.sigma11_fld.d(); auto s12 = ice->work.sigma12_fld.d(); auto s22 = ice->work.sigma22_fld.d();
+    auto mf    = mesh->metric_factor_fld.d();
+    auto u_old = ice->uice_old_fld.d();     auto v_old = ice->vice_old_fld.d();
+    const real_t vale   = 1.0 / (ice->ellipse * ice->ellipse);
+    const real_t det1   = 1.0 / (1.0 + 0.5 * ice->Tevp_inv * rdt);
+    const real_t dmin_p = ice->delta_min;
+    const real_t Tevp   = ice->Tevp_inv;
+    const real_t val3   = 1.0/3.0;
+
+    /* Step 5: the EVP subcycle. M5.12b: the 7 per-subcycle kernels are fused to 3 (saving ~480
+     * launches/step) WITHOUT changing the per-entity arithmetic or order → Serial bit-identical
+     * (no team scratch, no atomic reorder):
+     *   K1 ice_s2rhs_zero          (OWNED nodes)  — must precede the scatter.
+     *   K2 ice_evp_stress_scatter  (elements)     — stress_tensor FUSED with the element→node rhs
+     *        scatter; both element-indexed with the same cavity/ice-free guard, and the scatter
+     *        reads only the element's own (just-computed) sigma → atomic_add stays in element order.
+     *   K3 ice_evp_node_update     (ALL nodes)    — rhs-finalise (OWNED) + save-old (ALL) + velocity
+     *        update (OWNED) + coastal-BC (ALL), fused per node; each node reads only its own data so
+     *        the per-node order final→saveold→velupd→coastal reproduces the four original kernels. */
     for (int sub = 0; sub < ice->evp_rheol_steps; ++sub) {
-        fesom_ice_stress_tensor_kk(ice, mesh);
-        fesom_ice_stress2rhs_kk(ice, mesh);
+        /* K1: zero rhs over OWNED (halo rhs is scattered-but-unused; the C bound). */
+        Kokkos::parallel_for("ice_s2rhs_zero", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int n) { u_rhs(n)=0.0; v_rhs(n)=0.0; });
 
-        /* save old velocity (Fortran line 671; u_old/v_old unused downstream but ported faithfully). */
-        { auto u_old=ice->uice_old_fld.d(); auto v_old=ice->vice_old_fld.d();
-          auto ui=u_ice; auto vi=v_ice;
-          Kokkos::parallel_for("ice_evp_saveold", Kokkos::RangePolicy<>(0, N),
-              KOKKOS_LAMBDA(const int n){ u_old(n)=ui(n); v_old(n)=vi(n); });
-          ice->uice_old_fld.modify_device(); ice->vice_old_fld.modify_device(); }
-
-        /* velocity update over OWNED (per-node implicit drag/Coriolis solve). */
-        Kokkos::parallel_for("ice_evp_velupd", Kokkos::RangePolicy<>(0, myDim),
-            KOKKOS_LAMBDA(const int n) {
-                if (ulev_n(n) > 1) return;
-                if (a_ice(n) >= 0.01) {
-                    const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
-                    const real_t umod = Kokkos::sqrt(du*du+dv*dv);
-                    const real_t drag = cd*umod*rho0*inv_m(n);
-                    const real_t rhsu = u_ice(n)+rdt*(drag*(ax*u_w(n)-ay*v_w(n))+inv_m(n)*sax(n)+u_rhs(n));
-                    const real_t rhsv = v_ice(n)+rdt*(drag*(ax*v_w(n)+ay*u_w(n))+inv_m(n)*say(n)+v_rhs(n));
-                    const real_t r_a = 1.0 + ax*drag*rdt;
-                    const real_t r_b = rdt*(cor(n)+ay*drag);
-                    const real_t det = 1.0/(r_a*r_a+r_b*r_b);
-                    u_ice(n) = det*(r_a*rhsu+r_b*rhsv);
-                    v_ice(n) = det*(r_a*rhsv-r_b*rhsu);
-                } else { u_ice(n)=0.0; v_ice(n)=0.0; }
+        /* K2: stress tensor (eps/sigma, sigma is read-modify-write across subcycles) FUSED with the
+         * rhs scatter. sigma is written to global (next subcycle + verify/IO) AND used in registers. */
+        Kokkos::parallel_for("ice_evp_stress_scatter", Kokkos::RangePolicy<>(0, E),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev(el) > 1)    return;     /* cavity */
+                if (istr(el) <= 0.0) return;     /* ice-free */
+                const int n0 = en(3*el+0), n1 = en(3*el+1), n2 = en(3*el+2);
+                const int g = 6*el;
+                const real_t mfac = mf(el);
+                const real_t U0=u_ice(n0),U1=u_ice(n1),U2=u_ice(n2);
+                const real_t V0=v_ice(n0),V1=v_ice(n1),V2=v_ice(n2);
+                const real_t e11 = gs(g+0)*U0 + gs(g+1)*U1 + gs(g+2)*U2 - mfac*(V0+V1+V2)/3.0;
+                const real_t e22 = gs(g+3)*V0 + gs(g+4)*V1 + gs(g+5)*V2;
+                const real_t e12 = 0.5*( gs(g+3)*U0+gs(g+4)*U1+gs(g+5)*U2
+                                       + gs(g+0)*V0+gs(g+1)*V1+gs(g+2)*V2
+                                       + mfac*(U0+U1+U2)/3.0);
+                eps11(el)=e11; eps22(el)=e22; eps12(el)=e12;
+                const real_t delta = Kokkos::sqrt((e11*e11+e22*e22)*(1.0+vale)
+                                                 + 4.0*vale*e12*e12 + 2.0*e11*e22*(1.0-vale));
+                const real_t dmin = (delta > dmin_p) ? delta : dmin_p;
+                real_t zeta = istr(el)/dmin; zeta *= Tevp;
+                const real_t r1 = zeta*(e11+e22) - istr(el)*Tevp;
+                const real_t r2 = zeta*(e11-e22)*vale;
+                const real_t r3 = zeta*e12*vale;
+                const real_t si1 = det1*(s11(el)+s22(el)+rdt*r1);   /* reads OLD s11/s22 */
+                const real_t si2 = det1*(s11(el)-s22(el)+rdt*r2);
+                const real_t S12 = det1*(s12(el)+rdt*r3);           /* reads OLD s12 */
+                const real_t S11 = 0.5*(si1+si2);
+                const real_t S22 = 0.5*(si1-si2);
+                s12(el)=S12; s11(el)=S11; s22(el)=S22;              /* write NEW sigma */
+                /* element→node rhs scatter (was ice_s2rhs_scatter): element-order atomic_add. */
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = en(3*el+k);
+                    Kokkos::atomic_add(&u_rhs(n), -(a*(S11*gs(g+k) + S12*gs(g+k+3) + S12*val3*mfac)));
+                    Kokkos::atomic_add(&v_rhs(n), -(a*(S12*gs(g+k) + S22*gs(g+k+3) - S11*val3*mfac)));
+                }
             });
-        ice->uice_fld.modify_device(); ice->vice_fld.modify_device();
+        ice->work.eps11_fld.modify_device(); ice->work.eps12_fld.modify_device(); ice->work.eps22_fld.modify_device();
+        ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device(); ice->work.sigma22_fld.modify_device();
+        ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
 
-        /* M5.8: coastal BC + halo ON THE DEVICE (was: sync_host → host BC + host exchange →
-         * re-push = 4 PCIe copies × 120 subcycles, the §M5.6 finding #2). The BC zeros uice/vice
-         * at the precomputed coastal-node mask — idempotent 0-writes per node → race-free (no
-         * scatter), Serial AND OpenMP bit-identical. Halo = the GPU-aware device-halo (exact host
-         * bracket on Serial; no-op at npes==1). uice/vice stay DEVICE-resident across the subcycle;
-         * the post-loop sync_host (fesom_ice.cpp) pulls them once for FCT / I/O / the next step. */
-        Kokkos::parallel_for("ice_evp_coastal_bc", Kokkos::RangePolicy<>(0, N),
+        /* K3: rhs-finalise + save-old + velocity-update + coastal-BC, fused per node over ALL nodes.
+         * final/velupd are OWNED-only (n<myDim); save-old/coastal are ALL — exactly matching the four
+         * original kernels' ranges. final writes u_rhs(n) which velupd(n) then reads (same node). */
+        Kokkos::parallel_for("ice_evp_node_update", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int n) {
+                const bool owned = (n < myDim);
+                /* final (was ice_s2rhs_final, OWNED): the scatter (prev kernel) is complete here. */
+                if (owned && ulev_n(n) <= 1) {
+                    if (inv_am(n) > 0.0) {
+                        u_rhs(n) = u_rhs(n)*inv_am(n) + rhs_a(n);
+                        v_rhs(n) = v_rhs(n)*inv_am(n) + rhs_m(n);
+                    } else { u_rhs(n)=0.0; v_rhs(n)=0.0; }
+                }
+                /* save old velocity (ALL; u_old/v_old unused downstream but ported faithfully). */
+                u_old(n)=u_ice(n); v_old(n)=v_ice(n);
+                /* velocity update (OWNED; per-node implicit drag/Coriolis solve). */
+                if (owned && ulev_n(n) <= 1) {
+                    if (a_ice(n) >= 0.01) {
+                        const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
+                        const real_t umod = Kokkos::sqrt(du*du+dv*dv);
+                        const real_t drag = cd*umod*rho0*inv_m(n);
+                        const real_t rhsu = u_ice(n)+rdt*(drag*(ax*u_w(n)-ay*v_w(n))+inv_m(n)*sax(n)+u_rhs(n));
+                        const real_t rhsv = v_ice(n)+rdt*(drag*(ax*v_w(n)+ay*u_w(n))+inv_m(n)*say(n)+v_rhs(n));
+                        const real_t r_a = 1.0 + ax*drag*rdt;
+                        const real_t r_b = rdt*(cor(n)+ay*drag);
+                        const real_t det = 1.0/(r_a*r_a+r_b*r_b);
+                        u_ice(n) = det*(r_a*rhsu+r_b*rhsv);
+                        v_ice(n) = det*(r_a*rhsv-r_b*rhsu);
+                    } else { u_ice(n)=0.0; v_ice(n)=0.0; }
+                }
+                /* coastal BC (ALL): idempotent 0-write at coastal-mask nodes (M5.8). */
                 if (coastal(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
             });
-        ice->uice_fld.modify_device(); ice->vice_fld.modify_device();
+        ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
+        ice->uice_old_fld.modify_device(); ice->vice_old_fld.modify_device();
+        ice->uice_fld.modify_device();     ice->vice_fld.modify_device();
+        /* per-subcycle uice/vice halo (GPU-aware device-halo; exact host bracket on Serial, no-op
+         * at npes==1). uice/vice stay DEVICE-resident across the subcycle; post-loop sync in
+         * fesom_ice.cpp pulls them once for FCT / I/O / the next step. */
         fesom_halo_field(ice->uice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
         fesom_halo_field(ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
     }
