@@ -327,6 +327,26 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
   - **The fix is to DELETE the 3 placebo syncs and keep `uvnode`'s** — 3.1% recovered (CORE2 dist_8 clean, same-node, 2 runs: all-syncs 0.4931 → 0.4777 s/step), the measured cost of the 3 placebo PCIe copies (4 fields). That is near the ceiling: `uvnode` genuinely needs a sync, so the full M5.9 +6.2% was never fully recoverable.
   - **A surface-only `uvnode` refresh (bulk reads only nz=0) bought only +0.5%** (0.4752 = 3.6%) over the full sync (0.4777 = 3.1%): its per-step `Kokkos::View` scratch alloc + host unpack loop nearly cancel the ~94 MB PCIe saving. Not worth the custom kernel; a persistent-buffer version (+ finalize-free, L49) is a future micro-opt.
 
+- **L51 — 2026-05-28: the GPU fidelity gate's cached Serial oracle has a freshness budget.** During M5.11 profile pass, `scripts/gpu_fidelity_gate.sh` FAILED with worst-case T=1.28 vs the cached `/work/.../kokkos_gpu_runs/serref_core2/snap_000020.nc` (built 2026-05-27 20:46 from `master @ c2fa25e`, pre-M5.9 FIX). The same binary that passed M3.2 1-yr CUDA + 2-yr OMP earlier *the same day* was "failing" the 20-step gate. **Diagnosis**: rebuilding build-serial against current `master @ 466ea3e` (post-M5.9 FIX `6ba27e9` + M5.9-pin `05182aa`) produced a Serial output that differs from the cached oracle at **5 cells** (node 125225, levels 17–21 — all at the bathymetry transition). All other 5962321 cells were bit-identical. The differing cells have value 0 in the cached oracle and ULP-sized non-zero in the fresh oracle. **Cause**: M5.9 FIX / M5.9-pin added/dropped `sync_host()` calls in `fesom_step.cpp`. These are no-ops on Serial at runtime, but the surrounding source-line changes were enough for the compiler to reorder host loads/stores at one bathymetry-edge codepath → fp ULP drift. The CUDA path was never broken; the oracle was. Bisect ladder that pinpointed it:
+  1. Today's CUDA vs cached oracle: max\|Δ\|=1.28 (FAIL)
+  2. Today's OMP vs today's Serial: 0.000 (bit-identical — OMP healthy)
+  3. Today's CUDA vs today's Serial: 6.2e-4 (climate-close, PASS)
+  4. Today's Serial vs cached oracle: 1.28 (the oracle is stale, not CUDA)
+
+  **Fix**: promote `today_serial/snap_000020.nc` to be the new oracle; rename the
+  stale one with a `.STALE_<reason>` suffix. **Rule going forward**: rebuild the
+  oracle whenever (a) any commit touches `src/fesom_step.cpp` (even via no-op
+  sync_host calls), (b) the build env changes (compiler / openmpi / netcdf
+  module update), or (c) the gate fails unexpectedly on a binary that should
+  be inert. `scripts/gpu_fidelity_gate.sh --fresh-oracle` does this automatically.
+  See `docs/STATE_TODAY.md` for the full 2026-05-28 cleanup record. ALSO: the
+  unexpected gate fail was the user's clue that "the development tree is a mess" —
+  no single doc told them which oracle is canonical. `STATE_TODAY.md` fills that
+  gap; treat such state-snapshot docs as a first-class deliverable alongside
+  the lessons log.
+
+- **L52 — M5.11: with all halos and host-staging flips already shipped, the GPU wall on dist_8 is launch density, not single-kernel cost or bandwidth.** The profile pass (Kokkos `set_begin/end_parallel_{for,reduce,scan}_callback` auto-instrumentation in `fesom_profile.cpp` — no source-level wrapping needed) gave the per-kernel-time table across np=1 / dist_4 / dist_8. **Key finding**: the **biggest individual kernel at dist_8 is only 1.51% of step** (`fesom_halo_unpack` at 526 calls/step × 14.8 µs). Top-12 kernels combined are < 8% of step. **There is no fat compute kernel to optimize.** The cost is in **2450+ launches/step** from 3 high-frequency regions: halo pack+unpack (1052), CG iters (~560), EVP per-subcycle (~840). Per-call costs are 13–30 µs — near the bare CUDA launch overhead floor (~5–10 µs). The M5.12 lever is therefore **fusion** (collapse adjacent kernels in EVP, CG, halo brackets), not memory coalescing (Lever C M5.10b already failed for this very reason at FCT, the dominant phase). The auto-instrumentation pattern: register Kokkos profiling-tools callbacks, fence-bound them in begin/end → every parallel_for gets a bucket by its Kokkos label; no per-call source change. Adds ~12% overhead in profile mode (zero with env unset; the install_callbacks early-return makes the model byte-identical when `FESOM_STEP_PROFILE` is unset). PCIe is no longer dominant at dist_8 (1.07 GB/step vs the M5.3 stale 13 GB/step — the M5.1+M5.4+M5.7 halo flip campaign reduced PCIe by 12×). See `docs/PROFILE_M59.md` for the full table + bound-label decision tree, and `docs/M512_PLAN.md` for the lever plan.
+
 ---
 
 *Keep appending. Date entries when the context (versions, paths) might age.*

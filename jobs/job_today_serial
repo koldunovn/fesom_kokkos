@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH --job-name=today_ser
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/today/serial.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/today/serial.%j.err
+#
+# Fresh same-day SERIAL oracle on CORE2 dist_8, 20 steps. Used to test whether the
+# cached /work/.../kokkos_gpu_runs/serref_core2/ is still valid OR a new Serial run
+# would produce different output (==> Serial has changed).
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/today/serial; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-serial/fesom_port "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "[today/serial] exit=$? -> $OUT"

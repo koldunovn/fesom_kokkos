@@ -1,0 +1,24 @@
+#!/bin/bash
+#SBATCH --job-name=today_omp
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/today/omp.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/today/omp.%j.err
+#
+# Fresh same-day OpenMP on CORE2 dist_8, 20 steps. Compared to Serial, this exercises
+# the OMP atomic scatters (climate-close at ~1e-12 floor per memory). User reports
+# OMP from master worked today — confirm here at 20-step boundary.
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+export OMP_NUM_THREADS=1     # same as M1 acceptance: bit-identity vs Serial expected at 1 thread
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/today/omp; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-omp/fesom_port "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "[today/omp] exit=$? -> $OUT"

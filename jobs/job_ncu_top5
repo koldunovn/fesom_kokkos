@@ -36,9 +36,9 @@ PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 OUT=/work/ab0995/a270088/port2/kokkos_profile_m511/ncu_top5
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-# === PLACEHOLDER REGEX — fill in after R1 reports top-5 ===
-# Example: KREGEX='fct_mfct_h|fct_qr4c_v|momentum_adv_horiz|kpp_blmix|gm_fer_solve_gamma'
-KREGEX='__PLACEHOLDER__top5_from_R1__'
+# === Top-5 from R1c (CORE2 dist_8 per-kernel timing, see docs/PROFILE_M59.md §4) ===
+# Picked for diversity: per-call expensive + launch-density + CG + FCT + EVP.
+KREGEX='fesom_smooth_gather|fesom_halo_unpack|fesom_cg_psolve_dot2|fct_mfct_h|ice_stress_tensor'
 
 echo "=== M5.11 R3 ncu top-5, np=1, 3 steps, JRA55=1958 ==="
 echo "Kernel regex: $KREGEX"
