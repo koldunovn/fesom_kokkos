@@ -42,7 +42,7 @@ for M, name, col in ((NG5, "NG5 (7.4M)", "#d62728"), (DARS, "dars (3.16M)", "#ff
 axA.set_xscale("log", base=2); axA.set_yscale("log")
 axA.set_xticks([2, 4, 8, 16, 32]); axA.set_xticklabels([2, 4, 8, 16, 32])
 axA.set_xlabel("nodes"); axA.set_ylabel("s/step (campaign binary)")
-axA.set_title("(a) Strong scaling — GPU strong-scales ~1.85×/doubling\n(dotted = ideal 1/N; 32N GPU pending)")
+axA.set_title("(a) Strong scaling — GPU strong-scales ~1.85×/doubling\n(dotted = ideal 1/N; 32N GPU not obtained — node contention)")
 axA.legend(fontsize=9, ncol=2)
 
 # (b) node-for-node ratio vs nodes (drift)

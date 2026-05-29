@@ -293,16 +293,24 @@ binary strong-scales AND quantifies the per-rank-work drift the data/compute-bal
 |   4   | 6.12    | 4.330   | **1.41×** |   462k     | 2.342    | 1.465    | **1.60×**  |   197k     |
 |   8   | 3.307   | 2.230   | **1.48×** |   231k     | 1.264    | (no dist_1024) | —    |    99k     |
 |  16   | 1.813   | 1.171   | **1.55×** |   116k     | 0.750    | (no dist_2048) | —    |    49k     |
-|  32   | *pending* (no NG5 dist_4096) |  |  |  58k  | *pending* | 0.2051 | *pending* |    25k     |
+|  32   | *n/sched*¹ | (no dist_4096) | — | 58k | *n/sched*¹ | 0.2051 | — | 25k |
+
+¹ The two 32-node GPU runs (dist_128 = 128 A100) never scheduled over ~5 h of polling (the GPU
+partition was contended/reserved; one's nodes were `DOWN/DRAINED`) — **cancelled**. The 32N CPU
+(dars dist_4096) did land. Not re-chased: M5.14 (below) superseded the M5.13 binary anyway.
 
 - **GPU strong-scaling is near-ideal**: NG5 1.85× (4→8N), 1.82× (8→16N); dars 1.84/1.85/1.69× (2→4→8→16N)
   — ~91–93 % parallel efficiency per doubling, easing only at 16N where the columns thin out.
 - **The node-for-node GPU/CPU ratio drifts UP with node count** (NG5 1.41× → 1.48× → 1.55× as
-  nod2D/rank falls 462k → 231k → 116k). This is the **L58 data/compute-balance lesson as a strong-scaling
-  curve**: adding nodes spreads the work thinner per GPU, so the ratio creeps from 1.41× toward the
-  launch/MPI floor. The corollary is a **production rule: the GPU is most competitive at the FEWEST nodes
-  (highest per-rank work) that fit A100-80GB memory** — over-decomposing wastes the GPU's strength.
+  nod2D/rank falls 462k → 231k → 116k): adding nodes spreads the work thinner per GPU. The
+  **production rule stands: the GPU is most competitive at the FEWEST nodes (highest per-rank work)
+  that fit A100-80GB memory** — over-decomposing wastes the GPU's strength.
   (dars 8/16N + NG5 32N lack a node-for-node CPU partition, so those are GPU strong-scaling only.)
+- ⚠️ **The "drift toward a launch/MPI floor" reading (and L58's ~1.4× asymptote) was SUPERSEDED by
+  M5.14 (next section):** these M5.13-binary points still had **S as a hidden full-field PCIe chunk**;
+  flipping it (Lever A) dropped NG5 4N to 0.879× — *below* parity. So the residual was still mostly
+  reducible PCIe, not the launch floor. This section is the (valid) M5.13-binary characterization that
+  *motivated* M5.14; for the live ratio see § M5.14.
 - Figure: `docs/figures/scaling_hinode_m513.png` (`scripts/plot_hinode_scaling.py`).
 
 ### M5.14 — Lever A finished the residency: PARITY CROSSED (2026-05-30)
