@@ -445,7 +445,8 @@ void fesom_ice_step(int                            step,
         tr->data[FESOM_TRACER_T].values_fld.modify_host(); tr->data[FESOM_TRACER_T].values_fld.sync_device();
         tr->data[FESOM_TRACER_S].values_fld.modify_host(); tr->data[FESOM_TRACER_S].values_fld.sync_device();
         mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();
-        d->uv_fld.modify_host();      d->uv_fld.sync_device();
+        /* M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -
+         * no re-push; ocean2ice reads uv surface (nz=0) on device. (T/S still re-pushed — g1-T deferred.) */
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
         ice->srfoce_temp_fld.sync_host(); ice->srfoce_salt_fld.sync_host(); ice->srfoce_ssh_fld.sync_host();
         ice->srfoce_u_fld.sync_host();    ice->srfoce_v_fld.sync_host();

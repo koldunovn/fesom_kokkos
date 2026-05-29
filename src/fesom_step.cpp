@@ -328,7 +328,7 @@ int fesom_timestep(int                          step_n,
     /* INPUT rail (compute_vel_nodes): dyn->uv is host-written by last step's update_vel
      * + bolus (raw alias, invisible to the DualView, L14) → modify_host()+sync_device().
      * Mesh CSR / elem_area / levels are set-once device-current. (No-op on Serial/OpenMP.) */
-    dyn->uv_fld.modify_host(); dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident across the step (update_vel fesom_halo_field) - no re-push. */
     fesom_compute_vel_nodes_kk(mesh, dyn);              /* device: writes dyn->uvnode (owned) */
     if (s_verify_pp) fesom_compute_vel_nodes_verify(mesh, dyn, step_n);
     /* M5.4: uvnode device-halo (GPU-aware MPI on CUDA, host-staged on Serial); the OUT sync_host
@@ -437,7 +437,7 @@ int fesom_timestep(int                          step_n,
         const size_t nvec = (size_t)mesh->myDim_elem2D * (size_t)nl * 2;
         vrhs_uv_rhsAB_in.assign(dyn->uv_rhsAB, dyn->uv_rhsAB + nvec);   /* L26 capture-before (part i reads it) */
     }
-    dyn->uv_fld.modify_host();       dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident - no re-push (compute_vel_rhs reads it on device). */
     /* M5.13d: uv_rhsAB device-resident with its halo (cross-step AB2 history) - no IN re-push;
      * compute_vel_rhs part i reads it on device (last step's fesom_halo_field left it owned+halo). */
     dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
@@ -469,7 +469,7 @@ int fesom_timestep(int                          step_n,
                           * (size_t)nl * 2;
         vfb_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before (full extent) */
     }
-    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident - no re-push (visc_filt reads it on device). */
     /* M5.4: uv_rhs is device-resident with its halo from substep 4 — no IN re-push. */
     fesom_visc_filt_bidiff_kk(mesh, dyn, p);   /* device: uv_rhs += biharmonic; internal Uc/Vc halo (D21) */
     if (s_verify_vfilt) fesom_visc_filt_bidiff_verify(mesh, dyn, p, step_n, vfb_uv_rhs_in.data());
@@ -492,7 +492,7 @@ int fesom_timestep(int                          step_n,
         ivv_uv_rhs_in.assign(dyn->uv_rhs, dyn->uv_rhs + nvec);   /* L26 capture-before */
     }
     /* M5.4: uv_rhs is device-resident with its halo from substep 5 — no IN re-push. */
-    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident - no re-push (impl_vert_visc reads it on device). */
     dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
     /* M5.7b: Av is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
     /* M5.13f: helem device-resident from last step's commit - no re-push; impl_vert_visc reads it on device. */
@@ -535,7 +535,7 @@ int fesom_timestep(int                          step_n,
         ssh_pre_hbarold.assign(mesh->hbar_old,  mesh->hbar_old   + Nn_ssh);
         ssh_pre_etan.assign  (dyn->eta_n,       dyn->eta_n       + Nn_ssh);
     }
-    dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident - no re-push (ssh_rhs/CG read it on device). */
     /* M5.4: uv_rhs is device-resident with its halo from substep 6 — no re-push. */
     dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
     dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
@@ -559,13 +559,15 @@ int fesom_timestep(int                          step_n,
      *     (incl. HALO), so re-push d_eta after its halo (L30 cross-op re-push). */
     dyn->d_eta_fld.modify_host(); dyn->d_eta_fld.sync_device();
     fesom_update_vel_kk(mesh, dyn);
-    dyn->uv_fld.sync_host();                               /* OUT: before the elem3D halo */
-    fesom_halo_exchange(dyn->uv_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
+    /* M5.13g1: uv device-halo (GPU-aware MPI). uv stays device-resident across the whole step +
+     * the next step's substeps 3-7 + the ice-step ocean2ice (ALL uv re-pushes removed). snap-out
+     * (u/v element output) → pre-I/O sync in fesom_main.cpp; one-time init push bootstraps step 1. */
+    fesom_halo_field(dyn->uv_fld, FESOM_HALO_ELEM3D, nl, 2, p);
 
     /* 10. transport-divergence → ssh_rhs_old, then hbar update — device. compute_hbar reads
      *     uv at edge_tri (interior elements), but uv was just halo'd on the host (line above),
      *     so re-push it (L30) to keep the device copy coherent with the host. */
-    dyn->uv_fld.modify_host(); dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident (update_vel fesom_halo_field) - no re-push; compute_hbar reads it on device. */
     fesom_compute_hbar_kk(mesh, dyn);
     dyn->ssh_rhs_old_fld.sync_host();                      /* OUT (3 fields) before the halos */
     mesh->hbar_fld.sync_host();
@@ -688,7 +690,7 @@ int fesom_timestep(int                          step_n,
     /* 12b. vertical velocity. IN: uv (update_vel+halo, substep 9), helem (evolving mesh),
      *  fer_uv (GM only). EDGE→NODE SCATTER (atomic_add, D22) + per-node level cumsum.
      *  OUT: sync_host(w[,fer_w]) before the halo. */
-    dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+    /* M5.13g1: uv device-resident - no re-push; vert_vel reads it on device. */
     /* M5.13f: helem device-resident from last step's commit - no re-push; vert_vel reads it on device. */
     /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push (vert_vel reads it on device). */
     fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
@@ -735,13 +737,14 @@ int fesom_timestep(int                          step_n,
      * until 13c restores them (the FCT only READS uv/w_e; Redi/tracer-diff don't touch
      * them). On Serial/OpenMP host==device so the kernel is the C loop, bit-identical. */
     if (gm) {
-        dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
+        /* M5.13g1: uv device-resident - no bolus IN re-push. */
         /* M5.13e: w/w_e device-resident (12b/12d fesom_halo_field) - no bolus IN re-push. */
         /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push. */
         dyn->fer_w_fld.modify_host();  dyn->fer_w_fld.sync_device();
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
-        dyn->uv_fld.sync_host();   /* M5.13e: w/w_e stay device-resident (augmented); only uv (host-staged until g1) needs host. */
+        /* M5.13g1: uv now device-resident too (bolus-augmented on device) - no OUT sync_host; the tradv
+         * C-twin sees the augmented uv on Serial (host==device); CUDA FCT reads it on device. */
     }
 
     /* 13. tracer advection: T then S.
@@ -769,7 +772,7 @@ int fesom_timestep(int                          step_n,
          * values/valuesold are pushed right before each FCT. On Serial/OpenMP host==
          * device so every sync is a no-op (the run stays bit-identical). */
         const int N_redi = mesh->myDim_nod2D + mesh->eDim_nod2D;
-        dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
+        /* M5.13g1: uv device-resident (augmented) - no re-push; FCT reads it on device. */
         /* M5.13e: w_e device-resident (augmented by bolus 13a on device) - no re-push; FCT reads it on device. */
         /* M5.13f: hnode/helem device-resident from last step's commit - no re-push; FCT reads them on device. */
         mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
@@ -951,7 +954,7 @@ int fesom_timestep(int                          step_n,
     if (gm) {
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)-1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
-        dyn->uv_fld.sync_host();   /* M5.13e: w/w_e stay device-resident (restored); only uv needs host. */
+        /* M5.13g1: uv device-resident (bolus-restored on device) - no OUT sync_host; next-step substep-3 reads it on device. */
     }
 
     PMARK("13b_trdiff");
