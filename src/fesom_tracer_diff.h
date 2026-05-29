@@ -53,6 +53,17 @@ void fesom_impl_vert_diff_tracers_kk(const struct fesom_mesh    *mesh,
                                      const struct fesom_gm      *gm);
 
 /*
+ * M5.14: DEVICE salinity floor — S := max(S, 0.5) over myDim+eDim × column.
+ * Elementwise idempotent clamp (each node writes only its own column → race-free,
+ * NO scatter/reduction → bit-identical Serial, OpenMP AND CUDA). Replaces the host
+ * floor loop once S is device-resident (the trdiff OUT sync_host is removed). Must be
+ * called AFTER the post-trdiff device halo so the owned+halo clamp matches the
+ * exchange-then-floor order of the prior host path. Marks values modify_device().
+ */
+void fesom_salinity_floor_kk(const struct fesom_mesh *mesh,
+                             struct fesom_tracers    *tracers);
+
+/*
  * FESOM_KK_VERIFY=trdiff gate: capture-before (L26) on `values` for T and S (the
  * diffusion read-modifies both). Runs the C twin on the restored inputs and asserts
  * the final `values` is bit-identical on Serial; non-intrusive (restores KK state).

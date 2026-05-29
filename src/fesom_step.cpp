@@ -171,9 +171,8 @@ int fesom_timestep(int                          step_n,
      *  (mesh_sync_geometry_device). On Serial/OpenMP host==device so every sync below is a no-op
      *  (run stays bit-identical); the rail only moves bytes on CUDA. */
     {
-        auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
         /* M5.13g1-T: T values device-resident across the step - no EOS re-push (EOS reads it on device). */
-        tS.modify_host(); tS.sync_device();
+        /* M5.14 (S flip): S values device-resident too - no EOS re-push (EOS reads it on device). */
         /* M5.13f: hnode device-resident from last step's commit (fesom_halo_field) - no re-push; EOS reads it on device. */
     }
     fesom_pressure_bv_kk(tracers, mesh, aux);   /* device: density_m_rho0/hpressure/bvfreq/dbsfc/MLD1 */
@@ -244,11 +243,8 @@ int fesom_timestep(int                          step_n,
          * (last step's 12a) + helem (last step's 14) are evolving mesh, host-current. */
         /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
         /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push; GM sigma_xy/init_redi read them on device. */
-        {
-            auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
-            /* M5.13g1-T: T values device-resident - no GM re-push (sigma_xy reads T on device). */
-            tS.modify_host(); tS.sync_device();
-        }
+        /* M5.13g1-T: T values device-resident - no GM re-push (sigma_xy reads T on device). */
+        /* M5.14 (S flip): S values device-resident too - no GM re-push (sigma_xy reads S on device). */
         mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device();
         /* M5.13f: helem device-resident from last step's commit - no re-push; GM reads it on device. */
 
@@ -356,8 +352,7 @@ int fesom_timestep(int                          step_n,
         /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push. */
         aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
         /* M5.4: uvnode device-resident with its halo (substep 3) — no re-push. */
-        tracers->data[FESOM_TRACER_S].values_fld.modify_host();
-        tracers->data[FESOM_TRACER_S].values_fld.sync_device();
+        /* M5.14 (S flip): S values device-resident - no KPP re-push (bldepth reads S on device). */
         /* M5.13f: hnode device-resident from last step's commit - no re-push; KPP reads it on device. */
         /* forcing is a const input to the step; the sync_device is a pure coherence op (moves
          * host→device, no logical mutation) → const_cast is safe and localized here. */
@@ -807,11 +802,10 @@ int fesom_timestep(int                          step_n,
 
         /* ---- S ---- */
         {
-            auto &vS  = tracers->data[FESOM_TRACER_S].values_fld;
-            auto &voS = tracers->data[FESOM_TRACER_S].valuesold_fld;
-            vS.modify_host();  vS.sync_device();
-            voS.modify_host(); voS.sync_device();
-            std::vector<real_t> fct_pre_v, fct_pre_vo;
+            /* M5.14 (S flip): S values AND valuesold both device-resident - no FCT IN re-push.
+             * Mirror of g1-T: the MFCT valuesAB couples them, so they must be a COHERENT device
+             * pair (a split — values device, valuesold host-staged — diverged T on CUDA, g1-T). */
+            std::vector<real_t> fct_pre_v, fct_pre_vo;    /* L26 capture-before (Serial host==device) */
             if (s_verify_tradv) {
                 fct_pre_v.assign (tracers->data[FESOM_TRACER_S].values,
                                   tracers->data[FESOM_TRACER_S].values    + (size_t)N_redi * nl);
@@ -819,24 +813,21 @@ int fesom_timestep(int                          step_n,
                                   tracers->data[FESOM_TRACER_S].valuesold + (size_t)N_redi * nl);
             }
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers, p);
-            vS.sync_host();  voS.sync_host();
+            /* M5.14 (S flip): S values + valuesold both device-resident - no FCT OUT sync_host. */
             if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn,
                                                         tracers, p, step_n, fct_pre_v, fct_pre_vo);
         }
         if (gm) {
-            auto &vS  = tracers->data[FESOM_TRACER_S].values_fld;
-            auto &voS = tracers->data[FESOM_TRACER_S].valuesold_fld;
-            vS.modify_host();  vS.sync_device();
-            voS.modify_host(); voS.sync_device();
-            std::vector<real_t> redi_pre;
+            /* M5.14 (S flip): S values + valuesold both device-resident from FCT - no Redi IN re-push. */
+            std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi; Serial host==device) */
             if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_S].values,
                                              tracers->data[FESOM_TRACER_S].values + (size_t)N_redi * nl);
             fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_S, gm, mesh, tracers, p);
             fesom_diff_part_hor_redi_kk     (FESOM_TRACER_S, gm, mesh, tracers, p);
-            vS.sync_host();                   /* OUT rail: before the host halo */
+            /* M5.14 (S flip): S values device-resident - no Redi OUT sync_host (device-halo'd below). */
             if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_S, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
+        fesom_halo_field(tracers->data[FESOM_TRACER_S].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (S flip) device-halo (S values) */
     }
 
     PMARK("13_fct");
@@ -883,12 +874,11 @@ int fesom_timestep(int                          step_n,
             fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device();
             fnc->sw_3d_fld.modify_host();        fnc->sw_3d_fld.sync_device();   }
         /* M5.13g1-T: T values device-resident - no trdiff IN re-push (reads it on device). */
-        tracers->data[FESOM_TRACER_S].values_fld.modify_host();
-        tracers->data[FESOM_TRACER_S].values_fld.sync_device();
+        /* M5.14 (S flip): S values device-resident too - no trdiff IN re-push (reads it on device). */
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
         fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
         /* M5.13g1-T: T values device-resident - no trdiff OUT sync_host (device-halo'd below). */
-        tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+        /* M5.14 (S flip): S values device-resident too - no trdiff OUT sync_host (device-halo'd below). */
         if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,
                                                                  step_n, trd_pre_T, trd_pre_S);
         fesom_halo_field(tracers->data[FESOM_TRACER_T].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13g1-T device-halo (T values) */
@@ -898,7 +888,7 @@ int fesom_timestep(int                          step_n,
          * T stays device-resident otherwise (EOS/GM/FCT/Redi/trdiff/ocean2ice read it on device) — this is
          * ONE D2H/step, the L50 cost (like uvnode). The earlier g1-T FAIL was this stale SST, NOT valuesold. */
         tracers->data[FESOM_TRACER_T].values_fld.sync_host();
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
+        fesom_halo_field(tracers->data[FESOM_TRACER_S].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (S flip) device-halo (S values) */
     }
 
     /* Salinity floor — port of the *intent* behind Fortran's tracer_cutoff
@@ -927,18 +917,11 @@ int fesom_timestep(int                          step_n,
             sf_skip = (e && atoi(e));
             sf_checked = 1;
         }
-        if (!sf_skip) {
-            const real_t S_FLOOR = (real_t)0.5;
-            real_t *S = tracers->data[FESOM_TRACER_S].values;
-            const int N_full = mesh->myDim_nod2D + mesh->eDim_nod2D;
-            for (int n = 0; n < N_full; ++n) {
-                const int nzmax = mesh->nlevels_nod2D[n] - 1;
-                for (int nz = 0; nz < nzmax; ++nz) {
-                    const size_t i = FESOM_NODE3D(n, nz, mesh->nl);
-                    if (S[i] < S_FLOOR) S[i] = S_FLOOR;
-                }
-            }
-        }
+        /* M5.14 (S flip): the clamp is now a DEVICE kernel (S is device-resident; its host alias is
+         * stale after the device trdiff — the OUT sync_host was removed). Placed AFTER the post-trdiff
+         * device halo above so the owned+halo clamp reproduces the prior host path's exchange-then-floor
+         * order (bit-identical, race-free per-node column, no scatter). FESOM_NO_SFLOOR=1 still bisects. */
+        if (!sf_skip) fesom_salinity_floor_kk(mesh, tracers);
     }
 
     /* 13c. Phase G6b — bolus velocity sub (Fortran oce_ale_tracer.F90:284-295).

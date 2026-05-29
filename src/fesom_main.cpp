@@ -1024,6 +1024,8 @@ skip_rest_state:
         dyn.uv_fld.modify_host();     dyn.uv_fld.sync_device();   /* M5.13g1: uv device-resident across the boundary; bootstrap step 1 (cold-start uv=0=zero-init, but explicit/robust to restart) */
         tracers.data[FESOM_TRACER_T].values_fld.modify_host(); tracers.data[FESOM_TRACER_T].values_fld.sync_device();   /* M5.13g1-T: T values device-resident; bootstrap step 1 (non-zero IC) */
         tracers.data[FESOM_TRACER_T].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_T].valuesold_fld.sync_device();   /* M5.13g1-T FIX: valuesold too — coherent device pair for the MFCT */
+        tracers.data[FESOM_TRACER_S].values_fld.modify_host(); tracers.data[FESOM_TRACER_S].values_fld.sync_device();   /* M5.14 (S flip): S values device-resident; bootstrap step 1 (non-zero PHC IC, read at step-1 EOS) */
+        tracers.data[FESOM_TRACER_S].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_S].valuesold_fld.sync_device();   /* M5.14 (S flip): valuesold too — coherent device pair for the MFCT */
 
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
@@ -1044,6 +1046,12 @@ skip_rest_state:
                 fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
             }
             if (use_sr) {
+                /* M5.14 (S flip, L50): sss_runoff reads S[surface] on the HOST (ref_sss_local virtual_salt
+                 * + relax_salt — fesom_sss_runoff.cpp:389/407). S is now device-resident across the step
+                 * boundary, so refresh the host copy before the read. GATED on use_sr → OFF in the gate +
+                 * climate runs (no SSS-restoring file) → zero cost there; this path is therefore NOT
+                 * exercised by the current validation (flagged for a future SSS-active run). */
+                tracers.data[FESOM_TRACER_S].values_fld.sync_host();
                 fesom_sss_runoff_step_cal(&sr, &mesh, &tracers, &forcing, &mpi,
                                           n, &io.prev_calendar, &io.calendar);
             }
@@ -1304,6 +1312,7 @@ skip_rest_state:
                 dyn.w_fld.sync_host();   /* M5.13e: w flipped to device-halo (12b) -> pull for the snapshot gather */
                 dyn.uv_fld.sync_host();  /* M5.13g1: uv (element) device-resident -> pull for the u/v snapshot gather */
                 tracers.data[FESOM_TRACER_T].values_fld.sync_host();  /* M5.13g1-T: T values device-resident -> pull for the temp snapshot gather */
+                tracers.data[FESOM_TRACER_S].values_fld.sync_host();  /* M5.14 (S flip): S values device-resident -> pull for the salt snapshot gather */
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,

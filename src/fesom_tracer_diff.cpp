@@ -616,6 +616,32 @@ void fesom_impl_vert_diff_tracers_kk(const struct fesom_mesh    *mesh,
     diff_ver_part_impl_ale_kk(FESOM_TRACER_S, mesh, aux, forcing, tracers, gm);
 }
 
+/*--- M5.14: DEVICE salinity floor ------------------------------------------
+ * Verbatim device twin of the host floor loop in fesom_step.cpp (the
+ * `if (S < 0.5) S = 0.5` over myDim+eDim × [0, nlevels_nod2D[n]-1)). Each node
+ * touches only its own column → race-free, NO scatter → Serial/OpenMP/CUDA
+ * bit-identical. The driver calls this AFTER the post-trdiff device halo so the
+ * owned+halo clamp reproduces the host path's exchange-then-floor order. */
+void fesom_salinity_floor_kk(const struct fesom_mesh *mesh,
+                             struct fesom_tracers    *tracers)
+{
+    const int    nl      = mesh->nl;
+    const int    N_full  = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const real_t S_FLOOR = (real_t)0.5;
+    auto Sv     = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto nlev_n = mesh->nlevels_nod2D_fld.d();
+    Kokkos::parallel_for("fesom_salinity_floor",
+        Kokkos::RangePolicy<>(0, N_full),
+        KOKKOS_LAMBDA(const int n) {
+            const int nzmax = nlev_n(n) - 1;
+            for (int nz = 0; nz < nzmax; ++nz) {
+                const size_t i = FESOM_NODE3D(n, nz, nl);
+                if (Sv(i) < S_FLOOR) Sv(i) = S_FLOOR;
+            }
+        });
+    tracers->data[FESOM_TRACER_S].values_fld.modify_device();
+}
+
 /*--- FESOM_KK_VERIFY=trdiff (M2.7) -------------------------------------------
  * impl_vert_diff_tracers READ-MODIFY-WRITES `values` (+= the TDMA solution + the
  * surface flux BC), so the C-twin oracle needs the PRE-kernel `values` — the L26

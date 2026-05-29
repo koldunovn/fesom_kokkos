@@ -440,14 +440,11 @@ void fesom_ice_step(int                            step,
      * pattern). OUT: sync_host(srfoce_*) for the host EVP + the u_w/v_w nod2D halo (driver,
      * the ALE pattern). Falls back to no-op if dyn or tracers are NULL. */
     if (dyn && tracers) {
-        struct fesom_dyn     *d  = const_cast<struct fesom_dyn *>(dyn);
-        struct fesom_tracers *tr = const_cast<struct fesom_tracers *>(tracers);
         /* M5.13g1-T: T values device-resident across the boundary - no re-push; ocean2ice reads SST on device.
-         * (S still re-pushed - g1-T leaves S host-staged, floor-pinned.) */
-        tr->data[FESOM_TRACER_S].values_fld.modify_host(); tr->data[FESOM_TRACER_S].values_fld.sync_device();
+         * M5.14 (S flip): S values device-resident too (floor → device) - no re-push; ocean2ice reads srfoce_salt = S on device.
+         * M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -
+         * no re-push; ocean2ice reads uv surface (nz=0) on device. So T/S/uv all device-resident here now. */
         mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();
-        /* M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -
-         * no re-push; ocean2ice reads uv surface (nz=0) on device. (T/S still re-pushed — g1-T deferred.) */
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
         ice->srfoce_temp_fld.sync_host(); ice->srfoce_salt_fld.sync_host(); ice->srfoce_ssh_fld.sync_host();
         ice->srfoce_u_fld.sync_host();    ice->srfoce_v_fld.sync_host();
@@ -614,8 +611,7 @@ void fesom_ice_step(int                            step,
          * reductions + the 4 forcing halos (sync_host → host exchange); the ocean step's IN rail
          * re-pushes the host forcing → device (the "→host(forcing)" handoff). EOS-style verify
          * (oce_fluxes is a full overwrite from intact inputs → no capture-before). */
-        struct fesom_tracers *tr2 = const_cast<struct fesom_tracers *>(tracers);
-        tr2->data[FESOM_TRACER_S].values_fld.modify_host(); tr2->data[FESOM_TRACER_S].values_fld.sync_device();
+        /* M5.14 (S flip): S values device-resident (floor → device) - no re-push; oce_fluxes reads surface S on device. */
         forcing->Ssurf_fld.modify_host(); forcing->Ssurf_fld.sync_device();
         fesom_ice_oce_fluxes_kk(ice, partit, mesh, tracers, forcing, sr);
         if (s_verify_iceflux) fesom_ice_oce_fluxes_verify(ice, partit, mesh, tracers, forcing, sr, step);

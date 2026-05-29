@@ -739,12 +739,27 @@ static void resolve_temp_dev(const fesom_state *s, real_t *out_dev, size_t n)
     auto src = s->tracers->data[FESOM_TRACER_T].values_fld.d();
     Kokkos::parallel_for("io_acc_temp", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
+/* M5.14 (S flip): salt/sss now read S on the device (S is device-resident from
+ * the trdiff + the device salinity floor — no per-step D2H). Mirror temp/sst. */
+static void resolve_salt_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->tracers->data[FESOM_TRACER_S].values_fld.d();
+    Kokkos::parallel_for("io_acc_salt", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
 static void resolve_sst_dev(const fesom_state *s, real_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto T = s->tracers->data[FESOM_TRACER_T].values_fld.d();
     const int nl = s->mesh->nl;
     Kokkos::parallel_for("io_acc_sst", n, KOKKOS_LAMBDA(const size_t i){ out(i) += T(i * (size_t)nl + 0); });
+}
+static void resolve_sss_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto S = s->tracers->data[FESOM_TRACER_S].values_fld.d();
+    const int nl = s->mesh->nl;
+    Kokkos::parallel_for("io_acc_sss", n, KOKKOS_LAMBDA(const size_t i){ out(i) += S(i * (size_t)nl + 0); });
 }
 static void resolve_u_dev(const fesom_state *s, real_t *out_dev, size_t n)
 {
@@ -800,13 +815,13 @@ static void resolve_bvfreq_dev(const fesom_state *s, real_t *out_dev, size_t n)
 
 static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_NVARS] = {
     /* 3D ocean state.  6th col = M514 device-resident accumulator (or nullptr).
-     * salt/sss/density get theirs once S/density are flipped to residency (Tasks 5/6);
+     * salt/sss flipped to device-accum in M5.14 (S residency); density gets its in Task 6;
      * ssh stays host (eta_n is host); ice fields stay host (host-synced post-ice-step). */
     { "temp",    "potential temperature",          "degC",   FESOM_VAR_3D_NODE_MID,   resolve_temp,    resolve_temp_dev   },
-    { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt,    nullptr            },
+    { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt,    resolve_salt_dev   },
     { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh,     nullptr            },
     { "sst",     "sea surface temperature",        "degC",   FESOM_VAR_2D_NODE,       resolve_sst,     resolve_sst_dev    },
-    { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss,     nullptr            },
+    { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss,     resolve_sss_dev    },
     { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u,       resolve_u_dev      },
     { "v",       "meridional velocity",            "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_v,       resolve_v_dev      },
     { "w",       "vertical velocity at interfaces","m/s",    FESOM_VAR_3D_NODE_IFACE, resolve_w,       resolve_w_dev      },
