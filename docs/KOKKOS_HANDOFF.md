@@ -1,5 +1,11 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+> **NEXT CAMPAIGN (planned): M5.13 — NG5 device-residency / PCIe-reduction.** Full handout:
+> `docs/plans/20260530-pcie-residency-campaign.md`; copy-paste next-session prompt:
+> `docs/plans/20260530-pcie-campaign-PROMPT.md`. Mandate = the corrected L56 finding (NG5 is
+> PCIe-bound: GPU 7 %, PCIe 75 %); lever = flip the remaining host-staged nod3D/elem3D halos to
+> `fesom_halo_field`. Ranked targets + the validation gate + the milestone sequence are in the handout.
+
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
 Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT f+d+b). Lessons L53 (f), L54 (d), L55 (campaign cap). Scaling: **`docs/SCALING_NG5.md`**.
