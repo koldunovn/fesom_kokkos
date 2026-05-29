@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ng5_prof
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5prof.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5prof.%j.err
+#
+# NG5 per-phase + per-kernel profile (does the bottleneck shift from launch-density to
+# per-kernel compute/bandwidth when each rank holds 100k-900k nod2D x 70 lvl?). Parametrized:
+# TAG, nodes/ntasks via sbatch CLI. FESOM_STEP_PROFILE=1 (per-substep phase + Kokkos per-kernel
+# auto-instrumentation) + FESOM_CG_PROFILE=1. snap_every=-1 (no I/O). build-cuda (m512-fusion).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}; rm -rf "$OUT"; mkdir -p "$OUT"
+echo "=== NG5 PROFILE $TAG nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=180 nsteps=${NSTEPS:-35} ==="
+nvidia-smi -L | head -1
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 180 "${NSTEPS:-35}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "rc=$?"
+echo "===== loop timing + STEP PROFILE + CG share ====="
+grep -E "loop timing|STEP PROFILE|CG share|CG-share" "$OUT/run.log"
+echo "===== per-phase + per-kernel breakdown (rank0) ====="
+sed -n '/\[fesom_prof\] phase + kernel breakdown/,$p' "$OUT/run.log" | head -60
