@@ -282,6 +282,29 @@ gets the GPU/CPU ratio near 1×*:
   different lever. Figure: `docs/figures/scaling_meshsize_trend.png` (the green campaign curve diving
   through the old 3.6–3.8× PCIe floor; the white triangle = the dist_8 denser-packing probe).
 
+### High-node strong-scaling on the campaign binary — 8/16/32 nodes (2026-05-30)
+
+`jobs/submit_m513_hinode_scaling.sh` (campaign binary, 35 steps, 2-rep means). Confirms the campaign
+binary strong-scales AND quantifies the per-rank-work drift the data/compute-balance test predicts.
+
+| nodes | NG5 GPU | NG5 CPU | NG5 ratio | nod2D/rank | dars GPU | dars CPU | dars ratio | nod2D/rank |
+|------:|--------:|--------:|----------:|-----------:|---------:|---------:|-----------:|-----------:|
+|   2   |    —    |    —    |     —     |     —      | 4.311    | 2.844    | **1.52×**  |   395k     |
+|   4   | 6.12    | 4.330   | **1.41×** |   462k     | 2.342    | 1.465    | **1.60×**  |   197k     |
+|   8   | 3.307   | 2.230   | **1.48×** |   231k     | 1.264    | (no dist_1024) | —    |    99k     |
+|  16   | 1.813   | 1.171   | **1.55×** |   116k     | 0.750    | (no dist_2048) | —    |    49k     |
+|  32   | *pending* (no NG5 dist_4096) |  |  |  58k  | *pending* | 0.2051 | *pending* |    25k     |
+
+- **GPU strong-scaling is near-ideal**: NG5 1.85× (4→8N), 1.82× (8→16N); dars 1.84/1.85/1.69× (2→4→8→16N)
+  — ~91–93 % parallel efficiency per doubling, easing only at 16N where the columns thin out.
+- **The node-for-node GPU/CPU ratio drifts UP with node count** (NG5 1.41× → 1.48× → 1.55× as
+  nod2D/rank falls 462k → 231k → 116k). This is the **L58 data/compute-balance lesson as a strong-scaling
+  curve**: adding nodes spreads the work thinner per GPU, so the ratio creeps from 1.41× toward the
+  launch/MPI floor. The corollary is a **production rule: the GPU is most competitive at the FEWEST nodes
+  (highest per-rank work) that fit A100-80GB memory** — over-decomposing wastes the GPU's strength.
+  (dars 8/16N + NG5 32N lack a node-for-node CPU partition, so those are GPU strong-scaling only.)
+- Figure: `docs/figures/scaling_hinode_m513.png` (`scripts/plot_hinode_scaling.py`).
+
 ---
 
 *Generated 2026-05-29. Companion: `docs/SCALING_CORE2.md`, `docs/SCALING_FARC.md`,

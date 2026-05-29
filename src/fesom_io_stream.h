@@ -25,6 +25,7 @@
 #include "fesom_types.h"
 
 #include <mpi.h>
+#include <Kokkos_Core.hpp>   /* M514: on-device mean accumulation (device-resident output fields) */
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -65,13 +66,23 @@ typedef enum {
  * extraction loop. For 1:1 fields it's just `for i: out[i] += src[i]`. */
 typedef void (*fesom_resolve_fn)(const struct fesom_state *state, real_t *out, size_t n);
 
+/* M514 — device-resident variant. Accumulates ON-DEVICE into `out_dev` reading the
+ * field's device view (`field.d()`), so a device-resident output field is never
+ * round-tripped to host for the per-step mean. This (a) removes the per-step D2H that
+ * caps S/density/T residency and (b) FIXES the latent stale 3-D means of the already-
+ * device-resident u/v/w/Kv/Av/bvfreq (their host copies were only refreshed on snapshot
+ * steps). A NULL `dev_resolve` => keep the host `resolve` (host-authored fields: ssh). */
+typedef void (*fesom_resolve_dev_fn)(const struct fesom_state *state,
+                                     Kokkos::View<real_t*> out_dev, size_t n);
+
 /* Variable descriptor. Lifetime = run; held by reference, never copied. */
 typedef struct fesom_var_desc {
     const char         *name;       /* file basename: "temp", "ssh", "u", ... */
     const char         *long_name;  /* CF "long_name" attribute               */
     const char         *units;      /* CF "units" attribute                   */
     fesom_var_kind_t    kind;
-    fesom_resolve_fn    resolve;
+    fesom_resolve_fn    resolve;        /* host accumulate (always present)       */
+    fesom_resolve_dev_fn dev_resolve;   /* M514: on-device accumulate, or NULL    */
 } fesom_var_desc_t;
 
 /* Compute the size (in real_t elements) of the local accumulator buffer
@@ -101,6 +112,11 @@ typedef struct fesom_io_stream {
     real_t                 **accum;
     size_t                  *accum_sz;          /* [nvars] elements per accum */
     int                      n_accum;           /* # of step() calls in window */
+
+    /* M514: per-var DEVICE accumulator. Non-empty View only for vars with a
+     * dev_resolve (device-resident fields); host `accum[v]` stays the gather/flush
+     * buffer and is filled by a single deep_copy(accum[v] <- accum_dev[v]) at flush. */
+    Kokkos::View<real_t*>   *accum_dev;
 
     /* netCDF handles per variable. ncid == -1 means file not open yet
      * (lazy open on first flush of the rollover window). */
