@@ -10,11 +10,7 @@
 > `docs/SCALING_NG5.md` §M5.13 + § dars cross-mesh; fidelity `docs/GPU_FIDELITY.md` §M5.13 + § Climate validation;
 > lesson **L57**; figures `docs/figures/scaling_meshsize_trend.png` + `m513_*.png`. Memory: [[project-m513-pcie-campaign]].
 >
-> **NEXT CAMPAIGN (planned): Lever C — the heavy-kernel coalescing refactor** (`fesom_field.hpp` rank-1 →
-> `View<double**>`) + launch-fusion, to attack the residual ~1.4× floor (now per-step launch/MPI overhead,
-> ~720 launches/step — NOT PCIe; PCIe is solved). Separate session + special branch (the layout change is
-> invasive). Rationale: the data/compute-balance probe (dars dist_8) showed more per-rank work → nearer 1×,
-> but the asymptote on Levante-A100 is ~1.4× until the launch/MPI overhead is cut.
+> **NEXT CAMPAIGN (planned): close the residual ~1.4× gap — full prompt `docs/plans/20260531-close-cpu-gpu-gap-PROMPT.md`** (paste it to start). PCIe is SOLVED; the gap is now THREE-way (nsys-final NG5 dist_16: PCIe 44 % / MPI-sync 37 % / compute 19 %), so the next session **re-profiles first** (the wall moved) then picks among: **Lever A** g2 salinity-floor→device (the residual PCIe — quick, safe), **Lever B** CG (~219 iters) / EVP (120 subcycles) communication reduction (the MPI 37 % — highest upside, but changes numerics → needs the 1-yr climate revalidation), **Lever C** the `fesom_field.hpp` rank-1→`View<double**>` coalescing refactor (the 19 % compute — safe, invasive, own branch), **Lever D** denser-packing deployment guidance (free; the data/compute-balance lever, dars dist_8 showed more work/GPU → nearer 1×). Don't expect another 3.8×→1.4×-style single win — this is the long tail; measure each lever's upside before committing.
 
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
