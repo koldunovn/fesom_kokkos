@@ -210,12 +210,17 @@ The L56 prediction held. M5.13 flipped the remaining host-staged nod3D/elem3D ha
 `fesom_halo_field` (a `cfl_z`, b EOS `hpressure`/`sw_α`/`sw_β`, c the GM quartet, d `uv_rhsAB`,
 e ALE `w`/`w_e`+bolus, f ALE commit `hnode`/`helem`). NG5 dist_16, snapshot binaries:
 
-| metric (NG5 dist_16)        | baseline | a+b+c (ckpt1) | a–f (ckpt2/clean) |
-|:----------------------------|---------:|--------------:|------------------:|
-| step (s/step), nsys-traced  | 16.94    | 14.06         | 11.17             |
-| **step (s/step), clean**    | **16.27**| —             | **10.88**         |
-| PCIe `cudaMemcpy` (s/step)  | 12.74    | 10.25         | **7.48**          |
-| PCIe % of step              | 75 %     | ~73 %         | **67 %**          |
+| metric (NG5 dist_16)        | baseline | a–f (clean) | **a–f+g1-uv (clean)** |
+|:----------------------------|---------:|------------:|----------------------:|
+| **step (s/step), clean**    | **16.27**| 10.88       | **6.97**              |
+| **node-for-node GPU/CPU**   | 3.76×    | 2.51×       | **1.61×**             |
+| PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) | ~3.6 (est)            |
+| nsys-traced step            | 16.94    | 11.17       | —                     |
+
+g1-uv (full `uv` device-residency — flip update_vel + remove ALL 11 uv re-pushes + the ocean2ice
+cross-file push) was the **single biggest win**: 10.88 → 6.97 s/step (−36% more), because `uv`
+(ELEM3D×nl×2, the largest field) is read ~11×/step. The CORE2 deep_copy proxy MB halved (641 → 342
+MB/step). **The campaign blew past the ~2× target to 1.61×.**
 
 - **Clean a–f GPU dist_16 = 10.88 s/step** (2 reps 10.868/10.894, job `25233271`, no nsys/no I/O)
   vs **CPU dist_512 = 4.330 s/step** (node-for-node, UNCHANGED — the flips are
