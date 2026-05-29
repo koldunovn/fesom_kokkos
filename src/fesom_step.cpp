@@ -186,10 +186,9 @@ int fesom_timestep(int                          step_n,
      * alias. dbsfc has no halo but KPP bldepth reads it on host; MLD1_ind has no halo but GM
      * init_Redi_GM reads it on host — sync both here too. (No-ops on Serial/OpenMP.) */
     aux->density_m_rho0_fld.sync_host();
-    aux->hpressure_fld.sync_host();
+    /* M5.13b: hpressure/sw_alpha/sw_beta now device-halo'd below (fesom_halo_field) + stay
+     * device-resident - their OUT-rail sync_host removed (PGF/GM/KPP read them on device). */
     aux->bvfreq_fld.sync_host();
-    aux->sw_alpha_fld.sync_host();
-    aux->sw_beta_fld.sync_host();
     aux->dbsfc_fld.sync_host();
     aux->MLD1_ind_fld.sync_host();
     /* In-binary per-kernel gate (Serial max|Δ|==0); non-intrusive (restores the Kokkos result).
@@ -201,7 +200,8 @@ int fesom_timestep(int                          step_n,
      * device-authoritative — i.e. if the output sync_host() above were forgotten now that EOS runs
      * on the device (docs/SYNC_MAP.md §1). */
     fesom_exchange_nod3D(aux->density_m_rho0_fld.h_checked(), nl, p);
-    fesom_exchange_nod3D(aux->hpressure_fld.h_checked(),      nl, p);
+    /* M5.13b: hpressure device-halo (PGF reads it at element vertices on device, substep 2). */
+    fesom_halo_field(aux->hpressure_fld, FESOM_HALO_NOD3D, nl, 1, p);
     /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
     fesom_halo_field(aux->bvfreq_fld, FESOM_HALO_NOD3D, nl, 1, p);
     /* M5.9-pin (session 20): the M5.9 blanket sync_host here was a PLACEBO (the leave-one-out's 0.4
@@ -211,8 +211,9 @@ int fesom_timestep(int                          step_n,
      * KPP / mo_convect / GM read it on the DEVICE; the device smoother below re-dirties it anyway.
      * Its only host readers are the read-only min/max print + the netCDF snapshot, both covered by
      * the snapshot-gated pre-I/O sync_host in fesom_main.cpp (L48). So: no per-step sync. */
-    fesom_exchange_nod3D(aux->sw_alpha_fld.h_checked(),       nl, p);
-    fesom_exchange_nod3D(aux->sw_beta_fld.h_checked(),        nl, p);
+    /* M5.13b: sw_alpha/sw_beta device-halo (GM substep-1b + KPP substep-3 read them on device). */
+    fesom_halo_field(aux->sw_alpha_fld, FESOM_HALO_NOD3D, nl, 1, p);
+    fesom_halo_field(aux->sw_beta_fld,  FESOM_HALO_NOD3D, nl, 1, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
      * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). M5.5 (B): DEVICE smoother
      * (no host round-trip) — bvfreq stays device-resident + halo'd through to its
@@ -243,8 +244,7 @@ int fesom_timestep(int                          step_n,
          * substep-1 EOS rail + unchanged, re-pushed here for self-containment; hnode_new
          * (last step's 12a) + helem (last step's 14) are evolving mesh, host-current. */
         /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
-        aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
-        aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
+        /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push; GM sigma_xy/init_redi read them on device. */
         {
             auto &tT = tracers->data[FESOM_TRACER_T].values_fld;
             auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
@@ -304,7 +304,8 @@ int fesom_timestep(int                          step_n,
      *  back to the device with modify_host()+sync_device() (NOT a bare sync_device, which
      *  would feed the kernel the pre-halo device bytes). gradient_sca/elem_nodes/ulevels/
      *  nlevels are set-once device-current (mesh_sync_geometry_device). No-op on Serial/OpenMP. */
-    aux->hpressure_fld.modify_host(); aux->hpressure_fld.sync_device();
+    /* M5.13b: hpressure is device-resident with its halo (substep-1 fesom_halo_field) - the IN
+     * re-push is GONE; PGF reads it at the element's 3 vertices (incl. HALO) directly on device. */
     fesom_pressure_force_linfs_fullcell_kk(mesh, aux);   /* device: pgf_x, pgf_y (elem) */
     if (s_verify_pgf) fesom_pressure_force_verify(mesh, aux, step_n);
     /* M5.4: pgf device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
@@ -356,8 +357,7 @@ int fesom_timestep(int                          step_n,
          * forcing is host-produced; sw_alpha, sw_beta, dbsfc, uvnode, S, hnode are device-current
          * from substep 1 but re-synced for robustness. (No-op on Serial/OpenMP.) */
         /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
-        aux->sw_alpha_fld.modify_host(); aux->sw_alpha_fld.sync_device();
-        aux->sw_beta_fld.modify_host();  aux->sw_beta_fld.sync_device();
+        /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push. */
         aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
         /* M5.4: uvnode device-resident with its halo (substep 3) — no re-push. */
         tracers->data[FESOM_TRACER_S].values_fld.modify_host();

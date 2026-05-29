@@ -14,7 +14,7 @@ detail):** `docs/plans/20260530-pcie-residency-campaign.md` — this file is the
 ## STATE CHECKLIST (resumability — read this to know "where are we")
 
 - [x] **M5.13a** — `cfl_z` (NOD3D) — DONE ✅ rungs 1-3 (Serial `ale`=0 / pi np1+np2 bit-id / SYNCCHECK clean); gate PASS worst 5.7e-3 (no staleness); CORE2 deep_copy baseline **207.7/step, 1067.6 MB/step**
-- [ ] **M5.13b** — EOS `hpressure` + `sw_alpha`/`sw_beta` (NOD3D) — clean
+- [x] **M5.13b** — EOS `hpressure` + `sw_alpha`/`sw_beta` (NOD3D) — DONE ✅ verify eos/pgf/gm/kpp=0; pi np1+np2 bit-id; SYNCCHECK clean; gate PASS worst 2.3e-3; **deep_copy 207.7→199.7/step (−8), 1067.6→1020.4 MB/step**
 - [ ] **M5.13c** — GM quartet `fer_gamma`/`slope_tapered`/`Ki`/`fer_uv` — highest aggregate + complexity → **NG5 ckpt 1**
 - [ ] **M5.13d** — `uv_rhsAB` (ELEM3D) — cross-step AB2 history
 - [ ] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — tangled (`w` snap-out)
