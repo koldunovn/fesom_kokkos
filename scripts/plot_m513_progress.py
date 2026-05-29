@@ -29,8 +29,8 @@ fig, (axL, axR) = plt.subplots(1, 2, figsize=(12.5, 5.0))
 cols = ["#9aa0a6", "#f4a259", "#5b8e7d", "#1f6f3f"]
 b = axL.bar(x, step_s, color=cols, width=0.62, zorder=3)
 axL.axhline(cpu_ref, ls="--", lw=1.4, color="#b3261e", zorder=2)
-axL.text(len(stages)-0.5, cpu_ref+0.25, f"CPU node-for-node (dist_512) = {cpu_ref:.2f}",
-         color="#b3261e", ha="right", va="bottom", fontsize=9)
+axL.text(1.5, 15.7, f"– – CPU node-for-node (dist_512) = {cpu_ref:.2f} s/step",
+         color="#b3261e", ha="center", va="top", fontsize=9)
 for xi, s in zip(x, step_s):
     axL.text(xi, s+0.18, f"{s:.2f}", ha="center", va="bottom", fontsize=10, fontweight="bold")
 axL.set_xticks(x); axL.set_xticklabels(stages, fontsize=9)
@@ -72,12 +72,12 @@ axM.set_ylim(0, 1180); axM.grid(axis="y", alpha=0.3, zorder=0)
 axC = axM.twinx()
 axC.plot(xm, calls, "o-", color="#1f3a93", lw=2, ms=6, zorder=4, label="deep_copy calls/step")
 for xi, c in zip(xm, calls):
-    axC.text(xi, c+3, f"{c:.0f}", ha="center", va="bottom", fontsize=8, color="#1f3a93")
+    axC.text(xi, c-5, f"{c:.0f}", ha="center", va="top", fontsize=8, color="#1f3a93")
 axC.set_ylabel("deep_copy calls/step", color="#1f3a93")
-axC.tick_params(axis="y", labelcolor="#1f3a93"); axC.set_ylim(0, 230)
+axC.tick_params(axis="y", labelcolor="#1f3a93"); axC.set_ylim(0, 245)
 
 # annotate the two biggest single wins
-axM.annotate("GM quartet\n(−163 MB)", xy=(2, 857), xytext=(2, 980),
+axM.annotate("GM quartet\n(−163 MB)", xy=(2, 857), xytext=(0.85, 700),
              ha="center", fontsize=8.5, arrowprops=dict(arrowstyle="->", color="k"))
 axM.annotate("uv full residency\n(−299 MB, largest)", xy=(6, 342), xytext=(5.0, 520),
              ha="center", fontsize=8.5, arrowprops=dict(arrowstyle="->", color="k"))

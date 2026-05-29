@@ -70,6 +70,12 @@ than EPYC**, reached by dars-class meshes. Bigger meshes than NG5 will not meani
 > step blocked on full-field PCIe `cudaMemcpy` (un-flipped 3-D halos) and only ~7 % computing.
 > That PCIe overhead is reducible (device-residency / halo flips); the ratio should be
 > re-measured after the NG5 halo-flip campaign, not treated as fixed.
+>
+> **✅ RESOLVED (M5.13, 2026-05-30):** the campaign re-measured it. The "3.6–3.8× floor" was indeed
+> mostly reducible PCIe — device residency dropped NG5 to **1.41×** and dars to **1.60×** (denser dars
+> dist_8 → **1.52×**). The asymptote conclusion above is **superseded**: the floor was a *data-movement*
+> artifact, not a compute floor. See § M5.13 RESULT and § dars cross-mesh confirmation below; the real
+> remaining floor (~1.4×) is per-step launch/MPI overhead, a different lever.
 
 ## Per-rank vs OMEGA's A100 sweet spot (~250k nod2D/rank)
 
@@ -214,7 +220,7 @@ e ALE `w`/`w_e`+bolus, f ALE commit `hnode`/`helem`). NG5 dist_16, snapshot bina
 |:----------------------------|---------:|------:|-------:|------------------:|
 | **step (s/step), clean**    | **16.27**| 10.88 |  6.97  | **6.12**          |
 | **node-for-node GPU/CPU**   | 3.76×    | 2.51× | 1.61×  | **1.41×**         |
-| PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) | ~3.6 | ~3.0 (est)    |
+| PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) |  —   | **2.83 (nsys)**   |
 
 (g1-uv = full `uv` residency, the biggest single win; g1-T = full T values+valuesold residency,
 fixed with an L50 bulk-SST sync. ⚠️ **Performance numbers; the 1-year CORE2 CUDA-vs-Fortran+C climate
@@ -247,6 +253,33 @@ MB/step). **The campaign blew past the ~2× target to 1.61×.**
 3.76×→1.41×) · `docs/figures/m513_deepcopy_proxy.png` (per-milestone PCIe deep_copy 1068→277 MB/step)
 · `docs/figures/m513_ng5_pcie_decomp.png` (PCIe share 75%→44% — the GPU un-starved). Script:
 `scripts/plot_m513_progress.py`.
+
+### dars cross-mesh confirmation + the data/compute-balance test (2026-05-30)
+
+The campaign was developed and accepted on NG5, but the flips are mesh-independent (`#ifdef CUDA`,
+always active). Re-running the **campaign binary on dars** (3.16M nodes, 47 lvl) confirms the win
+generalizes across meshes — and tests the user's hypothesis that *the right data/compute balance
+gets the GPU/CPU ratio near 1×*:
+
+| dars (campaign binary)        | GPU s/step | CPU node-for-node | ratio  | nod2D/rank |
+|:------------------------------|-----------:|------------------:|-------:|-----------:|
+| pre-campaign dist_16 (4N)     | 6.003      | 1.465 (dist_512)  | 4.10×  | 197k       |
+| **post dist_16 (4N)**         | **2.342**  | 1.465 (dist_512)  | **1.60×** | 197k    |
+| **post dist_8 (2N, denser)**  | **4.311**  | 2.844 (dist_256)  | **1.52×** | **395k** |
+
+- **The campaign cuts dars's gap 4.10× → 1.60×** (−61 %), the same magnitude as NG5 (3.76× → 1.41×) —
+  it is not an NG5-specific artifact; both big nod3D meshes were PCIe-bound and both are now released.
+- **The data/compute-balance theory holds — in direction.** The denser dist_8 packing (395k nod2D/rank,
+  2× the per-rank work of dist_16) lands **closer to parity (1.52×) than dist_16 (1.60×)**. Plotted with
+  NG5 dist_16 (462k/rank → 1.41×), the trend is **monotone: more work per GPU → nearer 1×**. The A100 is
+  feed-rate-limited at low per-rank work; loading it more closes the gap.
+- **But the asymptote on Levante-A100 is ~1.4×, not 1×.** Even at 395–462k/rank the residual gap is the
+  irreducible per-step overhead — ~720 kernel launches + MPI/sync (the lever-C / launch-fusion territory,
+  *not* PCIe). To approach 1× you'd need both more per-rank work (denser packing — but the CPU OOMs first
+  on bigger meshes) **and** the launch/fusion lever. So: device residency took the gap from "GPU is a
+  curiosity" (3.8×) to "GPU is within ~1.5× and energy-competitive"; closing the last ~0.4× is a
+  different lever. Figure: `docs/figures/scaling_meshsize_trend.png` (the green campaign curve diving
+  through the old 3.6–3.8× PCIe floor; the white triangle = the dist_8 denser-packing probe).
 
 ---
 
