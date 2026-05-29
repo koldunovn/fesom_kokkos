@@ -23,6 +23,13 @@ typedef double real_t;
  * Names are explicit about the array shape so a misuse at the
  * call site reads wrong: FESOM_ELEM3D() on a node array, etc.
  */
+/* Compile-time ceiling on the vertical level count `nl`, used to size the per-column
+ * stack/lambda-local scratch arrays (host C twins AND device kernels — both need a
+ * compile-time bound; device lambda-locals cannot be VLAs). Covers CORE2/farc/dars (47-48),
+ * NG5 (70), and the OMEGA 96-level reference, with margin. A mesh with nl > this fails cleanly
+ * at load (fesom_mesh.cpp) instead of overflowing the stack. Raise it if a deeper mesh is added. */
+#define FESOM_MAX_LEVELS 128
+
 #define FESOM_NODE3D(node, lev, nl)   ((size_t)(node) * (size_t)(nl) + (size_t)(lev))
 #define FESOM_ELEM3D(elem, lev, nl)   ((size_t)(elem) * (size_t)(nl) + (size_t)(lev))
 #define FESOM_ELEMVEC(elem, lev, nl)  ((size_t)(elem) * (size_t)(nl) * 2 + (size_t)(lev) * 2)

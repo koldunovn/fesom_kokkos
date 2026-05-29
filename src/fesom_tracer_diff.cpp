@@ -42,7 +42,7 @@
 #include <string>
 #include <vector>
 
-enum { NL_MAX = 64 };
+enum { NL_MAX = FESOM_MAX_LEVELS };
 
 /* ------------------------------------------------------------------------ *
  * bc_surface — oce_ale_tracer.F90:1475-1524                                *

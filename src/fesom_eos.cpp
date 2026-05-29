@@ -167,9 +167,10 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
         /* Skip nodes with no wet layers (shouldn't happen in Phase 1 but guard). */
         if (nzmax <= nzmin) continue;
 
-        real_t bulk_0[64], bulk_pz[64], bulk_pz2[64], rhopot[64], rho[64];
-        /* nl≤48 in Phase 1; static cap of 64 leaves headroom and keeps the
-           compiler from generating dynamic-stack code. */
+        real_t bulk_0[FESOM_MAX_LEVELS], bulk_pz[FESOM_MAX_LEVELS], bulk_pz2[FESOM_MAX_LEVELS],
+               rhopot[FESOM_MAX_LEVELS], rho[FESOM_MAX_LEVELS];
+        /* Per-column scratch (one node at a time). Sized FESOM_MAX_LEVELS — a compile-time cap so
+           the device twin can mirror it (no VLA); `nl` is guarded <= FESOM_MAX_LEVELS at mesh load. */
 
         /* Pass 1: JM-EOS components per layer. */
         for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -327,7 +328,8 @@ void fesom_pressure_bv_kk(const struct fesom_tracers *tracers,
 
             if (nzmax <= nzmin) return;             /* no wet layers (C twin: continue) */
 
-            real_t bulk_0[64], bulk_pz[64], bulk_pz2[64], rhopot[64], rho[64];
+            real_t bulk_0[FESOM_MAX_LEVELS], bulk_pz[FESOM_MAX_LEVELS], bulk_pz2[FESOM_MAX_LEVELS],
+                   rhopot[FESOM_MAX_LEVELS], rho[FESOM_MAX_LEVELS];  /* per-thread lambda-local column */
 
             /* Pass 1: JM-EOS components per layer. */
             for (int nz = nzmin; nz < nzmax; ++nz) {

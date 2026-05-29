@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ng5_cpu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5.%j.err
+#
+# ng5 (3.16M nodes) CPU strong-scaling. Parametrized — submit via submit_ng5_scaling.sh.
+# Required env: TAG (eg ng5_cpu_n2). Optional: DT (default 180), NSTEPS (default 35).
+# Build = Kokkos Serial (it has the internal loop timer; the C port would also work via wall-diff
+# but Kokkos-Serial is what M3.2 validates against and is within 3-10% of the C port on farc).
+
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then
+  echo "ERROR: $MESH/dist_$NPES missing"; exit 2
+fi
+
+run() {  # $1=tag-suffix
+  srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" "${DT:-180}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+       > "$OUT/log_$1.txt" 2>&1
+  printf "%-12s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+
+echo "=== ng5 CPU $TAG  nodes=$SLURM_NNODES ntasks=$NPES on $SLURM_JOB_NODELIST  dt=${DT:-180} nsteps=${NSTEPS:-35} ==="
+run rep_a
+run rep_b
+echo "--- CG iters + T/S sanity (rep_a) ---"
+grep -E "it=" "$OUT/log_rep_a.txt" | tail -1

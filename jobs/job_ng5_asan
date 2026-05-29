@@ -1,0 +1,19 @@
+#!/bin/bash
+#SBATCH --job-name=ng5_asan
+#SBATCH -p compute
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --time=00:25:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_asan.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_asan.%j.err
+source /sw/etc/profile.levante; source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:halt_on_error=1:print_stacktrace=1:detect_odr_violation=0"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_asan; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-asan/fesom_port "$MESH" "$OUT" 180 1 999999 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "exit=$?"
+echo "=== ASAN error report ==="; grep -A40 "ERROR: AddressSanitizer" "$OUT/log" | head -50

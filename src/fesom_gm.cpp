@@ -26,7 +26,7 @@
 #include <algorithm>
 #include <cstdio>
 
-enum { NL_MAX = 64 };          /* matches the cap used in fesom_eos / momentum */
+enum { NL_MAX = FESOM_MAX_LEVELS };          /* matches the cap used in fesom_eos / momentum */
 
 #define GM_K_GM_MAX 1000.0   /* matches namelist.oce K_GM_max default
                               * and oce_setup_step.F90:934 fer_K init   */

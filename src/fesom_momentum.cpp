@@ -167,7 +167,7 @@ void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
     const real_t *uv  = dyn->uv;
     real_t       *un  = dyn->uvnode_rhs;        /* [2*FESOM_NODE3D(n,nz,nl)+c] */
     const real_t *we  = dyn->w_e;
-    enum { NL_MAX = 64 };
+    enum { NL_MAX = FESOM_MAX_LEVELS };
 
     /* 1. vertical advection: w·du/dz at vertices (Fortran 369-420) */
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
@@ -318,7 +318,7 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
         KOKKOS_LAMBDA(const int n) {
             int ul = ulev_n(n) - 1;
             int bl = nlev_n(n) - 2;
-            real_t wu[64], wv[64];
+            real_t wu[FESOM_MAX_LEVELS], wv[FESOM_MAX_LEVELS];
             for (int j = 0; j <= bl + 1; ++j) { wu[j] = 0.0; wv[j] = 0.0; }
             int b = nie_off(n), e = nie_off(n + 1);
             for (int k = b; k < e; ++k) {
@@ -360,7 +360,7 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
             if (el1 < 0) return;
             int ul1 = ulev_e(el1) - 1, bl1 = nlev_e(el1) - 2;
             real_t dx1 = edge_cross(4*ed + 0), dy1 = edge_cross(4*ed + 1);
-            real_t un1[64], un2[64];
+            real_t un1[FESOM_MAX_LEVELS], un2[FESOM_MAX_LEVELS];
             if (el2 >= 0) {
                 int ul2 = ulev_e(el2) - 1, bl2 = nlev_e(el2) - 2;
                 real_t dx2 = edge_cross(4*ed + 2), dy2 = edge_cross(4*ed + 3);
@@ -608,7 +608,7 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
     const real_t inv_density_0 = 1.0 / (real_t)FESOM_DENSITY_0;
 
     /* Per-column scratch — nl ≤ 48 so static cap of 64 is safe. */
-    enum { NL_MAX = 64 };
+    enum { NL_MAX = FESOM_MAX_LEVELS };
 
     for (int e = 0; e < E; ++e) {
         int nzmin = mesh->ulevels[e]   - 1;
@@ -822,10 +822,10 @@ void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
             int n1 = elnod(3*e + 1);
             int n2 = elnod(3*e + 2);
 
-            real_t zbar_n[64], Z_n[64];
-            real_t a[64], b[64], c[64];
-            real_t ur[64], vr[64];
-            real_t cp[64], up[64], vp[64];
+            real_t zbar_n[FESOM_MAX_LEVELS], Z_n[FESOM_MAX_LEVELS];
+            real_t a[FESOM_MAX_LEVELS], b[FESOM_MAX_LEVELS], c[FESOM_MAX_LEVELS];
+            real_t ur[FESOM_MAX_LEVELS], vr[FESOM_MAX_LEVELS];
+            real_t cp[FESOM_MAX_LEVELS], up[FESOM_MAX_LEVELS], vp[FESOM_MAX_LEVELS];
 
             /* Build zbar_n and Z_n from helem upward (lines 3167-3179). */
             for (int k = 0; k <= nzmax; ++k) zbar_n[k] = 0.0;

@@ -1,0 +1,18 @@
+#!/bin/bash
+#SBATCH --job-name=ng5_pgfdbg
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:15:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_pgfdbg.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_pgfdbg.%j.err
+source /sw/etc/profile.levante; source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_pgfdbg; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l /home/a/a270088/port_kokkos/build-serial/fesom_port "$MESH" "$OUT" 180 1 999999 "$PHC" 1958 > "$OUT/log" 2>&1
+echo "exit=$?"
+grep -E "PGF-DBG" "$OUT/log" | head -30

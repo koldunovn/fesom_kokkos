@@ -1330,7 +1330,7 @@ void fesom_tracer_advect_one(fesom_tracer_adv_scratch *sc,
  * any consumer reads it (b2/a1 read owned only; b3/MFCT read post-exchange).
  *===========================================================================*/
 
-enum { NL_MAX = 64 };   /* matches the cap used in fesom_eos / momentum / gm */
+enum { NL_MAX = FESOM_MAX_LEVELS };   /* matches the cap used in fesom_eos / momentum / gm */
 
 /* Device twin of node_avg_grad: area-weighted mean of tr_xy over the node's
  * surrounding elements that own layer nz, written into eud[gbase + nz*4 + cx/cy]. */

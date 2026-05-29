@@ -265,6 +265,12 @@ static void read_aux3d(fesom_mesh *m, const char *mesh_dir)
     int nl = 0;
     FESOM_CHECK(fscanf(fh, "%d", &nl) == 1, "aux3d.out: missing nl");
     FESOM_CHECK(nl >= 3, "aux3d.out: nl=%d too small", nl);
+    /* Per-column stack/lambda-local scratch (eos/momentum/gm/kpp/tracer_*) is sized
+     * FESOM_MAX_LEVELS at compile time. Fail cleanly here rather than overflow the stack
+     * at runtime (the NG5 nl=70 vs old cap-64 stack-buffer-overflow, fixed 2026-05-29). */
+    FESOM_CHECK(nl <= FESOM_MAX_LEVELS,
+                "aux3d.out: nl=%d exceeds FESOM_MAX_LEVELS=%d — raise the cap in fesom_types.h and rebuild",
+                nl, FESOM_MAX_LEVELS);
     m->nl   = nl;
     m->zbar_fld.alloc("zbar", (size_t)nl);   m->zbar = m->zbar_fld.h();
     FESOM_CHECK(m->zbar, "aux3d.out: out of memory (zbar)");
