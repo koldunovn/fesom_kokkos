@@ -807,6 +807,13 @@ static void resolve_bvfreq_dev(const fesom_state *s, real_t *out_dev, size_t n)
     auto src = s->aux->bvfreq_fld.d();
     Kokkos::parallel_for("io_acc_bvfreq", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
+/* M5.14 (density flip): density_m_rho0 is device-resident (no per-step D2H) → mean on device. */
+static void resolve_density_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->aux->density_m_rho0_fld.d();
+    Kokkos::parallel_for("io_acc_density", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
 
 /* Default monthly variable table. Lifetime = run.
  * If sea ice isn't initialised, callers should pass nvars = 12 instead
@@ -832,7 +839,7 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
      * are node-based (NODE_IFACE); Av is element-based (ELEM_IFACE). */
     { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_IFACE, resolve_Kv,      resolve_Kv_dev     },
     { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_IFACE, resolve_Av,      resolve_Av_dev     },
-    { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density, nullptr            },
+    { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density, resolve_density_dev },
     { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq,  resolve_bvfreq_dev },
     /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
     { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice,   nullptr            },

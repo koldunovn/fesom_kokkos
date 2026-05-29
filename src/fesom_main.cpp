@@ -1300,15 +1300,16 @@ skip_rest_state:
                 }
             }
             if (out_dir && snap_every > 0 && (n % snap_every == 0)) {
-                /* M5.4/M5.5/M5.7: device-resident I/O-output fields whose OUT-rail sync_host was
-                 * removed when flipped to device-halo (M5.4b pgf, M5.5 bvfreq, M5.7b Kv/Av) must be
-                 * pulled to host for the rank-0 gather (the I/O reads them via h_checked()). Only at
-                 * snapshot steps, so no per-step cost. (density still keeps its OUT rail.) */
+                /* M5.4/M5.5/M5.7/M5.14: device-resident I/O-output fields whose OUT-rail sync_host was
+                 * removed when flipped to device-halo (M5.4b pgf, M5.5 bvfreq, M5.7b Kv/Av, M5.14 density)
+                 * must be pulled to host for the rank-0 gather (the I/O reads them via h_checked()). Only
+                 * at snapshot steps, so no per-step cost. */
                 aux.pgf_x_fld.sync_host();
                 aux.pgf_y_fld.sync_host();
                 aux.bvfreq_fld.sync_host();
                 aux.Kv_fld.sync_host();
                 aux.Av_fld.sync_host();
+                aux.density_m_rho0_fld.sync_host();  /* M5.14 (density flip): device-resident -> pull for the density snapshot gather */
                 dyn.w_fld.sync_host();   /* M5.13e: w flipped to device-halo (12b) -> pull for the snapshot gather */
                 dyn.uv_fld.sync_host();  /* M5.13g1: uv (element) device-resident -> pull for the u/v snapshot gather */
                 tracers.data[FESOM_TRACER_T].values_fld.sync_host();  /* M5.13g1-T: T values device-resident -> pull for the temp snapshot gather */

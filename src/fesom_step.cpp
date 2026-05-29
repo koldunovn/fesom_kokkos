@@ -183,7 +183,10 @@ int fesom_timestep(int                          step_n,
      * before the host halo exchanges + smooth_nod3D + the GM/PP/KPP consumers that read via the raw
      * alias. dbsfc has no halo but KPP bldepth reads it on host; MLD1_ind has no halo but GM
      * init_Redi_GM reads it on host — sync both here too. (No-ops on Serial/OpenMP.) */
-    aux->density_m_rho0_fld.sync_host();
+    /* M5.14 (density flip): density_m_rho0 is device-halo'd below + stays device-resident. It has NO
+     * on-device consumer (GM recomputes its own ρ-gradient from T/S) and NO per-step host reader except
+     * I/O — so the OUT-rail sync_host is removed; the monthly mean reads it on device (resolve_density_dev)
+     * and the snapshot via the pre-I/O sync_host (L48). The gated eos verify reads it host-current on Serial. */
     /* M5.13b: hpressure/sw_alpha/sw_beta now device-halo'd below (fesom_halo_field) + stay
      * device-resident - their OUT-rail sync_host removed (PGF/GM/KPP read them on device). */
     aux->bvfreq_fld.sync_host();
@@ -197,7 +200,7 @@ int fesom_timestep(int                          step_n,
      * alias (production unchanged), but under -DFESOM_KK_SYNCCHECK each aborts if the field is still
      * device-authoritative — i.e. if the output sync_host() above were forgotten now that EOS runs
      * on the device (docs/SYNC_MAP.md §1). */
-    fesom_exchange_nod3D(aux->density_m_rho0_fld.h_checked(), nl, p);
+    fesom_halo_field(aux->density_m_rho0_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (density flip) device-halo */
     /* M5.13b: hpressure device-halo (PGF reads it at element vertices on device, substep 2). */
     fesom_halo_field(aux->hpressure_fld, FESOM_HALO_NOD3D, nl, 1, p);
     /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
