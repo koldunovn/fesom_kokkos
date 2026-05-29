@@ -708,13 +708,14 @@ int fesom_timestep(int                          step_n,
     dyn->w_fld.modify_host(); dyn->w_fld.sync_device();
     mesh->hnode_new_fld.sync_device();   /* no-op: Synced from 12a; documents the dependency */
     fesom_ale_compute_cflz_kk(mesh, dyn);
-    dyn->cfl_z_fld.sync_host();
     if (s_verify_ale) fesom_ale_compute_cflz_verify(mesh, dyn, step_n);
-    fesom_exchange_nod3D(dyn->cfl_z_fld.h_checked(), nl, p);
+    /* M5.13a: cfl_z device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
+     * sync_host + the wvel_split IN re-push (below) are gone — cfl_z stays device-resident with
+     * its halo; compute_wvel_split (12d) reads it on-device. NOT snap-out. */
+    fesom_halo_field(dyn->cfl_z_fld, FESOM_HALO_NOD3D, nl, 1, p);
 
-    /* 12d. w-split (⚠️ use_wsplit=.false. preserved → w_e=w, w_i=0). IN: cfl_z (just halo'd),
-     *  w (Synced from 12c IN; cflz did not write w). Pure per-(n,nz) map. OUT: sync_host(w_e,w_i). */
-    dyn->cfl_z_fld.modify_host(); dyn->cfl_z_fld.sync_device();
+    /* 12d. w-split (⚠️ use_wsplit=.false. preserved → w_e=w, w_i=0). IN: cfl_z (device-resident,
+     *  halo'd above), w (Synced from 12c IN; cflz did not write w). Pure per-(n,nz) map. OUT: sync_host(w_e,w_i). */
     dyn->w_fld.sync_device();   /* no-op: Synced from 12c IN; w unchanged by cflz */
     fesom_ale_compute_wvel_split_kk(mesh, dyn);
     dyn->w_e_fld.sync_host();
