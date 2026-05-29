@@ -1,10 +1,20 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-> **NEXT CAMPAIGN (planned): M5.13 — NG5 device-residency / PCIe-reduction.** Full handout:
-> `docs/plans/20260530-pcie-residency-campaign.md`; copy-paste next-session prompt:
-> `docs/plans/20260530-pcie-campaign-PROMPT.md`. Mandate = the corrected L56 finding (NG5 is
-> PCIe-bound: GPU 7 %, PCIe 75 %); lever = flip the remaining host-staged nod3D/elem3D halos to
-> `fesom_halo_field`. Ranked targets + the validation gate + the milestone sequence are in the handout.
+> **✅ M5.13 — NG5 device-residency / PCIe-reduction COMPLETE + climate-validated (2026-05-30, branch `m513-pcie`).**
+> Flipped the remaining host-staged nod3D/elem3D halos to `fesom_halo_field` (a `cfl_z`, b EOS, c GM quartet,
+> d `uv_rhsAB`, e ALE w/w_e+bolus, f ALE commit) + full residency of **uv** (g1-uv) and tracer **T** (g1-T).
+> **NG5 dist_16: step 16.27→6.12 s/step (−62 %); node-for-node GPU/CPU 3.76×→1.41×; PCIe `cudaMemcpy`
+> 12.74→2.83 s/step (75 %→44 %).** Cross-mesh: dars 4.10×→1.60× (denser dist_8 1.52×). **1-yr CORE2 CUDA
+> climate = statistically identical to the pre-campaign binary (zero regression, corr 1.0000/bias O(1e-4) vs C).**
+> Only g2 (S-floor) deferred. Plan+findings `docs/plans/20260530-m513-pcie-residency-tasks.md`; result
+> `docs/SCALING_NG5.md` §M5.13 + § dars cross-mesh; fidelity `docs/GPU_FIDELITY.md` §M5.13 + § Climate validation;
+> lesson **L57**; figures `docs/figures/scaling_meshsize_trend.png` + `m513_*.png`. Memory: [[project-m513-pcie-campaign]].
+>
+> **NEXT CAMPAIGN (planned): Lever C — the heavy-kernel coalescing refactor** (`fesom_field.hpp` rank-1 →
+> `View<double**>`) + launch-fusion, to attack the residual ~1.4× floor (now per-step launch/MPI overhead,
+> ~720 launches/step — NOT PCIe; PCIe is solved). Separate session + special branch (the layout change is
+> invasive). Rationale: the data/compute-balance probe (dars dist_8) showed more per-rank work → nearer 1×,
+> but the asymptote on Levante-A100 is ~1.4× until the launch/MPI overhead is cut.
 
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
