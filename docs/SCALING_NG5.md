@@ -153,4 +153,5 @@ M5.13 candidate. **Next: `ncu` on the top NG5 kernels** (FCT, GM) for the bound 
 ---
 
 *Generated 2026-05-29. Companion: `docs/SCALING_CORE2.md`, `docs/SCALING_FARC.md`,
-`docs/SCALING_DARS.md`, `docs/PROFILE_M59.md`. Figures: `docs/figures/scaling_*.png`.*
+`docs/SCALING_DARS.md`, `docs/PROFILE_M59.md`. Figures: `docs/figures/scaling_*.png`,
+`docs/figures/profile_regime_shift.png` (CORE2-vs-NG5 per-phase composition).*
