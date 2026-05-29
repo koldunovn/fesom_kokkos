@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH --job-name=kk_nsys_ng5
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/nsys_ng5.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/nsys_ng5.%j.err
+# nsys timeline on NG5 dist_16, rank 0 only (others plain). Traces CUDA kernels + memcpy(PCIe)
+# + MPI -> the GPU-busy% vs PCIe% vs MPI/idle breakdown for the step (no replay, ~light).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/nsys_ng5; rm -rf "$OUT"; mkdir -p "$OUT"
+cat > "$OUT/wrap.sh" <<'WRAP'
+#!/bin/bash
+F=/home/a/a270088/port_kokkos/build-cuda/fesom_port
+if [ "${SLURM_PROCID:-0}" = "0" ]; then
+  exec nsys profile -t cuda,mpi,nvtx -o "$NSYS_OUT" --force-overwrite=true \
+       --capture-range=none --sample=none "$F" "$@"
+else exec "$F" "$@"; fi
+WRAP
+chmod +x "$OUT/wrap.sh"
+export NSYS_OUT="$OUT/ng5"
+echo "=== nsys NG5 dist_16 rank0, 8 steps ==="
+srun "$OUT/wrap.sh" "$MESH" "$OUT" 180 8 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "rc=$?"
+nsys stats --report cuda_gpu_kern_sum,cuda_gpu_mem_time_sum,cuda_api_sum --format column "$NSYS_OUT.nsys-rep" > "$OUT/stats.txt" 2>&1
+nsys stats --report cuda_gpu_trace "$NSYS_OUT.nsys-rep" --format column 2>/dev/null | head -3 >> "$OUT/stats.txt"
+echo "wrote stats.txt"

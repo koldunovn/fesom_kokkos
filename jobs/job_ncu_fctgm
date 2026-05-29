@@ -1,0 +1,46 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ncu_fctgm
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_fctgm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_fctgm.%j.err
+#
+# ncu per-kernel bound labels for FCT + GM at PRODUCTION per-rank work, on a single A100 (clean,
+# no MPI+ncu issues). PROXY mesh = farc np=1 (638k x 48 = 30.6M cells/rank ~= NG5 dist_16's
+# 462k x 70 = 32.3M) — same kernels, same memory-bound question, ncu-friendly. --set basic gives
+# SpeedOfLight (Compute % vs Memory % = the bound label) + Occupancy with light replay. We profile
+# a window of launches (init + ~2 steps), then identify FCT (fesom_tracer_adv) + GM (fesom_gm/fer)
+# kernels by name in the report. NO FESOM_STEP_PROFILE (its fences fight ncu replay).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_fctgm; rm -rf "$OUT"; mkdir -p "$OUT"
+REP="$OUT/fctgm"
+
+echo "=== ncu --set basic, farc np=1 (production per-rank work proxy), dt=900, 4 steps ==="
+nvidia-smi -L | head -1
+srun ncu --set basic \
+         --launch-count 170 \
+         --target-processes application-only \
+         -o "$REP" -f \
+     "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 900 4 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "ncu rc=$?"
+
+echo "===== readable per-kernel details ====="
+ncu -i "$REP.ncu-rep" --page details > "$OUT/details.txt" 2>&1 && echo "wrote details.txt ($(wc -l < "$OUT/details.txt") lines)"
+echo "===== CSV: kernel | duration | Compute SOL% | Memory SOL% | occupancy% ====="
+ncu -i "$REP.ncu-rep" --csv --page raw \
+    --metrics gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active \
+    > "$OUT/sol.csv" 2>&1 && echo "wrote sol.csv ($(wc -l < "$OUT/sol.csv") rows)"
+echo "===== distinct kernel names seen (to map FCT/GM) ====="
+ncu -i "$REP.ncu-rep" --csv --page raw --metrics gpu__time_duration.sum 2>/dev/null | head -60
+echo "=== done -> $REP.ncu-rep + details.txt + sol.csv ==="
