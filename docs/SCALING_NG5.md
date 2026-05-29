@@ -204,6 +204,36 @@ the 75 %.
 
 ---
 
+## M5.13 RESULT — the device-residency campaign confirms the PCIe was reducible (2026-05-30)
+
+The L56 prediction held. M5.13 flipped the remaining host-staged nod3D/elem3D halos to
+`fesom_halo_field` (a `cfl_z`, b EOS `hpressure`/`sw_α`/`sw_β`, c the GM quartet, d `uv_rhsAB`,
+e ALE `w`/`w_e`+bolus, f ALE commit `hnode`/`helem`). NG5 dist_16, snapshot binaries:
+
+| metric (NG5 dist_16)        | baseline | a+b+c (ckpt1) | a–f (ckpt2/clean) |
+|:----------------------------|---------:|--------------:|------------------:|
+| step (s/step), nsys-traced  | 16.94    | 14.06         | 11.17             |
+| **step (s/step), clean**    | **16.27**| —             | **10.88**         |
+| PCIe `cudaMemcpy` (s/step)  | 12.74    | 10.25         | **7.48**          |
+| PCIe % of step              | 75 %     | ~73 %         | **67 %**          |
+
+- **Clean a–f GPU dist_16 = 10.88 s/step** (2 reps 10.868/10.894, job `25233271`, no nsys/no I/O)
+  vs **CPU dist_512 = 4.330 s/step** (node-for-node, UNCHANGED — the flips are
+  `#ifdef KOKKOS_ENABLE_CUDA`, so the Serial/CPU binary is byte-identical and the CPU scaling
+  column above still holds). → **node-for-node GPU/CPU 3.76× → 2.51×**, the gap closed ~⅔ of the
+  way from 3.8× toward the ~2× target, **from a–f alone**.
+- **PCIe `cudaMemcpy` dropped 41 %** (12.74 → 7.48 s/step); GPU compute unchanged (~1.2 s/step);
+  PCIe share 75 % → 67 %. The blocking full-field memcpy count fell (213 → 192 /step at a+b+c) as
+  the device-halo path replaces each big blocking copy with on-device pack + GPU-aware-MPI async.
+  The "3.6–3.8× floor / per-watt unreachable" conclusions were indeed mostly reducible PCIe.
+- **Deferred (g1/g2):** tracer `T`/`S` values + `uv` full device-residency (~1–1.5 s/step more,
+  but cross-file into the ice step → a focused follow-up) and the S-floor (conditional gate not
+  met). Validation: every flip passed Serial verify=0 + pi np1+np2 bit-id + SYNCCHECK + the
+  CORE2-active-ice fidelity gate. See `docs/plans/20260530-m513-pcie-residency-tasks.md` § Deferred,
+  lesson **L57**, `docs/GPU_FIDELITY.md` § M5.13.
+
+---
+
 *Generated 2026-05-29. Companion: `docs/SCALING_CORE2.md`, `docs/SCALING_FARC.md`,
 `docs/SCALING_DARS.md`, `docs/PROFILE_M59.md`. Figures: `docs/figures/scaling_*.png`,
 `docs/figures/nsys_ng5_breakdown.png` (the corrected step decomposition — PCIe 75 % / GPU 7 %),

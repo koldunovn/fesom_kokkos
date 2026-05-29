@@ -567,3 +567,41 @@ reproduces the C-port-KPP at the scatter-drift floor on every gate we have.
 - corr ~1.0000 on all ocean fields; corr 0.99997 on ice (vs C-port-KPP).
 - backend-vs-C bias (~1e-4 °C SST) ≪ C-vs-Fortran budget (~0.1 on ice fields).
 - no NaN/blow-up; T/S bounded across the run.
+
+---
+
+## §M5.13 — the NG5 device-residency campaign (a–f): every flip passed the CORE2-active-ice gate
+
+Each milestone ran the mandatory `scripts/gpu_fidelity_gate.sh --fresh-oracle` (CORE2 dist_8, ICE
+active, CUDA device-halo vs the rebuilt Serial oracle) with `FESOM_STEP_PROFILE=1` (→ the deep_copy
+PCIe proxy from the same job). All passed at the CUDA climate-close floor (worst field |Δ| well under
+its ceiling; ice `h_ice` ceil 1e-1, T ceil 1e-2):
+
+| milestone | flip | gate worst \|Δ\| | deep_copy calls/step | MB/step |
+|:---|:---|---:|---:|---:|
+| (baseline) | — | — | 207.7 | 1067.6 |
+| a `cfl_z` | NOD3D | 5.7e-3 | 207.7 | 1067.6 |
+| b EOS hpressure/sw_α/sw_β | NOD3D | 2.3e-3 | 199.7 | 1020.4 |
+| c GM quartet | NOD2D/ELEM2D_FULL | 8.9e-3 | 188.7 | 857.2 |
+| d `uv_rhsAB` | ELEM3D | 1.9e-3 | 186.7 | 810.7 |
+| e ALE w/w_e+bolus | NOD3D | 3.8e-3 | 175.8 | 746.5 |
+| f ALE commit hnode/helem | NOD3D/ELEM3D | 4.3e-3 | **163.8** | **641.4** |
+
+(Serial side of every milestone: per-kernel `FESOM_KK_VERIFY` max|Δ|==0 + pi np1+np2 bit-identical +
+SYNCCHECK clean — bit-identity preserved by construction, Approach B.)
+
+### ⚠️ The f gate CAUGHT a real CUDA-only bug pi/Serial could NOT (the gate-is-mandatory reason, restated)
+f's first gate run **FAILED**: `CG_kk pp·App = -nan` abort at **step 1, iter 1**, 0 steps completed.
+Cause: `hnode`/`helem` are EVOLVING mesh (NOT in the set-once `mesh_sync_geometry_device` push,
+SYNC_MAP §8); f removed the per-step IN re-pushes that bootstrapped them onto the device, but **step 1
+has no prior substep-14 commit** → device read stale/zero `hnode`/`helem` → NaN density → CG abort.
+**Serial/pi could not see this** (host==device → the missing push is a no-op, the stale read can't
+happen; pi also has no ice). FIX = a one-time `mesh.hnode/helem.modify_host()+sync_device()` before
+the time loop (`fesom_main.cpp`); steps 2+ get them from the commit. Re-gated → PASS (worst 4.3e-3).
+**General rule (L57):** a field made device-resident across the step boundary with non-zero initial
+values needs a one-time step-1 init push.
+
+### Result (NG5 dist_16) — see `docs/SCALING_NG5.md` § M5.13
+Clean step **16.27 → 10.88 s/step (−33 %)**; PCIe `cudaMemcpy` **12.74 → 7.48 s/step (−41 %)**;
+node-for-node GPU/CPU **3.76× → 2.51×**. g1 (T/uv full residency) + g2 (S-floor, conditional gate
+not met) deferred — see the plan § Deferred + L57.

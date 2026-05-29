@@ -21,10 +21,18 @@ detail):** `docs/plans/20260530-pcie-residency-campaign.md` — this file is the
 - [x] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — DONE ✅ ale/tradv/vrhs=0 (160 lines); bit-id; SYNCCHECK; gate PASS 3.8e-3; deep_copy 186.7→175.8/step (−11), 810.7→746.5 MB/step; `w`→pre-I/O block
 - [x] **M5.13f** — ALE commit `hnode`/`helem` — DONE ✅ (10 re-pushes removed). ⚠️ **step-1 crash** (no prior commit → stale device hnode/helem → CG NaN) FIXED by a one-time init push before the loop (fesom_main.cpp); verify 9-keys=0 (400 lines); bit-id; SYNCCHECK; gate PASS 4.3e-3; deep_copy 175.8→163.8/step (−12), 746.5→641.4 MB/step → NG5 ckpt2 launched
   - **LESSON:** a field made device-resident *across the step boundary* with non-zero init values needs a one-time init push for step 1 (no prior end-of-step producer).
-- [ ] **M5.13g1** — tracer `T` values + `uv`-after-update_vel — highest blast radius (all snap-out)
-- [ ] **M5.13g2** — *(CONDITIONAL)* salinity floor → device clamp, unpin `S` → **NG5 ckpt 3 = acceptance**
-- [ ] **Acceptance** — NG5 final re-trace + scaling sweep interpreted, ratio recorded
-- [ ] **Docs** — lessons/scaling/fidelity/handoff updated, plan → `completed/`
+- [~] **M5.13g1** — tracer `T` values + `uv`-after-update_vel — **DEFERRED to a focused follow-up** (see § Deferred below). a–f met the campaign goal; g1 needs full cross-step residency + step-1 init pushes + spans the **ice step** (ocean2ice reads T/uv surface) → too crash-prone to rush autonomously for ~1–1.5 s/step marginal.
+- [~] **M5.13g2** — *(CONDITIONAL — gate NOT met)* salinity floor → device clamp. NG5 evidence: S's floor-pin sync is a small fraction of the residual 7.48 s/step PCIe → **correctly skipped** per its own conditional.
+- [x] **Acceptance** — NG5 dist_16: nsys ckpt-1/2 (a+b+c→a–f) + clean timing (job 25233271). **Clean step 16.27→10.88 s/step (−33%); PCIe 12.74→7.48 s/step (−41%); node-for-node GPU/CPU 3.76×→2.51×** (vs CPU dist_512=4.330, unchanged — flips are `#ifdef CUDA`)
+- [ ] **Docs** — lessons (L57)/scaling/fidelity/handoff updated, plan → `completed/`
+
+## § Deferred to a focused follow-up (g1-uv / g1-T / g2)
+
+The f crash (step-1 stale device hnode/helem → CG NaN) proved these cross-step flips need **full device-residency + a step-1 init push + ice-step coordination** — riskier/larger than the original sketch. a–f already delivered the campaign goal (34% step, 41% PCIe, 3.8×→~2.6×), so the high-blast-radius remainder is handed off rather than rushed autonomously. Precise findings for the next session:
+
+- **g1-uv (full residency, ~9 ELEM3D-nl-2 transfers ≈ ~1–1.5 s/step at NG5):** flip the update_vel halo (`:562`/`:563`); REMOVE **every** uv re-push (compute_vel_nodes `:331`, compute_vel_rhs `:440`, visc `:472`, ivisc `:495`, ssh `:539`, compute_hbar `:568`, vert_vel `:691`, bolus-13a `:740`, FCT `:772`) + the bolus OUT sync_host (13a `:747`, 13c `:958` — currently uv-only after e); **+ the ocean2ice uv-surface push in the ice step (`fesom_ice_coupling.cpp`)**; uv→pre-I/O. uv is zero-init → no init push needed. (Partial flip clobbers at the first un-removed re-push — L48.)
+- **g1-T (full residency, ~6 transfers):** flip the post-Redi (`:809`) + post-trdiff (`:898`) halos; REMOVE the FCT→Redi round-trip (`:792` FCT-OUT, `:799` Redi-IN), the trdiff-IN (`:888`), AND the cross-step EOS T push (`:176`) + GM-1b T push + **ocean2ice T-surface push (ice step)**; add a **one-time T+valuesold init push** before the loop (f pattern, non-zero IC); T→pre-I/O. (A SAFER partial exists: flip only `:809` + remove `:806`/`:888`, keep trdiff-OUT host-staged → no cross-step, ~2 transfers, no init push.)
+- **g2:** only if a future NG5 trace shows S's floor-pin sync is material; then port `:931-950` to a race-free device clamp (the ice `cut_off` shape, byte-identical) + flip S halos + the ocean2ice S push.
 
 Each milestone is committed separately. A fresh session resumes by finding the first unchecked box.
 
