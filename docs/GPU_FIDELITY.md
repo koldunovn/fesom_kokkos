@@ -647,3 +647,38 @@ criterion (backend-vs-C ≪ the C-vs-Fortran budget). **This directly retires th
 1.00000 / bias O(1e-4), exactly as the pre-campaign binary. ⚠️ The doc's older pre-campaign §"CUDA 1-yr 1958" recorded
 a_ice/m_ice-vs-Fortran ~0.91/0.98 — that was a stale **old-script** ice-mask-averaging artifact ([[feedback-ice-mask-averaging]]);
 the current script gives 0.99997 for *both* runs (shown above). See plan § Deferred + L57; `docs/SCALING_NG5.md` § M5.13.
+
+## §M5.14 — Lever A: the last host-staged nod3D fields (S, density, fer_w, w_i) → device residency
+
+Continuation of M5.13 into the deferred (`S`=g2) / missed (`density`, `fer_w`, `w_i`) fields. Each flip passed the
+full ladder (Serial `FESOM_KK_VERIFY` max|Δ|==0 + Serial pi np1+np2 ALL-FIELDS-BIT-IDENTICAL + SYNCCHECK clean +
+the **CORE2-active-ice CUDA fidelity gate** `gpu_fidelity_gate.sh --fresh-oracle`, build-cuda-m514 vs the build-serial
+oracle). Gate worst-field per flip (all ≪ ceilings; no staleness regression):
+
+| flip (commit) | gate worst field | S max\|Δ\| | T max\|Δ\| | density max\|Δ\| |
+|--|--|--|--|--|
+| S = g2 mirror-T (`491ccb8`)         | h_ice 4.5e-3 | 3.66e-4 | 9.95e-4 | — |
+| + density (`84c1d8d`)               | h_ice 7.8e-3 | 4.32e-4 | 1.18e-3 | 3.08e-4 |
+| + fer_w + w_i (`0bc7da9`)           | h_ice 7.7e-3 | 5.03e-4 | 1.35e-3 | 3.87e-4 |
+
+All at the established CUDA climate-close floor (ceilings: S/T 1e-2, density 1e-1, h_ice 1e-1). The cross-flip drift in
+the S/T/density values is **run-to-run CUDA non-determinism** between independent gate runs (D22), not accumulation.
+
+**The gate-blind path — monthly means — validated separately** (the gate diffs snapshots only; the means are the
+reason for the device-mean-accum, Task 4 `2611936`):
+- Serial device-accum vs host-accum (`FESOM_IO_HOST_ACCUM=1`) `.monthly.nc`: **salt/sss/density bit-identical**
+  (`cdo diffn`, +/- controls) → `resolve_{salt,sss,density}_dev` arithmetic is correct.
+- CUDA device-accum mean vs the **Serial ground-truth** mean (gate runs' `.monthly.nc`): salt/sss/density
+  **0/49 records differ > 1e-3** (max ~8.1e-5 salt, comparable to temp's 2.2e-4) → the staleness-free device mean
+  is correct on the GPU.
+- The standalone CUDA dev-vs-host A/B job (`job_m514_io_ab_pi`) kept hitting transient `cudaErrorDevicesUnavailable`
+  (GPU contention, the documented "just re-run" flakiness); the ground-truth comparison above is stronger anyway.
+
+**Device salinity floor** (`fesom_salinity_floor_kk`, the host floor's device twin): race-free per-node
+`max(S,0.5)` over myDim+eDim×column, placed AFTER the post-trdiff device halo → bit-identical Serial AND CUDA
+(no scatter/reduction). Verified Serial pi/CORE2 bit-identical; nsys ~0.0 % (0.2 ms/step).
+
+**1-yr CORE2 CUDA climate validation (the authoritative verdict): IN FLIGHT** (`job_m32_cuda_core2_m514`,
+`M32_NSTEPS=17280`, `m32_cuda_m514_1yr`). Compare vs the M5.13 campaign 1-yr (`m32_cuda_m513_1yr`) + Fortran/C refs
+with `scripts/m32_climate_compare.py` — snapshot AND `.monthly.nc` means, expect statistically identical (corr~1,
+bias O(1e-4)), per L58 (never settle fidelity with the 20-step gate). [Result to be filled when the run completes.]

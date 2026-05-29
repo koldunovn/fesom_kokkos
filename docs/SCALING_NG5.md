@@ -305,6 +305,39 @@ binary strong-scales AND quantifies the per-rank-work drift the data/compute-bal
   (dars 8/16N + NG5 32N lack a node-for-node CPU partition, so those are GPU strong-scaling only.)
 - Figure: `docs/figures/scaling_hinode_m513.png` (`scripts/plot_hinode_scaling.py`).
 
+### M5.14 — Lever A finished the residency: PARITY CROSSED (2026-05-30)
+
+M5.14 flipped the LAST host-staged nod3D fields M5.13 left — **S** (the g2 mirror-T flip, biggest), **density**,
+**fer_w**, **w_i** — to `fesom_halo_field` + full device residency (+ the host salinity-floor → a device kernel,
++ device-side monthly-mean accumulation as the enabler). All four committed and gated (`docs/GPU_FIDELITY.md` §M5.14).
+
+**Same-day baseline (the rigorous comparison — rebuilt the pre-Lever-A `build-cuda`, confirmed pre-S [0 salinity-floor
+symbols], ran the identical `job_ng5_prof` today):**
+
+| NG5 dist_16 (4 nodes) | pre-Lever-A | M5.14 | change |
+|--|--:|--:|--:|
+| step time            | 6.136 s | **3.805 s** | **−38.0 %** |
+| deep_copy (PCIe/step)| 11.02 GB | **6.57 GB** | **−40.4 %** |
+| deep_copy calls/step | 139 | 121 | −18 |
+
+The same-day GPU baseline 6.136 reproduced M5.13's 6.12 to 0.4 % → today's node conditions match M5.13's. A same-day
+CPU dist_512 (4 nodes, `build-serial`, dt=180) re-measure gave **4.327 s/step** (matching the M5.13 ref 4.330 to 0.1 %).
+**Node-for-node: GPU 3.805 / CPU 4.327 = 0.879× → the GPU is ~12–14 % FASTER than the CPU** — confirmed same-day on
+BOTH sides (no node-noise caveat). **This overturns the M5.13 "~1.4× asymptote"
+conclusion above** (§ High-node + L58): that nsys was on the a–f binary BEFORE S/density were flipped — S alone was
+still doing ~13 full-field 259 MB D2H/step at NG5 (biggest field, in the biggest phase `13_fct`). Removing it dropped
+the GPU step below the CPU. The "~1.4× launch/MPI floor" was a *partial-residency* artifact, not fundamental.
+
+**Regime flipped to compute-bound.** Post-M5.14 nsys kernel summary (rank 0, 8 steps): the `fesom_smooth_nod3D`
+smoother is now the **#1 GPU kernel (25.7 % of kernel time)**, FCT/momentum/GM/trdiff filling the rest; `cudaMemcpy`
+no longer dominates. Per-phase (`FESOM_STEP_PROFILE`): `3_mixing` 19.9 %, `1b_gm` 16.1 %, `13_fct` 13.1 %,
+`fesom_smooth_gather` 8.2 %, `1_eos` 5.3 %, `13b_trdiff` 5.3 %. **The next levers are B (MPI interior/boundary
+overlap) and C (kernel coalescing + launch fusion) — NOT more residency** (PCIe is no longer the wall). The device
+mean-accum (`resolve_*_dev`) and device salinity floor show at ~0.0 % of kernel time (negligible).
+
+Jobs: `job_ng5_prof_m514` (build-cuda-m514) + `job_ng5_prof` (build-cuda = pre-Lever-A, same-day) + `job_nsys_ng5_m514`.
+Commits: t4 `2611936` · S `491ccb8` · density `84c1d8d` · fer_w/w_i `0bc7da9`. Lesson **L59**.
+
 ---
 
 *Generated 2026-05-29. Companion: `docs/SCALING_CORE2.md`, `docs/SCALING_FARC.md`,
