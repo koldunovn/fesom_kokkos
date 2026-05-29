@@ -18,7 +18,7 @@ detail):** `docs/plans/20260530-pcie-residency-campaign.md` — this file is the
 - [x] **M5.13c** — GM quartet `fer_gamma`/`slope_tapered`/`Ki`/`fer_uv` — DONE ✅ verify gm/ale/tradv/trdiff=0 (300 lines); bit-id; SYNCCHECK; gate PASS 8.9e-3; **deep_copy 199.7→188.7/step (−11), 1020.4→857.2 MB/step (−163, biggest drop)** → NG5 ckpt1 launched (snapshotted binary)
 - [x] **M5.13d** — `uv_rhsAB` (ELEM3D) — DONE ✅ vrhs=0; bit-id; SYNCCHECK; gate PASS 1.9e-3; deep_copy 188.7→186.7/step (−2), 857.2→810.7 MB/step
   - **NG5 ckpt1 (a+b+c):** step 16.94→**14.06 s/step** (~17%); PCIe `cudaMemcpy` 12.74→**10.25 s/step** (−2.5); blocking memcpy 213→192/step (snapshot `m513_ckpt/fesom_port_abc`, job 25232379)
-- [ ] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — tangled (`w` snap-out)
+- [x] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — DONE ✅ ale/tradv/vrhs=0 (160 lines); bit-id; SYNCCHECK; gate PASS 3.8e-3; deep_copy 186.7→175.8/step (−11), 810.7→746.5 MB/step; `w`→pre-I/O block
 - [ ] **M5.13f** — ALE commit `hnode`/`helem` — highest cross-step fan-out → **NG5 ckpt 2**
 - [ ] **M5.13g1** — tracer `T` values + `uv`-after-update_vel — highest blast radius (all snap-out)
 - [ ] **M5.13g2** — *(CONDITIONAL)* salinity floor → device clamp, unpin `S` → **NG5 ckpt 3 = acceptance**

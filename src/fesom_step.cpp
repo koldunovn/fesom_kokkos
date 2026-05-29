@@ -441,7 +441,7 @@ int fesom_timestep(int                          step_n,
     /* M5.13d: uv_rhsAB device-resident with its halo (cross-step AB2 history) - no IN re-push;
      * compute_vel_rhs part i reads it on device (last step's fesom_halo_field left it owned+halo). */
     dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
-    dyn->w_e_fld.modify_host();      dyn->w_e_fld.sync_device();
+    /* M5.13e: w_e device-resident with its halo (12d fesom_halo_field) - no re-push; compute_vel_rhs reads it on device. */
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
@@ -692,10 +692,9 @@ int fesom_timestep(int                          step_n,
     mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
     /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push (vert_vel reads it on device). */
     fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
-    dyn->w_fld.sync_host();
     if (gm) dyn->fer_w_fld.sync_host();
     if (s_verify_ale) fesom_ale_vert_vel_verify(mesh, dyn, gm ? 1 : 0, step_n);
-    fesom_exchange_nod3D(dyn->w_fld.h_checked(), nl, p);     /* Fortran oce_ale.F90:2679 */
+    fesom_halo_field(dyn->w_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w; snap-out -> pre-I/O sync) */
     if (gm) {
         /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
         fesom_exchange_nod3D(dyn->fer_w_fld.h_checked(), nl, p);
@@ -704,7 +703,7 @@ int fesom_timestep(int                          step_n,
     /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
      *  Per-node accumulation into the node's OWN column → race-free (NOT a scatter).
      *  OUT: sync_host(cfl_z) before the halo. */
-    dyn->w_fld.modify_host(); dyn->w_fld.sync_device();
+    /* M5.13e: w device-resident with its halo (12b fesom_halo_field) - no re-push (cflz reads it on device). */
     mesh->hnode_new_fld.sync_device();   /* no-op: Synced from 12a; documents the dependency */
     fesom_ale_compute_cflz_kk(mesh, dyn);
     if (s_verify_ale) fesom_ale_compute_cflz_verify(mesh, dyn, step_n);
@@ -717,10 +716,9 @@ int fesom_timestep(int                          step_n,
      *  halo'd above), w (Synced from 12c IN; cflz did not write w). Pure per-(n,nz) map. OUT: sync_host(w_e,w_i). */
     dyn->w_fld.sync_device();   /* no-op: Synced from 12c IN; w unchanged by cflz */
     fesom_ale_compute_wvel_split_kk(mesh, dyn);
-    dyn->w_e_fld.sync_host();
     dyn->w_i_fld.sync_host();
     if (s_verify_ale) fesom_ale_compute_wvel_split_verify(mesh, dyn, step_n);
-    fesom_exchange_nod3D(dyn->w_e_fld.h_checked(), nl, p);
+    fesom_halo_field(dyn->w_e_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w_e) */
     fesom_exchange_nod3D(dyn->w_i_fld.h_checked(), nl, p);
 
     PMARK("12_ale");
@@ -738,13 +736,12 @@ int fesom_timestep(int                          step_n,
      * them). On Serial/OpenMP host==device so the kernel is the C loop, bit-identical. */
     if (gm) {
         dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
-        dyn->w_fld.modify_host();      dyn->w_fld.sync_device();
-        dyn->w_e_fld.modify_host();    dyn->w_e_fld.sync_device();
+        /* M5.13e: w/w_e device-resident (12b/12d fesom_halo_field) - no bolus IN re-push. */
         /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push. */
         dyn->fer_w_fld.modify_host();  dyn->fer_w_fld.sync_device();
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
-        dyn->uv_fld.sync_host();       dyn->w_fld.sync_host();       dyn->w_e_fld.sync_host();
+        dyn->uv_fld.sync_host();   /* M5.13e: w/w_e stay device-resident (augmented); only uv (host-staged until g1) needs host. */
     }
 
     /* 13. tracer advection: T then S.
@@ -773,7 +770,7 @@ int fesom_timestep(int                          step_n,
          * device so every sync is a no-op (the run stays bit-identical). */
         const int N_redi = mesh->myDim_nod2D + mesh->eDim_nod2D;
         dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
-        dyn->w_e_fld.modify_host();         dyn->w_e_fld.sync_device();
+        /* M5.13e: w_e device-resident (augmented by bolus 13a on device) - no re-push; FCT reads it on device. */
         mesh->hnode_fld.modify_host();      mesh->hnode_fld.sync_device();
         mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
         mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
@@ -955,7 +952,7 @@ int fesom_timestep(int                          step_n,
     if (gm) {
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)-1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
-        dyn->uv_fld.sync_host();       dyn->w_fld.sync_host();       dyn->w_e_fld.sync_host();
+        dyn->uv_fld.sync_host();   /* M5.13e: w/w_e stay device-resident (restored); only uv needs host. */
     }
 
     PMARK("13b_trdiff");

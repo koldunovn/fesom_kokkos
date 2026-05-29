@@ -1289,6 +1289,7 @@ skip_rest_state:
                 aux.bvfreq_fld.sync_host();
                 aux.Kv_fld.sync_host();
                 aux.Av_fld.sync_host();
+                dyn.w_fld.sync_host();   /* M5.13e: w flipped to device-halo (12b) -> pull for the snapshot gather */
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,
