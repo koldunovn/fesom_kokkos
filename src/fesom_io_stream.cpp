@@ -12,6 +12,7 @@
  * and other cadences/rollovers wired in Task 7.
  */
 #include "fesom_io_stream.h"
+#include <Kokkos_Core.hpp>     /* M514: device mean accumulators (fesom_io_stream.cpp is fesom_port-only) */
 #include <type_traits>
 #include "fesom_io.h"          /* full fesom_state typedef */
 #include "fesom_aux.h"
@@ -327,6 +328,16 @@ static void close_open_files(fesom_io_stream_t *s)
 /* Flush: divide accum by n_accum, gather, write one record           */
 /* ------------------------------------------------------------------ */
 
+/* M514: FESOM_IO_HOST_ACCUM=1 forces the HOST accumulation path even for vars that
+ * have a dev_resolve — the A/B switch to prove device-mean-accum is bit-identical to
+ * the host path (on Serial device==host) and to bisect. Default (unset) = device. */
+static bool io_use_dev_accum(void)
+{
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("FESOM_IO_HOST_ACCUM"); v = (e && atoi(e)) ? 0 : 1; }
+    return v != 0;
+}
+
 static void flush_one_var(fesom_io_stream_t *s, int v,
                           const fesom_calendar_t *cal,
                           const struct fesom_mesh *mesh)
@@ -340,6 +351,17 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     int local_e = mesh->myDim_elem2D;
     size_t accum_n = s->accum_sz[v];
     real_t *accum = s->accum[v];
+
+    /* M514: device-resident var accumulated on-device — pull the device sum into
+     * the host accum buffer ONCE here (the only D2H; per-month, not per-step). The
+     * rest of flush (normalize/gather/write) is unchanged and host-side. */
+    if (s->output_kind == FESOM_OUT_MEAN && s->vars[v].dev_resolve && io_use_dev_accum()) {
+        Kokkos::View<real_t*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+            h(accum, accum_n);
+        Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+            d(s->accum_dev[v], accum_n);
+        Kokkos::deep_copy(h, d);
+    }
 
     /* Divide running sum by sample count to yield the mean. INSTANT
      * skips this branch (Task 7). */
@@ -475,7 +497,15 @@ static void flush_all(fesom_io_stream_t *s,
     /* Reset accumulators for the next window. */
     if (s->output_kind == FESOM_OUT_MEAN) {
         for (int v = 0; v < s->nvars; ++v) {
-            memset(s->accum[v], 0, s->accum_sz[v] * sizeof(real_t));
+            /* M514: dev-resident var sums live on-device — zero the device buffer
+             * (the hot path accumulates there); host accum[v] is re-filled at flush. */
+            if (s->vars[v].dev_resolve && io_use_dev_accum()) {
+                Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                    d(s->accum_dev[v], s->accum_sz[v]);
+                Kokkos::deep_copy(d, (real_t)0.0);
+            } else {
+                memset(s->accum[v], 0, s->accum_sz[v] * sizeof(real_t));
+            }
         }
     }
     s->n_accum = 0;
@@ -538,6 +568,11 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
     s->accum = (decltype(s->accum))calloc((size_t)nvars, sizeof(real_t *));
     FESOM_CHECK(s->accum, "io_stream: oom (accum array)");
 
+    /* M514: per-var device accumulators (raw device ptrs; NULL for non-dev vars).
+     * Filled below only for vars with a dev_resolve. */
+    s->accum_dev = (decltype(s->accum_dev))calloc((size_t)nvars, sizeof(real_t *));
+    FESOM_CHECK(s->accum_dev, "io_stream: oom (accum_dev array)");
+
     for (int v = 0; v < nvars; ++v) {
         s->ncid[v]        = -1;
         s->var_id[v]      = -1;
@@ -552,6 +587,16 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
         s->accum[v] = (std::remove_reference_t<decltype(s->accum[v])>)calloc(s->accum_sz[v], sizeof(real_t));
         FESOM_CHECK(s->accum[v], "io_stream: oom (accum[%d] %zu)",
                     v, s->accum_sz[v]);
+        /* M514: device accumulator only for device-resident vars (dev_resolve set).
+         * Raw device buffer via kokkos_malloc (default = device space), zeroed. */
+        if (vars[v].dev_resolve) {
+            s->accum_dev[v] = (real_t *)Kokkos::kokkos_malloc("io_accum_dev",
+                                                              s->accum_sz[v] * sizeof(real_t));
+            FESOM_CHECK(s->accum_dev[v], "io_stream: oom (accum_dev[%d])", v);
+            Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                d(s->accum_dev[v], s->accum_sz[v]);
+            Kokkos::deep_copy(d, (real_t)0.0);
+        }
     }
 }
 
@@ -569,7 +614,13 @@ void fesom_io_stream_step(fesom_io_stream_t      *s,
      * and only act on the boundary trigger. */
     if (s->output_kind == FESOM_OUT_MEAN) {
         for (int v = 0; v < s->nvars; ++v) {
-            s->vars[v].resolve(state, s->accum[v], s->accum_sz[v]);
+            /* M514: device-resident vars accumulate ON-DEVICE (no per-step D2H);
+             * the host accum[v] is filled by one deep_copy at flush. Host-authored
+             * vars (ssh, ice) keep the host resolver. */
+            if (s->vars[v].dev_resolve && io_use_dev_accum())
+                s->vars[v].dev_resolve(state, s->accum_dev[v], s->accum_sz[v]);
+            else
+                s->vars[v].resolve(state, s->accum[v], s->accum_sz[v]);
         }
         s->n_accum += 1;
     }
@@ -615,6 +666,14 @@ void fesom_io_stream_close(fesom_io_stream_t *s)
         for (int v = 0; v < s->nvars; ++v) free(s->accum[v]);
         free(s->accum);
     }
+    /* M514: release the device accumulator buffers here — BEFORE Kokkos::finalize
+     * (io_stream_close runs at run end via fesom_io_finalize, fesom_main.cpp:1346). */
+    if (s->accum_dev) {
+        for (int v = 0; v < s->nvars; ++v)
+            if (s->accum_dev[v]) Kokkos::kokkos_free(s->accum_dev[v]);
+        free(s->accum_dev);
+    }
+    s->accum_dev = nullptr;
     free(s->accum_sz);
     free(s->ncid); free(s->var_id);
     free(s->time_id); free(s->bnds_id);

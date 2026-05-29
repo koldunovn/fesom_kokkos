@@ -25,7 +25,9 @@
 #include "fesom_types.h"
 
 #include <mpi.h>
-#include <Kokkos_Core.hpp>   /* M514: on-device mean accumulation (device-resident output fields) */
+/* M514 note: device mean accumulation lives entirely in the .cpp files (fesom_io.cpp
+ * resolvers + fesom_io_stream.cpp plumbing). This header stays Kokkos-free / C-safe —
+ * it's included by a C unit test (tests/test_io_stream_unit.c) and a no-Kokkos target. */
 
 struct fesom_mesh;
 struct fesom_partit;
@@ -73,7 +75,7 @@ typedef void (*fesom_resolve_fn)(const struct fesom_state *state, real_t *out, s
  * device-resident u/v/w/Kv/Av/bvfreq (their host copies were only refreshed on snapshot
  * steps). A NULL `dev_resolve` => keep the host `resolve` (host-authored fields: ssh). */
 typedef void (*fesom_resolve_dev_fn)(const struct fesom_state *state,
-                                     Kokkos::View<real_t*> out_dev, size_t n);
+                                     real_t *out_dev, size_t n);   /* out_dev = DEVICE ptr */
 
 /* Variable descriptor. Lifetime = run; held by reference, never copied. */
 typedef struct fesom_var_desc {
@@ -113,10 +115,10 @@ typedef struct fesom_io_stream {
     size_t                  *accum_sz;          /* [nvars] elements per accum */
     int                      n_accum;           /* # of step() calls in window */
 
-    /* M514: per-var DEVICE accumulator. Non-empty View only for vars with a
-     * dev_resolve (device-resident fields); host `accum[v]` stays the gather/flush
-     * buffer and is filled by a single deep_copy(accum[v] <- accum_dev[v]) at flush. */
-    Kokkos::View<real_t*>   *accum_dev;
+    /* M514: per-var DEVICE accumulator (raw device pointer via Kokkos::kokkos_malloc;
+     * NULL for non-dev vars). Host `accum[v]` stays the gather/flush buffer, filled by
+     * one deep_copy(accum[v] <- accum_dev[v]) at flush. Kokkos lives only in the .cpp. */
+    real_t                 **accum_dev;
 
     /* netCDF handles per variable. ncid == -1 means file not open yet
      * (lazy open on first flush of the rollover window). */

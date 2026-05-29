@@ -720,36 +720,111 @@ static void resolve_vice(const fesom_state *s, real_t *out, size_t n)
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
 
+/* ---------------------------------------------------------------------- *
+ * M514 — DEVICE-resident accumulators. One per device-resident output    *
+ * field; each mirrors its host twin's EXACT indexing but reads the        *
+ * field's device view (field.d()) and accumulates on-device, so a         *
+ * device-resident field never round-trips to host for the per-step mean.  *
+ * Bit-identical to the host twin (per-element time-sum; Serial device==    *
+ * host). The host `out[i] += src[i]` becomes a parallel_for; out is the    *
+ * stream's per-var device accumulator (deep_copied to host once at flush). *
+ * ---------------------------------------------------------------------- */
+/* out_dev is a raw DEVICE pointer (the stream's per-var device accumulator);
+ * wrap it unmanaged in the default (device) space, then accumulate field.d(). */
+typedef Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>> io_acc_dev_t;
+
+static void resolve_temp_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->tracers->data[FESOM_TRACER_T].values_fld.d();
+    Kokkos::parallel_for("io_acc_temp", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_sst_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto T = s->tracers->data[FESOM_TRACER_T].values_fld.d();
+    const int nl = s->mesh->nl;
+    Kokkos::parallel_for("io_acc_sst", n, KOKKOS_LAMBDA(const size_t i){ out(i) += T(i * (size_t)nl + 0); });
+}
+static void resolve_u_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto uv = s->dyn->uv_fld.d();
+    const int nl = s->mesh->nl;
+    const size_t E = n / (size_t)nl;
+    Kokkos::parallel_for("io_acc_u", E, KOKKOS_LAMBDA(const size_t e){
+        for (int k = 0; k < nl; ++k)
+            out(e * (size_t)nl + (size_t)k) += uv(e * (size_t)nl * 2 + (size_t)k * 2 + 0);
+    });
+}
+static void resolve_v_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto uv = s->dyn->uv_fld.d();
+    const int nl = s->mesh->nl;
+    const size_t E = n / (size_t)nl;
+    Kokkos::parallel_for("io_acc_v", E, KOKKOS_LAMBDA(const size_t e){
+        for (int k = 0; k < nl; ++k)
+            out(e * (size_t)nl + (size_t)k) += uv(e * (size_t)nl * 2 + (size_t)k * 2 + 1);
+    });
+}
+static void resolve_w_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->dyn->w_fld.d();
+    Kokkos::parallel_for("io_acc_w", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_Kv_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->aux->Kv_fld.d();
+    Kokkos::parallel_for("io_acc_Kv", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_Av_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->aux->Av_fld.d();
+    Kokkos::parallel_for("io_acc_Av", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_bvfreq_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->aux->bvfreq_fld.d();
+    Kokkos::parallel_for("io_acc_bvfreq", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+
 /* Default monthly variable table. Lifetime = run.
  * If sea ice isn't initialised, callers should pass nvars = 12 instead
  * of FESOM_DEFAULT_MONTHLY_NVARS to skip the trailing 5 ice entries. */
 #define FESOM_DEFAULT_MONTHLY_NVARS 17
 
 static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_NVARS] = {
-    /* 3D ocean state */
-    { "temp",    "potential temperature",          "degC",   FESOM_VAR_3D_NODE_MID,   resolve_temp    },
-    { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt    },
-    { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh     },
-    { "sst",     "sea surface temperature",        "degC",   FESOM_VAR_2D_NODE,       resolve_sst     },
-    { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss     },
-    { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u       },
-    { "v",       "meridional velocity",            "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_v       },
-    { "w",       "vertical velocity at interfaces","m/s",    FESOM_VAR_3D_NODE_IFACE, resolve_w       },
+    /* 3D ocean state.  6th col = M514 device-resident accumulator (or nullptr).
+     * salt/sss/density get theirs once S/density are flipped to residency (Tasks 5/6);
+     * ssh stays host (eta_n is host); ice fields stay host (host-synced post-ice-step). */
+    { "temp",    "potential temperature",          "degC",   FESOM_VAR_3D_NODE_MID,   resolve_temp,    resolve_temp_dev   },
+    { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt,    nullptr            },
+    { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh,     nullptr            },
+    { "sst",     "sea surface temperature",        "degC",   FESOM_VAR_2D_NODE,       resolve_sst,     resolve_sst_dev    },
+    { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss,     nullptr            },
+    { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u,       resolve_u_dev      },
+    { "v",       "meridional velocity",            "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_v,       resolve_v_dev      },
+    { "w",       "vertical velocity at interfaces","m/s",    FESOM_VAR_3D_NODE_IFACE, resolve_w,       resolve_w_dev      },
     /* Kv, bvfreq (N^2) and Av are INTERFACE quantities (defined at the nl level
      * interfaces, like w), so they must be written on nz (nl=48) — matching the
      * Fortran. They were wrongly registered as MID (nz_1=47), which dropped the
      * bottom interface and mislabelled the depths as layer mid-points. Kv/bvfreq
      * are node-based (NODE_IFACE); Av is element-based (ELEM_IFACE). */
-    { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_IFACE, resolve_Kv      },
-    { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_IFACE, resolve_Av      },
-    { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density },
-    { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq  },
+    { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_IFACE, resolve_Kv,      resolve_Kv_dev     },
+    { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_IFACE, resolve_Av,      resolve_Av_dev     },
+    { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density, nullptr            },
+    { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq,  resolve_bvfreq_dev },
     /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
-    { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice   },
-    { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice   },
-    { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow  },
-    { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice    },
-    { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice    },
+    { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice,   nullptr            },
+    { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice,   nullptr            },
+    { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow,  nullptr            },
+    { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice,    nullptr            },
+    { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice,    nullptr            },
 };
 
 /* ====================================================================== */

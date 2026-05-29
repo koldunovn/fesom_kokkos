@@ -158,12 +158,21 @@ gate / NG5 builds wait for the sweep (or a scratch build dir). Build GPU with `s
 > Dual purpose: (1) enables full S/density/T residency with no per-step D2H; (2) FIXES the latent stale
 > 3-D means of the already-device-resident `u/v/w/Kv/Av/bvfreq` (Task-0 discovery). Validate (2) by checking
 > a device-resident field's mean is no longer frozen between snapshots.
-- [ ] Make the MEAN accumulators (`s->accum[v]`) **device Views** (per var; host-only output fields keep host accum).
-- [ ] Convert the device-resident-field resolvers (`resolve_salt`/`resolve_temp`/`resolve_density`/sst/sss/...)
-      to launch a device kernel `accum_dev(i) += field_dev(i)` (host function launches the `parallel_for` — no
-      device function pointers). Sync the accumulator host **once** at the period boundary (`fesom_io_stream.cpp:346/476`).
-- [ ] **Validate (bit-identity of the refactor):** a CORE2 run with mean output → `.monthly.nc` **bit-identical**
-      pre/post (no field flipped yet → pure no-op proof; per-element time-sum, same order). + SYNCCHECK + pi.
+- [x] Per-var **device accumulator** = raw device buffer (`real_t** accum_dev`, `Kokkos::kokkos_malloc`,
+      zeroed); host `accum[v]` kept as the gather buffer. ⚠️ **Header trap (fixed):** `fesom_io_stream.h`
+      is included by a **C** unit test + a no-Kokkos target → kept Kokkos-FREE (`dev_resolve` takes a raw
+      `real_t*` device ptr; all Kokkos lives in the `.cpp`, which are `fesom_port`-only).
+- [x] Device resolvers (`resolve_{temp,sst,u,v,w,Kv,Av,bvfreq}_dev` in `fesom_io.cpp`) — each mirrors its
+      host twin's exact indexing, wraps `out_dev` unmanaged + `parallel_for` over `field.d()`. Wired via a 6th
+      `dev_resolve` col in the var table (salt/sss/density = nullptr until flipped in Tasks 5/6; ssh/ice host).
+- [x] Hot-path dispatch + one D2H at flush (`flush_one_var`) + zero device buf at reset + `kokkos_free`
+      before finalize (verified `fesom_io_finalize`@1346 < `Kokkos::finalize`@1366).
+- [x] **A/B toggle `FESOM_IO_HOST_ACCUM=1`** (forces host path) for validation/bisect.
+- [x] **Serial validation PASSED:** pi 30-step, device-accum vs host-accum (`FESOM_IO_HOST_ACCUM=1`) →
+      `.monthly.nc` **bit-identical** for all dev vars (temp/u/v/w/Kv/Av/bvfreq) + host sanity (salt/ssh);
+      `cdo diffn` positive (0/49 differ) + negative (45/49 differ) controls confirm. build-serial compiles clean.
+- [ ] **CUDA validation (pending, build-cuda-m514 rebuilding):** device-accum vs host-accum on GPU MUST
+      DIFFER for u/v/w/Kv/Av/bvfreq (the staleness fix manifesting) + match temp; device-accum ≈ Serial.
 
 #### Task 5: S full residency (the g2 flip — biggest, atomic per L48)
 **Files:** Modify `src/fesom_step.cpp`, `src/fesom_main.cpp`, `src/fesom_ice.cpp`

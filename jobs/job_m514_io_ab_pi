@@ -1,0 +1,19 @@
+#!/bin/bash
+#SBATCH --job-name=kk_m514_ab
+#SBATCH -p gpu -A ab0995 --nodes=1 --ntasks=1 --gres=gpu:1 --gpu-bind=none --time=00:12:00
+#SBATCH -o /work/ab0995/a270088/port2/m514_ab_gpu/ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m514_ab_gpu/ab.%j.err
+ROOT=/home/a/a270088/port_kokkos; source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1 UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+OUT=/work/ab0995/a270088/port2/m514_ab_gpu; rm -rf "$OUT/dev" "$OUT/host"; mkdir -p "$OUT/dev" "$OUT/host"
+F="$ROOT/build-cuda-m514/fesom_port"
+echo "=== device-accum (default) ==="; srun "$F" "$MESH" "$OUT/dev" 100 30 -1 > "$OUT/dev.log" 2>&1; echo rc=$?
+echo "=== host-accum (FESOM_IO_HOST_ACCUM=1 = the stale-baseline behavior) ==="; FESOM_IO_HOST_ACCUM=1 srun "$F" "$MESH" "$OUT/host" 100 30 -1 > "$OUT/host.log" 2>&1; echo rc=$?
+echo "=== CUDA device-vs-host .monthly.nc (EXPECT: u/v/w/Kv/Av/bvfreq DIFFER=staleness fixed; temp/salt MATCH) ==="
+for v in temp u v w Kv Av bvfreq salt; do
+  f=$(ls "$OUT/dev/${v}.fesom."*.monthly.nc 2>/dev/null|head -1); b=$(basename "$f" 2>/dev/null)
+  [ -z "$f" ] && { echo "  $v: (no file)"; continue; }
+  r=$(cdo diffn "$f" "$OUT/host/$b" 2>/dev/null | grep -iE "records differ" || echo "0 differ (identical)")
+  echo "  $v: $r"
+done
