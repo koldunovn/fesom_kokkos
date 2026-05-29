@@ -438,20 +438,21 @@ int fesom_timestep(int                          step_n,
         vrhs_uv_rhsAB_in.assign(dyn->uv_rhsAB, dyn->uv_rhsAB + nvec);   /* L26 capture-before (part i reads it) */
     }
     dyn->uv_fld.modify_host();       dyn->uv_fld.sync_device();
-    dyn->uv_rhsAB_fld.modify_host(); dyn->uv_rhsAB_fld.sync_device();
+    /* M5.13d: uv_rhsAB device-resident with its halo (cross-step AB2 history) - no IN re-push;
+     * compute_vel_rhs part i reads it on device (last step's fesom_halo_field left it owned+halo). */
     dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
     dyn->w_e_fld.modify_host();      dyn->w_e_fld.sync_device();
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
-    dyn->uv_rhsAB_fld.sync_host();   /* OUT rail (uv_rhsAB stays host-staged — cross-step AB history) */
+    /* M5.13d: uv_rhsAB OUT sync_host removed - device-halo'd below; AB2 history read on device, no host reader. */
     if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
                                                     vrhs_uv_rhsAB_in.data());
     /* M5.4: uv_rhs needed by visc_filt_bidiff on HALO elements → device-halo (GPU-aware MPI on
      * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:
      * uv_rhs now stays device-resident with its halo across substeps 4-6. */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
-    fesom_halo_exchange(dyn->uv_rhsAB_fld.h_checked(), FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_halo_field(dyn->uv_rhsAB_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* M5.13d device-halo */
 
     PMARK("4_velrhs");
     /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
