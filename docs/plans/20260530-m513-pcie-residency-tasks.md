@@ -15,7 +15,7 @@ detail):** `docs/plans/20260530-pcie-residency-campaign.md` — this file is the
 
 - [x] **M5.13a** — `cfl_z` (NOD3D) — DONE ✅ rungs 1-3 (Serial `ale`=0 / pi np1+np2 bit-id / SYNCCHECK clean); gate PASS worst 5.7e-3 (no staleness); CORE2 deep_copy baseline **207.7/step, 1067.6 MB/step**
 - [x] **M5.13b** — EOS `hpressure` + `sw_alpha`/`sw_beta` (NOD3D) — DONE ✅ verify eos/pgf/gm/kpp=0; pi np1+np2 bit-id; SYNCCHECK clean; gate PASS worst 2.3e-3; **deep_copy 207.7→199.7/step (−8), 1067.6→1020.4 MB/step**
-- [ ] **M5.13c** — GM quartet `fer_gamma`/`slope_tapered`/`Ki`/`fer_uv` — highest aggregate + complexity → **NG5 ckpt 1**
+- [x] **M5.13c** — GM quartet `fer_gamma`/`slope_tapered`/`Ki`/`fer_uv` — DONE ✅ verify gm/ale/tradv/trdiff=0 (300 lines); bit-id; SYNCCHECK; gate PASS 8.9e-3; **deep_copy 199.7→188.7/step (−11), 1020.4→857.2 MB/step (−163, biggest drop)** → NG5 ckpt1 launched (snapshotted binary)
 - [ ] **M5.13d** — `uv_rhsAB` (ELEM3D) — cross-step AB2 history
 - [ ] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — tangled (`w` snap-out)
 - [ ] **M5.13f** — ALE commit `hnode`/`helem` — highest cross-step fan-out → **NG5 ckpt 2**

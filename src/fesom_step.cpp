@@ -263,37 +263,35 @@ int fesom_timestep(int                          step_n,
         /* (G2b) neutral slope + ODM95 tapering. */
         fesom_compute_neutral_slope_kk(aux, mesh, gm);
         gm->neutral_slope_fld.sync_host();
-        gm->slope_tapered_fld.sync_host();
+        /* M5.13c: slope_tapered now device-halo'd below; OUT sync_host removed (Redi diff_hor + trdiff K33 read it on device). */
         gm->fer_tapfac_fld.sync_host();   /* read by init_redi (owned) + the verify; not halo'd */
         if (s_verify_gm) fesom_gm_neutral_slope_verify(aux, mesh, gm, p, step_n);
         fesom_halo_exchange(gm->neutral_slope_fld.h_checked(), FESOM_HALO_NOD2D, nl1, 3, p);
-        fesom_halo_exchange(gm->slope_tapered_fld.h_checked(), FESOM_HALO_NOD2D, nl1, 3, p);
+        fesom_halo_field(gm->slope_tapered_fld, FESOM_HALO_NOD2D, nl1, 3, p);   /* M5.13c device-halo */
 
         /* (G3) per-step GM/Redi coefficient builder. */
         fesom_init_redi_gm_kk(aux, mesh, gm);
         gm->fer_scal_fld.sync_host();
         gm->fer_K_fld.sync_host();
         gm->fer_C_fld.sync_host();
-        gm->Ki_fld.sync_host();
+        /* M5.13c: Ki now device-halo'd below; OUT sync_host removed (Redi + trdiff read it on device). */
         if (s_verify_gm) fesom_gm_init_redi_verify(aux, mesh, gm, p, step_n);
         fesom_exchange_nod2D(gm->fer_C_fld.h_checked(), p);
         fesom_halo_exchange(gm->fer_K_fld.h_checked(), FESOM_HALO_NOD2D, nl, 1, p);
-        fesom_halo_exchange(gm->Ki_fld.h_checked(),    FESOM_HALO_NOD2D, nl, 1, p);
+        fesom_halo_field(gm->Ki_fld, FESOM_HALO_NOD2D, nl, 1, p);   /* M5.13c device-halo */
 
         /* (G4) streamfunction solve (per-node TDMA). */
         fesom_fer_solve_gamma_kk(aux, mesh, gm);
-        gm->fer_gamma_fld.sync_host();
         if (s_verify_gm) fesom_gm_solve_gamma_verify(aux, mesh, gm, p, step_n);
-        fesom_halo_exchange(gm->fer_gamma_fld.h_checked(), FESOM_HALO_NOD2D, nl, 2, p);
-        /* fer_gamma2vel reads fer_gamma at HALO vertices → re-push the halo'd host
-         * values to the device (L30, the bvfreq/hpressure cross-op pattern). */
-        gm->fer_gamma_fld.modify_host(); gm->fer_gamma_fld.sync_device();
+        /* M5.13c: fer_gamma device-halo; fer_gamma2vel reads it at HALO vertices directly on device
+         * (the L30 host re-push round-trip is removed — the device halo leaves fer_gamma owned+halo current). */
+        fesom_halo_field(gm->fer_gamma_fld, FESOM_HALO_NOD2D, nl, 2, p);
 
         /* (G4) bolus velocity reconstruction (vertex→element). */
         fesom_fer_gamma2vel_kk(dyn, mesh, gm);
-        dyn->fer_uv_fld.sync_host();
         if (s_verify_gm) fesom_gm_gamma2vel_verify(dyn, mesh, gm, p, step_n);
-        fesom_halo_exchange(dyn->fer_uv_fld.h_checked(), FESOM_HALO_ELEM2D_FULL, nl, 2, p);
+        /* M5.13c: fer_uv device-halo; ALE vert_vel (12b) + bolus add (13a) read it on device (re-pushes removed). */
+        fesom_halo_field(dyn->fer_uv_fld, FESOM_HALO_ELEM2D_FULL, nl, 2, p);
     }
 
     PMARK("1b_gm");
@@ -691,7 +689,7 @@ int fesom_timestep(int                          step_n,
      *  OUT: sync_host(w[,fer_w]) before the halo. */
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
     mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
-    if (gm) { dyn->fer_uv_fld.modify_host(); dyn->fer_uv_fld.sync_device(); }
+    /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push (vert_vel reads it on device). */
     fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
     dyn->w_fld.sync_host();
     if (gm) dyn->fer_w_fld.sync_host();
@@ -741,7 +739,7 @@ int fesom_timestep(int                          step_n,
         dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
         dyn->w_fld.modify_host();      dyn->w_fld.sync_device();
         dyn->w_e_fld.modify_host();    dyn->w_e_fld.sync_device();
-        dyn->fer_uv_fld.modify_host(); dyn->fer_uv_fld.sync_device();
+        /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push. */
         dyn->fer_w_fld.modify_host();  dyn->fer_w_fld.sync_device();
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
@@ -778,10 +776,7 @@ int fesom_timestep(int                          step_n,
         mesh->hnode_fld.modify_host();      mesh->hnode_fld.sync_device();
         mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
         mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
-        if (gm) {
-            gm->slope_tapered_fld.modify_host(); gm->slope_tapered_fld.sync_device();
-            gm->Ki_fld.modify_host();            gm->Ki_fld.sync_device();
-        }
+        /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (Redi reads them on device). */
 
         /* ---- T ---- */
         {
@@ -897,10 +892,7 @@ int fesom_timestep(int                          step_n,
         tracers->data[FESOM_TRACER_T].values_fld.sync_device();
         tracers->data[FESOM_TRACER_S].values_fld.modify_host();
         tracers->data[FESOM_TRACER_S].values_fld.sync_device();
-        if (gm) {
-            gm->slope_tapered_fld.modify_host(); gm->slope_tapered_fld.sync_device();
-            gm->Ki_fld.modify_host();            gm->Ki_fld.sync_device();
-        }
+        /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
         fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
         tracers->data[FESOM_TRACER_T].values_fld.sync_host();              /* OUT rail: before the halos */
         tracers->data[FESOM_TRACER_S].values_fld.sync_host();
