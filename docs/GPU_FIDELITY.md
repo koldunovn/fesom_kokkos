@@ -501,9 +501,14 @@ uice   1958   |  0.99978  -7.4589e-05  5.3412e-04  1.125e-02
 
 CUDA-vs-C bias on the ocean fields is O(1e-4)°C SST / O(1e-3) PSU SSS — the pure GPU scatter/reduce
 drift (D22). Ice fields show O(1e-4) bias / corr ~0.99998 — the per-subcycle EVP scatter compounding
-stays bounded over 17280 steps. CUDA-vs-F retains the genuine Fortran↔C-at-KPP physics gap on ice
-(a_ice ~0.1, corr ~0.91) which the C-port had already validated as the irreducible scheme-skill
-budget (commits `375f3eb`, `4d2718a`).
+stays bounded over 17280 steps.
+
+> **⚠️ Correction (2026-05-30):** the `a_ice/m_ice`-vs-Fortran numbers in the table above (corr ~0.91/0.98,
+> bias ~0.1) were a **stale old-script ice-mask-averaging artifact** — they predate the `nan_to_num`-per-month
+> fix (`466ea3e`, [[feedback-ice-mask-averaging]]). Re-running the **current** script on this same run dir gives
+> a_ice/m_ice-vs-Fortran **0.99997** (see § M5.13 climate validation, the apples-to-apples table). So there is
+> **no** genuine C↔Fortran gap on ice *concentration*; the one genuine, irreducible C↔Fortran ice budget is on
+> **uice** (ice velocity, corr 0.85 — both scripts, GPU-independent since uice-vs-C = 0.99978).
 
 DRIFT not computed (single-year run). Bias maps: `docs/m32_bias_maps/bias_*_1958_kpp.png`.
 
@@ -610,8 +615,35 @@ values needs a one-time step-1 init push.
 
 ### Result (NG5 dist_16) — see `docs/SCALING_NG5.md` § M5.13
 Clean step **16.27 → 10.88 (a–f) → 6.97 (+g1-uv) → 6.12 s/step (+g1-T) = −62 %**; node-for-node GPU/CPU
-**3.76× → 1.41×**; PCIe `cudaMemcpy` (nsys a–f) **12.74 → 7.48 s/step**. g1-uv (full uv residency, `e2ad90e`)
-was the biggest single win; g1-T (full T values+valuesold, `eaac63b`) needed the L50 bulk-SST fix. **⚠️ These
-are performance + the 20-step staleness-gate results; the AUTHORITATIVE 1-yr CORE2 CUDA-vs-Fortran+C climate
-validation on the campaign binary is IN FLIGHT** (pre-campaign: CUDA-vs-C corr ~1 / O(1e-4), `docs/REFERENCE_RUNS.md`).
-g2 deferred. See plan § Deferred + L57.
+**3.76× → 1.41×**; PCIe `cudaMemcpy` (nsys) **12.74 → 2.83 s/step** (share 75 % → 44 %). g1-uv (full uv residency, `e2ad90e`)
+was the biggest single win; g1-T (full T values+valuesold, `eaac63b`) needed the L50 bulk-SST fix. Cross-mesh:
+the same flips cut **dars** 4.10× → 1.60× (denser dist_8 → 1.52×, the data/compute-balance probe). g2 deferred.
+
+### Climate validation — 1-yr CORE2 CUDA-vs-Fortran+C on the campaign binary (2026-05-30) ✅ PASS
+
+The authoritative fidelity check (not the per-milestone 20-step staleness gate). 1-yr 1958 CORE2 KPP dist_8 on the
+**campaign binary** (a–f+g1-uv+g1-T, `f263151`; run `25236304`, `m32_cuda_m513_1yr`, rc=0, 17280 steps, T∈[−2.0,32.1] °C
+S∈[3.95,41.05] — physically sane). Compared to the same M5.9-pin pre-campaign run (`m32_cuda_1yr_pin`) **with the same
+current compare script** (apples-to-apples), vs canonical KPP refs (`fortran_kpp_5yr_fix` + `kpp_5yr_fix`):
+
+```
+backend-vs-C-port (isolates the GPU scatter/reduce drift; C-twin ≡ Serial ≡ bit-identical):
+field |  pre-campaign (M5.9-pin)        |  campaign (M5.13)
+sst   |  1.00000  +1.0415e-4  RMS 1.41e-2 | 1.00000  +1.1675e-4  RMS 1.40e-2
+sss   |  0.99996  -1.7994e-4  RMS 2.61e-2 | 0.99996  -1.8291e-4  RMS 2.61e-2
+ssh   |  1.00000  -1.4326e-5             | 1.00000  -1.4023e-5
+a_ice |  0.99997  +1.6348e-4             | 0.99997  +1.6261e-4
+m_ice |  0.99998  -1.5053e-4             | 0.99998  -1.4952e-4
+uice  |  0.99978  -7.4589e-5             | 0.99978  -7.4579e-5
+```
+
+**Statistically identical on every field** — pre vs post differ only in the 4th–5th significant figure, i.e. the
+run-to-run GPU non-determinism between two independent CUDA runs (D22), **not** a campaign effect. The device-residency
+campaign introduced **zero climate-level change**. vs **Fortran**: sst/sss/ssh/a_ice/m_ice all corr ≥ 0.99996; **uice
+0.85019** (identical pre & post) = the pre-existing genuine C↔Fortran ice-velocity scheme-skill budget — uice-vs-C is
+0.99978, so the GPU reproduces C's ice drift and the 0.85 is *not* GPU/campaign-induced. PASS by the script's own
+criterion (backend-vs-C ≪ the C-vs-Fortran budget). **This directly retires the "is 1.623e-3 acceptable?" worry:** the
+20-step gate's worst single-cell |Δ| does NOT accumulate — over a full year the campaign binary tracks C-port to corr
+1.00000 / bias O(1e-4), exactly as the pre-campaign binary. ⚠️ The doc's older pre-campaign §"CUDA 1-yr 1958" recorded
+a_ice/m_ice-vs-Fortran ~0.91/0.98 — that was a stale **old-script** ice-mask-averaging artifact ([[feedback-ice-mask-averaging]]);
+the current script gives 0.99997 for *both* runs (shown above). See plan § Deferred + L57; `docs/SCALING_NG5.md` § M5.13.

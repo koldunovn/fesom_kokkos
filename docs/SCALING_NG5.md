@@ -223,10 +223,11 @@ e ALE `w`/`w_e`+bolus, f ALE commit `hnode`/`helem`). NG5 dist_16, snapshot bina
 | PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) |  —   | **2.83 (nsys)**   |
 
 (g1-uv = full `uv` residency, the biggest single win; g1-T = full T values+valuesold residency,
-fixed with an L50 bulk-SST sync. ⚠️ **Performance numbers; the 1-year CORE2 CUDA-vs-Fortran+C climate
-validation on the campaign binary is the authoritative fidelity check — see § Climate validation below /
-`docs/GPU_FIDELITY.md`.** The 20-step fidelity gate that ran per milestone is a *staleness* tripwire,
-not the climate test.)
+fixed with an L50 bulk-SST sync. ✅ **The authoritative 1-year CORE2 CUDA-vs-Fortran+C climate
+validation PASSED** — the campaign binary is statistically identical to the pre-campaign M5.9-pin
+binary (vs C-port: sst corr 1.00000/bias 1.2e-4, all fields ≥0.99996; zero climate-level change from
+the flips). See `docs/GPU_FIDELITY.md` § Climate validation. The 20-step per-milestone gate was only a
+*staleness* tripwire, not the climate test.)
 
 g1-uv (full `uv` device-residency — flip update_vel + remove ALL 11 uv re-pushes + the ocean2ice
 cross-file push) was the **single biggest win**: 10.88 → 6.97 s/step (−36% more), because `uv`
@@ -245,8 +246,8 @@ MB/step). **The campaign blew past the ~2× target to 1.61×.**
 - **g1-uv + g1-T DONE** (full `uv` and tracer-`T` device-residency; g1-T needed the L50 bulk-SST
   sync). **Only g2 (S-floor → device) deferred** — conditional gate not met; S is floor-pinned and
   hits the same L50 SSS host reader. Validation: every flip = Serial verify=0 + pi np1+np2 bit-id +
-  SYNCCHECK + the CORE2-active-ice fidelity gate; ⚠️ the 1-yr CORE2 CUDA-vs-Fortran+C **climate**
-  validation on the campaign binary is the authoritative fidelity check (in flight). See
+  SYNCCHECK + the CORE2-active-ice fidelity gate; ✅ the 1-yr CORE2 CUDA-vs-Fortran+C **climate**
+  validation PASSED (statistically identical to pre-campaign; corr ~1.0000 / bias O(1e-4) vs C). See
   `docs/plans/20260530-m513-pcie-residency-tasks.md` § Deferred, lesson **L57**, `docs/GPU_FIDELITY.md` § M5.13.
 
 **Figures (M5.13):** `docs/figures/m513_ng5_progression.png` (NG5 step 16.27→6.12 s/step, GPU/CPU
