@@ -1,9 +1,11 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-**Session 21 (2026-05-28) — M5.12 fusion campaign: f reverted, d + b landed (both <1%), fusion thesis CAPPED, pivoting to mesh size (NG5 7M).**
-Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f docs), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295` (b).
-Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT filled for f + d + b). Lessons L53 (f), L54 (d), **L55 (the campaign cap)**.
-**Bottom line: launch fusion caps at <1%/lever (L55); the real lever is mesh size (SCALING_DARS). M5.12 cumulative d+b ≈ 1.3%. Next = NG5/dars-class runs, not g/e/h.**
+**Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
+Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
+Plan: `docs/plans/20260528-m512-fusion.md` (§RESULT f+d+b). Lessons L53 (f), L54 (d), L55 (campaign cap). Scaling: **`docs/SCALING_NG5.md`**.
+**Bottom line: (1) launch fusion caps at <1%/lever (L55); (2) the mesh-size lever ASYMPTOTES — CORE2 8.9× → farc 5.5× → dars 4.1× → NG5 3.8× (node-for-node GPU/CPU), increments collapsing (−3.4,−1.4,−0.3) → ~3.6-3.8× is the Levante-A100 floor for this port, reached by dars-class meshes. Bigger meshes won't close it.**
+- **NG5 (7.4M nodes, 70 levels) strong-scaling DONE** (commit `328536c`; `docs/SCALING_NG5.md`). GPU dist_8/16/32/64 = 30.4/16.3/8.70/4.51 s/step; CPU dist_512/1024/2048 = 4.33/2.24/1.17 s/step (dist_256 CPU OOM at 128 ranks/node). **Node-for-node GPU/CPU = 3.8×** (stable 4/8/16N); strong-scaling 93–96%/doubling both sides. Binary = m512-fusion (GPU+CPU); dars/farc/CORE2 = M5.11 (<1.3% delta, negligible). dt=180, snap_every=-1 (no I/O).
+- **⚠️ DEEP-MESH FIX (`328536c`) — NG5's nl=70 exposed 2 latent "never tested past ~48 levels" bugs**, both fixed (a future ≥48-level mesh on ANY backend would have hit #1): **(1) stack-buffer-overflow** — per-column scratch hardcoded `[64]` (eos host+device) / `NL_MAX`/`KPP_NL_MAX=64` enums (momentum/gm/kpp/tracer_adv/tracer_diff), sized for CORE2/dars ~48; nl=70 wrote past the frame → segfault in `fesom_pressure_bv` (ASAN-localized). Fix = project-wide `FESOM_MAX_LEVELS=128` (`fesom_types.h`) at every site + `nl<=FESOM_MAX_LEVELS` guard at mesh load; bit-identity preserved (pi verify max|Δ|==0). **(2) rank-0 I/O gather OOM** (~66 GB at NG5; the step-0 snapshot mallocs 17 global buffers on rank0) → scaling runs use `snap_every=-1`; **production NG5 snapshots still need parallel I/O / single-buffer-reuse (OPEN).**
 - **M5.12f-1 (CG-dot View-reducer) — REVERTED, perf-neutral (L53).** Converted the 2 in-loop CG
   `parallel_reduce` sites (`fesom_ssh.cpp`) from host-scalar to device-`View` reducers to defer the
   post-kernel fence to the `deep_copy` before the `MPI_Allreduce`. Mechanism is REAL (confirmed from
