@@ -586,7 +586,13 @@ its ceiling; ice `h_ice` ceil 1e-1, T ceil 1e-2):
 | d `uv_rhsAB` | ELEM3D | 1.9e-3 | 186.7 | 810.7 |
 | e ALE w/w_e+bolus | NOD3D | 3.8e-3 | 175.8 | 746.5 |
 | f ALE commit hnode/helem | NOD3D/ELEM3D | 4.3e-3 | 163.8 | 641.4 |
-| **g1-uv** full uv residency | ELEM3D | 4.7e-3 | **150.9** | **342.3** |
+| **g1-uv** full uv residency | ELEM3D | 4.7e-3 | 150.9 | 342.3 |
+| **g1-T** full T values+valuesold | NOD3D | 1.4e-2¹ | **139.9** | **277.3** |
+
+¹ g1-T's worst is h_ice 1.4e-2 (ceil 1e-1); T itself 1.6e-3 (the floor). ⚠️ g1-T FAILED the gate TWICE first
+(deterministic T 5.0e-2): the cause was `fesom_bulk_compute` reading `SST=T[surface]` on the host every step
+(`fesom_bulk.cpp:259`, **L50** — the uvnode pattern for SST), NOT the values/valuesold asymmetry (ruled out by
+a bit-identical 2nd fail). FIX = one targeted T `sync_host` after trdiff. The gate caught it; Serial/pi could not.
 
 (Serial side of every milestone: per-kernel `FESOM_KK_VERIFY` max|Δ|==0 + pi np1+np2 bit-identical +
 SYNCCHECK clean — bit-identity preserved by construction, Approach B.)
@@ -603,7 +609,9 @@ the time loop (`fesom_main.cpp`); steps 2+ get them from the commit. Re-gated �
 values needs a one-time step-1 init push.
 
 ### Result (NG5 dist_16) — see `docs/SCALING_NG5.md` § M5.13
-Clean step **16.27 → 10.88 (a–f) → 6.97 s/step (a–f+g1-uv) = −57 %**; node-for-node GPU/CPU
-**3.76× → 2.51× → 1.61× (below the ~2× target)**; PCIe `cudaMemcpy` (nsys a–f) **12.74 → 7.48 s/step**.
-g1-uv (full uv residency, `e2ad90e`) was the biggest single win + proved the cross-file full-residency
-method (spans the ice-step ocean2ice, passed clean). g1-T + g2 deferred — see the plan § Deferred + L57.
+Clean step **16.27 → 10.88 (a–f) → 6.97 (+g1-uv) → 6.12 s/step (+g1-T) = −62 %**; node-for-node GPU/CPU
+**3.76× → 1.41×**; PCIe `cudaMemcpy` (nsys a–f) **12.74 → 7.48 s/step**. g1-uv (full uv residency, `e2ad90e`)
+was the biggest single win; g1-T (full T values+valuesold, `eaac63b`) needed the L50 bulk-SST fix. **⚠️ These
+are performance + the 20-step staleness-gate results; the AUTHORITATIVE 1-yr CORE2 CUDA-vs-Fortran+C climate
+validation on the campaign binary is IN FLIGHT** (pre-campaign: CUDA-vs-C corr ~1 / O(1e-4), `docs/REFERENCE_RUNS.md`).
+g2 deferred. See plan § Deferred + L57.

@@ -210,12 +210,17 @@ The L56 prediction held. M5.13 flipped the remaining host-staged nod3D/elem3D ha
 `fesom_halo_field` (a `cfl_z`, b EOS `hpressure`/`sw_α`/`sw_β`, c the GM quartet, d `uv_rhsAB`,
 e ALE `w`/`w_e`+bolus, f ALE commit `hnode`/`helem`). NG5 dist_16, snapshot binaries:
 
-| metric (NG5 dist_16)        | baseline | a–f (clean) | **a–f+g1-uv (clean)** |
-|:----------------------------|---------:|------------:|----------------------:|
-| **step (s/step), clean**    | **16.27**| 10.88       | **6.97**              |
-| **node-for-node GPU/CPU**   | 3.76×    | 2.51×       | **1.61×**             |
-| PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) | ~3.6 (est)            |
-| nsys-traced step            | 16.94    | 11.17       | —                     |
+| metric (NG5 dist_16)        | baseline |  a–f  | +g1-uv | **+g1-T (final)** |
+|:----------------------------|---------:|------:|-------:|------------------:|
+| **step (s/step), clean**    | **16.27**| 10.88 |  6.97  | **6.12**          |
+| **node-for-node GPU/CPU**   | 3.76×    | 2.51× | 1.61×  | **1.41×**         |
+| PCIe `cudaMemcpy` (s/step)  | 12.74    | 7.48 (nsys) | ~3.6 | ~3.0 (est)    |
+
+(g1-uv = full `uv` residency, the biggest single win; g1-T = full T values+valuesold residency,
+fixed with an L50 bulk-SST sync. ⚠️ **Performance numbers; the 1-year CORE2 CUDA-vs-Fortran+C climate
+validation on the campaign binary is the authoritative fidelity check — see § Climate validation below /
+`docs/GPU_FIDELITY.md`.** The 20-step fidelity gate that ran per milestone is a *staleness* tripwire,
+not the climate test.)
 
 g1-uv (full `uv` device-residency — flip update_vel + remove ALL 11 uv re-pushes + the ocean2ice
 cross-file push) was the **single biggest win**: 10.88 → 6.97 s/step (−36% more), because `uv`
