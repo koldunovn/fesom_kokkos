@@ -236,11 +236,17 @@ MB/step). **The campaign blew past the ~2× target to 1.61×.**
   PCIe share 75 % → 67 %. The blocking full-field memcpy count fell (213 → 192 /step at a+b+c) as
   the device-halo path replaces each big blocking copy with on-device pack + GPU-aware-MPI async.
   The "3.6–3.8× floor / per-watt unreachable" conclusions were indeed mostly reducible PCIe.
-- **Deferred (g1/g2):** tracer `T`/`S` values + `uv` full device-residency (~1–1.5 s/step more,
-  but cross-file into the ice step → a focused follow-up) and the S-floor (conditional gate not
-  met). Validation: every flip passed Serial verify=0 + pi np1+np2 bit-id + SYNCCHECK + the
-  CORE2-active-ice fidelity gate. See `docs/plans/20260530-m513-pcie-residency-tasks.md` § Deferred,
-  lesson **L57**, `docs/GPU_FIDELITY.md` § M5.13.
+- **g1-uv + g1-T DONE** (full `uv` and tracer-`T` device-residency; g1-T needed the L50 bulk-SST
+  sync). **Only g2 (S-floor → device) deferred** — conditional gate not met; S is floor-pinned and
+  hits the same L50 SSS host reader. Validation: every flip = Serial verify=0 + pi np1+np2 bit-id +
+  SYNCCHECK + the CORE2-active-ice fidelity gate; ⚠️ the 1-yr CORE2 CUDA-vs-Fortran+C **climate**
+  validation on the campaign binary is the authoritative fidelity check (in flight). See
+  `docs/plans/20260530-m513-pcie-residency-tasks.md` § Deferred, lesson **L57**, `docs/GPU_FIDELITY.md` § M5.13.
+
+**Figures (M5.13):** `docs/figures/m513_ng5_progression.png` (NG5 step 16.27→6.12 s/step, GPU/CPU
+3.76×→1.41×) · `docs/figures/m513_deepcopy_proxy.png` (per-milestone PCIe deep_copy 1068→277 MB/step)
+· `docs/figures/m513_ng5_pcie_decomp.png` (PCIe share 75%→44% — the GPU un-starved). Script:
+`scripts/plot_m513_progress.py`.
 
 ---
 
