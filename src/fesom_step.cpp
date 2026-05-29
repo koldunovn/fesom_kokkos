@@ -175,7 +175,7 @@ int fesom_timestep(int                          step_n,
         auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
         tT.modify_host(); tT.sync_device();
         tS.modify_host(); tS.sync_device();
-        mesh->hnode_fld.modify_host(); mesh->hnode_fld.sync_device();
+        /* M5.13f: hnode device-resident from last step's commit (fesom_halo_field) - no re-push; EOS reads it on device. */
     }
     fesom_pressure_bv_kk(tracers, mesh, aux);   /* device: density_m_rho0/hpressure/bvfreq/dbsfc/MLD1 */
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
@@ -252,7 +252,7 @@ int fesom_timestep(int                          step_n,
             tS.modify_host(); tS.sync_device();
         }
         mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device();
-        mesh->helem_fld.modify_host();     mesh->helem_fld.sync_device();
+        /* M5.13f: helem device-resident from last step's commit - no re-push; GM reads it on device. */
 
         /* (G2b) density gradient on neutral surfaces. */
         fesom_compute_sigma_xy_kk(aux, tracers, mesh, gm);
@@ -360,7 +360,7 @@ int fesom_timestep(int                          step_n,
         /* M5.4: uvnode device-resident with its halo (substep 3) — no re-push. */
         tracers->data[FESOM_TRACER_S].values_fld.modify_host();
         tracers->data[FESOM_TRACER_S].values_fld.sync_device();
-        mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
+        /* M5.13f: hnode device-resident from last step's commit - no re-push; KPP reads it on device. */
         /* forcing is a const input to the step; the sync_device is a pure coherence op (moves
          * host→device, no logical mutation) → const_cast is safe and localized here. */
         auto *fnc = const_cast<struct fesom_forcing *>(forcing);
@@ -443,7 +443,7 @@ int fesom_timestep(int                          step_n,
     dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
     /* M5.13e: w_e device-resident with its halo (12d fesom_halo_field) - no re-push; compute_vel_rhs reads it on device. */
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
-    mesh->hnode_fld.modify_host();   mesh->hnode_fld.sync_device();
+    /* M5.13f: hnode device-resident from last step's commit - no re-push; compute_vel_rhs reads it on device. */
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
     /* M5.13d: uv_rhsAB OUT sync_host removed - device-halo'd below; AB2 history read on device, no host reader. */
     if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
@@ -495,7 +495,7 @@ int fesom_timestep(int                          step_n,
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
     dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
     /* M5.7b: Av is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
-    mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
+    /* M5.13f: helem device-resident from last step's commit - no re-push; impl_vert_visc reads it on device. */
     {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
         fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();   }
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
@@ -539,7 +539,7 @@ int fesom_timestep(int                          step_n,
     /* M5.4: uv_rhs is device-resident with its halo from substep 6 — no re-push. */
     dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
     dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
-    mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
+    /* M5.13f: helem device-resident from last step's commit - no re-push; ssh_rhs/CG read it on device. */
     mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
 
     PMARK("6_ivisc");
@@ -679,7 +679,7 @@ int fesom_timestep(int                          step_n,
     /* 12a. thickness: hnode_new = hnode. IN: hnode (evolving mesh, host-written/halo'd by last
      *  step's commit). OUT: sync_host(hnode_new) — it is read on the HOST by the tracer
      *  advection/diffusion (substeps 13/13b) and stays Synced for the device cflz/commit. */
-    mesh->hnode_fld.modify_host(); mesh->hnode_fld.sync_device();
+    /* M5.13f: hnode device-resident from last step's commit - no re-push; thickness reads it on device. */
     fesom_ale_thickness_linfs_kk(mesh);
     mesh->hnode_new_fld.sync_host();
     if (s_verify_ale) fesom_ale_thickness_verify(mesh, step_n);
@@ -689,7 +689,7 @@ int fesom_timestep(int                          step_n,
      *  fer_uv (GM only). EDGE→NODE SCATTER (atomic_add, D22) + per-node level cumsum.
      *  OUT: sync_host(w[,fer_w]) before the halo. */
     dyn->uv_fld.modify_host();     dyn->uv_fld.sync_device();
-    mesh->helem_fld.modify_host(); mesh->helem_fld.sync_device();
+    /* M5.13f: helem device-resident from last step's commit - no re-push; vert_vel reads it on device. */
     /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push (vert_vel reads it on device). */
     fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
     if (gm) dyn->fer_w_fld.sync_host();
@@ -771,9 +771,8 @@ int fesom_timestep(int                          step_n,
         const int N_redi = mesh->myDim_nod2D + mesh->eDim_nod2D;
         dyn->uv_fld.modify_host();          dyn->uv_fld.sync_device();
         /* M5.13e: w_e device-resident (augmented by bolus 13a on device) - no re-push; FCT reads it on device. */
-        mesh->hnode_fld.modify_host();      mesh->hnode_fld.sync_device();
+        /* M5.13f: hnode/helem device-resident from last step's commit - no re-push; FCT reads them on device. */
         mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
-        mesh->helem_fld.modify_host();      mesh->helem_fld.sync_device();
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (Redi reads them on device). */
 
         /* ---- T ---- */
@@ -963,11 +962,11 @@ int fesom_timestep(int                          step_n,
      *  the halos; both EVOLVING → feed next step's substep-1 EOS + substep-6 TDMA. */
     mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
     fesom_ale_commit_thickness_kk(mesh);
-    mesh->hnode_fld.sync_host();
-    mesh->helem_fld.sync_host();
     if (s_verify_ale) fesom_ale_commit_verify(mesh, step_n);
-    fesom_exchange_nod3D (mesh->hnode_fld.h_checked(), nl, p);   /* both already same — but be explicit */
-    fesom_exchange_elem3D(mesh->helem_fld.h_checked(), nl, p);   /* Fortran oce_ale.F90:1027,1249 */
+    /* M5.13f: hnode/helem device-halo'd below (evolving mesh stays device-resident across the step
+     * boundary); the ~10 next-step IN re-pushes are removed. NOT snap-out. */
+    fesom_halo_field(mesh->hnode_fld, FESOM_HALO_NOD3D,  nl, 1, p);   /* M5.13f device-halo (hnode) */
+    fesom_halo_field(mesh->helem_fld, FESOM_HALO_ELEM3D, nl, 1, p);   /* M5.13f device-halo (helem) */
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */

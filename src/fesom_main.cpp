@@ -1013,6 +1013,15 @@ skip_rest_state:
         #define TP_BEG()    do { if (step_prof) { Kokkos::fence(); _tp = MPI_Wtime(); } } while (0)
         #define TP_END(acc) do { if (step_prof) { Kokkos::fence(); (acc) += MPI_Wtime() - _tp; } } while (0)
 
+        /* M5.13f: hnode/helem are now DEVICE-RESIDENT across the step boundary (the substep-14 commit
+         * device-halo keeps them current). But the set-once geometry push (mesh_sync_geometry_device)
+         * does NOT include the EVOLVING hnode/helem (SYNC_MAP §8), and at STEP 1 there is no prior
+         * commit — so push the host-initialised hnode/helem to the device ONCE here, before the loop,
+         * so step 1's substeps 1-13 read correct device values (else stale/zero device -> NaN -> CG
+         * abort, caught by the M5.13f gate). Steps 2+ get them from the commit. No-op on Serial/OpenMP. */
+        mesh.hnode_fld.modify_host(); mesh.hnode_fld.sync_device();
+        mesh.helem_fld.modify_host(); mesh.helem_fld.sync_device();
+
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
                 Kokkos::fence();

@@ -19,7 +19,8 @@ detail):** `docs/plans/20260530-pcie-residency-campaign.md` — this file is the
 - [x] **M5.13d** — `uv_rhsAB` (ELEM3D) — DONE ✅ vrhs=0; bit-id; SYNCCHECK; gate PASS 1.9e-3; deep_copy 188.7→186.7/step (−2), 857.2→810.7 MB/step
   - **NG5 ckpt1 (a+b+c):** step 16.94→**14.06 s/step** (~17%); PCIe `cudaMemcpy` 12.74→**10.25 s/step** (−2.5); blocking memcpy 213→192/step (snapshot `m513_ckpt/fesom_port_abc`, job 25232379)
 - [x] **M5.13e** — ALE `w`/`w_e` + bolus round-trips — DONE ✅ ale/tradv/vrhs=0 (160 lines); bit-id; SYNCCHECK; gate PASS 3.8e-3; deep_copy 186.7→175.8/step (−11), 810.7→746.5 MB/step; `w`→pre-I/O block
-- [ ] **M5.13f** — ALE commit `hnode`/`helem` — highest cross-step fan-out → **NG5 ckpt 2**
+- [x] **M5.13f** — ALE commit `hnode`/`helem` — DONE ✅ (10 re-pushes removed). ⚠️ **step-1 crash** (no prior commit → stale device hnode/helem → CG NaN) FIXED by a one-time init push before the loop (fesom_main.cpp); verify 9-keys=0 (400 lines); bit-id; SYNCCHECK; gate PASS 4.3e-3; deep_copy 175.8→163.8/step (−12), 746.5→641.4 MB/step → NG5 ckpt2 launched
+  - **LESSON:** a field made device-resident *across the step boundary* with non-zero init values needs a one-time init push for step 1 (no prior end-of-step producer).
 - [ ] **M5.13g1** — tracer `T` values + `uv`-after-update_vel — highest blast radius (all snap-out)
 - [ ] **M5.13g2** — *(CONDITIONAL)* salinity floor → device clamp, unpin `S` → **NG5 ckpt 3 = acceptance**
 - [ ] **Acceptance** — NG5 final re-trace + scaling sweep interpreted, ratio recorded
