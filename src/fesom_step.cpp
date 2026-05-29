@@ -489,7 +489,10 @@ int fesom_timestep(int                          step_n,
     }
     /* M5.4: uv_rhs is device-resident with its halo from substep 5 — no IN re-push. */
     /* M5.13g1: uv device-resident - no re-push (impl_vert_visc reads it on device). */
-    dyn->w_i_fld.modify_host();    dyn->w_i_fld.sync_device();
+    /* M5.14 (w_i flip): w_i device-resident across the step boundary (12d fesom_halo_field) - no re-push.
+     * Cross-step (produced 12d, consumed here at substep 6). At step 1 substep 6 reads device w_i before any
+     * 12d has run → the zero-init device View, which equals the runtime value (use_wsplit=false → w_i≡0
+     * always), so NO L57 init push is needed (verified: ale.cpp sets w_i=0 in the use_wsplit=false branch). */
     /* M5.7b: Av is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
     /* M5.13f: helem device-resident from last step's commit - no re-push; impl_vert_visc reads it on device. */
     {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
@@ -690,12 +693,13 @@ int fesom_timestep(int                          step_n,
     /* M5.13f: helem device-resident from last step's commit - no re-push; vert_vel reads it on device. */
     /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push (vert_vel reads it on device). */
     fesom_ale_vert_vel_linfs_kk(mesh, dyn, gm ? 1 : 0);
-    if (gm) dyn->fer_w_fld.sync_host();
+    /* M5.14 (fer_w flip): fer_w device-resident - no OUT sync_host (bolus 13a reads it on device, same step;
+     * not an output field → no mean entanglement). The gated ale verify reads owned fer_w host-current on Serial. */
     if (s_verify_ale) fesom_ale_vert_vel_verify(mesh, dyn, gm ? 1 : 0, step_n);
     fesom_halo_field(dyn->w_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w; snap-out -> pre-I/O sync) */
     if (gm) {
-        /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
-        fesom_exchange_nod3D(dyn->fer_w_fld.h_checked(), nl, p);
+        /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). M5.14: device-halo (fer_w stays device-resident). */
+        fesom_halo_field(dyn->fer_w_fld, FESOM_HALO_NOD3D, nl, 1, p);
     }
 
     /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
@@ -714,10 +718,10 @@ int fesom_timestep(int                          step_n,
      *  halo'd above), w (Synced from 12c IN; cflz did not write w). Pure per-(n,nz) map. OUT: sync_host(w_e,w_i). */
     dyn->w_fld.sync_device();   /* no-op: Synced from 12c IN; w unchanged by cflz */
     fesom_ale_compute_wvel_split_kk(mesh, dyn);
-    dyn->w_i_fld.sync_host();
+    /* M5.14 (w_i flip): w_i device-resident - no OUT sync_host (substep 6 of the NEXT step reads it on device). */
     if (s_verify_ale) fesom_ale_compute_wvel_split_verify(mesh, dyn, step_n);
     fesom_halo_field(dyn->w_e_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w_e) */
-    fesom_exchange_nod3D(dyn->w_i_fld.h_checked(), nl, p);
+    fesom_halo_field(dyn->w_i_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (w_i flip) device-halo */
 
     PMARK("12_ale");
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
@@ -736,7 +740,7 @@ int fesom_timestep(int                          step_n,
         /* M5.13g1: uv device-resident - no bolus IN re-push. */
         /* M5.13e: w/w_e device-resident (12b/12d fesom_halo_field) - no bolus IN re-push. */
         /* M5.13c: fer_uv device-resident with its halo (substep 1b) - no re-push. */
-        dyn->fer_w_fld.modify_host();  dyn->fer_w_fld.sync_device();
+        /* M5.14 (fer_w flip): fer_w device-resident (12b fesom_halo_field) - no bolus IN re-push. */
         fesom_gm_bolus_apply_kk(dyn, mesh, (real_t)1.0);
         dyn->uv_fld.modify_device();   dyn->w_fld.modify_device();   dyn->w_e_fld.modify_device();
         /* M5.13g1: uv now device-resident too (bolus-augmented on device) - no OUT sync_host; the tradv
