@@ -442,7 +442,8 @@ void fesom_ice_step(int                            step,
     if (dyn && tracers) {
         struct fesom_dyn     *d  = const_cast<struct fesom_dyn *>(dyn);
         struct fesom_tracers *tr = const_cast<struct fesom_tracers *>(tracers);
-        tr->data[FESOM_TRACER_T].values_fld.modify_host(); tr->data[FESOM_TRACER_T].values_fld.sync_device();
+        /* M5.13g1-T: T values device-resident across the boundary - no re-push; ocean2ice reads SST on device.
+         * (S still re-pushed - g1-T leaves S host-staged, floor-pinned.) */
         tr->data[FESOM_TRACER_S].values_fld.modify_host(); tr->data[FESOM_TRACER_S].values_fld.sync_device();
         mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();
         /* M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -

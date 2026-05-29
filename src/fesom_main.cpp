@@ -1022,6 +1022,8 @@ skip_rest_state:
         mesh.hnode_fld.modify_host(); mesh.hnode_fld.sync_device();
         mesh.helem_fld.modify_host(); mesh.helem_fld.sync_device();
         dyn.uv_fld.modify_host();     dyn.uv_fld.sync_device();   /* M5.13g1: uv device-resident across the boundary; bootstrap step 1 (cold-start uv=0=zero-init, but explicit/robust to restart) */
+        tracers.data[FESOM_TRACER_T].values_fld.modify_host(); tracers.data[FESOM_TRACER_T].values_fld.sync_device();   /* M5.13g1-T: T values device-resident; bootstrap step 1 (non-zero IC) */
+        tracers.data[FESOM_TRACER_T].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_T].valuesold_fld.sync_device();   /* M5.13g1-T FIX: valuesold too — coherent device pair for the MFCT */
 
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
@@ -1301,6 +1303,7 @@ skip_rest_state:
                 aux.Av_fld.sync_host();
                 dyn.w_fld.sync_host();   /* M5.13e: w flipped to device-halo (12b) -> pull for the snapshot gather */
                 dyn.uv_fld.sync_host();  /* M5.13g1: uv (element) device-resident -> pull for the u/v snapshot gather */
+                tracers.data[FESOM_TRACER_T].values_fld.sync_host();  /* M5.13g1-T: T values device-resident -> pull for the temp snapshot gather */
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,

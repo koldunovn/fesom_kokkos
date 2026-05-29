@@ -171,9 +171,8 @@ int fesom_timestep(int                          step_n,
      *  (mesh_sync_geometry_device). On Serial/OpenMP host==device so every sync below is a no-op
      *  (run stays bit-identical); the rail only moves bytes on CUDA. */
     {
-        auto &tT = tracers->data[FESOM_TRACER_T].values_fld;
         auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
-        tT.modify_host(); tT.sync_device();
+        /* M5.13g1-T: T values device-resident across the step - no EOS re-push (EOS reads it on device). */
         tS.modify_host(); tS.sync_device();
         /* M5.13f: hnode device-resident from last step's commit (fesom_halo_field) - no re-push; EOS reads it on device. */
     }
@@ -246,9 +245,8 @@ int fesom_timestep(int                          step_n,
         /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
         /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push; GM sigma_xy/init_redi read them on device. */
         {
-            auto &tT = tracers->data[FESOM_TRACER_T].values_fld;
             auto &tS = tracers->data[FESOM_TRACER_S].values_fld;
-            tT.modify_host(); tT.sync_device();
+            /* M5.13g1-T: T values device-resident - no GM re-push (sigma_xy reads T on device). */
             tS.modify_host(); tS.sync_device();
         }
         mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device();
@@ -780,10 +778,9 @@ int fesom_timestep(int                          step_n,
 
         /* ---- T ---- */
         {
-            auto &vT  = tracers->data[FESOM_TRACER_T].values_fld;
-            auto &voT = tracers->data[FESOM_TRACER_T].valuesold_fld;
-            vT.modify_host();  vT.sync_device();          /* FCT per-tracer IN rail */
-            voT.modify_host(); voT.sync_device();
+            /* M5.13g1-T (FIX): T values AND valuesold both device-resident - no FCT IN re-push. The MFCT
+             * valuesAB couples them, so they must be a COHERENT device pair (the earlier split — values
+             * device, valuesold host-staged — diverged T 5e-2 on CUDA; the gate caught it). */
             std::vector<real_t> fct_pre_v, fct_pre_vo;    /* L26 capture-before (pre-FCT inputs) */
             if (s_verify_tradv) {
                 fct_pre_v.assign (tracers->data[FESOM_TRACER_T].values,
@@ -792,24 +789,21 @@ int fesom_timestep(int                          step_n,
                                   tracers->data[FESOM_TRACER_T].valuesold + (size_t)N_redi * nl);
             }
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers, p);
-            vT.sync_host();  voT.sync_host();             /* OUT rail: Redi rail + halo + next step read them */
+            /* M5.13g1-T (FIX): T values + valuesold both device-resident - no FCT OUT sync_host. */
             if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn,
                                                         tracers, p, step_n, fct_pre_v, fct_pre_vo);
         }
         if (gm) {
-            auto &vT  = tracers->data[FESOM_TRACER_T].values_fld;
-            auto &voT = tracers->data[FESOM_TRACER_T].valuesold_fld;
-            vT.modify_host();  vT.sync_device();          /* Redi IN: post-FCT values (host-current) */
-            voT.modify_host(); voT.sync_device();
+            /* M5.13g1-T (FIX): T values + valuesold both device-resident from FCT - no Redi IN re-push. */
             std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi) */
             if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_T].values,
                                              tracers->data[FESOM_TRACER_T].values + (size_t)N_redi * nl);
             fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_T, gm, mesh, tracers, p);
             fesom_diff_part_hor_redi_kk     (FESOM_TRACER_T, gm, mesh, tracers, p);
-            vT.sync_host();                   /* OUT rail: before the host halo */
+            /* M5.13g1-T: T values device-resident - no Redi OUT sync_host (device-halo'd below). */
             if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_T, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);   /* M1.5 guarded */
+        fesom_halo_field(tracers->data[FESOM_TRACER_T].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13g1-T device-halo (T values) */
 
         /* ---- S ---- */
         {
@@ -888,17 +882,22 @@ int fesom_timestep(int                          step_n,
             fnc->virtual_salt_fld.modify_host(); fnc->virtual_salt_fld.sync_device();
             fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device();
             fnc->sw_3d_fld.modify_host();        fnc->sw_3d_fld.sync_device();   }
-        tracers->data[FESOM_TRACER_T].values_fld.modify_host();
-        tracers->data[FESOM_TRACER_T].values_fld.sync_device();
+        /* M5.13g1-T: T values device-resident - no trdiff IN re-push (reads it on device). */
         tracers->data[FESOM_TRACER_S].values_fld.modify_host();
         tracers->data[FESOM_TRACER_S].values_fld.sync_device();
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
         fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
-        tracers->data[FESOM_TRACER_T].values_fld.sync_host();              /* OUT rail: before the halos */
+        /* M5.13g1-T: T values device-resident - no trdiff OUT sync_host (device-halo'd below). */
         tracers->data[FESOM_TRACER_S].values_fld.sync_host();
         if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,
                                                                  step_n, trd_pre_T, trd_pre_S);
-        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, p);
+        fesom_halo_field(tracers->data[FESOM_TRACER_T].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13g1-T device-halo (T values) */
+        /* M5.13g1-T (FIX2, L50): fesom_bulk_compute reads SST = T[surface] on the HOST every step
+         * (fesom_bulk.cpp:259, the JRA55 air-sea heat flux — exactly the uvnode→bulk wind-stress case).
+         * So keep T host-current for next-step bulk: sync_host here (trdiff is the last T write this step).
+         * T stays device-resident otherwise (EOS/GM/FCT/Redi/trdiff/ocean2ice read it on device) — this is
+         * ONE D2H/step, the L50 cost (like uvnode). The earlier g1-T FAIL was this stale SST, NOT valuesold. */
+        tracers->data[FESOM_TRACER_T].values_fld.sync_host();
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, p);
     }
 
