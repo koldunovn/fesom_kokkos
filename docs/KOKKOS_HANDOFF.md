@@ -21,7 +21,12 @@
 > (`Allreduce` 0.2 %). **Residency is now fully EXHAUSTED** — M5.16 put the last required host readers (`T`/`uvnode`) on
 > the device. Forcing is down to 8.7 % of the step (`force:jra55_read` 3.6 %, stays host).
 >
-> **NEXT CAMPAIGN: Lever B — interior/boundary halo overlap** (the ~47 % `MPI_Waitall`): start the device halo
+> **NEXT CAMPAIGN: M5.17 — attack the MPI communications. Full prompt `docs/plans/20260531-m517-mpi-comms-PROMPT.md`,
+> branch `m517-mpi-comms`** (created off `master`). ⚠️ **MEASURE FIRST** (the user's explicit ask): the ~47 % `MPI_Waitall`
+> is a SUM of recoverable comm + many-small-message latency + UN-recoverable load imbalance — run the env-gated
+> barrier-isolation experiment + the per-rank-variance decomposition on the M5.16 binary BEFORE building anything, to
+> find the overlappable ceiling. Then pick the sub-lever: **interior/boundary halo overlap** (comm-latency-dominant —
+> start the device halo
 > exchange, compute interior nodes while it's in flight, finish the boundary-dependent kernel after. Climate-safe
 > (numerics-neutral reorder) but INVASIVE (split every haloed kernel). ⚠️ **re-measure the overlappable-vs-load-imbalance
 > split FIRST** — a chunk of the 47 % is rank-wait idle that overlap can't recover; if it's mostly imbalance, B's
@@ -29,6 +34,12 @@
 > — halo-latency-bound, not kernel-compute-bound), **Lever D** deployment/packing guidance (free). **Phase B of M5.16**
 > (make `forcing` fully device-resident — drop the bulk output `sync_host` + the downstream re-pushes + port
 > `oce_fluxes_mom`) is a smaller measured follow-on. **Measure-first every step — the wall moves.**
+
+**Session 22 (2026-05-30) — M5.16 (bulk-compute device port) + master fast-forward + a climate-script fix.** Branch `m515-gm-residency`, commit **`6059808`**; `master` fast-forwarded M5.9-pin→M5.16 (tags **`m5.9-pin`** @ old master, **`m5.16-bulk-port`** @ HEAD).
+- **M5.16 (the port):** `fesom_bulk_compute` (L&Y09 air-sea bulk, 16 % of the NG5 step, single-threaded on the GPU build's Serial host — the blmc/L49 trap) → `fesom_bulk_compute_kk`, a `KOKKOS_LAMBDA` per-surface-node map over `[0,N)` (`ncar_ocean_fluxes_mode`+`obudget` as `KOKKOS_INLINE_FUNCTION` device twins, the IceThermC/L45 recipe). Reads **SST=`T`[surface] + `uvnode` on the DEVICE** → the last required-host-reader DtoH gone (the per-step `T`+`uvnode` `sync_host` removed from `fesom_step.cpp` = the residency unlock). **Phase-A drop-in:** outputs `sync_host`'d so the ice step + coupling are byte-for-byte unchanged. Phase B (forcing fully device-resident) deferred.
+- **Result (rigorous same-day SAME-NODE):** NG5 dist_16 **3.4524→2.6766 s/step (−22.5 %)**; `force:bulk_compute` 16.0 %→0.95 %; deep_copy 4.10→3.41 GB/step. **Node-for-node GPU/CPU 0.615× = the GPU node is 1.63× FASTER than a CPU node** (CPU dist_512 4.350 s/step same-day; arc 3.76× slower→0.62×). CORE2 dist_8 climate step 0.1424→0.1271 (−10.7 %).
+- **Validated:** Serial `bulk`-verify max|Δ|==0 (`jobs/job_bulk_verify_core2`, CORE2, FORCED-only L42) + forcing→ice chain unchanged (5 ice keys zero) + SYNCCHECK clean + CUDA gate PASS (worst 8.5e-3, no staleness) + **1-yr climate PASS** (M5.16≡M5.15 to the D22 floor, zero fidelity cost). Lesson **L61**, memory [[project-m516-bulk-port]].
+- **⚠️ Script-artifact found+fixed (user review):** `uice`-vs-Fortran ≈0.85, mislabeled "the C↔F ice-drift budget" in §M5.13–§M5.15, was a comparison-script artifact — `uice`/`vice` were missing from `m32_climate_compare.py`'s NaN→0 ice-mask set ([[feedback-ice-mask-averaging]], which had flagged exactly this). Fortran masks ice-free water as NaN, the port writes 0 (73.5 % of CORE2 nodes). Fixed → `uice`-vs-Fortran 0.919 (ice-covered-only 0.913); the residual ~0.91 is a real modest C-port-vs-Fortran EVP difference faithfully reproduced by the port (`uice`-vs-C-port 0.99978). Does not change any perf/fidelity verdict.
 
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
