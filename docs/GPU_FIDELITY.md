@@ -904,3 +904,73 @@ dynamic-physics/GPU-jitter). **(2) the GPU-compute + residual PCIe bulk (~89 %)*
 **25.7 % of GPU compute**, plus `deep_copy` still 3.41 GB/step → **Lever C** (rank-1 → `View<double**>` coalescing /
 layout) + any residual-residency. **(3) the comm itself (2.4 %)** — Lever B — not worth it. Lesson **L62**. Tooling:
 `jobs/job_ng5_halo_split`, the `[halo-mpi-prof]` rail in `fesom_halo_device.cpp` (env-gated).
+
+## §M5.18 — the coalescing lever: `fesom_smooth_nod3D_kk` re-parallelized to one-thread-per-(node,level)
+
+§M5.17 pivoted to the GPU-compute+PCIe bulk (~89 %), and the fattest single kernel was the area-weighted
+horizontal smoother `fesom_smooth_nod3D_kk` (`src/fesom_eos.cpp`; bvfreq N² 1 sweep + KPP blmc 3 sweeps×3 channels)
+— **25.7 % of all GPU compute** per nsys. The M5.5 device port mapped **one thread per (slab, owned-node)** with an
+internal loop over the node's levels. Since the field is **node-major** (`arr[node*NL+nz]`, `NL=70` contiguous),
+consecutive threads = consecutive *nodes* → every `work`/`vol`/`arr` access strided by `NL` → catastrophically
+**uncoalesced stores**, plus hard **depth divergence** (adjacent nodes have wildly different column depths).
+
+**The fix (commit-pending, M5.18):** re-parallelize to **one thread per (slab, node, LEVEL)** — flat
+`RangePolicy(0, nslab*Nmy*NL)` decoded to `(s,n,nz)`, masking `nz∉[uln,nlnz]`. Now a warp of 32 consecutive flat
+idx spans 32 consecutive **levels of the same node** → all element-vertex reads `arr(sb+v*NL+nz0..+31)` and all
+`work`/`vol`/`arr` stores are **contiguous = coalesced**, and the divergence vanishes (one level/thread). The
+per-`(n,nz)` float sum still runs over the SAME element order `k=o0..o1` and accumulates in the SAME sequence
+(register accumulator ≡ the old in-memory one, IEEE op-for-op) → **byte-identical**. No global layout refactor —
+this exploits the EXISTING layout's level-contiguity (the local, low-risk cousin of Lever C). The 2-kernel
+read-then-write split + per-channel device halo are unchanged.
+
+**ncu before/after (NG5 dist_16, rank0, `jobs/job_ncu_smooth_ab`, explicit `--metrics` so the sectors/req counter
+that `--set basic` drops is captured; the `before` reproduces the prompt's baseline — gather SM 2.27→2.23 %, occ
+52.7→52.4 %, 48–145 ms — validating the A/B):**
+
+| kernel | metric | BEFORE (m516 per-node) | AFTER (m518 per-(n,nz)) | factor |
+|--|--|--|--|--|
+| gather | duration med (range) | 64.0 ms (47.7–145.3) | **4.1 ms (1.4–4.3)** | **15.5×**, divergence spread gone |
+| gather | STORE sectors/req | 29.5 | **6.9** | 4.3× (≈optimal for f64; masked warps < 8) |
+| gather | LOAD sectors/req | 23.8 | **2.9** | 8.3× |
+| gather | occupancy / SM util | 52.4 % / 2.2 % | **91.5 % / 58.9 %** | ALUs were 98 % idle on latency → working |
+| scale | duration med | 13.9 ms | **1.4 ms** | 9.9×; now DRAM-bound (73 %) — the goal |
+
+**Perf — same-day, SAME-NODE A/B (both binaries back-to-back in ONE 4-node allocation, `jobs/job_ng5_m518_ab`,
+job 25247500; the only valid baseline — [[feedback-perf-same-day-baseline]]. NB the absolute 2.48 differs from
+§M5.17's 2.68 by node/day variance ~7 %, which is exactly why a memory-recorded number from another day is NOT a
+baseline):**
+
+| run (clean, no profiler fences) | s/step |
+|--|--|
+| BEFORE (m516) | 2.4823 |
+| **AFTER (m518)** | **2.1296** |
+| | **−14.2 %** |
+
+The `FESOM_STEP_PROFILE` breakdown attributes it cleanly: the **ocean** phase dropped **1.7992 → 1.4488 s/step
+(−0.350, −19.5 %)** while forcing (0.2118→0.2126), sea-ice (0.1462→0.1457) and coupling (0.3260→0.3260) are
+byte-stable — both smoothers live in the ocean phase (bvfreq in `1_eos`, blmc in `3_mixing`), and the ocean delta
+(0.350) ≈ the clean-step delta (0.353). **~14 % of the whole step from one bit-identical kernel re-parallelization
+— ~2× the prompt's 5–8 % estimate, because the kernel sped up 10–15× (not the assumed 2–4×).**
+
+### Validation — bit-identical → the M2.x gate, plus a NEW isolated `smooth` verify
+A new `FESOM_KK_VERIFY=smooth` hook (`fesom_smooth_nod3D_kk_verify`, `fesom_eos.cpp`) captures the input
+before the device kernel (L26), runs it, then runs the host C twin `fesom_smooth_nod3D` per channel and diffs the
+owned region. This is the **only tight, isolated** check of the smoother: the `eos` gate runs BEFORE the bvfreq
+smoother (unsmoothed bvfreq), and `kpp` covers blmc only transitively through the `max(viscA/diffK, blmc)` combine.
+- **Serial + OpenMP** `smooth` (bvfreq nslab=1 + blmc nslab=3): `max|Δ|=0.000e+00` every step (race-free map — no
+  scatter → OpenMP is bit-identical too). `eos`/`kpp` also clean.
+- **pi np1 + np2** end-to-end (100/20/10, analytical): **ALL FIELDS BIT-IDENTICAL** vs the golden + the np2 oracle
+  (np2 exercises real MPI/scatter). pi DOES exercise the bvfreq smoother (the port calls it unconditionally) AND blmc
+  (KPP on).
+- **SYNCCHECK** clean.
+- **CUDA fidelity gate** (`gpu_fidelity_gate.sh --fresh-oracle`, CORE2 dist_8 ICE ACTIVE): **PASS** — all 27 fields at
+  the climate-close floor (worst h_ice 7.7e-3 ≤ ceil 1e-1; T 9.8e-4, S 3.4e-4, bvfreq 2.3e-7), the SAME floor as M5.16
+  → the rewrite adds ZERO new divergence.
+- **1-yr CORE2 CUDA climate PASS** (`m32_cuda_m518_1yr`, 17275 steps, 0.130 s/step): **vs M5.16 apples-to-apples (the
+  zero-cost proof) — every field corr = 1.00000, bias O(1e-6), RMS O(1e-4) → M5.18 ≡ M5.16 to the D22 atomic-scatter
+  floor, ZERO climate cost.** vs C-port: sst/ssh corr 1.00000, sss/a_ice/m_ice ≥ 0.9999, uice 0.99978. vs Fortran
+  (science budget): corr ~1; uice 0.919 = the known, faithfully-reproduced C-vs-Fortran EVP difference (the
+  [[feedback-ice-mask-averaging]] number, unchanged from M5.16). **M5.18 COMPLETE.**
+
+Tooling added this session: `jobs/job_ng5_m518_ab` (same-node clean+profile A/B), `jobs/job_ncu_smooth_ab` (ncu A/B
+with the sectors/req metric), `ncu_rank0.sh` `NCU_METRICS` override. Lesson **L63**.

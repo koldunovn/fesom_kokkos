@@ -133,6 +133,7 @@ int fesom_timestep(int                          step_n,
     static int s_verify_tradv  = 0;   /* M2.6 substep 13 (FCT) */
     static int s_verify_trdiff = 0;   /* M2.7 substep 13b (tracer diffusion) */
     static int s_verify_ssh    = 0;   /* M4.2 substeps 7-11 (SSH RHS + CG + update_vel + hbar) */
+    static int s_verify_smooth = 0;   /* M5.18 device smoother (bvfreq here; blmc in fesom_kpp) */
     if (!s_verify_loaded) {
         const char *e = getenv("FESOM_KK_VERIFY");
         s_verify_eos = (e && strstr(e, "eos")) ? 1 : 0;
@@ -146,6 +147,7 @@ int fesom_timestep(int                          step_n,
         s_verify_tradv = (e && strstr(e, "tradv")) ? 1 : 0;   /* M2.6: distinct token (no collision either way, L25) */
         s_verify_trdiff = (e && strstr(e, "trdiff")) ? 1 : 0; /* M2.7: distinct token — ⊄ tradv and tradv ⊄ trdiff (L25) */
         s_verify_ssh = (e && strstr(e, "ssh")) ? 1 : 0;       /* M4.2: no substring collision (ssh ⊄ any key) */
+        s_verify_smooth = (e && strstr(e, "smooth")) ? 1 : 0; /* M5.18: collision-free token */
         /* Match the "pp" token but NOT the "pp" inside "kpp" (sibling gate key): scan for
          * "pp" not immediately preceded by 'k'. (eos/kpp use a plain strstr; pp needs the
          * guard because kpp is a substring superset — lesson L25.) */
@@ -224,7 +226,10 @@ int fesom_timestep(int                          step_n,
      * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). M5.5 (B): DEVICE smoother
      * (no host round-trip) — bvfreq stays device-resident + halo'd through to its
      * consumers (GM, PP/KPP, mo_convect), whose bvfreq IN re-pushes are now removed. */
-    fesom_smooth_nod3D_kk(aux->bvfreq_fld, 1, mesh, p);
+    if (s_verify_smooth)   /* M5.18 isolated gate: device smoother vs the host C twin (Serial max|Δ|==0) */
+        fesom_smooth_nod3D_kk_verify(aux->bvfreq_fld, 1, mesh, p, 0, 1, 0, "bvfreq", step_n);
+    else
+        fesom_smooth_nod3D_kk(aux->bvfreq_fld, 1, mesh, p);
 
     PMARK("1_eos");
     /*  1b. GM/Redi prerequisites + per-step coefficient builder + streamfunction

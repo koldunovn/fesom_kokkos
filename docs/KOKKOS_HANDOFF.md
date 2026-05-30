@@ -1,5 +1,26 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+> **✅ M5.18 — the COALESCING LEVER: `fesom_smooth_nod3D_kk` re-parallelized to one-thread-per-(node,LEVEL) (2026-05-30). Branch `m517-mpi-comms`, UNCOMMITTED (on top of M5.17).**
+> The #1 GPU kernel (25.7 % of GPU compute) mapped one thread per (slab,owned-node) with an internal level loop →
+> consecutive threads = consecutive nodes → every store strided by `NL=70` = uncoalesced (ncu: STORE 29.5 sectors/req,
+> **SM util 2.2 %** = ALUs 98 % idle on memory latency, occ 52 %, 48–145 ms with 3× depth-divergence spread).
+> **Fix:** flat `RangePolicy(0, nslab*Nmy*NL)` decoded to `(s,n,nz)` — the field is node-major (`arr[node*NL+nz]`), so a
+> warp of 32 consecutive levels is contiguous → **coalesced**, divergence-free; register-accumulated SAME element order
+> → **byte-identical** (no global layout refactor — the local cousin of Lever C). **Result (ncu A/B + same-node s/step
+> A/B):** gather **64→4.1 ms (15.5×)**, scale 13.9→1.4 ms, STORE sec/req 29.5→6.9, SM 2.2→59 %, occ 52→91 %; **NG5 dist_16
+> clean 2.4823→2.1296 s/step = −14.2 %** (all ocean phase −19.5 %, other phases byte-stable; ~2× the 5–8 % estimate).
+> **Validated:** new `FESOM_KK_VERIFY=smooth` isolated hook (Serial+OpenMP max|Δ|=0; bvfreq had NO direct verify, kpp
+> covered blmc only via the max-combine) + pi np1+np2 ALL FIELDS BIT-IDENTICAL + SYNCCHECK clean + **CUDA gate PASS**
+> (worst 7.7e-3, SAME floor as M5.16 = zero new divergence) + **1-yr CUDA climate PASS** (`m32_cuda_m518_1yr`: vs M5.16
+> ALL fields corr=1.00000 = zero climate cost; vs C-port/Fortran corr ~1). `docs/GPU_FIDELITY.md` §M5.18, **L63**, [[project-m518-smoother-compute]]. Tooling: `jobs/job_ng5_m518_ab`,
+> `jobs/job_ncu_smooth_ab`, `ncu_rank0.sh` `NCU_METRICS`.
+>
+> **→ NEXT: generalize the coalescing lever** — re-profile (nsys) to re-rank, apply per-(node,level) to the other
+> node-major kernels (FCT `tracer_advect`, `compute_vel_rhs`, GM `compute_sigma`/neutral_slope, `diff_ver_part_impl`),
+> then attack the residual PCIe `deep_copy` 3.41 GB/step. Heavyweight Lever C (`fesom_field.hpp` rank-1 →
+> `View<double**>`) stays last resort. Load-imbalance ~9 % = orthogonal Lever D. ⚠️ **M5.17 + M5.18 are BOTH uncommitted
+> — commit decision pending the user.**
+
 > **✅ M5.17 — Lever B (MPI-comm overlap) MEASURED + CLOSED as a DEAD END (2026-05-30). Branch `m517-mpi-comms`, UNCOMMITTED.**
 > A barrier-isolation experiment (env-gated `MPI_Barrier` before every halo exchange + a per-rank Barrier/Waitall
 > accountant in `fesom_halo_device.cpp`+`fesom_halo.cpp`; instrument validated **pi np1+np2 BIT-IDENTICAL**) split the

@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ng5_ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5ab.%j.err
+#
+# M5.18 same-day SAME-NODE A/B: run the BEFORE (M5.16 per-node smoother) and AFTER
+# (M5.18 per-(node,level) coalesced smoother) binaries back-to-back in ONE allocation
+# (identical nodes + contention — [[feedback-perf-same-day-baseline]]). NG5 dist_16, dt=180,
+# 35 steps, snap_every=-1. Clean s/step (no profiler fences) + FESOM_STEP_PROFILE breakdown.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BEFORE="$ROOT/build-cuda/fesom_port_m516"
+AFTER="$ROOT/build-cuda/fesom_port_m518"
+NSTEPS=${NSTEPS:-35}
+nvidia-smi -L | head -1
+echo "nodes: $SLURM_NODELIST"
+
+run () {  # $1=binary $2=tag $3=profile(0/1)
+  local OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ng5ab_$2; rm -rf "$OUT"; mkdir -p "$OUT"
+  local PROF=""; [ "$3" = 1 ] && PROF="FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1"
+  echo "######## $2 (profile=$3) :: $1 ########"
+  env $PROF srun "$1" "$MESH" "$OUT" 180 "$NSTEPS" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|s/step|STEP PROFILE|CG share|CG-share" "$OUT/run.log"
+  if [ "$3" = 1 ]; then
+    echo "---- per-phase breakdown (rank0) ----"
+    sed -n '/phase + kernel breakdown/,$p' "$OUT/run.log" | head -45
+  fi
+  rm -f "$OUT"/*.monthly.nc   # NG5 writes ~50GB monthly.nc even at snap_every=-1
+}
+
+echo "=================== CLEAN s/step (no profiler fences) ==================="
+run "$BEFORE" before_clean 0
+run "$AFTER"  after_clean  0
+echo "=================== PHASE BREAKDOWN (FESOM_STEP_PROFILE) ==================="
+run "$BEFORE" before_prof  1
+run "$AFTER"  after_prof   1
+echo "=== done ==="

@@ -500,6 +500,25 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
      * Collapses blmc's 3-channel smoother from 9 gather + 9 scale launches to 3 + 3 (nslab=1 →
      * byte-identical to the original single-slab path; the bvfreq caller is unchanged). The
      * per-sweep slab halos stay one-per-channel (halo aggregation is M5.12g, not here). */
+    /* M5.18 (lever C-local, the #1-GPU-kernel coalescing flip): ONE THREAD PER
+     * (slab, node, LEVEL) — flat RangePolicy(0, nslab*Nmy*NL) decoded to (s,n,nz).
+     * The field is node-major (arr[node*NL + nz]), so the LEVEL is the contiguous
+     * inner dim: a warp of 32 consecutive flat idx = ((s*Nmy)+n)*NL + nz spans 32
+     * consecutive LEVELS of the same node n, so every element-vertex read
+     * arr(sb + v*NL + nz0..+31) and every work/vol/arr store at idx is CONTIGUOUS →
+     * COALESCED, and the per-(node,depth) warp divergence vanishes (each thread does
+     * exactly ONE level). The old M5.5 mapping was one-thread-per-node with an
+     * internal nz loop, so consecutive threads = consecutive NODES → every store
+     * strided by NL=70 = ~52 sectors/request (ncu), the killer that made this kernel
+     * 25.7% of GPU compute at 2.27% SM util (latency-bound on scattered stores).
+     * The per-(n,nz) float sum still runs over the SAME element order k=o0..o1 and
+     * accumulates in the SAME sequence (register accumulator ≡ the old in-memory one,
+     * IEEE op-for-op) → byte-identical → Serial AND OpenMP bit-identical (no scatter);
+     * CUDA climate-close. The 2-kernel read-then-write split (gather→work/vol, scale→
+     * arr) stays so arr is read-then-written across the sweep with no race; vol is
+     * built on sweep 0 and reused. See docs/GPU_FIDELITY.md §M5.18.
+     * NB launching Nmy*NL threads wastes the shallow-node tail (avg depth < NL); that
+     * is acceptable for a memory-bound kernel — coalescing + occupancy dominate. */
     Kokkos::View<double*> vol ("smooth.vol",  (size_t)nslab * Nmy * NL);
     Kokkos::View<double*> work("smooth.work", (size_t)nslab * Nmy * NL);
 
@@ -514,49 +533,125 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
     auto nle_e  = mesh->nlevels_fld.d();
     auto volv = vol; auto workv = work;
     const std::size_t stride = slab_stride;
+    const int NmyNL = Nmy * NL;          /* per-slab thread count (Nmy*NL < INT_MAX for any real rank) */
+    const int total = nslab * NmyNL;
 
     for (int sweep = 0; sweep < n_smooth; ++sweep) {
         const int sw = sweep;
-        Kokkos::parallel_for("fesom_smooth_gather", Kokkos::RangePolicy<>(0, nslab * Nmy),
+        Kokkos::parallel_for("fesom_smooth_gather", Kokkos::RangePolicy<>(0, total),
             KOKKOS_LAMBDA(const int idx) {
-                const int s = idx / Nmy;
-                const int n = idx - s * Nmy;
-                const std::size_t sb = base + (std::size_t)s * stride;
+                const int s   = idx / NmyNL;
+                const int rem = idx - s * NmyNL;
+                const int n   = rem / NL;
+                const int nz  = rem - n * NL;
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
-                for (int nz = uln; nz <= nlnz; ++nz) {
-                    if (sw == 0) volv((size_t)idx*NL + nz) = 0.0;
-                    workv((size_t)idx*NL + nz) = 0.0;
-                }
+                if (nz < uln || nz > nlnz) return;          /* mask: level outside node's column */
+                const std::size_t sb = base + (std::size_t)s * stride;
+                double w = 0.0, vacc = 0.0;
                 const int o0 = off(n), o1 = off(n + 1);
                 for (int k = o0; k < o1; ++k) {
                     const int el = nie(k);
                     int ule = ule_e(el) - 1; if (ule < uln)  ule = uln;
                     int nle = nle_e(el) - 1; if (nle > nlnz) nle = nlnz;
+                    if (nz < ule || nz > nle) continue;     /* element doesn't reach this level */
                     const double a = ea(el);
                     const int v0 = en(3*el+0), v1 = en(3*el+1), v2 = en(3*el+2);
-                    for (int nz = ule; nz <= nle; ++nz) {
-                        if (sw == 0) volv((size_t)idx*NL + nz) += a;
-                        workv((size_t)idx*NL + nz) += a * ( arr(sb + (size_t)v0*NL + nz)
-                                                          + arr(sb + (size_t)v1*NL + nz)
-                                                          + arr(sb + (size_t)v2*NL + nz) );
-                    }
+                    if (sw == 0) vacc += a;
+                    w += a * ( arr(sb + (size_t)v0*NL + nz)
+                             + arr(sb + (size_t)v1*NL + nz)
+                             + arr(sb + (size_t)v2*NL + nz) );
                 }
-                if (sw == 0)
-                    for (int nz = uln; nz <= nlnz; ++nz)
-                        volv((size_t)idx*NL + nz) = 1.0 / (3.0 * volv((size_t)idx*NL + nz));
+                workv((size_t)idx) = w;
+                if (sw == 0) volv((size_t)idx) = 1.0 / (3.0 * vacc);   /* geometry-only, built once */
             });
-        Kokkos::parallel_for("fesom_smooth_scale", Kokkos::RangePolicy<>(0, nslab * Nmy),
+        Kokkos::parallel_for("fesom_smooth_scale", Kokkos::RangePolicy<>(0, total),
             KOKKOS_LAMBDA(const int idx) {
-                const int s = idx / Nmy;
-                const int n = idx - s * Nmy;
-                const std::size_t sb = base + (std::size_t)s * stride;
+                const int s   = idx / NmyNL;
+                const int rem = idx - s * NmyNL;
+                const int n   = rem / NL;
+                const int nz  = rem - n * NL;
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
-                for (int nz = uln; nz <= nlnz; ++nz)
-                    arr(sb + (size_t)n*NL + nz) = workv((size_t)idx*NL + nz) * volv((size_t)idx*NL + nz);
+                if (nz < uln || nz > nlnz) return;          /* mask: matches the gather */
+                const std::size_t sb = base + (std::size_t)s * stride;
+                arr(sb + (size_t)n*NL + nz) = workv((size_t)idx) * volv((size_t)idx);
             });
         arr_fld.modify_device();
         for (int s = 0; s < nslab; ++s)   /* per-channel slab halo for the next sweep / exit */
             fesom_halo_field(arr_fld, FESOM_HALO_NOD3D, NL, 1, p, base + (std::size_t)s * stride);
+    }
+}
+
+/*--- FESOM_KK_VERIFY=smooth — isolate fesom_smooth_nod3D_kk vs the host C twin (M5.18) ---
+ * The smoother runs IN PLACE, so the input must be captured BEFORE the device kernel
+ * (L26 capture-before):
+ *   1. sync the input to host (contract: device-current + valid halo on entry) and
+ *      snapshot each channel's FULL (owned+halo) buffer — the host C twin halo-exchanges it;
+ *   2. run the production device kernel (modifies arr_fld in place; leaves it halo'd);
+ *   3. sync the device-smoothed result to host and snapshot each channel's OWNED region;
+ *   4. run the host C twin fesom_smooth_nod3D on each input snapshot (it does its own halo
+ *      exchanges between sweeps) and diff the owned region vs the device result;
+ *   5. report max|Δ|; abort on Serial if not bit-identical.
+ * Non-intrusive: arr_fld exits host==device-current with the device result (just synced),
+ * so the production step proceeds on the device path exactly as without the verify. The
+ * existing `eos` gate runs BEFORE the bvfreq smoother (unsmoothed bvfreq), and `kpp` only
+ * covers blmc transitively through the max(viscA/diffK, blmc) combine — so this is the only
+ * tight, isolated check of the smoother itself. Diagnostic only (env-gated, off the hot
+ * path); the snapshots are plain host vectors (never touched by a device kernel). */
+void fesom_smooth_nod3D_kk_verify(fesom::Field &arr_fld, int n_smooth,
+                                  const struct fesom_mesh *mesh, struct fesom_partit *p,
+                                  std::size_t base, int nslab, std::size_t slab_stride,
+                                  const char *label, int step_n)
+{
+    const int    NL  = mesh->nl;
+    const int    Nmy = mesh->myDim_nod2D;
+    const size_t chan = (nslab > 1) ? (size_t)slab_stride : (arr_fld.size() - base);
+    const size_t own  = (size_t)Nmy * (size_t)NL;
+
+    /* 1. input → host; snapshot each channel's full (owned+halo) buffer. */
+    arr_fld.sync_host();
+    {
+        const real_t *in = arr_fld.h();
+        std::vector<std::vector<real_t>> in_snap(nslab);
+        for (int s = 0; s < nslab; ++s) {
+            const real_t *src = in + base + (size_t)s * slab_stride;
+            in_snap[(size_t)s].assign(src, src + chan);
+        }
+
+        /* 2. production device kernel (in place; leaves arr_fld device-auth + halo'd). */
+        fesom_smooth_nod3D_kk(arr_fld, n_smooth, mesh, p, base, nslab, slab_stride);
+
+        /* 3. device result → host; snapshot each channel's owned region. */
+        arr_fld.sync_host();
+        const real_t *dev = arr_fld.h();
+        std::vector<std::vector<real_t>> dev_snap(nslab);
+        for (int s = 0; s < nslab; ++s) {
+            const real_t *src = dev + base + (size_t)s * slab_stride;
+            dev_snap[(size_t)s].assign(src, src + own);
+        }
+
+        /* 4. host C twin per channel on the input snapshot; diff the owned region. */
+        double dmax = 0.0;
+        std::vector<real_t> twin(chan);
+        for (int s = 0; s < nslab; ++s) {
+            std::copy(in_snap[(size_t)s].begin(), in_snap[(size_t)s].end(), twin.begin());
+            fesom_smooth_nod3D(twin.data(), NL, n_smooth, mesh, p);
+            for (size_t i = 0; i < own; ++i) {
+                double d = std::fabs((double)dev_snap[(size_t)s][i] - (double)twin[i]);
+                if (d > dmax) dmax = d;
+            }
+        }
+
+        /* 5. report + assert. Serial is the bit-identity oracle; OpenMP is also bit-identical
+         *    (race-free map, no scatter); CUDA is climate-close (reported only). */
+        const std::string backend = Kokkos::DefaultExecutionSpace::name();
+        std::printf("[FESOM_KK_VERIFY=smooth] step %d backend=%s field=%s nslab=%d n_smooth=%d  max|Δ|=%.3e\n",
+                    step_n, backend.c_str(), label ? label : "?", nslab, n_smooth, dmax);
+        std::fflush(stdout);
+        if (backend == "Serial" && dmax != 0.0) {
+            std::fprintf(stderr, "[FESOM_KK_VERIFY=smooth] FAIL: Serial must be bit-identical to the "
+                                 "C twin (field=%s, max|Δ|=%.3e)\n", label ? label : "?", dmax);
+            std::abort();
+        }
     }
 }
 

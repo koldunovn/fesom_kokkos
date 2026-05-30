@@ -78,6 +78,15 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                            std::size_t base = 0,           /* slab offset for multi-channel fields */
                            int nslab = 1,                  /* M5.12d: # contiguous channels to smooth in one call */
                            std::size_t slab_stride = 0);   /* byte... element offset between channels (n_nod*nl) */
+
+/* FESOM_KK_VERIFY=smooth (M5.18): isolated per-kernel gate for the device smoother — runs
+ * the production kernel then the host C twin on a capture-before snapshot and asserts Serial
+ * max|Δ|==0 over the owned region (the eos gate runs before the bvfreq smoother, kpp covers
+ * blmc only transitively). Same arg shape as fesom_smooth_nod3D_kk + a label + step. */
+void fesom_smooth_nod3D_kk_verify(fesom::Field &arr_fld, int n_smooth,
+                                  const struct fesom_mesh *mesh, struct fesom_partit *p,
+                                  std::size_t base, int nslab, std::size_t slab_stride,
+                                  const char *label, int step_n);
 #endif
 
 /*

@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ncu_ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ab.%j.err
+# M5.18 ncu A/B on the smoother (gather+scale), NG5 dist_16 rank0. Targeted --metrics (NCU_METRICS)
+# so the BEFORE/AFTER reps both carry the sectors-per-request coalescing counter that --set basic
+# drops. Profiles fesom_port_m516 (per-node) then fesom_port_m518 (per-(node,level) coalesced).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+export NCU_REGEX='fesom_smooth_nod3D'   # matches both gather + scale (enclosing fn name)
+export NCU_SKIP=40                       # 8 smoother kernels/step x ~5 steps spin-up
+export NCU_COUNT=24                      # ~3 steps of gather+scale steady-state
+# the coalescing story in one shot: duration, SM%, memory%, occupancy, DRAM%, LOAD + STORE sec/req
+export NCU_METRICS='gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,dram__throughput.avg.pct_of_peak_sustained_elapsed,l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio,l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio'
+
+profile () {  # $1=binary $2=tag
+  local OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ab_$2; rm -rf "$OUT"; mkdir -p "$OUT"
+  export FESOM="$1"; export NCU_OUT="$OUT/smooth"
+  echo "######## ncu $2 :: $1 ########"
+  srun "$ROOT/jobs/ncu_rank0.sh" "$MESH" "$OUT" 180 10 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "srun rc=$?"
+  ncu -i "$NCU_OUT.ncu-rep" --csv --page raw > "$OUT/metrics.csv" 2>&1 \
+    && echo "metrics.csv: $(wc -l < "$OUT/metrics.csv") rows"
+  rm -f "$OUT"/*.monthly.nc
+}
+
+profile "$ROOT/build-cuda/fesom_port_m516" before
+profile "$ROOT/build-cuda/fesom_port_m518" after
+echo "=== done — compare ncu_ab_before/metrics.csv vs ncu_ab_after/metrics.csv ==="

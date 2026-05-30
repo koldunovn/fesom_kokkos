@@ -1547,7 +1547,18 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
      * blmc stays device-resident; the combine below reads it at OWNED nodes. */
     for (int j = 0; j < 3; ++j)
         fesom_halo_field(k->blmc_fld, FESOM_HALO_NOD3D, nl, 1, partit, (std::size_t)j * slab);
-    fesom_smooth_nod3D_kk(k->blmc_fld, 3, mesh, partit, /*base=*/0, /*nslab=*/3, /*slab_stride=*/slab);
+    /* M5.18: FESOM_KK_VERIFY=smooth isolates the blmc smoother vs the host C twin (the kpp gate
+     * only sees it transitively through the max(viscA/diffK, blmc) combine). Cached env read. */
+    static int s_verify_smooth = -1;
+    if (s_verify_smooth < 0) {
+        const char *e = getenv("FESOM_KK_VERIFY");
+        s_verify_smooth = (e && strstr(e, "smooth")) ? 1 : 0;
+    }
+    if (s_verify_smooth)
+        fesom_smooth_nod3D_kk_verify(k->blmc_fld, 3, mesh, partit, /*base=*/0, /*nslab=*/3,
+                                     /*slab_stride=*/slab, "blmc", s_kpp_call);
+    else
+        fesom_smooth_nod3D_kk(k->blmc_fld, 3, mesh, partit, /*base=*/0, /*nslab=*/3, /*slab_stride=*/slab);
 
     /* combine blmc into viscA/diffK within the BL; zero ghats outside (:451-463) */
     Kokkos::parallel_for("kpp_combine", Kokkos::RangePolicy<>(0, Nmy),
