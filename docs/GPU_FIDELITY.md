@@ -678,7 +678,23 @@ reason for the device-mean-accum, Task 4 `2611936`):
 `max(S,0.5)` over myDim+eDim×column, placed AFTER the post-trdiff device halo → bit-identical Serial AND CUDA
 (no scatter/reduction). Verified Serial pi/CORE2 bit-identical; nsys ~0.0 % (0.2 ms/step).
 
-**1-yr CORE2 CUDA climate validation (the authoritative verdict): IN FLIGHT** (`job_m32_cuda_core2_m514`,
-`M32_NSTEPS=17280`, `m32_cuda_m514_1yr`). Compare vs the M5.13 campaign 1-yr (`m32_cuda_m513_1yr`) + Fortran/C refs
-with `scripts/m32_climate_compare.py` — snapshot AND `.monthly.nc` means, expect statistically identical (corr~1,
-bias O(1e-4)), per L58 (never settle fidelity with the 20-step gate). [Result to be filled when the run completes.]
+**1-yr CORE2 CUDA climate validation (the authoritative verdict): ✅ PASS** (`m32_cuda_m514_1yr`, rc=0, 17280 steps,
+0.1727 s/step, T∈[−2.02, 32.12] °C / S∈[3.95, 41.05] — physical, no runaway). The apples-to-apples test (L58 lesson 2:
+re-run the prior binary's 1-yr through the **identical** current `scripts/m32_climate_compare.py` so any delta is the
+M5.14 flips, not the script). Surface annual-mean stats, year 1958, vs the C-port KPP reference:
+
+| field | M5.14 corr / bias / RMS | M5.13 corr / bias / RMS |
+|--|--|--|
+| sst  | 1.00000 / +1.04e-4 / 1.407e-2 | 1.00000 / +1.17e-4 / 1.404e-2 |
+| sss  | 0.99996 / −1.76e-4 / 2.613e-2 | 0.99996 / −1.83e-4 / 2.612e-2 |
+| ssh  | 1.00000 / −1.41e-5 / 9.06e-4  | 1.00000 / −1.40e-5 / 9.05e-4  |
+| a_ice| 0.99997 / +1.63e-4 / 2.858e-3 | 0.99997 / +1.63e-4 / 2.857e-3 |
+| m_ice| 0.99998 / −1.50e-4 / 3.570e-3 | 0.99998 / −1.50e-4 / 3.568e-3 |
+| uice | 0.99978 / −7.46e-5 / 5.34e-4  | 0.99978 / −7.46e-5 / 5.34e-4  |
+
+The two binaries differ only in the **4th–5th significant figure** — the run-to-run CUDA atomic-scatter floor (D22),
+not a systematic shift. vs Fortran: identical picture (sst/ssh corr 1.00000, sss/a_ice/m_ice 0.99996–0.99997); the
+`uice`-vs-Fortran **0.85019** is the known genuine C↔Fortran ice-drift budget (`uice`-vs-C is 0.99978, far inside it),
+**bit-for-bit the same as M5.13** (0.85019). DRIFT not assessed (single year). **Conclusion: the parity win (NG5 4N
+0.879× node-for-node) cost ZERO climate fidelity** — the M5.14 device-residency flips are statistically identical to
+the M5.13 campaign binary on every field. Campaign (M5.13 + M5.14) is climate-validated end to end.

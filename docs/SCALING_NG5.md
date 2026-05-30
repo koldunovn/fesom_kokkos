@@ -343,8 +343,22 @@ no longer dominates. Per-phase (`FESOM_STEP_PROFILE`): `3_mixing` 19.9 %, `1b_gm
 overlap) and C (kernel coalescing + launch fusion) — NOT more residency** (PCIe is no longer the wall). The device
 mean-accum (`resolve_*_dev`) and device salinity floor show at ~0.0 % of kernel time (negligible).
 
-Jobs: `job_ng5_prof_m514` (build-cuda-m514) + `job_ng5_prof` (build-cuda = pre-Lever-A, same-day) + `job_nsys_ng5_m514`.
+Jobs: the same-day A/B used temp `job_{ng5_prof,nsys_ng5}_m514` (pointing at a temp `build-cuda-m514`) vs
+`job_ng5_prof` (`build-cuda` = pre-Lever-A). At M5.14 closeout (2026-05-30) the canonical `build-cuda` was rebuilt
+to the M5.14 binary (15 `salinity_floor` + 14 `resolve_*_dev` symbols, confirmed) and the temp build + `*_m514`
+job copies were removed — so the canonical `job_ng5_prof`/`job_nsys_ng5` now reproduce these on the M5.14 binary.
 Commits: t4 `2611936` · S `491ccb8` · density `84c1d8d` · fer_w/w_i `0bc7da9`. Lesson **L59**.
+
+**Consolidated figure: `docs/figures/scaling_m514_parity.png`** (`scripts/plot_m514_scaling.py`) — the full
+landed scaling sweep with the M5.14 parity point overlaid. **(a)** strong scaling (NG5 + dars, GPU vs CPU,
+2–16 nodes): GPU strong-scales ~1.85×/doubling (≈92 % efficiency), near-ideal 1/N, easing only at 16N where
+columns thin out; the M5.14 4N GPU point (gold ★, 3.81 s/step) sits *below* the CPU's 4.33. **(b)** node-for-node
+GPU/CPU ratio vs nodes: the M5.13 sweep drifts UP with node count (NG5 1.41× → 1.48× → 1.55× as nod2D/rank falls
+462k → 116k; dars 1.52×/1.60× at 2/4N) — the per-rank-work roll-off (fewer nodes = more work/GPU = nearer parity,
+L58). **Lever A (M5.14) drops NG5 4N from 1.41× to 0.879× — through the parity line into the green "GPU faster"
+band** (the gold arrow). The drift-up reading and L58's "~1.4× launch/MPI asymptote" are *superseded*: S was still
+a hidden full-field PCIe chunk on the M5.13-sweep binary; flipping it crosses parity. Strong-scaling efficiency
+(GPU, per doubling): NG5 93 %/91 % (4→8/8→16N); dars 92 %/93 %/84 % (2→4/4→8/8→16N). CPU strong-scales 95–97 %.
 
 ---
 
