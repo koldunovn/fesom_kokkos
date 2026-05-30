@@ -698,3 +698,43 @@ not a systematic shift. vs Fortran: identical picture (sst/ssh corr 1.00000, sss
 **bit-for-bit the same as M5.13** (0.85019). DRIFT not assessed (single year). **Conclusion: the parity win (NG5 4N
 0.879× node-for-node) cost ZERO climate fidelity** — the M5.14 device-residency flips are statistically identical to
 the M5.13 campaign binary on every field. Campaign (M5.13 + M5.14) is climate-validated end to end.
+
+## §M5.15 — GM-chain device residency (T1+T2): the dominant residual-PCIe source
+
+A clean re-profile of the M5.14 binary (NG5 dist_16, `nsys_ng5/ng5.sqlite` + a `FESOM_SYNC_LOG`-instrumented per-field
+attribution run) **overturned M5.14's "compute-bound" read**: GPU utilization is only **~30 %** of wall (NOT
+compute-bound — the smoother, the #1 *kernel* at 25.7 %, is only ~8 % of *wall*); the step idles ~70 % on data
+movement + halos. Decomposition (steady-state, % of wall): PCIe DtoH 24.7 % (4.11 GB/step), HtoD 9.7 %,
+`MPI_Waitall` 51.3 %, CG `Allreduce` **0.2 %** (the CG-reduction flavor of Lever B is dead — confirms M5.2).
+
+**Per-field DtoH attribution** (the sync-rail logger, ranking mesh-invariant) put the **GM chain** on top:
+`neutral_slope` 18.1, `sigma_xy` 12.3, `fer_K` 6.2, `fer_tapfac` 6.2 MB/step/rank — all **host-bracket halos**
+(`sync_host` DtoH + host `fesom_halo_exchange` = the `MPI_Waitall` + re-import HtoD) or, for `fer_tapfac`/`fer_scal`,
+**verify-only syncs firing in production**. Ice ruled out (all nod2D); KPP's 13-field dump block is debug-gated (off).
+
+**T1+T2 (`81b8947`):** flipped `sigma_xy`/`neutral_slope`/`fer_K` host halos → `fesom_halo_field` (device GPU-aware,
+the L48/M5.13c recipe; `fer_C` kept host = small nod2D), and guarded `fer_tapfac`/`fer_scal` behind `s_verify_gm`
+(device kernels read them OWNED; only the gated verify needs host). One fix kills both costs (the DtoH AND the host
+exchange→device path).
+
+**Validated (full ladder):** Serial gm-verify max|Δ|==0; pi np1+np2 ALL-FIELDS-BIT-IDENTICAL (vs C baseline + nocma);
+SYNCCHECK clean (no production host reader broken — confirms the verify-only classification); **CORE2-active-ice CUDA
+fidelity gate PASS** (worst 8.08e-3, all within ceilings, no staleness regression). Climate-safe (pure residency).
+
+**Result (NG5 dist_16, same-day vs M5.14's 3.80 s/step):**
+
+| metric | M5.14 | T1+T2 | Δ |
+|--|--|--|--|
+| clean step (`job_ng5_prof`) | 3.80 s/step | **3.61** | **−5 %** |
+| `deep_copy` | 6.57 GB/step (121 calls) | **4.84 (116)** | **−26 %** |
+| nsys PCIe DtoH | 4.11 GB/step | 2.35 | **−43 %** |
+| GPU utilization | 29.8 % | 34.0 % | +4 pts |
+| `1b_gm` phase (% of loop) | ~11–16 % | **4.63 %** | collapsed |
+| `MPI_Waitall` | 51.3 % | 47.3 % | −4 pts |
+| node-for-node GPU/CPU | 0.879× | **~0.834×** | GPU ~17 % faster |
+
+The 1.73 GB/step `deep_copy` drop matches the GM fields exactly (`neutral_slope` 765 + `sigma_xy` 517 + `fer_K` 259 +
+`fer_tapfac` 259 MB ≈ 1.8 GB), and the `1b_gm` phase collapse is the direct fingerprint. The `MPI_Waitall` fell only
+4 pts → the bulk of the remaining halo-wait is the *other* exchanges + load-imbalance (the T3 / deferred overlap-B
+target). Tooling: `FESOM_SYNC_LOG` rail in `fesom_field.hpp` (compile-guarded), `job_nsys_ng5` (now MPI-traced),
+`job_synclog_core2`, `job_m515_serial_val`. Plan: `docs/plans/20260530-m515-gm-residency.md`. Lesson L60.

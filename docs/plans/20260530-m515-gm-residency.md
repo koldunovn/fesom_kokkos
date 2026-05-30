@@ -84,7 +84,7 @@ Per field X currently host-bracketed (`X.sync_host()` then `fesom_halo_exchange(
 
 - [x] **T1** — guard GM verify-only syncs (`fer_tapfac`, `fer_scal`) behind `s_verify_gm` (folded into the T2 verify-blocks)
 - [x] **T2** — flip GM host-bracket halos to device: `neutral_slope`, `sigma_xy`, `fer_K` (`fer_C` kept host = small nod2D). **Validated: Serial gm-verify max|Δ|==0, pi np1+np2 ALL-FIELDS-BIT-IDENTICAL, SYNCCHECK clean, CORE2 CUDA gate PASS (worst 8.08e-3, no staleness regression).**
-- [ ] **CP1** — NG5 nsys + scaling checkpoint (recovered PCIe + Waitall; GPU util)
+- [x] **CP1** — NG5 nsys checkpoint: **clean step 3.80→3.61 s/step (−5%), deep_copy 6.57→4.84 GB/step (−26%), nsys DtoH 4.11→2.35 (−43%), GPU util 29.8→34%, 1b_gm phase ~11-16%→4.63%; node-for-node 0.879→~0.834×.** GPU_FIDELITY §M5.15.
 - [ ] **T3** — investigate + flip the nod3D host-readers: `bvfreq` (placebo?), `dbsfc`, `ghats`, `T`/`S`, `hnode_new`
 - [ ] **T4** — `uvnode` surface-only refresh (the hard one; optional/defer)
 - [ ] **CP2 / ACCEPTANCE** — NG5 full sweep + 1-yr CORE2 CUDA climate PASS (L58); decide if Lever B-overlap is still worth it
