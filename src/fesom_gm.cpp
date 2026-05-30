@@ -1108,54 +1108,60 @@ void fesom_compute_sigma_xy_kk(struct fesom_aux           *aux,
     auto elnod      = mesh->elem_nodes_fld.d();
     auto earea      = mesh->elem_area_fld.d();
 
-    Kokkos::parallel_for("fesom_gm_sigma_xy", Kokkos::RangePolicy<>(0, myDim),
-        KOKKOS_LAMBDA(const int n) {
+    /* M5.19 (bucket-A coalescing lever): ONE THREAD PER (node, LEVEL) — flat
+     * RangePolicy(0, myDim*nl) decoded to (n,nz). The old per-node column scratch
+     * tx/ty/sx/sy/vol[NL_MAX] held PER-LEVEL accumulators (no cross-level reduction),
+     * so each (n,nz) thread re-loops the node's surrounding elements (k=o0..o1, the
+     * SAME order) and accumulates ONLY its level nz in registers → the scratch is
+     * eliminated and the per-(n,nz) arithmetic is IEEE op-for-op identical → byte-
+     * identical (Serial AND OpenMP; race-free). Coalescing: sxy is node-major (stride
+     * 2/level) and the T/S gather reads i{0,1,2}=v*nl+nz are level-contiguous, so a warp
+     * of 32 consecutive nz (same node) reads/writes contiguously; the per-element scalars
+     * (grad/elnod/earea) are warp-broadcast (all 32 share node n's elements). The old
+     * one-thread-per-node strided every sxy store by nl*2 (uncoalesced). The element loop
+     * is re-walked per level but the TOTAL arithmetic is unchanged (the element/level
+     * loops just swap order). See docs/GPU_FIDELITY.md §M5.19. */
+    const int myDimNL = myDim * nl;
+    Kokkos::parallel_for("fesom_gm_sigma_xy", Kokkos::RangePolicy<>(0, myDimNL),
+        KOKKOS_LAMBDA(const int idx) {
+            const int n  = idx / nl;
+            const int nz = idx - n * nl;
             int nle_node = nlev_n(n) - 1;       /* exclusive */
             int ule_node = ulev_n(n) - 1;       /* 0-based   */
-            if (nle_node <= ule_node) return;   /* dry */
+            if (nz < ule_node || nz >= nle_node) return;   /* outside the node's column (dry → empty range) */
 
-            real_t tx[NL_MAX], ty[NL_MAX], sx[NL_MAX], sy[NL_MAX], vol[NL_MAX];
-            for (int nz = ule_node; nz < nle_node; ++nz) {
-                tx[nz] = ty[nz] = sx[nz] = sy[nz] = vol[nz] = 0.0;
-            }
-
+            real_t tx = 0.0, ty = 0.0, sx = 0.0, sy = 0.0, vol = 0.0;
             int o0 = off(n);
             int o1 = off(n + 1);
             for (int k = o0; k < o1; ++k) {
                 int el = nie(k);
                 int nle = nlev_e(el) - 1;       /* exclusive  */
                 int ule = ulev_e(el) - 1;       /* 0-based    */
+                if (nz < ule || nz >= nle) continue;        /* element doesn't reach this level */
                 real_t g0 = grad(6*el + 0), g1 = grad(6*el + 1), g2 = grad(6*el + 2);
                 real_t g3 = grad(6*el + 3), g4 = grad(6*el + 4), g5 = grad(6*el + 5);
                 int v0 = elnod(3*el + 0);
                 int v1 = elnod(3*el + 1);
                 int v2 = elnod(3*el + 2);
                 real_t a = earea(el);
-
-                for (int nz = ule; nz < nle; ++nz) {
-                    /* Tracer T/S stored with stride nl (NOT nl-1). */
-                    size_t i0 = (size_t)v0 * nl + nz;
-                    size_t i1 = (size_t)v1 * nl + nz;
-                    size_t i2 = (size_t)v2 * nl + nz;
-                    if (nz < ule_node || nz >= nle_node) continue;
-
-                    vol[nz] += a;
-                    tx[nz] += (g0*T(i0) + g1*T(i1) + g2*T(i2)) * a;
-                    ty[nz] += (g3*T(i0) + g4*T(i1) + g5*T(i2)) * a;
-                    sx[nz] += (g0*S(i0) + g1*S(i1) + g2*S(i2)) * a;
-                    sy[nz] += (g3*S(i0) + g4*S(i1) + g5*S(i2)) * a;
-                }
+                /* Tracer T/S stored with stride nl (NOT nl-1). */
+                size_t i0 = (size_t)v0 * nl + nz;
+                size_t i1 = (size_t)v1 * nl + nz;
+                size_t i2 = (size_t)v2 * nl + nz;
+                vol += a;
+                tx += (g0*T(i0) + g1*T(i1) + g2*T(i2)) * a;
+                ty += (g3*T(i0) + g4*T(i1) + g5*T(i2)) * a;
+                sx += (g0*S(i0) + g1*S(i1) + g2*S(i2)) * a;
+                sy += (g3*S(i0) + g4*S(i1) + g5*S(i2)) * a;
             }
 
-            for (int nz = ule_node; nz < nle_node; ++nz) {
-                real_t inv_vol = (vol[nz] > 0.0) ? 1.0 / vol[nz] : 0.0;
-                real_t a = alpha((size_t)n * nl + nz);
-                real_t b = beta ((size_t)n * nl + nz);
-                sxy((size_t)n * nl * 2 + nz * 2 + 0) =
-                    (-a * tx[nz] + b * sx[nz]) * inv_vol * rho_ref;
-                sxy((size_t)n * nl * 2 + nz * 2 + 1) =
-                    (-a * ty[nz] + b * sy[nz]) * inv_vol * rho_ref;
-            }
+            real_t inv_vol = (vol > 0.0) ? 1.0 / vol : 0.0;
+            real_t a = alpha((size_t)n * nl + nz);
+            real_t b = beta ((size_t)n * nl + nz);
+            sxy((size_t)n * nl * 2 + nz * 2 + 0) =
+                (-a * tx + b * sx) * inv_vol * rho_ref;
+            sxy((size_t)n * nl * 2 + nz * 2 + 1) =
+                (-a * ty + b * sy) * inv_vol * rho_ref;
         });
 
     gm->sigma_xy_fld.modify_device();
@@ -1188,59 +1194,60 @@ void fesom_compute_neutral_slope_kk(struct fesom_aux        *aux,
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
 
-    Kokkos::parallel_for("fesom_gm_neutral_slope", Kokkos::RangePolicy<>(0, myDim),
-        KOKKOS_LAMBDA(const int n) {
+    /* M5.19 (bucket-A coalescing lever): ONE THREAD PER (node, LEVEL) — flat
+     * RangePolicy(0, myDim*nl1) decoded to (n,nz). The old per-node kernel ran 3 passes
+     * with a c1[NL_MAX] column scratch, but every level is INDEPENDENT (Pass 2's c1[nz]
+     * depends only on level nz via bvfreq[nz]/bvfreq[nz+1] — an INPUT read, not a written
+     * neighbor; Pass 3 re-reads ns[nz] which Pass 1 just wrote = the same bits), so the
+     * three passes FUSE into one per-(n,nz) computation with c1 register-local → the
+     * scratch is eliminated and the arithmetic is IEEE op-for-op identical → byte-identical
+     * (Serial AND OpenMP; race-free). Coalescing: ns/st are node-major (stride 3/level),
+     * tf/bvfreq stride 1, sxy stride 2 → a warp of 32 consecutive nz (same node) reads/
+     * writes contiguously; the old one-thread-per-node strided every store by nl1*3 / nl
+     * (uncoalesced). slope_tapered is zeroed for EVERY nz∈[0,nl1) exactly as the C zero
+     * loop (then overwritten on active levels); ns/tf are written only on active levels,
+     * matching the C. See docs/GPU_FIDELITY.md §M5.19. */
+    const int myDimNL1 = myDim * nl1;
+    Kokkos::parallel_for("fesom_gm_neutral_slope", Kokkos::RangePolicy<>(0, myDimNL1),
+        KOKKOS_LAMBDA(const int idx) {
+            const int n  = idx / nl1;
+            const int nz = idx - n * nl1;
+
+            /* Zero slope_tapered for every nz (Fortran line 2979) — overwritten below on active levels. */
+            st((size_t)n * nl1 * 3 + nz * 3 + 0) = 0.0;
+            st((size_t)n * nl1 * 3 + nz * 3 + 1) = 0.0;
+            st((size_t)n * nl1 * 3 + nz * 3 + 2) = 0.0;
+
             int nle = nlev_n(n) - 1;       /* exclusive index for slopes */
             int ule = ulev_n(n) - 1;       /* 0-based */
-
-            /* Zero slope_tapered over the full nz range (Fortran line 2979). */
-            for (int nz = 0; nz < nl1; ++nz) {
-                st((size_t)n * nl1 * 3 + nz * 3 + 0) = 0.0;
-                st((size_t)n * nl1 * 3 + nz * 3 + 1) = 0.0;
-                st((size_t)n * nl1 * 3 + nz * 3 + 2) = 0.0;
-            }
-
-            if (nle <= ule) return;
+            if (nle <= ule) return;        /* dry node */
+            if (nz < ule || nz >= nle) return;   /* inactive level — st stays zeroed; ns/tf untouched */
 
             /* Pass 1: neutral_slope from sigma_xy / N². */
-            for (int nz = ule; nz < nle; ++nz) {
-                real_t bv_sum = bvfreq((size_t)n * nl + nz)
-                              + bvfreq((size_t)n * nl + (nz + 1));
-                real_t denom  = (bv_sum > eps_sq) ? bv_sum : eps_sq;
-                real_t ro_z_inv = 2.0 * g / rho_ref / denom;
+            real_t bv_sum = bvfreq((size_t)n * nl + nz)
+                          + bvfreq((size_t)n * nl + (nz + 1));
+            real_t denom  = (bv_sum > eps_sq) ? bv_sum : eps_sq;
+            real_t ro_z_inv = 2.0 * g / rho_ref / denom;
+            real_t sx = sxy((size_t)n * nl * 2 + nz * 2 + 0) * ro_z_inv;
+            real_t sy = sxy((size_t)n * nl * 2 + nz * 2 + 1) * ro_z_inv;
+            real_t sm = Kokkos::sqrt(sx*sx + sy*sy);
+            ns((size_t)n * nl1 * 3 + nz * 3 + 0) = sx;
+            ns((size_t)n * nl1 * 3 + nz * 3 + 1) = sy;
+            ns((size_t)n * nl1 * 3 + nz * 3 + 2) = sm;
 
-                real_t sx = sxy((size_t)n * nl * 2 + nz * 2 + 0) * ro_z_inv;
-                real_t sy = sxy((size_t)n * nl * 2 + nz * 2 + 1) * ro_z_inv;
-                real_t sm = Kokkos::sqrt(sx*sx + sy*sy);
-                ns((size_t)n * nl1 * 3 + nz * 3 + 0) = sx;
-                ns((size_t)n * nl1 * 3 + nz * 3 + 1) = sy;
-                ns((size_t)n * nl1 * 3 + nz * 3 + 2) = sm;
-            }
+            /* Pass 2: ODM95 tapering c1 (register-local; reads ns[nz]==sm just written). */
+            real_t v = 0.5 * (1.0 + Kokkos::tanh((ODM95_Scr - sm) / ODM95_Sd));
+            real_t bv0 = bvfreq((size_t)n * nl + nz);
+            real_t bv1 = bvfreq((size_t)n * nl + (nz + 1));
+            if (bv0 <= 0.0 || bv1 <= 0.0) v = 0.0;
+            real_t cc = v;                               /* c1 * c2 = c1 (c2≡1) */
 
-            /* Pass 2: ODM95 tapering c1. */
-            real_t c1[NL_MAX];
-            for (int nz = 0; nz < nl1; ++nz) c1[nz] = 1.0;
-            for (int nz = ule; nz < nle; ++nz) {
-                real_t sm = ns((size_t)n * nl1 * 3 + nz * 3 + 2);
-                real_t v = 0.5 * (1.0 + Kokkos::tanh((ODM95_Scr - sm) / ODM95_Sd));
-                real_t bv0 = bvfreq((size_t)n * nl + nz);
-                real_t bv1 = bvfreq((size_t)n * nl + (nz + 1));
-                if (bv0 <= 0.0 || bv1 <= 0.0) v = 0.0;
-                c1[nz] = v;
-            }
-
-            /* Pass 3: combine c1*c2 (c2≡1) → fer_tapfac=c1, slope_tapered=ns*sqrt(c1). */
-            for (int nz = ule; nz < nle; ++nz) {
-                real_t cc = c1[nz];                          /* c1 * c2 = c1 */
-                tf((size_t)n * nl + nz) = cc;
-                real_t s = Kokkos::sqrt(cc);
-                real_t sx = ns((size_t)n * nl1 * 3 + nz * 3 + 0);
-                real_t sy = ns((size_t)n * nl1 * 3 + nz * 3 + 1);
-                real_t sm = ns((size_t)n * nl1 * 3 + nz * 3 + 2);
-                st((size_t)n * nl1 * 3 + nz * 3 + 0) = sx * s;
-                st((size_t)n * nl1 * 3 + nz * 3 + 1) = sy * s;
-                st((size_t)n * nl1 * 3 + nz * 3 + 2) = sm * s;
-            }
+            /* Pass 3: fer_tapfac=c1, slope_tapered=ns*sqrt(c1) (sx/sy/sm == ns[nz]). */
+            tf((size_t)n * nl + nz) = cc;
+            real_t s = Kokkos::sqrt(cc);
+            st((size_t)n * nl1 * 3 + nz * 3 + 0) = sx * s;
+            st((size_t)n * nl1 * 3 + nz * 3 + 1) = sy * s;
+            st((size_t)n * nl1 * 3 + nz * 3 + 2) = sm * s;
         });
 
     gm->neutral_slope_fld.modify_device();

@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ncu519
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu519.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu519.%j.err
+# M5.19 ncu A/B on the bucket-A coalescing flips, NG5 dist_16 rank0. Targeted --metrics so BEFORE
+# (m518: vel_rhs/sigma_xy/neutral_slope one-thread-per-elem/node) + AFTER (m519: one-thread-per-(.,level))
+# both carry the sectors/req coalescing counter. ncu --kernel-name matches the demangled ENCLOSING fn.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+export NCU_REGEX='compute_vel_rhs|compute_sigma_xy|compute_neutral_slope'   # enclosing fn names
+export NCU_SKIP=16    # ~4 matched kernels/step (vel_rhs_elem+assembly+sigma_xy+neutral_slope) x 4 spin-up steps
+export NCU_COUNT=20   # ~5 steps steady-state
+export NCU_METRICS='gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,dram__throughput.avg.pct_of_peak_sustained_elapsed,l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio,l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio'
+
+profile () {  # $1=binary $2=tag
+  local OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ncu519_$2; rm -rf "$OUT"; mkdir -p "$OUT"
+  export FESOM="$1"; export NCU_OUT="$OUT/kern"
+  echo "######## ncu $2 :: $1 ########"
+  srun "$ROOT/jobs/ncu_rank0.sh" "$MESH" "$OUT" 180 12 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "srun rc=$?"
+  ncu -i "$NCU_OUT.ncu-rep" --csv --page raw > "$OUT/metrics.csv" 2>&1 \
+    && echo "metrics.csv: $(wc -l < "$OUT/metrics.csv") rows"
+  rm -f "$OUT"/*.monthly.nc
+}
+
+profile "$ROOT/build-cuda/fesom_port_m518" before
+profile "$ROOT/build-cuda/fesom_port_m519" after
+echo "=== done — compare ncu519_before/metrics.csv vs ncu519_after/metrics.csv ==="

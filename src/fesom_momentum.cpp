@@ -400,15 +400,21 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
             }
         });
 
-    /* 3. divide by scalar control-volume area (Fortran 550-555). Per-node, race-free. */
-    Kokkos::parallel_for("fesom_momadv_area", Kokkos::RangePolicy<>(0, Nmy),
-        KOKKOS_LAMBDA(const int n) {
+    /* 3. divide by scalar control-volume area (Fortran 550-555). Per-node, race-free.
+     * M5.19 bucket-A coalescing flip: one thread per (node, LEVEL) — un is node-major
+     * (FESOM_ELEMVEC(n,nz)=n*nl*2+nz*2) so the level is the contiguous inner dim → the
+     * per-(n,nz) warp coalesces (vs the old one-thread-per-node strided-by-nl*2 store).
+     * Pure per-level map (no scratch/coupling) → byte-identical. */
+    const int NmyNL_a = Nmy * nl;
+    Kokkos::parallel_for("fesom_momadv_area", Kokkos::RangePolicy<>(0, NmyNL_a),
+        KOKKOS_LAMBDA(const int idx) {
+            const int n  = idx / nl;
+            const int nz = idx - n * nl;
             int ul = ulev_n(n) - 1, bl = nlev_n(n) - 2;
-            for (int nz = ul; nz <= bl; ++nz) {
-                real_t inv = 1.0 / areasvol(FESOM_NODE3D(n, nz, nl));
-                un(FESOM_ELEMVEC(n,nz,nl)+0) *= inv;
-                un(FESOM_ELEMVEC(n,nz,nl)+1) *= inv;
-            }
+            if (nz < ul || nz > bl) return;            /* [ul, bl] inclusive — matches the C loop */
+            real_t inv = 1.0 / areasvol(FESOM_NODE3D(n, nz, nl));
+            un(FESOM_ELEMVEC(n,nz,nl)+0) *= inv;
+            un(FESOM_ELEMVEC(n,nz,nl)+1) *= inv;
         });
 
     /* 4. exchange uvnode_rhs (Fortran 559) — INTERNAL nod3D halo bracket (D21).
@@ -418,17 +424,22 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
 
     /* 5. vertex → element: uv_rhsAB += elem_area·mean(3 vertices) (Fortran 565-573).
        Per-element gather (each element writes only its own uv_rhsAB) → race-free, no atomic. */
-    Kokkos::parallel_for("fesom_momadv_v2e", Kokkos::RangePolicy<>(0, Emy),
-        KOKKOS_LAMBDA(const int el) {
+    /* M5.19 bucket-A coalescing flip: one thread per (elem, LEVEL) — uv_rhsAB store and the
+     * 3 vertex un reads are level-contiguous per element → coalesced; `a` is a per-element
+     * scalar (warp-broadcast). Each (el,nz) is touched by one thread → byte-identical. */
+    const int EmyNL = Emy * nl;
+    Kokkos::parallel_for("fesom_momadv_v2e", Kokkos::RangePolicy<>(0, EmyNL),
+        KOKKOS_LAMBDA(const int idx) {
+            const int el = idx / nl;
+            const int nz = idx - el * nl;
             int ul = ulev_e(el) - 1, bl = nlev_e(el) - 2;
+            if (nz < ul || nz > bl) return;
             int v0 = elnod(3*el+0), v1 = elnod(3*el+1), v2 = elnod(3*el+2);
             real_t a = area(el);
-            for (int nz = ul; nz <= bl; ++nz) {
-                uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+0) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+0)
-                    + un(FESOM_ELEMVEC(v1,nz,nl)+0) + un(FESOM_ELEMVEC(v2,nz,nl)+0)) / 3.0;
-                uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+1) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+1)
-                    + un(FESOM_ELEMVEC(v1,nz,nl)+1) + un(FESOM_ELEMVEC(v2,nz,nl)+1)) / 3.0;
-            }
+            uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+0) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+0)
+                + un(FESOM_ELEMVEC(v1,nz,nl)+0) + un(FESOM_ELEMVEC(v2,nz,nl)+0)) / 3.0;
+            uv_rhsAB(FESOM_ELEMVEC(el,nz,nl)+1) += a * (un(FESOM_ELEMVEC(v0,nz,nl)+1)
+                + un(FESOM_ELEMVEC(v1,nz,nl)+1) + un(FESOM_ELEMVEC(v2,nz,nl)+1)) / 3.0;
         });
 }
 
@@ -469,20 +480,40 @@ void fesom_compute_vel_rhs_kk(const struct fesom_mesh *mesh,
     auto pgf_x    = aux->pgf_x_fld.d();
     auto pgf_y    = aux->pgf_y_fld.d();
 
-    /* Per-element: (i) AB history shift, (ii) SSH grad + PGF, (iii) store Coriolis. Race-free. */
-    Kokkos::parallel_for("fesom_vel_rhs_elem", Kokkos::RangePolicy<>(0, E),
-        KOKKOS_LAMBDA(const int e) {
-            int nzmin = ulev(e) - 1;
-            int nzmax = nlev(e) - 1;
+    /* M5.19 (bucket-A coalescing lever, the M5.18 flat-lever recipe): ONE THREAD PER
+     * (elem, LEVEL) — flat RangePolicy(0, E*nl) decoded to (e,nz). uv_rhs/uv_rhsAB are
+     * element-major (FESOM_ELEMVEC = e*nl*2 + nz*2) and pgf_x/pgf_y are FESOM_ELEM3D =
+     * e*nl + nz, so the LEVEL is the contiguous inner dim: a warp of 32 consecutive flat
+     * idx = e*nl + nz spans 32 consecutive LEVELS of the same element → every uv_rhs/
+     * uv_rhsAB store (stride-2 component = 64 contiguous doubles/warp) and every pgf load
+     * is CONTIGUOUS → COALESCED, and the per-(elem,depth) divergence vanishes (one level/
+     * thread). The old M2.4 mapping was one-thread-per-ELEMENT with an internal nz loop →
+     * consecutive threads = consecutive ELEMENTS → every store strided by nl*2=140 =
+     * uncoalesced (the same disease the M5.18 smoother had at 25.7% of GPU compute). The
+     * per-element scalars (pre0..2, Fx, Fy, areav, ff) recompute per thread; within a warp
+     * all threads share ONE element so eta_n/gradsca/area/coriolis are read once
+     * (warp-broadcast) → cheap (a few FLOPs, not nl× the memory). The per-(e,nz) arithmetic
+     * runs in the SAME statement order as the C twin (AB-shift store, THEN += PGF), IEEE
+     * op-for-op, and each thread reads-then-writes only its OWN k (no cross-level/-thread
+     * coupling) → byte-identical → Serial AND OpenMP bit-identical (no scatter); CUDA
+     * climate-close. Wasted shallow-column tail (avg depth < nl) is acceptable for a
+     * memory-bound kernel — coalescing + occupancy dominate. See docs/GPU_FIDELITY.md §M5.19. */
+    const int Eonl = E * nl;        /* E*nl < INT_MAX for any real rank */
+    Kokkos::parallel_for("fesom_vel_rhs_elem", Kokkos::RangePolicy<>(0, Eonl),
+        KOKKOS_LAMBDA(const int idx) {
+            const int e  = idx / nl;
+            const int nz = idx - e * nl;
+            const int nzmin = ulev(e) - 1;
+            const int nzmax = nlev(e) - 1;
+            if (nz < nzmin || nz >= nzmax) return;   /* [nzmin, nzmax) — matches the C loop bound */
+
             int n0 = elnod(3*e + 0);
             int n1 = elnod(3*e + 1);
             int n2 = elnod(3*e + 2);
 
-            for (int nz = nzmin; nz < nzmax; ++nz) {            /* (i) AB history shift */
-                size_t k = FESOM_ELEMVEC(e, nz, nl);
-                uv_rhs(k + 0) = ab1 * uv_rhsAB(k + 0);
-                uv_rhs(k + 1) = ab1 * uv_rhsAB(k + 1);
-            }
+            size_t k = FESOM_ELEMVEC(e, nz, nl);
+            uv_rhs(k + 0) = ab1 * uv_rhsAB(k + 0);              /* (i) AB history shift */
+            uv_rhs(k + 1) = ab1 * uv_rhsAB(k + 1);
 
             real_t pre0 = -g * eta_n(n0);
             real_t pre1 = -g * eta_n(n1);
@@ -494,18 +525,15 @@ void fesom_compute_vel_rhs_kk(const struct fesom_mesh *mesh,
             real_t areav = area(e);
             real_t ff    = coriolis(e) * areav;
 
-            for (int nz = nzmin; nz < nzmax; ++nz) {            /* (ii) and (iii) */
-                size_t k   = FESOM_ELEMVEC(e, nz, nl);
-                size_t kel = FESOM_ELEM3D(e, nz, nl);
-                real_t pgfx = pgf_x(kel);
-                real_t pgfy = pgf_y(kel);
-                uv_rhs(k + 0) += (Fx - pgfx) * areav;
-                uv_rhs(k + 1) += (Fy - pgfy) * areav;
-                real_t u = uv(k + 0);
-                real_t v = uv(k + 1);
-                uv_rhsAB(k + 0) =  v * ff;
-                uv_rhsAB(k + 1) = -u * ff;
-            }
+            size_t kel = FESOM_ELEM3D(e, nz, nl);               /* (ii) and (iii) */
+            real_t pgfx = pgf_x(kel);
+            real_t pgfy = pgf_y(kel);
+            uv_rhs(k + 0) += (Fx - pgfx) * areav;
+            uv_rhs(k + 1) += (Fy - pgfy) * areav;
+            real_t u = uv(k + 0);
+            real_t v = uv(k + 1);
+            uv_rhsAB(k + 0) =  v * ff;
+            uv_rhsAB(k + 1) = -u * ff;
         });
 
     /* Momentum advection (momadv_opt=2): adds ke_adv into uv_rhsAB (device; edge scatter
@@ -514,16 +542,20 @@ void fesom_compute_vel_rhs_kk(const struct fesom_mesh *mesh,
 
     /* Final assembly with ff_step (1.0 on the first step to match Fortran's lfirst). Race-free. */
     const real_t ff_step = is_first_step ? 1.0 : ab2;
-    Kokkos::parallel_for("fesom_vel_rhs_assembly", Kokkos::RangePolicy<>(0, E),
-        KOKKOS_LAMBDA(const int e) {
-            int nzmin = ulev(e) - 1;
-            int nzmax = nlev(e) - 1;
+    /* M5.19 bucket-A: same flat (elem,LEVEL) coalescing flip as fesom_vel_rhs_elem above —
+     * pure per-level map (inv_area is the only per-element scalar, one division/thread,
+     * warp-broadcast inputs). Same expression, op-for-op → byte-identical. */
+    Kokkos::parallel_for("fesom_vel_rhs_assembly", Kokkos::RangePolicy<>(0, Eonl),
+        KOKKOS_LAMBDA(const int idx) {
+            const int e  = idx / nl;
+            const int nz = idx - e * nl;
+            const int nzmin = ulev(e) - 1;
+            const int nzmax = nlev(e) - 1;
+            if (nz < nzmin || nz >= nzmax) return;
             real_t inv_area = 1.0 / area(e);
-            for (int nz = nzmin; nz < nzmax; ++nz) {
-                size_t k = FESOM_ELEMVEC(e, nz, nl);
-                uv_rhs(k + 0) = dt * (uv_rhs(k + 0) + uv_rhsAB(k + 0) * ff_step) * inv_area;
-                uv_rhs(k + 1) = dt * (uv_rhs(k + 1) + uv_rhsAB(k + 1) * ff_step) * inv_area;
-            }
+            size_t k = FESOM_ELEMVEC(e, nz, nl);
+            uv_rhs(k + 0) = dt * (uv_rhs(k + 0) + uv_rhsAB(k + 0) * ff_step) * inv_area;
+            uv_rhs(k + 1) = dt * (uv_rhs(k + 1) + uv_rhsAB(k + 1) * ff_step) * inv_area;
         });
 
     dyn->uv_rhs_fld.modify_device();

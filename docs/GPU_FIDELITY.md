@@ -974,3 +974,95 @@ smoother (unsmoothed bvfreq), and `kpp` covers blmc only transitively through th
 
 Tooling added this session: `jobs/job_ng5_m518_ab` (same-node clean+profile A/B), `jobs/job_ncu_smooth_ab` (ncu A/B
 with the sectors/req metric), `ncu_rank0.sh` `NCU_METRICS` override. Lesson **L63**.
+
+## §M5.19 — generalize the coalescing lever to `compute_vel_rhs` + GM `sigma_xy`/`neutral_slope` (the next memory-bound node/element-major kernels)
+
+M5.18 proved the lever on the #1 kernel (the smoother). §M5.19 generalizes it. **Step-0 re-profile** (`jobs/job_ng5_prof`
++ `jobs/job_nsys_ng5` on the M5.18 binary) confirmed the smoother dropped out of the top (`fesom_smooth_gather`
+25.7 %→**0.60 %**) and gave the post-M5.18 ranking: `13_fct` 22.8 %, `3_mixing` 10.1 %, `1b_gm` 7.5 %, `12_ale` 6.7 %,
+`4_velrhs` 4.4 %; the fattest single coalescing targets = `fesom_vel_rhs_elem` 1.73 %, `fesom_gm_sigma_xy` 1.67 %,
+`fesom_vel_rhs_assembly` 0.88 %, `fesom_gm_neutral_slope` 0.80 %.
+
+**The classification (code-read, not profile-driven — the bucket dictates the technique):**
+
+| bucket | recognize | technique | this session |
+|--|--|--|--|
+| **A. pure per-level map** | internal `for(nz)` from same-level/fixed-per-column reads; no scratch/scan | the M5.18 flat lever: `RangePolicy(0, N*nl)`, decode `(n,nz)`, mask, register-write | `vel_rhs_elem`, `vel_rhs_assembly`, `momadv_area`, `momadv_v2e`, `update_vel`(M5.20) |
+| **B. per-column** | column scratch / multi-pass / vertical-neighbor coupling | TeamPolicy, **OR** if the "scratch" is really per-level accumulators / the passes have no cross-level WRITE dep → the flat lever still applies (see GM below) | GM `sigma_xy`+`neutral_slope` (turned out flat-lever-able); `momadv_vert`, FCT `zal_a34`, `qr4c_v` deferred |
+| **C. TDMA** | down-then-up column sweep, `nz` depends on `nz-1` | Lever C layout only | `impl_vert_visc`, `fer_solve_gamma`, `impl_vert_diff_tracers` |
+| **D. scatter** | `atomic_add` from an edge/element loop | different axis | `momadv_horiz`, `visc_bidiff`, FCT `*_h`/`LO_scatter`, redi edges |
+
+**KEY FINDING — GM `sigma_xy`/`neutral_slope` are flat-lever-able, NOT TeamPolicy (the prompt guessed B→TeamPolicy):**
+- `sigma_xy`'s `tx/ty/sx/sy/vol[NL_MAX]` "column scratch" holds **per-level accumulators with no cross-level reduction**.
+  A per-`(n,nz)` thread re-walks the node's surrounding elements (`k=o0..o1`, the SAME order) and accumulates ONLY its
+  level in registers → scratch eliminated, element/level loops just swap order, total arithmetic unchanged → byte-identical.
+- `neutral_slope`'s 3 passes + `c1[NL_MAX]` have **no cross-level WRITE dependency** (Pass 2's `c1[nz]` reads only
+  `bvfreq[nz]`/`bvfreq[nz+1]` — INPUTS; Pass 3 re-reads `ns[nz]` = the bits Pass 1 just wrote). The passes **fuse** into one
+  per-`(n,nz)` computation with `c1` register-local → byte-identical.
+- Lesson: a "column scratch" is only a true bucket-B blocker when it carries a CROSS-LEVEL reduction or a recurrence on
+  WRITTEN values. Per-level accumulators and input-only neighbor reads are still bucket A. Always read the scratch's data flow.
+
+The 4 momentum maps (`vel_rhs_elem`/`assembly` `src/fesom_momentum.cpp:491,537`; `momadv_area`/`v2e` `:404,421`) + 2 GM maps
+(`fesom_gm_sigma_xy`/`neutral_slope` `src/fesom_gm.cpp`) were all flipped to one-thread-per-(elem/node, LEVEL). Element/node
+scalars (`Fx/Fy/ff`, `grad/area`) recompute per thread but are warp-broadcast (all 32 threads in a warp share one element/node).
+
+**Perf — same-day SAME-NODE A/B (`jobs/job_ng5_m519_ab`, job 25249075; m518 vs m519 back-to-back in one allocation):**
+
+| run (clean, no profiler fences) | s/step |
+|--|--|
+| BEFORE (m518) | 2.1278 |
+| **AFTER (m519)** | **2.0139** |
+| | **−5.35 %** |
+
+The `FESOM_STEP_PROFILE` breakdown attributes it to exactly the two touched phases: **`4_velrhs` 0.0955→0.0323 s/step
+(−66 %)** + **`1b_gm` 0.1638→0.1137 (−31 %)** = **−0.1133 s/step**, ≈ the clean-step delta (−0.1139); every other phase is
+byte-stable (`13_fct` 0.4978→0.4976, `3_mixing` 0.2203→0.2196, `12_ale` 0.1460→0.1458, `7_ssh`/`ice`/`eos`/`force` flat).
+`fesom_gm_sigma_xy`/`fesom_vel_rhs_elem` fall out of the top-17 kernels entirely after the flip.
+
+**ncu A/B (`jobs/job_ncu_m519_ab`, job 25249076, NG5 dist_16 rank0, `--metrics` w/ the sectors/req coalescing counter):**
+
+| kernel | dur ms (B→A) | SM % (B→A) | occ % (B→A) | LD sec/req | ST sec/req |
+|--|--|--|--|--|--|
+| `vel_rhs_elem` | 37.8 → 2.8 (**13.4×**) | 2.5 → 18.0 | 70.9 → 71.0 | 30.2 → 3.8 | 30.8 → 13.2 |
+| `compute_sigma_xy` | 36.4 → 2.9 (**12.6×**) | 2.0 → 43.8 | 52.6 → 56.8 | 22.4 → 3.0 | 30.6 → 13.2 |
+| `vel_rhs_assembly` | 19.0 → 1.6 (**12.0×**) | 1.7 → 22.7 | 93.6 → 92.5 | 29.7 → 7.9 | 30.8 → 13.2 |
+| `compute_neutral_slope` | 17.8 → 1.7 (**10.6×**) | 3.1 → 29.9 | 53.1 → 67.7 | 30.0 → 7.4 | 31.1 → 20.0 |
+
+Identical M5.18 signature: before = ~2–3 % SM util (ALUs idle on memory latency), LD ~22–30 sectors/req (uncoalesced
+node/element-major stores strided by `nl·2`); after = LD 3–8 sectors/req, SM 18–44 %, **10–13× per-kernel**. The ncu durations
+match the per-step profile (e.g. `vel_rhs_elem` 37.8 ms ≈ profile 37.7 ms), and the 4 kernels' savings (~102 ms/step) ≈ the
+clean-step delta (114 ms) → **the −5.35 % is fully attributed to the coalescing flips** (the rest = the tiny `momadv_*` maps).
+
+### Validation — bit-identical → the M2.x gate (same discipline as M5.18)
+All six flips are race-free maps with the per-`(n,nz)` arithmetic IEEE op-for-op identical to the C twin → **Serial bit-identical**
+(which, for a race-free map, ⟹ OpenMP bit-identical; the only OpenMP non-determinism in the momentum chain is the pre-existing,
+untouched `momadv_horiz` D22 scatter).
+- **`FESOM_KK_VERIFY=vrhs` Serial**: `uv_rhs`=0.000e+00, `uv_rhsAB`=0.000e+00 every step (covers the whole momentum-rhs chain
+  incl. `momadv_area`/`v2e`). **`FESOM_KK_VERIFY=gm` Serial**: `sigma_xy`=0, `neutral_slope`/`slope_tapered`/`fer_tapfac`=0, and
+  the entire downstream GM chain (`fer_K`/`fer_gamma`/`fer_uv`/`redi`)=0.000e+00.
+- **pi np1 + np2** (100/20/10, analytical, build-serial → ordered scatter → full bit-identity): **ALL FIELDS BIT-IDENTICAL** vs the
+  golden + the np2 nocma oracle. (GM is ON in pi, so the GM flips are exercised end-to-end.)
+- **SYNCCHECK** clean (no sync-rail change — pure kernel re-parallelization).
+- **CUDA fidelity gate** (`gpu_fidelity_gate.sh --fresh-oracle`, CORE2 dist_8 ICE ACTIVE): **PASS** — all fields at the
+  climate-close floor (worst h_ice 1.718e-3; T 1.7e-4, density 3.3e-4, bvfreq 3.8e-7) → ZERO new divergence vs M5.18.
+- **1-yr CORE2 CUDA climate PASS** (`m32_cuda_m519_1yr`, 17280 steps, clean: T[-2.01,31.27] S[3.95,41.05], no nan): **vs
+  `m32_cuda_m518_1yr` apples-to-apples (the zero-cost proof) — every field corr=1.00000, bias O(1e-6–1e-7), RMS O(1e-4–1e-5)
+  → M5.19 ≡ M5.18 to the D22 atomic-scatter floor, ZERO climate cost.** vs C-port (KPP): sst/ssh corr 1.00000, sss 0.99996,
+  a_ice/m_ice 0.99997–0.99998, uice **0.99978** (identical to M5.18). vs Fortran (science budget): corr ~1; uice 0.91872 = the
+  known, faithfully-reproduced C-vs-Fortran EVP difference ([[feedback-ice-mask-averaging]]), unchanged from M5.18. **M5.19 COMPLETE.**
+
+### Remaining coalescing headroom (for M5.20) — classified, not yet flipped
+- **Bucket A (flat lever, ready):** `fesom_update_vel` (0.82 %, `fesom_momentum.cpp:1106`, clean per-elem map, `ssh` verify);
+  FCT `fct_zal_a1` (0.71 %, per-node map), `fct_zal_a2` (0.64 %, per-elem map), `fct_qr4c_v` (0.58 %, per-node — vertical
+  reads `valsAB[nz±1,±2]` are INPUTS → flat-lever-able), `fct_grad_elem`, `fct_LO_final`, `fct_f2d_v`, `fct_ale_recon` (each
+  0.4–0.9 %). All in `fesom_tracer_adv.cpp`, validated by `tradv` (L37 capture-before on `values`+`valuesold`).
+- **Bucket B (true scratch/coupling):** `momadv_vert` (0.54 %, `wu[nz]-wu[nz+1]` coupling + element-gather-into-scratch);
+  FCT `fct_zal_a34` (1.03 %, `tvmax[]` cluster with vertical 3-layer dependency on WRITTEN values).
+- **Bucket C (TDMA, Lever C only):** `impl_vert_diff_tracers` 1.61 %, `impl_vert_visc` 0.69 %, `fer_solve_gamma` 0.47 %.
+- **Bucket D (scatter):** the FCT `*_h` edge scatters (`mfct_h` 1.59 %, `eud_fill` 1.73 % is per-edge+node-gather, B-ish),
+  `momadv_horiz`, `visc_bidiff`, `ale_vvel_scatter`, redi edges.
+- **The biggest single phase, `13_fct` (22.8 %), is ~24 small mixed-bucket sub-kernels** — the clean bucket-A ones sum to
+  ~3–4 % but each is <0.9 % and they share scratch inside one giant function → higher per-kernel risk, lower per-kernel ROI than
+  the momentum/GM kernels just done. Attack FCT bucket-A in a focused M5.20 pass with the `tradv` verify on each.
+
+Tooling added: `jobs/job_ng5_m519_ab`, `jobs/job_ncu_m519_ab` (NCU_REGEX = enclosing-fn names `compute_vel_rhs|compute_sigma_xy|compute_neutral_slope`), `scripts/ncu_coalesce_summary.py`. Lesson **L64**.
