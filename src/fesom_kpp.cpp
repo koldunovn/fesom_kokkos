@@ -1589,13 +1589,25 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
      * bracket on Serial) — removes the sync_host → host-exchange → re-push round trip. Both are
      * read at HALO right below: viscA by the node→elem average (element vertices can be halo
      * nodes), diffK slab-0 by the single-Kv deep_copy. The slab offset is the M5.5b blmc recipe
-     * (base_off = j*slab). ghats stays HOST (gated off in CORE2, not read on device after — see
-     * the comment above) → its sync_host + host exchange remain unchanged. */
+     * (base_off = j*slab). */
     fesom_halo_field(k->diffK_fld, FESOM_HALO_NOD3D, nl, 1, partit, 0 * slab);
     fesom_halo_field(k->diffK_fld, FESOM_HALO_NOD3D, nl, 1, partit, 1 * slab);
     fesom_halo_field(k->viscA_fld, FESOM_HALO_NOD3D, nl, 1, partit);
-    k->ghats_fld.sync_host();
-    fesom_exchange_nod3D(k->ghats_fld.h_checked(), nl - 1, partit);
+    /* M5.21 (Lever 2a, L66): ghats (the KPP non-local transport term) is UNCONSUMED — the port has
+     * use_kpp_nonlclflx=.false., so the tracer-diffusion non-local flux is skipped
+     * (fesom_tracer_diff.cpp:19,291) and NOTHING reads ghats on host OR device after combine
+     * (the kpp verify diffs only Kv/Av; the sole host reader is the FESOM_KPP_DUMP_DIR diagnostic).
+     * Its per-step sync_host (255.8 MB/step D2H on NG5 — the #1 per-field PCIe driver, a blocking
+     * fence in the mixing substep) + host halo exchange were a pure PLACEBO. Skipped in production;
+     * kept ONLY when the dump diagnostic will read host ghats this step, so the dump stays exact.
+     * Removing dead data changes NO computed field → BIT-IDENTICAL (Serial AND CUDA). ⚠️ RESTORE the
+     * unconditional sync_host + exchange if the KPP non-local flux is ever ported/enabled — a real
+     * ghats consumer would then exist (the L36/L39 "device consumer" rule). ghats stays
+     * device-authoritative (modify_device above); the dump path syncs it on demand. */
+    if (fesom_kpp_dump_this_step(s_kpp_call)) {
+        k->ghats_fld.sync_host();
+        fesom_exchange_nod3D(k->ghats_fld.h_checked(), nl - 1, partit);
+    }
 
     /* node→elem viscAE = Σ(viscA over 3 vertices)/3 + bottom fill + minmix (:475-490) */
     Kokkos::parallel_for("kpp_viscAE", Kokkos::RangePolicy<>(0, mesh->myDim_elem2D),
