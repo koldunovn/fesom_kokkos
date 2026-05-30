@@ -776,3 +776,83 @@ floor) — vs C-port: sst/ssh corr 1.00000, sss/a_ice/m_ice 0.99996–0.99998, b
 identical, `uice`-vs-Fortran 0.85019 = the known C↔F ice-drift budget (bit-for-bit the M5.13/M5.14 number). **The
 GM-chain residency cost ZERO climate fidelity** — the whole residency arc (M5.13 → M5.14 → M5.15) is climate-neutral
 end to end. **M5.15 COMPLETE.**
+
+## §M5.16 — port `fesom_bulk_compute` to a device per-surface-node map (the forcing-compute lever)
+
+The M5.15 close MEASURED the forcing phase (gated FPROF split, `fesom_main.cpp`): `force:bulk_compute` = **16.0 % of
+the NG5 step** (0.55 s/step) — the L&Y09 air-sea bulk formulae ran **single-threaded on the GPU build's Kokkos-Serial
+host** (the blmc/L49 trap: a host loop nsys can't see — it profiles GPU kernels only). M5.16 ports it to a
+`KOKKOS_LAMBDA` per-surface-node MAP over `[0,N)` (the EOS/KPP/ice-thermo device-map class, L39/L45): `ncar_ocean_-
+fluxes_mode` + `obudget` become `KOKKOS_INLINE_FUNCTION` device twins (std math → `Kokkos::`; the scalar `BULK_*`/
+`FESOM_CD_ATM_ICE` are `#define`s, `z_wind/z_tair/z_shum` captured by value); the **8 JRA55 surface fields are HtoD'd
+at bulk**; **SST=`T`[surface] + `uvnode` are read on the DEVICE.**
+
+**THE RESIDENCY UNLOCK.** `T` and `uvnode` were the LAST genuinely-required per-step DtoH (the L50 class — proven by
+the M5.9-pin NaN-poison discriminator that bulk was their SOLE host reader). With bulk reading them on-device, the
+per-step `T` `sync_host` (`fesom_step.cpp:900`) and `uvnode` `sync_host` (`:334`) are **GONE** → the ~nod3D + nod3D×2
+DtoH/step disappears. (Confirmed I/O-safe: `T` snapshot output is covered by the pre-I/O `sync_host`, `fesom_main.cpp`,
+L48; `uvnode` is not a snapshot field; `ocean2ice` reads `T` via `.d()`.)
+
+**Phase A (drop-in).** `fesom_bulk_compute_kk` writes ALL outputs on device, halos `{stress_node_surf,heat_flux,
+water_flux}` via `fesom_halo_field`, then **`sync_host`s the full output set** so the downstream is byte-for-byte the
+host-authoritative state the C twin left: `oce_fluxes_mom` [host] reads `stress_node_surf`; the ice-step IN rails
+(`Ch_atm_oce`/`Ce_atm_oce` → thermo, `stress_atmice` → EVP); the host element-interp → `stress_surf`; the ocean-step
+re-pushes. **No downstream edit** → minimal validation surface. The win is the device COMPUTE + the removed `T`/`uvnode`
+DtoH, not these small nod2D round-trips; making `forcing` fully device-resident (drop the output `sync_host` + the
+downstream re-pushes) is the measured **Phase B follow-on** (it would reclaim the deep_copy that Phase A re-adds).
+
+**Validated (full ladder):**
+- **Serial `bulk` verify max|Δ|==0** (`job_bulk_verify_core2`, CORE2 dist_16, JRA active, 60 steps): all 8 outputs
+  (`sns/ss/hf/wf/Ch/Ce/satmx/satmy`) bit-identical to the C twin every step on all 16 ranks, **and zero nonzeros across
+  `bulk`+the 5 ice keys** (the forcing→ice→ocean chain unchanged — the drop-in is proven). ⚠️ FORCED-ONLY: pi uses
+  analytical stress and NEVER calls bulk (`jra55_year≤0`), so this verify is CORE2-only (L42), exactly like ice.
+- **SYNCCHECK clean** (`job_bulk_synccheck_core2`, build-synccheck CORE2): no `h_checked()` stale-host abort — the
+  residency unlock breaks no production host reader, and the bulk device writes are all `sync_host`'d.
+- **CORE2-active-ice CUDA fidelity gate PASS** (`gpu_fidelity_gate.sh --fresh-oracle`): all 27 fields at the climate-
+  close floor, **worst `h_ice` 8.53e-3** (ceil 1e-1); **`T` 1.13e-3 (ceil 1e-2) — at the floor, NOT a staleness
+  divergence** → the SST device-read + residency unlock are correct on CUDA. "No staleness regression."
+
+**Result (NG5 dist_16, RIGOROUS same-day + SAME-NODE baseline — M5.15 binary rebuilt + run on the same 4 GPU nodes
+`l50133/45/48/93` today, jobs 25246378 vs 25246296):**
+
+| metric | M5.15 baseline | **M5.16** | Δ |
+|--|--|--|--|
+| clean step (`job_ng5_prof`) | 3.4524 s/step | **2.6766** | **−22.5 %** |
+| `force:bulk_compute` | 0.5535 s (16.03 %) | **0.0253 (0.95 %)** | **−95 %** |
+| `force:jra55_read` | 0.0975 s (2.82 %) | 0.0970 (3.63 %) | unchanged (stays host) |
+| `deep_copy` | 4099 MB/step (113) | **3413 (126)** | **−16.7 %** |
+
+The same-day baseline reproduced M5.15's 3.456 exactly (3.4524) → the **−22.5 % is real, not node-mix noise**.
+Attribution: the bulk-compute device port (−0.528 s, the `force:bulk_compute` collapse 16.0 %→0.95 % — the single-
+threaded host loop is gone) + the `T`/`uvnode` residency unlock (−0.248 s, the `deep_copy` −0.69 GB → less ocean-phase
+PCIe). **This exceeds the prompt's ~16 % estimate** (which counted only the bulk compute; the residency unlock added
+~7 % more). The `deep_copy` drop (−16.7 %) is smaller than the raw `T`/`uvnode` bytes because Phase A re-adds the small
+nod2D output `sync_host` + the 8 JRA HtoD (+13 calls); Phase B reclaims it. ⚠️ M5.16 is a **no-op on the CPU build**
+(the OpenMP path's bulk is already cheap per-rank at high decomposition; residency is GPU-only) → node-for-node GPU/CPU
+improves purely from the GPU step drop (needs a same-day CPU re-run to pin — Lever D).
+
+**Node-for-node GPU/CPU (NG5, 4 nodes, RIGOROUS same-day):** GPU dist_16 **2.6766** / CPU dist_512 (M5.16 build-serial,
+128 c/node, reps 4.378+4.322) **4.350** = **0.615× → the GPU node is 1.63× FASTER than a CPU node** (was ~0.80× at
+M5.15). The CPU/Serial build is provably unaffected by M5.16 (the residency flips are no-ops on Serial; the bulk kernel
+runs single-threaded there and is tiny at 14.5k nod2D/rank) — confirmed same-day (4.35 ≈ the M5.12 study's 4.33). The
+node-for-node arc over the whole M5.x campaign: **3.76× SLOWER (M5.12) → 0.88× (M5.14) → 0.80× (M5.15) → 0.615×
+(M5.16) — a ~6× swing on identical node counts.**
+
+**✅ 1-yr CORE2 CUDA climate = PASS (closes M5.16).** `m32_cuda_m516_1yr` (17275 steps, **0.1271 s/step on CORE2
+dist_8 — vs M5.15's 0.1424, −10.7 %**; the bulk port helps CORE2 too). Apples-to-apples (L58), M5.16 vs M5.15 1-yr
+through the IDENTICAL `m32_climate_compare.py` differ only in the **4th–5th sig-fig of the bias** (the D22 atomic-
+scatter floor): vs C-port sst/ssh corr **1.00000**, sss/a_ice/m_ice 0.99996–0.99998, `uice` **0.99978** (M5.15: 0.99978);
+vs Fortran sst/ssh 1.00000, sss/a_ice/m_ice 0.99996–0.99997. **The bulk device port + the T/uvnode residency unlock
+cost ZERO climate fidelity** (M5.16 ≡ M5.15 to the floor, and the port reproduces the C twin: every backend-vs-C corr
+≥ 0.99978). Lesson L61. **M5.16 COMPLETE.**
+
+⚠️ **`uice`-vs-Fortran SCRIPT-ARTIFACT CORRECTION (2026-05-30):** docs §M5.13–§M5.15 reported `uice`-vs-Fortran ≈ 0.850
+as "the C↔F ice-drift budget." That number was **artifact-deflated**: `uice` was omitted from the per-month NaN→0
+ice-masking that `a_ice`/`m_ice` get ([[feedback-ice-mask-averaging]]) — Fortran masks ice-free water as NaN, the
+C/Kokkos port writes 0 (73.5 % of CORE2 nodes), so the Fortran annual `nanmean` dropped ice-free months while the
+port's mean kept the zeros → a spurious decorrelation hitting ONLY the Fortran comparison (C/Kokkos share the
+0-convention → `uice`-vs-C was always a clean 0.99978). **Fixed** (`uice`/`vice` added to `ICE_FIELDS` in
+`m32_climate_compare.py`): `uice`-vs-Fortran = **0.919** (ice-covered-nodes-only = 0.913 — same ballpark; `|d|max`
+0.228→0.136). The residual ~0.91 is a **real but modest** C-port-vs-Fortran ice-velocity (EVP) difference — NOT a
+Kokkos/GPU artifact (the port matches the C twin at 0.99978). This correction does not change any M5.x perf/fidelity
+verdict (those rest on backend-vs-C + M5.16≡M5.15); it just relabels the Fortran `uice` number.

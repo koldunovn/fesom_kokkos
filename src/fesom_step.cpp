@@ -331,17 +331,12 @@ int fesom_timestep(int                          step_n,
     /* M5.4: uvnode device-halo (GPU-aware MPI on CUDA, host-staged on Serial); the OUT sync_host
      * + the KPP/PP IN re-pushes are gone — uvnode stays device-resident with its halo. */
     fesom_halo_field(dyn->uvnode_fld, FESOM_HALO_NOD3D, nl, 2, p);
-    dyn->uvnode_fld.sync_host();   /* M5.9-pin (session 20): the ONE genuinely-required M5.9 sync —
-                                    * fesom_bulk_compute (fesom_main.cpp, every CORE2 step) reads uvnode's
-                                    * surface on the host for the wind stress (wind relative to ocean
-                                    * current). Proven the SOLE real host reader by the NaN-poison
-                                    * discriminator: poisoning uvnode → NaN stress → CG abort, while the
-                                    * other 3 fields poisoned had ZERO model effect (their M5.9 syncs were
-                                    * placebos — sync-fence chaos sensitivity, not stale reads). KPP reads
-                                    * uvnode on the DEVICE via its device-resident halo. No-op on Serial.
-                                    * (bulk reads only nz=0; a surface-only refresh was tried but its
-                                    * per-step Kokkos buffer alloc + host unpack canceled the PCIe win —
-                                    * a persistent-buffer version is a future micro-opt, ~1%.) */
+    /* M5.16: the M5.9-pin uvnode sync_host is GONE — fesom_bulk_compute_kk now reads uvnode's surface
+     * on the DEVICE (the L&Y09 wind stress, wind relative to ocean current). uvnode was the SOLE real
+     * host reader (proven by the NaN-poison discriminator, M5.9-pin); with bulk on the device, uvnode
+     * stays device-resident across the step → the ~nod3D×2 DtoH/step is gone (the residency unlock).
+     * KPP already read uvnode on the device via its device-resident halo. (uvnode is not a snapshot
+     * output; the verify-only host read is gated in fesom_main.cpp.) */
 
     if (s_use_kpp) {
         /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
@@ -892,12 +887,12 @@ int fesom_timestep(int                          step_n,
         if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,
                                                                  step_n, trd_pre_T, trd_pre_S);
         fesom_halo_field(tracers->data[FESOM_TRACER_T].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13g1-T device-halo (T values) */
-        /* M5.13g1-T (FIX2, L50): fesom_bulk_compute reads SST = T[surface] on the HOST every step
-         * (fesom_bulk.cpp:259, the JRA55 air-sea heat flux — exactly the uvnode→bulk wind-stress case).
-         * So keep T host-current for next-step bulk: sync_host here (trdiff is the last T write this step).
-         * T stays device-resident otherwise (EOS/GM/FCT/Redi/trdiff/ocean2ice read it on device) — this is
-         * ONE D2H/step, the L50 cost (like uvnode). The earlier g1-T FAIL was this stale SST, NOT valuesold. */
-        tracers->data[FESOM_TRACER_T].values_fld.sync_host();
+        /* M5.16: the M5.13g1-T (FIX2, L50) T sync_host is GONE — fesom_bulk_compute_kk now reads
+         * SST = T[surface] on the DEVICE (the JRA55 air-sea heat flux). bulk was the SOLE host reader of
+         * T (EOS/GM/FCT/Redi/trdiff/ocean2ice all read it on device); with bulk on the device, T stays
+         * device-resident across the step → the ~nod3D DtoH/step is gone (the residency unlock, paired
+         * with uvnode at substep 3). T's snapshot output is covered by the pre-I/O sync_host in
+         * fesom_main.cpp (L48); the verify-only host read is gated there too. */
         fesom_halo_field(tracers->data[FESOM_TRACER_S].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (S flip) device-halo (S values) */
     }
 

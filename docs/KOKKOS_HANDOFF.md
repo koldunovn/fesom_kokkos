@@ -5,17 +5,30 @@
 > **M5.13** (branch `m513-pcie`, L57/L58) the nod3D/elem3D halos + uv/T; **M5.14** (`m514-residency`, L59) the last
 > fields S/density/fer_w/w_i (the g2 S-flip + device salinity floor); **M5.15** (`m515-gm-residency`, **L60**) the GM
 > chain (`sigma_xy`/`neutral_slope`/`fer_K` halos → device + removed verify-only `bvfreq`/`dbsfc`/`fer_tapfac`/`fer_scal` syncs).
-> **NG5 dist_16: 16.27 → 6.12 → 3.80 → 3.456 s/step. Node-for-node GPU/CPU 3.76× → ~0.80× — the GPU is now ~25 %
-> FASTER than a CPU node.** Each milestone: Serial bit-identical + CUDA gate PASS + **1-yr CORE2 CUDA climate = statistically
-> identical** (the D22 4th-5th-sig-fig floor; zero fidelity cost). HEAD `1c19a3a` on `m515-gm-residency`.
-> Result/fidelity: `docs/GPU_FIDELITY.md` §M5.13–§M5.15; `docs/SCALING_NG5.md`; lessons **L57–L60**. Memory:
-> [[project-m515-gm-residency]] / [[project-m514-residual-residency]] / [[project-m513-pcie-campaign]].
+> **+ M5.16** (`m515-gm-residency`, **L61**, uncommitted): ported `fesom_bulk_compute` (L&Y09 air-sea bulk) to a device
+> per-surface-node map — bulk now reads SST/`uvnode` on-device, so the LAST required-host-reader DtoH (`T`/`uvnode`
+> `sync_host` in `fesom_step.cpp`) is GONE (the residency unlock).
+> **NG5 dist_16: 16.27 → 6.12 → 3.80 → 3.456 → 2.677 s/step** (M5.16 **−22.5 %**, rigorous same-day SAME-NODE baseline;
+> `force:bulk_compute` 16 %→0.95 %, deep_copy 4.10→3.41 GB/step). Node-for-node GPU/CPU 3.76× → ~0.80× (M5.15) and
+> improving (M5.16 is GPU-only). Each milestone: Serial bit-identical + CUDA gate PASS + **1-yr CORE2 CUDA climate =
+> statistically identical** (the D22 4th-5th-sig-fig floor; zero fidelity cost — M5.16's 1-yr climate is in flight).
+> HEAD `1c19a3a` on `m515-gm-residency` + uncommitted M5.16.
+> Result/fidelity: `docs/GPU_FIDELITY.md` §M5.13–§M5.16; `docs/SCALING_NG5.md`; lessons **L57–L61**. Memory:
+> [[project-m516-bulk-port]] / [[project-m515-gm-residency]] / [[project-m514-residual-residency]] / [[project-m513-pcie-campaign]].
 >
 > **KEY FINDING (the through-line): the step is DATA-MOVEMENT / HALO-LATENCY bound, NOT compute-bound** — GPU
-> utilization is only ~30 % (a re-profile this session overturned M5.14's "compute-bound" read). CG/EVP comms is dead
-> (`Allreduce` 0.2 %). Residency is now exhausted (the remaining DtoH is the *required* `T`/`uvnode` bulk-forcing reads).
+> utilization is only ~30 % (a re-profile overturned M5.14's "compute-bound" read). CG/EVP comms is dead
+> (`Allreduce` 0.2 %). **Residency is now fully EXHAUSTED** — M5.16 put the last required host readers (`T`/`uvnode`) on
+> the device. Forcing is down to 8.7 % of the step (`force:jra55_read` 3.6 %, stays host).
 >
-> **NEXT CAMPAIGN: M5.16 — port `fesom_bulk_compute` to the device. Full prompt `docs/plans/20260531-m516-bulk-port-and-roadmap-PROMPT.md`** (paste it to start). **Measured at 16 % of the step** (`force:bulk_compute` = 0.55 s/step, single-threaded host bulk math — the blmc/L49 trap): a contained, **climate-safe** (per-surface-node map → bit-identical Serial) win that **also dissolves the residency wall** (T/uvnode go device-resident once bulk reads them on-device). Evidence-ranked roadmap after that: **Lever B** interior/boundary halo overlap (the ~47 % `MPI_Waitall` — bigger but invasive + partly load-imbalance; re-measure the overlappable split first), then **Lever C** `fesom_field.hpp` rank-1→`View<double**>` coalescing (LAST — GPU only ~34 % utilized), **Lever D** deployment/packing guidance (free). **Measure-first every step — the wall moves.**
+> **NEXT CAMPAIGN: Lever B — interior/boundary halo overlap** (the ~47 % `MPI_Waitall`): start the device halo
+> exchange, compute interior nodes while it's in flight, finish the boundary-dependent kernel after. Climate-safe
+> (numerics-neutral reorder) but INVASIVE (split every haloed kernel). ⚠️ **re-measure the overlappable-vs-load-imbalance
+> split FIRST** — a chunk of the 47 % is rank-wait idle that overlap can't recover; if it's mostly imbalance, B's
+> ceiling is low. Separate session + branch. Then **Lever C** `fesom_field.hpp` rank-1→`View<double**>` coalescing (LAST
+> — halo-latency-bound, not kernel-compute-bound), **Lever D** deployment/packing guidance (free). **Phase B of M5.16**
+> (make `forcing` fully device-resident — drop the bulk output `sync_host` + the downstream re-pushes + port
+> `oce_fluxes_mom`) is a smaller measured follow-on. **Measure-first every step — the wall moves.**
 
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.

@@ -1,0 +1,49 @@
+#!/bin/bash
+# M5.16 BULK per-kernel verify on CORE2 (bulk is FORCED-only — pi uses analytical wind stress and
+# NEVER calls fesom_bulk_compute [jra55_year<=0], so the FESOM_KK_VERIFY=bulk gate is only meaningful
+# here, exactly like the ice verify, L42). Short run (60 steps, dist_16, 1 node) on the SERIAL build:
+# FESOM_KK_VERIFY=bulk runs the C twin (fesom_bulk_compute) beside the device map every step and
+# asserts max|Δ|==0 on Serial (aborts on the first nonzero). The ice keys ride along so the whole
+# forcing->ice chain is confirmed unchanged (on Serial the T/uvnode sync removal is a no-op, so this
+# also proves the drop-in property). Output → /scratch (never $HOME).
+#SBATCH --job-name=bulk_vfy
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:20:00
+#SBATCH -A ab0995
+#SBATCH -o /scratch/a/a270088/m516_bulk_verify/slurm.%j.out
+#SBATCH -e /scratch/a/a270088/m516_bulk_verify/slurm.%j.err
+
+set -u
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos/env.sh
+ulimit -s 204800
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2          # 16 ranks → reads dist_16
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=60
+SNAP_EVERY=60
+JRA55_YEAR=1958
+export FESOM_PRINT_EVERY=20
+# bulk = M5.16 device bulk-compute map. The ice keys (evp/icemap/icefct/icethermo/iceflux) confirm
+# the forcing->ice chain is byte-for-byte unchanged (bulk is a drop-in on Serial).
+export FESOM_KK_VERIFY=bulk,evp,icemap,icefct,icethermo,iceflux
+
+BIN=/home/a/a270088/port_kokkos/build-serial/fesom_port
+OUT_DIR=/scratch/a/a270088/m516_bulk_verify
+mkdir -p "$OUT_DIR"
+
+echo "=== M5.16 BULK verify (FESOM_KK_VERIFY=bulk + ice keys) CORE2 dist_16 — $(date) ==="
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+echo "--- any NONZERO Serial Δ across all keys (a FAIL aborts the run; empty = all bit-identical): ---"
+grep "FESOM_KK_VERIFY=" "$OUT_DIR/run.log" 2>/dev/null | grep -v "0.000e+00" | head
+echo "--- last bulk lines (confirm forcing is non-trivial: stress/heat-flux/Ch magnitudes): ---"
+grep "FESOM_KK_VERIFY=bulk" "$OUT_DIR/run.log" 2>/dev/null | tail -6
+echo "--- run.err tail (FAIL message if aborted): ---"; tail -5 "$OUT_DIR/run.err"
+exit $EC

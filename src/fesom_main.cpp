@@ -942,6 +942,9 @@ skip_rest_state:
         const int freeze_ts = (getenv("FESOM_FREEZE_TS") && atoi(getenv("FESOM_FREEZE_TS")));
         const int no_wind   = (getenv("FESOM_NO_WIND")   && atoi(getenv("FESOM_NO_WIND")));
         const int no_hflux  = (getenv("FESOM_NO_HFLUX")  && atoi(getenv("FESOM_NO_HFLUX")));
+        /* M5.16: per-kernel verify for the device bulk-compute (collision-free token, L25).
+         * FORCED-ONLY → meaningful only with JRA55 active (CORE2), pi never calls bulk. */
+        const int verify_bulk = (getenv("FESOM_KK_VERIFY") && strstr(getenv("FESOM_KK_VERIFY"), "bulk")) ? 1 : 0;
         /* Snapshot T,S at IC for FESOM_FREEZE_TS restore. Covers myDim+eDim
          * so halo copies are also reset — the step writes both. */
         real_t *T_ic = NULL, *S_ic = NULL;
@@ -1026,6 +1029,7 @@ skip_rest_state:
         tracers.data[FESOM_TRACER_T].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_T].valuesold_fld.sync_device();   /* M5.13g1-T FIX: valuesold too — coherent device pair for the MFCT */
         tracers.data[FESOM_TRACER_S].values_fld.modify_host(); tracers.data[FESOM_TRACER_S].values_fld.sync_device();   /* M5.14 (S flip): S values device-resident; bootstrap step 1 (non-zero PHC IC, read at step-1 EOS) */
         tracers.data[FESOM_TRACER_S].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_S].valuesold_fld.sync_device();   /* M5.14 (S flip): valuesold too — coherent device pair for the MFCT */
+        dyn.uvnode_fld.modify_host(); dyn.uvnode_fld.sync_device();   /* M5.16: bulk_kk reads uvnode on the device in step-1's forcing phase (before substep-3 rewrites it); the IC fesom_compute_vel_nodes wrote host uvnode (cold-start 0, but explicit/robust to restart) */
 
         for (int n = 1; n <= nsteps; ++n) {
             if (n == time_warmup + 1) {
@@ -1045,8 +1049,19 @@ skip_rest_state:
                 /* M5.15 (forcing-phase split, gated by FESOM_STEP_PROFILE): isolate the host
                  * bulk-compute (device-portable, single-threaded on the GPU build's host) from
                  * the JRA55 read/interp (stays host) to size a potential fesom_bulk_compute device port. */
-                FPROF_BEG(_tj); fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);                  FPROF_END(_tj, "force:jra55_read");
-                FPROF_BEG(_tb); fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
+                FPROF_BEG(_tj); fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);                     FPROF_END(_tj, "force:jra55_read");
+                /* M5.16: bulk on the DEVICE (per-surface-node L&Y09 map) — reads SST=T[surface] + uvnode
+                 * on the device (the T/uvnode per-step DtoH in fesom_step.cpp are gone). Drop-in: leaves the
+                 * same host-authoritative forcing/ice state the C twin did, so the ice step + coupling are
+                 * unchanged. The single-threaded host loop (blmc/L49 trap, ~16% of the NG5 step) is gone. */
+                FPROF_BEG(_tb); fesom_bulk_compute_kk(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
+                if (verify_bulk) {
+                    /* C twin reads SST + uvnode on the HOST → make them host-current first (no-op on
+                     * Serial, where device==host; on the CUDA print-only path it refreshes the host copy). */
+                    tracers.data[FESOM_TRACER_T].values_fld.sync_host();
+                    dyn.uvnode_fld.sync_host();
+                    fesom_bulk_compute_verify(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi, n);
+                }
             }
             if (use_sr) {
                 /* M5.14 (S flip, L50): sss_runoff reads S[surface] on the HOST (ref_sss_local virtual_salt

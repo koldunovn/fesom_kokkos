@@ -28,7 +28,15 @@ import numpy as np, netCDF4 as nc
 # Defaults: matched to the Kokkos port HEAD (KPP, gamma=0.5). See docs/REFERENCE_RUNS.md.
 FORT_DEFAULT = "/scratch/a/a270088/fortran_kpp_5yr_fix"   # <var>.fesom.<yr>.nc        (Fortran-KPP, γ=0.5)
 CREF_DEFAULT = "/work/ab0995/a270088/port/kpp_5yr_fix"    # <var>.fesom.<yr>.monthly.nc (C-port-KPP @ 6ecabe8, γ=0.5, 5 yr)
-ICE_FIELDS = {"a_ice", "m_ice", "m_snow"}                  # need NaN→0 BEFORE temporal mean ([[feedback-ice-mask-averaging]])
+ICE_FIELDS = {"a_ice", "m_ice", "m_snow", "uice", "vice"}  # need NaN→0 BEFORE temporal mean ([[feedback-ice-mask-averaging]])
+# ⚠️ uice/vice ADDED 2026-05-30: Fortran masks ice-free water as NaN, the C/Kokkos port writes 0 there
+# (73.5% of nodes on CORE2). WITHOUT the per-month NaN→0, the Fortran annual nanmean drops ice-free months
+# while the port's mean includes the zeros → a SPURIOUS uice-vs-Fortran decorrelation (the marginal-ice
+# artifact) that hit ONLY the Fortran comparison (C/Kokkos share the 0-convention). It deflated uice-vs-
+# Fortran to 0.850; with the fix it is 0.919 (ice-covered-nodes-only gives 0.913 — same ballpark). The
+# residual ~0.91 is a REAL (modest) C-port-vs-Fortran ice-velocity/EVP difference, faithfully reproduced
+# by the port (uice-vs-C-port = 0.99978). The earlier "0.85" in docs/GPU_FIDELITY §M5.13–§M5.15 was this
+# artifact-deflated number — read it as ~0.92.
 FIELDS = ("sst", "sss", "ssh", "a_ice", "m_ice", "uice")   # surface climate + ice drift; missing ones skip
 
 def surf_annual(path, var):
