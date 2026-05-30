@@ -758,5 +758,13 @@ pi np1+np2 ALL-FIELDS-BIT-IDENTICAL, SYNCCHECK clean, **CUDA gate PASS (worst 7.
 | node-for-node GPU/CPU | 0.879× | ~0.834× | **~0.80× (GPU ~25% faster)** |
 
 **Residency is now largely exhausted** — the remaining per-step DtoH is genuinely-required host readers
-(`T`/`uvnode` for the JRA55 bulk forcing, the L50 class) + small/deliberate fields. The `MPI_Waitall` (still ~47 %)
-is the next prize and is the deferred **Lever B — interior/boundary overlap** (CP2), not more residency.
+(`T`/`uvnode` for the JRA55 bulk forcing, the L50 class) + small/deliberate fields.
+
+**NEXT-LEVER MEASUREMENT (the forcing-phase split, gated FPROF `fesom_main.cpp:1045`):** `force:bulk_compute`
+= **0.5517 s/step = 16.0 % of the step** (the host bulk formulae run **single-threaded** on the GPU build's
+Kokkos-Serial host — the blmc/L49 trap, invisible to nsys), vs `force:jra55_read` = 0.098 s (2.8 %, stays host).
+**⟹ porting `fesom_bulk_compute` to a device per-surface-node map is the recommended next campaign (M5.16),
+ahead of Lever-B overlap:** it's a ~16 % *contained* win, climate-safe (race-free map → bit-identical Serial,
+gate-only), AND it dissolves the residency wall — once bulk reads `T`/`uvnode` on-device, their ~760 MB/step DtoH
+disappears (the new HtoD for the 8 nod2D JRA55 surface fields is far smaller). Lever B (the ~47 % `MPI_Waitall`,
+interior/boundary overlap) is the prize *after* that — bigger but invasive + partly load-imbalance.

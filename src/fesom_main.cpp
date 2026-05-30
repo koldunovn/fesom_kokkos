@@ -1042,8 +1042,11 @@ skip_rest_state:
                  * fesom_jra55_step_cal calls open_year on rollover; the
                  * old "cal.year == jra55_year" safety overlap from Task 2
                  * was retired with multi-year support. */
-                fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);
-                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
+                /* M5.15 (forcing-phase split, gated by FESOM_STEP_PROFILE): isolate the host
+                 * bulk-compute (device-portable, single-threaded on the GPU build's host) from
+                 * the JRA55 read/interp (stays host) to size a potential fesom_bulk_compute device port. */
+                FPROF_BEG(_tj); fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);                  FPROF_END(_tj, "force:jra55_read");
+                FPROF_BEG(_tb); fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
             }
             if (use_sr) {
                 /* M5.14 (S flip, L50): sss_runoff reads S[surface] on the HOST (ref_sss_local virtual_salt
