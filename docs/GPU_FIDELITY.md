@@ -768,3 +768,11 @@ ahead of Lever-B overlap:** it's a ~16 % *contained* win, climate-safe (race-fre
 gate-only), AND it dissolves the residency wall — once bulk reads `T`/`uvnode` on-device, their ~760 MB/step DtoH
 disappears (the new HtoD for the 8 nod2D JRA55 surface fields is far smaller). Lever B (the ~47 % `MPI_Waitall`,
 interior/boundary overlap) is the prize *after* that — bigger but invasive + partly load-imbalance.
+
+**✅ 1-yr CORE2 CUDA climate = PASS (closes M5.15).** `m32_cuda_m515_1yr` (17275 steps, **0.1424 s/step** on CORE2
+dist_8 — vs M5.14's 0.1727, **−17.5 %**; T∈[−2.02,32.12]/S∈[3.95,41.05] physical). Apples-to-apples (L58): M5.15 vs
+M5.14 1-yr through the identical `m32_climate_compare.py` differ only in the **4th–5th sig-fig** (the D22 atomic-scatter
+floor) — vs C-port: sst/ssh corr 1.00000, sss/a_ice/m_ice 0.99996–0.99998, bias O(1e-4), `uice` 0.99978; vs Fortran
+identical, `uice`-vs-Fortran 0.85019 = the known C↔F ice-drift budget (bit-for-bit the M5.13/M5.14 number). **The
+GM-chain residency cost ZERO climate fidelity** — the whole residency arc (M5.13 → M5.14 → M5.15) is climate-neutral
+end to end. **M5.15 COMPLETE.**
