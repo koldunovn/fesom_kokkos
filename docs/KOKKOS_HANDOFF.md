@@ -1,16 +1,21 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
-> **✅ M5.13 — NG5 device-residency / PCIe-reduction COMPLETE + climate-validated (2026-05-30, branch `m513-pcie`).**
-> Flipped the remaining host-staged nod3D/elem3D halos to `fesom_halo_field` (a `cfl_z`, b EOS, c GM quartet,
-> d `uv_rhsAB`, e ALE w/w_e+bolus, f ALE commit) + full residency of **uv** (g1-uv) and tracer **T** (g1-T).
-> **NG5 dist_16: step 16.27→6.12 s/step (−62 %); node-for-node GPU/CPU 3.76×→1.41×; PCIe `cudaMemcpy`
-> 12.74→2.83 s/step (75 %→44 %).** Cross-mesh: dars 4.10×→1.60× (denser dist_8 1.52×). **1-yr CORE2 CUDA
-> climate = statistically identical to the pre-campaign binary (zero regression, corr 1.0000/bias O(1e-4) vs C).**
-> Only g2 (S-floor) deferred. Plan+findings `docs/plans/20260530-m513-pcie-residency-tasks.md`; result
-> `docs/SCALING_NG5.md` §M5.13 + § dars cross-mesh; fidelity `docs/GPU_FIDELITY.md` §M5.13 + § Climate validation;
-> lesson **L57**; figures `docs/figures/scaling_meshsize_trend.png` + `m513_*.png`. Memory: [[project-m513-pcie-campaign]].
+> **✅ M5.13 + M5.14 + M5.15 — the device-residency arc COMPLETE + climate-validated end-to-end (2026-05-30).**
+> Three campaigns flipped every host-staged halo + finished full device residency on the ocean fields:
+> **M5.13** (branch `m513-pcie`, L57/L58) the nod3D/elem3D halos + uv/T; **M5.14** (`m514-residency`, L59) the last
+> fields S/density/fer_w/w_i (the g2 S-flip + device salinity floor); **M5.15** (`m515-gm-residency`, **L60**) the GM
+> chain (`sigma_xy`/`neutral_slope`/`fer_K` halos → device + removed verify-only `bvfreq`/`dbsfc`/`fer_tapfac`/`fer_scal` syncs).
+> **NG5 dist_16: 16.27 → 6.12 → 3.80 → 3.456 s/step. Node-for-node GPU/CPU 3.76× → ~0.80× — the GPU is now ~25 %
+> FASTER than a CPU node.** Each milestone: Serial bit-identical + CUDA gate PASS + **1-yr CORE2 CUDA climate = statistically
+> identical** (the D22 4th-5th-sig-fig floor; zero fidelity cost). HEAD `1c19a3a` on `m515-gm-residency`.
+> Result/fidelity: `docs/GPU_FIDELITY.md` §M5.13–§M5.15; `docs/SCALING_NG5.md`; lessons **L57–L60**. Memory:
+> [[project-m515-gm-residency]] / [[project-m514-residual-residency]] / [[project-m513-pcie-campaign]].
 >
-> **NEXT CAMPAIGN (planned): close the residual ~1.4× gap — full prompt `docs/plans/20260531-close-cpu-gpu-gap-PROMPT.md`** (paste it to start). PCIe is SOLVED; the gap is now THREE-way (nsys-final NG5 dist_16: PCIe 44 % / MPI-sync 37 % / compute 19 %), so the next session **re-profiles first** (the wall moved) then picks among: **Lever A** g2 salinity-floor→device (the residual PCIe — quick, safe), **Lever B** CG (~219 iters) / EVP (120 subcycles) communication reduction (the MPI 37 % — highest upside, but changes numerics → needs the 1-yr climate revalidation), **Lever C** the `fesom_field.hpp` rank-1→`View<double**>` coalescing refactor (the 19 % compute — safe, invasive, own branch), **Lever D** denser-packing deployment guidance (free; the data/compute-balance lever, dars dist_8 showed more work/GPU → nearer 1×). Don't expect another 3.8×→1.4×-style single win — this is the long tail; measure each lever's upside before committing.
+> **KEY FINDING (the through-line): the step is DATA-MOVEMENT / HALO-LATENCY bound, NOT compute-bound** — GPU
+> utilization is only ~30 % (a re-profile this session overturned M5.14's "compute-bound" read). CG/EVP comms is dead
+> (`Allreduce` 0.2 %). Residency is now exhausted (the remaining DtoH is the *required* `T`/`uvnode` bulk-forcing reads).
+>
+> **NEXT CAMPAIGN: M5.16 — port `fesom_bulk_compute` to the device. Full prompt `docs/plans/20260531-m516-bulk-port-and-roadmap-PROMPT.md`** (paste it to start). **Measured at 16 % of the step** (`force:bulk_compute` = 0.55 s/step, single-threaded host bulk math — the blmc/L49 trap): a contained, **climate-safe** (per-surface-node map → bit-identical Serial) win that **also dissolves the residency wall** (T/uvnode go device-resident once bulk reads them on-device). Evidence-ranked roadmap after that: **Lever B** interior/boundary halo overlap (the ~47 % `MPI_Waitall` — bigger but invasive + partly load-imbalance; re-measure the overlappable split first), then **Lever C** `fesom_field.hpp` rank-1→`View<double**>` coalescing (LAST — GPU only ~34 % utilized), **Lever D** deployment/packing guidance (free). **Measure-first every step — the wall moves.**
 
 **Session 21 (2026-05-28→29) — M5.12 fusion campaign (f reverted, d+b landed, thesis CAPPED) + NG5 7.4M scaling + a deep-mesh bug fix.**
 Branch `m512-fusion` off `profile-m511 @ 11b33af`; commits `4dabaac` (f), `09b27a8`+`f70f247` (d), `43e67a8` (handoff), `9d13295`+`5ed7b65` (b), **`328536c` (deep-mesh fix + NG5 harness)**.
