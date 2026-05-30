@@ -36,6 +36,13 @@
 #  include <cstdio>
 #  include <cstdlib>
 #endif
+#ifdef FESOM_SYNC_LOG
+#  include <cstdio>
+// Per-field DtoH/HtoD attribution: emit one line per ACTUAL deep_copy (need_sync gated, so no-op
+// syncs are not counted) tagging the View label + bytes. Aggregate the SYNCLOG lines offline to
+// see which fields drive the residual per-step PCIe. Compile-guarded: build-cuda (no macro) is
+// byte-identical. Diagnostic only — never shipped on.
+#endif
 
 namespace fesom {
 
@@ -71,8 +78,18 @@ public:
     // Coarse sync discipline. modify marks a space dirty; sync propagates only if needed.
     void modify_host()   { dv_.modify_host();   auth_ = Auth::Host; }
     void modify_device() { dv_.modify_device(); auth_ = Auth::Device; }
-    void sync_host()     { dv_.sync_host();   if (auth_ == Auth::Device) auth_ = Auth::Synced; }
-    void sync_device()   { dv_.sync_device(); if (auth_ == Auth::Host)   auth_ = Auth::Synced; }
+    void sync_host()     {
+#ifdef FESOM_SYNC_LOG
+        if (dv_.need_sync_host())
+            std::fprintf(stderr, "SYNCLOG D2H %s %zu\n", dv_.view_host().label().c_str(), n_ * sizeof(T));
+#endif
+        dv_.sync_host();   if (auth_ == Auth::Device) auth_ = Auth::Synced; }
+    void sync_device()   {
+#ifdef FESOM_SYNC_LOG
+        if (dv_.need_sync_device())
+            std::fprintf(stderr, "SYNCLOG H2D %s %zu\n", dv_.view_host().label().c_str(), n_ * sizeof(T));
+#endif
+        dv_.sync_device(); if (auth_ == Auth::Host)   auth_ = Auth::Synced; }
 
     // HOST pointer WITH a currency check under -DFESOM_KK_SYNCCHECK. Routing halo/I/O/legacy host
     // reads through this traps a stale-host access (device authoritative and un-synced) at the
