@@ -82,8 +82,8 @@ Per field X currently host-bracketed (`X.sync_host()` then `fesom_halo_exchange(
 
 ## Resumable status (one line per task — read this, not the chat, for "where are we")
 
-- [ ] **T1** — guard GM verify-only syncs (`fer_tapfac`, `fer_scal`) behind `s_verify_gm` (the freebie)
-- [ ] **T2** — flip GM host-bracket halos to device: `neutral_slope`, `sigma_xy`, `fer_K`, `fer_C` (the big one)
+- [x] **T1** — guard GM verify-only syncs (`fer_tapfac`, `fer_scal`) behind `s_verify_gm` (folded into the T2 verify-blocks)
+- [x] **T2** — flip GM host-bracket halos to device: `neutral_slope`, `sigma_xy`, `fer_K` (`fer_C` kept host = small nod2D). **Validated: Serial gm-verify max|Δ|==0, pi np1+np2 ALL-FIELDS-BIT-IDENTICAL, SYNCCHECK clean, CORE2 CUDA gate PASS (worst 8.08e-3, no staleness regression).**
 - [ ] **CP1** — NG5 nsys + scaling checkpoint (recovered PCIe + Waitall; GPU util)
 - [ ] **T3** — investigate + flip the nod3D host-readers: `bvfreq` (placebo?), `dbsfc`, `ghats`, `T`/`S`, `hnode_new`
 - [ ] **T4** — `uvnode` surface-only refresh (the hard one; optional/defer)

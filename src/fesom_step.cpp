@@ -253,28 +253,23 @@ int fesom_timestep(int                          step_n,
 
         /* (G2b) density gradient on neutral surfaces. */
         fesom_compute_sigma_xy_kk(aux, tracers, mesh, gm);
-        gm->sigma_xy_fld.sync_host();
-        if (s_verify_gm) fesom_gm_sigma_xy_verify(aux, tracers, mesh, gm, p, step_n);
-        fesom_halo_exchange(gm->sigma_xy_fld.h_checked(), FESOM_HALO_NOD2D, nl, 2, p);
+        if (s_verify_gm) { gm->sigma_xy_fld.sync_host(); fesom_gm_sigma_xy_verify(aux, tracers, mesh, gm, p, step_n); }
+        fesom_halo_field(gm->sigma_xy_fld, FESOM_HALO_NOD2D, nl, 2, p);   /* M5.15 T2: device-halo (compute_neutral_slope/init_redi read sigma_xy on device); host rail now verify-only */
 
         /* (G2b) neutral slope + ODM95 tapering. */
         fesom_compute_neutral_slope_kk(aux, mesh, gm);
-        gm->neutral_slope_fld.sync_host();
-        /* M5.13c: slope_tapered now device-halo'd below; OUT sync_host removed (Redi diff_hor + trdiff K33 read it on device). */
-        gm->fer_tapfac_fld.sync_host();   /* read by init_redi (owned) + the verify; not halo'd */
-        if (s_verify_gm) fesom_gm_neutral_slope_verify(aux, mesh, gm, p, step_n);
-        fesom_halo_exchange(gm->neutral_slope_fld.h_checked(), FESOM_HALO_NOD2D, nl1, 3, p);
+        /* M5.13c: slope_tapered device-halo'd below (Redi diff_hor + trdiff K33 read it on device). */
+        if (s_verify_gm) { gm->neutral_slope_fld.sync_host(); gm->fer_tapfac_fld.sync_host(); fesom_gm_neutral_slope_verify(aux, mesh, gm, p, step_n); }   /* M5.15 T1/T2: host rails VERIFY-ONLY — init_redi reads neutral_slope/fer_tapfac on device (.d() fesom_gm.cpp:1187/1286) */
+        fesom_halo_field(gm->neutral_slope_fld, FESOM_HALO_NOD2D, nl1, 3, p);   /* M5.15 T2: device-halo */
         fesom_halo_field(gm->slope_tapered_fld, FESOM_HALO_NOD2D, nl1, 3, p);   /* M5.13c device-halo */
 
         /* (G3) per-step GM/Redi coefficient builder. */
         fesom_init_redi_gm_kk(aux, mesh, gm);
-        gm->fer_scal_fld.sync_host();
-        gm->fer_K_fld.sync_host();
-        gm->fer_C_fld.sync_host();
-        /* M5.13c: Ki now device-halo'd below; OUT sync_host removed (Redi + trdiff read it on device). */
-        if (s_verify_gm) fesom_gm_init_redi_verify(aux, mesh, gm, p, step_n);
+        gm->fer_C_fld.sync_host();   /* fer_C kept host-exchanged below (small nod2D, not a PCIe target) */
+        /* M5.13c: Ki device-halo'd below (Redi + trdiff read it on device). */
+        if (s_verify_gm) { gm->fer_scal_fld.sync_host(); gm->fer_K_fld.sync_host(); fesom_gm_init_redi_verify(aux, mesh, gm, p, step_n); }   /* M5.15 T1/T2: fer_scal/fer_K host rails VERIFY-ONLY (device computes them; fer_K read on device by Redi/trdiff) */
         fesom_exchange_nod2D(gm->fer_C_fld.h_checked(), p);
-        fesom_halo_exchange(gm->fer_K_fld.h_checked(), FESOM_HALO_NOD2D, nl, 1, p);
+        fesom_halo_field(gm->fer_K_fld, FESOM_HALO_NOD2D, nl, 1, p);   /* M5.15 T2: device-halo (was host fesom_halo_exchange) */
         fesom_halo_field(gm->Ki_fld, FESOM_HALO_NOD2D, nl, 1, p);   /* M5.13c device-halo */
 
         /* (G4) streamfunction solve (per-node TDMA). */

@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_m515val
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/m515_val/val.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m515_val/val.%j.err
+# M5.15 Serial validation ladder (T1+T2 GM-residency flips), pi mesh, on a compute node
+# (login-node NetCDF4/HDF5 nc_create hits EACCES on Lustre). 1=gm-verify, 2=np1 bit-id,
+# 3=SYNCCHECK, 4=np2 bit-id. PASS criteria printed inline.
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante       # init spack module env FIRST (else module load -> wrong HDF5 -> nc_create EACCES)
+source "$ROOT/env.sh"
+export HDF5_USE_FILE_LOCKING=FALSE OMPI_MCA_io=romio321
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+REF=$ROOT/docs/reference/c_baseline_snapshots/pi
+REF2=/scratch/a/a270088/pi_np2_ref_m13_nocma
+V=/work/ab0995/a270088/port2/m515_val
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+echo "########## 1) Serial gm-verify (max|Δ| must be 0) ##########"
+rm -rf "$V/gmv"; mkdir -p "$V/gmv"; FESOM_KK_VERIFY=gm srun -n1 "$ROOT/build-serial/fesom_port" "$MESH" "$V/gmv" 100 20 10 > "$V/gmv.log" 2>&1
+echo "rc=$?"
+echo "--- NON-zero gm max|Δ|? (empty = PASS) ---"; grep "FESOM_KK_VERIFY=" "$V/gmv.log" | grep -v "0.000e+00" | head
+echo "--- gm verify ran (sample, last 2) ---"; grep "FESOM_KK_VERIFY=gm" "$V/gmv.log" | tail -2
+
+echo; echo "########## 2) Serial pi np1 BIT-IDENTITY vs C baseline ##########"
+rm -rf "$V/np1"; mkdir -p "$V/np1"; srun -n1 "$ROOT/build-serial/fesom_port" "$MESH" "$V/np1" 100 20 10 > "$V/np1.log" 2>&1
+echo "rc=$?"; $PY "$ROOT/scripts/diff_snap.py" "$REF" "$V/np1" 2>&1 | tail -6
+
+echo; echo "########## 3) SYNCCHECK (clean exit, no stale-host abort) ##########"
+rm -rf "$V/sc"; mkdir -p "$V/sc"; srun -n1 "$ROOT/build-synccheck/fesom_port" "$MESH" "$V/sc" 100 20 10 > "$V/sc.log" 2>&1
+echo "rc=$? (0 = no abort)"; grep -iE "SYNCCHECK|missing sync|FATAL" "$V/sc.log" | head
+
+echo; echo "########## 4) Serial pi np2 BIT-IDENTITY (vader none) vs nocma ref ##########"
+rm -rf "$V/np2"; mkdir -p "$V/np2"; OMPI_MCA_btl_vader_single_copy_mechanism=none srun -n2 "$ROOT/build-serial/fesom_port" "$MESH" "$V/np2" 100 20 10 > "$V/np2.log" 2>&1
+echo "rc=$?"; $PY "$ROOT/scripts/diff_snap.py" "$REF2" "$V/np2" 2>&1 | tail -6
+echo "=== M5.15 serial validation done ==="
