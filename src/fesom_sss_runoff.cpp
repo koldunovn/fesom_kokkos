@@ -344,7 +344,8 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                            struct fesom_forcing       *forcing,
                            struct fesom_partit        *partit,
                            int yearnew, int month_now,
-                           int update_monthly_flag)
+                           int update_monthly_flag,
+                           int clim_read_only)
 {
     (void)yearnew;
 
@@ -363,6 +364,18 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                                 /*check_dummy=*/1, /*do_onvert=*/1, mesh);
         sr->sss_month_loaded = i;
     }
+
+    /* M5.22 (Lever 2b): the per-step virtual_salt/relax_salt/water_flux below are REDUNDANT in the
+     * normal ice-active path — the device ice oce_fluxes (`fesom_ice_oce_fluxes_kk`, `fesom_ice.cpp:616`)
+     * recomputes virtual_salt/relax_salt on device (reading S device-resident, with device global
+     * integrals) and OVERWRITES heat/water/virtual/relax_salt one substep later, and nothing between here
+     * and there reads them (the ice thermo does not). Computing them here forced a full-S `sync_host`
+     * (249 MB/step D2H on NG5, the #2 per-field PCIe driver). So with clim_read_only=1 (the caller's
+     * default, set when the device oce_fluxes will run) do ONLY the monthly Ssurf climatology read above
+     * and return. clim_read_only=0 is the FESOM_NO_ICE_THERMO fallback (device oce_fluxes skipped) where
+     * the host must still produce the fluxes. Removing the redundant path is bit-identical (the values
+     * were overwritten + unread). */
+    if (clim_read_only) return;
 
     /* ---------- oce_fluxes (ice_oce_coupling.F90:436-646) ---------- */
 
@@ -458,12 +471,13 @@ void fesom_sss_runoff_step_cal(fesom_sss_runoff           *sr,
                                struct fesom_partit        *partit,
                                int                         n_step,
                                const fesom_calendar_t     *prev,
-                               const fesom_calendar_t     *cal)
+                               const fesom_calendar_t     *cal,
+                               int                         clim_read_only)
 {
     int yearnew  = cal->year;
     int month_now = cal->month;
     int update_monthly_flag = (n_step == 1)
                             || fesom_calendar_crossed(prev, cal, FESOM_PERIOD_MONTHLY);
     fesom_sss_runoff_step(sr, mesh, tracers, forcing, partit,
-                          yearnew, month_now, update_monthly_flag);
+                          yearnew, month_now, update_monthly_flag, clim_read_only);
 }

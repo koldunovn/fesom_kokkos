@@ -67,7 +67,9 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                            struct fesom_forcing       *forcing,
                            struct fesom_partit        *partit,
                            int yearnew, int month_now,
-                           int update_monthly_flag);
+                           int update_monthly_flag,
+                           int clim_read_only);   /* M5.22: 1 = monthly Ssurf read only (device oce_fluxes
+                                                   * does the per-step flux); 0 = full host flux (ice-off) */
 
 /* Calendar-driven adapter for fesom_sss_runoff_step. Computes month_now
  * from `cal->month` and update_monthly_flag from `n_step == 1` OR a
@@ -81,7 +83,8 @@ void fesom_sss_runoff_step_cal(fesom_sss_runoff           *sr,
                                struct fesom_partit        *partit,
                                int                         n_step,
                                const fesom_calendar_t     *prev,
-                               const fesom_calendar_t     *cal);
+                               const fesom_calendar_t     *cal,
+                               int                         clim_read_only);
 
 /* Helper used by both SSS reader and the runoff reader.
  * Literal port of read_other_NetCDF (gen_modules_read_NetCDF.F90:6-184).

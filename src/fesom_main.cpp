@@ -1064,14 +1064,23 @@ skip_rest_state:
                 }
             }
             if (use_sr) {
-                /* M5.14 (S flip, L50): sss_runoff reads S[surface] on the HOST (ref_sss_local virtual_salt
-                 * + relax_salt — fesom_sss_runoff.cpp:389/407). S is now device-resident across the step
-                 * boundary, so refresh the host copy before the read. GATED on use_sr → OFF in the gate +
-                 * climate runs (no SSS-restoring file) → zero cost there; this path is therefore NOT
-                 * exercised by the current validation (flagged for a future SSS-active run). */
-                tracers.data[FESOM_TRACER_S].values_fld.sync_host();
+                /* M5.22 (Lever 2b): the SSS restoring / virtual-salt / runoff are ALREADY on the device.
+                 * The ice step's oce_fluxes (`fesom_ice_oce_fluxes_kk`) recomputes virtual_salt/relax_salt
+                 * on device (reading S device-resident, device global integrals) and OVERWRITES them a
+                 * substep later; runoff folds into the ice freshwater flux on device. So in the normal
+                 * ice-active path this host call does ONLY the monthly Ssurf climatology read
+                 * (clim_read_only=1) — the per-step host flux is redundant (overwritten + unread by the ice
+                 * thermo), so NO S sync_host: the 249 MB/step D2H (the #2 per-field PCIe driver) is GONE,
+                 * bit-identical. The FESOM_NO_ICE_THERMO bisect mode skips the device oce_fluxes → the host
+                 * must produce the fluxes there (clim_read_only=0, S synced). ⚠️ a real ice-off / coupled
+                 * mode (no device oce_fluxes) must route the host-flux fallback the same way (and revisit
+                 * runoff, which is currently coupled to use_sr). use_sr ⟺ jra55_year>0 (`:836-846`). */
+                static int host_fluxes = -1;
+                if (host_fluxes < 0) host_fluxes = (getenv("FESOM_NO_ICE_THERMO") != NULL);
+                if (host_fluxes) tracers.data[FESOM_TRACER_S].values_fld.sync_host();
                 fesom_sss_runoff_step_cal(&sr, &mesh, &tracers, &forcing, &mpi,
-                                          n, &io.prev_calendar, &io.calendar);
+                                          n, &io.prev_calendar, &io.calendar,
+                                          /*clim_read_only=*/!host_fluxes);
             }
             TP_END(tp_force);
             /* Physics-bisect toggles (env-gated). Applied AFTER bulk+runoff
