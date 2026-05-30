@@ -1066,3 +1066,32 @@ untouched `momadv_horiz` D22 scatter).
   the momentum/GM kernels just done. Attack FCT bucket-A in a focused M5.20 pass with the `tradv` verify on each.
 
 Tooling added: `jobs/job_ng5_m519_ab`, `jobs/job_ncu_m519_ab` (NCU_REGEX = enclosing-fn names `compute_vel_rhs|compute_sigma_xy|compute_neutral_slope`), `scripts/ncu_coalesce_summary.py`. Lesson **L64**.
+
+## §M5.20 — the PCIe track: per-field attribution refutes Phase-B; `hnode_new` + `sw_3d` device-residency = −36 % deep_copy
+
+The orthogonal lever (the residual 3.41 GB/step `deep_copy`). **Measured first** (the campaign discipline). nsys settled that the memops are ~100 % PCIe (HtoD 56 % + DtoH 43 %; device↔device only 0.04 %). Then **`FESOM_SYNC_LOG`** (a scoped CMake option added this session → `SYNCLOG D2H/H2D <label> <bytes>` per actual Field sync; `jobs/job_ng5_synclog`, NG5 dist_16 rank0) attributed the 3413 MB/step per field:
+
+| field | dir | MB/step | what |
+|--|--|--|--|
+| `hnode_new` | H2D×2 + D2H | **778** | layer thickness, 3× host round-trip/step |
+| `forcing.sw_3d` | H2D×2 | **519** | shortwave-penetration 3-D, host-computed + pushed 2× |
+| `kpp.ghats` | D2H | 256 | "ghats stays host" (M5.7) |
+| `tracers.S` | D2H | 249 | host salinity floor (L36/L39) |
+
+**The 8 JRA55 forcing fields are only ~7 MB/step each** → the prompt's §6 **Phase-B-forcing suggestion was REFUTED by the measurement** — it would have given ~0. The halo'd fields show count/step≈0.04 (startup only) → halos are already device-resident. *Measuring before building is why this session didn't waste effort on the wrong lever.*
+
+### Flip 1 — `hnode_new` device-resident (the M5.9-pin placebo pattern + a step-1 catch)
+The 3 syncs (`fesom_step.cpp` 12a-OUT `sync_host` + the substep-1/13 `modify_host`+`sync_device` re-pushes) served only verify-only C-twins + the M5.13 "self-containment" defensive re-push — the device kernels read `hnode_new` on device. **First attempt removed all 3 → crash** (`CG_kk pp·App=-nan` at step 1): substep-1b GM reads `hnode_new` on device *before* the 12a thickness kernel runs, and at step 1 that value is the IC (host-written) → the device copy was alloc-zeros → NaN. **Fix:** keep device-resident (step ≥2 holds last step's 12a value = identical to the old re-push), but **seed the device copy from the IC at step 1 only** (`if (step_n==1)`); the 12a-OUT + substep-13 syncs stay removed. ⚠️ **LINFS-SPECIFIC** (hnode_new ≡ hnode, device-computed) — guarded at all 3 sites: **zstar must revisit `hnode_new`'s rail** when it makes the thickness a genuinely-evolving field (per the user). The gate caught the crash; the fix passes.
+
+### Flip 2 — `sw_3d` device port (`fesom_cal_shortwave_rad_kk`)
+`sw_3d` was host-computed (`fesom_cal_shortwave_rad`, the Jerlov penetration profile) + pushed 2× (substep-3 H2D for KPP, substep-13b re-push for tracer-diff — the latter a placebo, sw_3d is forcing set once/step). **Ported the 3-D profile to a per-surface-node device kernel** (`fesom_bulk.cpp`); the `heat_flux += swsurf` side effect stays on host (small nod2D op). `chl` pushed to device on update (const-once / monthly). Both pushes removed → **zero sw_3d sync sites**. exp/log10 on device → **Serial bit-identical** (same libm on the Serial CPU backend), CUDA climate-close (EOS-class last-ULP divergence).
+
+### Validation — all PASS
+- **Serial:** pi np1+np2 bit-identical (driver sanity; the seeds/sw_3d are no-ops/unexercised under pi). The decisive sw_3d check = **fresh CORE2 Serial oracle == saved M5.19 oracle, ALL FIELDS BIT-IDENTICAL** → the `sw_3d` device kernel equals the host `cal_shortwave_rad` op-for-op on Serial (and hnode_new is a Serial no-op).
+- **CUDA fidelity gate** (`--fresh-oracle`, CORE2 dist_8 ice-active): **PASS**, worst max|Δ|=3.870e-03 (T 1.4e-3) — same floor as M5.16/M5.18, zero staleness regression (the gate caught Flip-1's first-attempt crash).
+- **A/B (same-node, NG5 dist_16):** 2.1523 → **1.7741 s/step = −17.6 %** (prof corroborates 2.2099→1.8292). hnode_new alone was a clean **−11.4 %** on its own allocation (2.0138→1.7843).
+- **deep_copy: 3413 → 2176 MB/step = −36.3 %** (hnode_new −742, sw_3d −496) — the clean cross-allocation-proof of both flips.
+- **1-yr CORE2 CUDA climate PASS** (`m32_cuda_m520_1yr`, 17280 steps, clean T[-2.01,31.27] S[3.95,41.05]): **vs m519 apples-to-apples — every field corr=1.00000, bias O(1e-6–1e-7), RMS O(1e-4–1e-5) → M5.20 ≡ M5.19 to the D22 floor, ZERO climate cost** (the sw_3d device-exp perturbation is climatically invisible). Science budget vs Fortran preserved: sst/ssh 1.00000, sss 0.99996, a_ice/m_ice 0.99997 (same as M5.19). **M5.20 COMPLETE.**
+
+### Remaining PCIe headroom (2176 MB/step) — for M5.21
+`kpp.ghats` (256 D2H — the M5.7 "ghats stays host" decision) + `tracers.S` (249 D2H — the L36/L39 host salinity floor) are the next two; both are *deliberate* host-stays that need their host consumer ported/reconsidered (harder than placebo removal). Then ice-FCT values (~18 MB/step ×5) + startup. Tooling: `jobs/job_ng5_synclog` (per-field PCIe), `jobs/job_ng5_m520_ab`, the `FESOM_SYNC_LOG` CMake option. Lesson **L65**.

@@ -1148,6 +1148,7 @@ skip_rest_state:
                         for (int i = 0; i < Nn; ++i)
                             forcing.chl[i] = (real_t)FESOM_PHASE1_CHL_CONST;
                         chl_const_done = 1;
+                        forcing.chl_fld.modify_host(); forcing.chl_fld.sync_device();  /* M5.20: chl → device for cal_shortwave_rad_kk */
                     }
                 } else if (n == 1 ||
                            fesom_calendar_crossed(&io.prev_calendar, &io.calendar,
@@ -1161,8 +1162,10 @@ skip_rest_state:
                     if (mpi.mype == 0)
                         fprintf(stderr, "[chl] Updating chlorophyll climatology for month %d\n", mi);
                     fesom_read_other_NetCDF(chl_file, "chl", mi, forcing.chl, 1, 1, &mesh);
+                    forcing.chl_fld.modify_host(); forcing.chl_fld.sync_device();  /* M5.20: chl → device for cal_shortwave_rad_kk */
                 }
-                fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);
+                fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);     /* host: heat_flux += swsurf (+ host sw_3d = Serial verify ref) */
+                fesom_cal_shortwave_rad_kk(&mesh, &jra, &ice, &forcing);   /* M5.20: device sw_3d (KPP/trdiff read it device-resident; no HtoD) */
             }
             TP_END(tp_coupl);
 

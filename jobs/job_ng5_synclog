@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=kk_synclog
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/synclog.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/synclog.%j.err
+# M5.20 PCIe attribution: per-field DtoH/HtoD with the FESOM_SYNC_LOG binary (fesom_port_synclog),
+# NG5 dist_16. Per-rank stderr (--error=err.%t) so rank0's SYNCLOG is isolated. Run NSTEPS steps;
+# fields synced every step show count/step ~1+ (the per-step PCIe drivers); one-time startup
+# transfers (mesh/IC) show count/step ~1/NSTEPS. Aggregate rank0 per (dir,label) by total bytes.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999 FESOM_STEP_PROFILE=1   # STEP_PROFILE for the deep_copy total cross-check
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ng5_synclog; rm -rf "$OUT"; mkdir -p "$OUT"
+NSTEPS=${NSTEPS:-25}
+echo "=== NG5 dist_16 SYNC_LOG run, $NSTEPS steps ==="
+srun --error="$OUT/err.%t" --output="$OUT/out.%t" \
+     "$ROOT/build-cuda/fesom_port_synclog" "$MESH" "$OUT" 180 "$NSTEPS" -1 "$PHC" 1958
+echo "rc=$?"
+rm -f "$OUT"/*.monthly.nc
+
+echo; echo "=== deep_copy total (FESOM_STEP_PROFILE cross-check, rank0) ==="
+grep -iE "deep_copy|MB/step" "$OUT/out.0" 2>/dev/null | head
+echo; echo "=== rank0 per-field PCIe — sorted by total MB (NSTEPS=$NSTEPS) ==="
+grep '^SYNCLOG' "$OUT/err.0" 2>/dev/null | awk -v n=$NSTEPS '
+  {key=$2" "$3; sum[key]+=$4; cnt[key]++}
+  END{ for(k in sum) printf "%10.3f  %8.3f  %8.2f  %6.2f  %s\n", sum[k]/1e6, sum[k]/1e6/n, cnt[k], cnt[k]/n, k }' \
+  | sort -rn | awk 'BEGIN{printf "%10s  %8s  %8s  %6s  %s\n","MB_tot","MB/step","calls","c/step","DIR LABEL"} {print}' | head -40
+echo; echo "=== totals (rank0) ==="
+grep '^SYNCLOG' "$OUT/err.0" 2>/dev/null | awk -v n=$NSTEPS '
+  {s+=$4; c++; if($2=="D2H"){d2h+=$4} else {h2d+=$4}}
+  END{printf "TOTAL %.2f MB over %d steps = %.1f MB/step (%d transfers, %.0f/step) | D2H %.1f MB/step  H2D %.1f MB/step\n",
+       s/1e6,n,s/1e6/n,c,c/n,d2h/1e6/n,h2d/1e6/n}'

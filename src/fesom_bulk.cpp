@@ -747,3 +747,75 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
         }
     }
 }
+
+/*--- fesom_cal_shortwave_rad_kk — DEVICE twin of the sw_3d penetration profile (M5.20) -------
+ * Per-surface-node map writing sw_3d (the 3-D shortwave penetration) on the DEVICE, so KPP
+ * (substep 3) and tracer-diff (substep 13b) read it device-resident → eliminates the 519 MB/step
+ * HtoD the host computation + the substep-3/13b re-pushes cost (the 2nd-biggest PCIe driver, M5.20
+ * SYNC_LOG attribution). The `heat_flux += swsurf` SIDE EFFECT stays in the host cal_shortwave_rad
+ * (a small nod2D op, unchanged) — this kernel only recomputes swsurf for the profile and writes
+ * sw_3d. Race-free (each surface node owns its column). Mirrors fesom_cal_shortwave_rad arithmetic
+ * op-for-op; exp/log10 run on the device → Serial bit-identical to the host twin (same libm on the
+ * Serial CPU backend), CUDA climate-close (last-ULP transcendental divergence, the EOS class).
+ * CONTRACT: jra->shortwave + a_ice device-current on entry, chl device-current (pushed in the
+ * forcing phase when it updates); marks sw_3d modify_device(). */
+void fesom_cal_shortwave_rad_kk(const struct fesom_mesh  *mesh,
+                                const struct fesom_jra55 *jra,
+                                const struct fesom_ice   *ice,
+                                struct fesom_forcing     *forcing)
+{
+    if (!FESOM_PHASE1_USE_SW_PENE) return;
+    const int    N    = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    nl   = mesh->nl;
+    const real_t albw = (real_t)BULK_ALBW;
+    const real_t vcpw = (real_t)FESOM_VCPW;
+
+    auto a_ice = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto swr   = jra->shortwave_fld.d();
+    auto chl   = forcing->chl_fld.d();
+    auto sw_3d = forcing->sw_3d_fld.d();
+    auto zbar3 = mesh->zbar_3d_n_fld.d();
+    auto uln   = mesh->ulevels_nod2D_fld.d();
+    auto nln   = mesh->nlevels_nod2D_fld.d();
+
+    /* zero sw_3d over all local nodes/levels (mirrors the host memset, Fortran 39-43) */
+    Kokkos::parallel_for("fesom_sw3d_zero", Kokkos::RangePolicy<>(0, (size_t)N * (size_t)nl),
+        KOKKOS_LAMBDA(const std::size_t i) { sw_3d(i) = 0.0; });
+
+    Kokkos::parallel_for("fesom_cal_shortwave_rad", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n2) {
+            if (uln(n2) > 1)     return;        /* cavity: no penetration (F:51) */
+            if (a_ice(n2) > 0.0) return;        /* under ice: none (F:52) */
+
+            real_t swsurf = (1.0 - albw) * swr(n2);   /* = qsr */
+            swsurf *= 0.54;                            /* visible part (300-750nm) */
+            /* heat_flux[n2] += swsurf — done on the HOST in cal_shortwave_rad, NOT here. */
+
+            real_t cc = chl(n2);
+            if (cc < 0.02) cc = 0.02;
+            real_t c  = Kokkos::log10(cc);
+            real_t c2 = c*c, c3 = c2*c, c4 = c3*c, c5 = c4*c;
+            real_t v1  = 0.008*c + 0.132*c2 + 0.038*c3 - 0.017*c4 - 0.007*c5;
+            real_t v2  = 0.679 - v1;
+            v1         = 0.321 + v1;
+            real_t sc1 = 1.54  - 0.197*c + 0.166*c2 - 0.252*c3 - 0.055*c4 + 0.042*c5;
+            real_t sc2 = 7.925 - 6.644*c + 3.662*c2 - 1.815*c3 - 0.218*c4 + 0.502*c5;
+
+            swsurf /= vcpw;                            /* W/m² → K m/s (F:81) */
+
+            const int nzmin = uln(n2) - 1;
+            const int nzmax = nln(n2) - 1;
+            sw_3d(FESOM_NODE3D(n2, nzmin, nl)) = swsurf;            /* F:85 */
+            for (int k = nzmin + 1; k <= nzmax; ++k) {             /* F:86-93 */
+                real_t z   = zbar3(FESOM_NODE3D(n2, k, nl));
+                real_t aux = v1 * Kokkos::exp(z / sc1) + v2 * Kokkos::exp(z / sc2);
+                sw_3d(FESOM_NODE3D(n2, k, nl)) = swsurf * aux;
+                if (aux < 1.0e-5 || k == nzmax) {
+                    sw_3d(FESOM_NODE3D(n2, k, nl)) = 0.0;
+                    break;
+                }
+            }
+        });
+
+    forcing->sw_3d_fld.modify_device();
+}

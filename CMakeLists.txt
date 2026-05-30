@@ -89,6 +89,16 @@ if(FESOM_KK_SYNCCHECK)
   message(STATUS "FESOM_KK_SYNCCHECK ON — Field coherence guards + per-step round-trip enabled")
 endif()
 
+# FESOM_SYNC_LOG (M5.20 PCIe attribution): emit one `SYNCLOG D2H/H2D <label> <bytes>` line per ACTUAL
+# Field sync (need_sync-gated) so the per-step host<->device traffic can be aggregated per field
+# offline. Scoped to the fesom_port target (Kokkos unchanged → no Kokkos rebuild). Diagnostic, OFF by
+# default (production build byte-identical). Build a separate dir: -DFESOM_SYNC_LOG=ON.
+option(FESOM_SYNC_LOG "Per-field DtoH/HtoD deep_copy attribution to stderr (diagnostic)" OFF)
+if(FESOM_SYNC_LOG)
+  target_compile_definitions(fesom_port PRIVATE FESOM_SYNC_LOG)
+  message(STATUS "FESOM_SYNC_LOG ON — per-field PCIe attribution (SYNCLOG lines on stderr)")
+endif()
+
 # --- Tests (compiled as C++ to match the now-C++ model objects' linkage) --------------------
 enable_testing()
 

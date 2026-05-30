@@ -76,4 +76,10 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
                              const struct fesom_ice   *ice,
                              struct fesom_forcing     *forcing);
 
+/* M5.20: DEVICE twin of the sw_3d penetration profile (KPP/tracer-diff read sw_3d device-resident). */
+void fesom_cal_shortwave_rad_kk(const struct fesom_mesh  *mesh,
+                                const struct fesom_jra55 *jra,
+                                const struct fesom_ice   *ice,
+                                struct fesom_forcing     *forcing);
+
 #endif /* FESOM_BULK_H */

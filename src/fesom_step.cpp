@@ -258,7 +258,12 @@ int fesom_timestep(int                          step_n,
         /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push; GM sigma_xy/init_redi read them on device. */
         /* M5.13g1-T: T values device-resident - no GM re-push (sigma_xy reads T on device). */
         /* M5.14 (S flip): S values device-resident too - no GM re-push (sigma_xy reads S on device). */
-        mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device();
+        /* M5.20: hnode_new is DEVICE-resident — device-written by 12a each step; substep-1b GM reads it on
+         * device. For step ≥2 the device holds last step's 12a value (= what the old per-step re-push copied
+         * via host), so the re-push was a PLACEBO. STEP 1 ONLY: 12a has not run yet, so the device copy must
+         * be SEEDED from the host IC (fesom_ic sets hnode_new=h) before GM reads it — else GM reads alloc-zeros
+         * → NaN → CG abort. ⚠️ LINFS-only — zstar must revisit hnode_new's whole rail (see substep 12a). */
+        if (step_n == 1) { mesh->hnode_new_fld.modify_host(); mesh->hnode_new_fld.sync_device(); }
         /* M5.13f: helem device-resident from last step's commit - no re-push; GM reads it on device. */
 
         /* (G2b) density gradient on neutral surfaces. */
@@ -366,7 +371,10 @@ int fesom_timestep(int                          step_n,
         fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
         fnc->heat_flux_fld.modify_host();        fnc->heat_flux_fld.sync_device();
         fnc->water_flux_fld.modify_host();       fnc->water_flux_fld.sync_device();
-        fnc->sw_3d_fld.modify_host();            fnc->sw_3d_fld.sync_device();
+        /* M5.20: sw_3d push REMOVED — sw_3d is now computed on the DEVICE by fesom_cal_shortwave_rad_kk
+         * (forcing phase, main.cpp); KPP reads it device-resident. Eliminates 259 MB/step HtoD here (the
+         * substep-13b re-push, another 259, was a placebo also removed). The host heat_flux += swsurf
+         * side effect stays in cal_shortwave_rad. */
 
         fesom_kpp_mixing_kk(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
 
@@ -681,11 +689,20 @@ int fesom_timestep(int                          step_n,
      *  dead (preserved verbatim). On Serial/OpenMP host==device so every sync is a no-op. */
 
     /* 12a. thickness: hnode_new = hnode. IN: hnode (evolving mesh, host-written/halo'd by last
-     *  step's commit). OUT: sync_host(hnode_new) — it is read on the HOST by the tracer
-     *  advection/diffusion (substeps 13/13b) and stays Synced for the device cflz/commit. */
+     *  step's commit). M5.20: OUT stays DEVICE-resident — the substeps 13/13b tracer adv/diff (and
+     *  1b GM) read hnode_new on DEVICE; the only host readers are verify-only C-twins. The former
+     *  sync_host here + the substep-1/13 re-pushes were placebos (the dominant 778 MB/step PCIe).
+     *  ⚠️ LINFS-SPECIFIC: under the current linfs coordinate hnode_new ≡ hnode (fesom_ale_thickness_linfs_kk
+     *  is a trivial device copy), so it is computed AND read entirely on device → no host rail needed.
+     *  ZSTAR (future): hnode_new becomes a genuinely evolving thickness — if it is then computed or read
+     *  on the HOST, RESTORE the matching sync_device/sync_host here + at substeps 1 & 13 (grep "M5.20:
+     *  hnode_new"). The device-residency is an optimization for linfs, NOT a coordinate-agnostic invariant. */
     /* M5.13f: hnode device-resident from last step's commit - no re-push; thickness reads it on device. */
     fesom_ale_thickness_linfs_kk(mesh);
-    mesh->hnode_new_fld.sync_host();
+    /* M5.20: hnode_new stays DEVICE-resident — the sync_host was a PLACEBO (259 MB/step D2H): the only
+     * host readers are the verify-only C-twins (tracer/GM/ale), which on Serial read host==device. The
+     * production tracer adv/diff/GM kernels read hnode_new on device. NOT a snapshot output (no pre-I/O
+     * sync needed). See docs/GPU_FIDELITY.md §M5.20. */
     if (s_verify_ale) fesom_ale_thickness_verify(mesh, step_n);
     /* hnode_new = hnode (no exchange needed; both already cover halo). */
 
@@ -778,7 +795,8 @@ int fesom_timestep(int                          step_n,
         /* M5.13g1: uv device-resident (augmented) - no re-push; FCT reads it on device. */
         /* M5.13e: w_e device-resident (augmented by bolus 13a on device) - no re-push; FCT reads it on device. */
         /* M5.13f: hnode/helem device-resident from last step's commit - no re-push; FCT reads them on device. */
-        mesh->hnode_new_fld.modify_host();  mesh->hnode_new_fld.sync_device();
+        /* M5.20: hnode_new DEVICE-resident (this step's 12a modify_device) - PLACEBO re-push removed; FCT
+         * reads it on device. ⚠️ LINFS-only — zstar must restore this re-push if host-computed (see substep 12a). */
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (Redi reads them on device). */
 
         /* ---- T ---- */
@@ -881,8 +899,10 @@ int fesom_timestep(int                          step_n,
             fnc->heat_flux_fld.modify_host();    fnc->heat_flux_fld.sync_device();
             fnc->water_flux_fld.modify_host();   fnc->water_flux_fld.sync_device();
             fnc->virtual_salt_fld.modify_host(); fnc->virtual_salt_fld.sync_device();
-            fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device();
-            fnc->sw_3d_fld.modify_host();        fnc->sw_3d_fld.sync_device();   }
+            fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device(); }
+        /* M5.20: sw_3d re-push REMOVED here — sw_3d is forcing (set once/step by cal_shortwave_rad in the
+         * forcing phase, pushed at substep 3); it is not mutated between substep 3 and 13b, so tracer_diff
+         * reads it device-current from the substep-3 push. This was a PLACEBO re-push (259 MB/step H2D). */
         /* M5.13g1-T: T values device-resident - no trdiff IN re-push (reads it on device). */
         /* M5.14 (S flip): S values device-resident too - no trdiff IN re-push (reads it on device). */
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
