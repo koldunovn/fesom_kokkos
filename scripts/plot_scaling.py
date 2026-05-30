@@ -11,16 +11,20 @@ import numpy as np, os
 # mesh: nodes(M), gpu {nodes:s/step}, cpu {nodes:s/step}, cport-4node-s/step (or None)
 M = {
  "CORE2": dict(nodes=0.127, col="#1f77b4",
-               gpu={1:0.8617, 2:0.4741, 4:0.2937},
+               gpu={1:0.8617, 2:0.4741, 4:0.2937},                       # pre-campaign (M5.12)
+               gpu522={1:0.1285, 2:0.1129, 4:0.1345, 8:0.1354},          # m522 (2026-05-31)
                cpu={1:0.1856, 2:0.0946, 4:0.0555}, cport4=0.0329),
  "farc":  dict(nodes=0.638, col="#2ca02c",
                gpu={1:4.0193, 2:2.1225, 4:1.1580},
+               gpu522={1:0.3245, 2:0.2687, 4:0.2328},
                cpu={1:0.8713, 2:0.4434, 4:0.2281}, cport4=0.2067),
  "dars":  dict(nodes=3.16,  col="#ff7f0e",
                gpu={4:6.003, 8:3.095},
+               gpu522={2:0.8659, 4:0.5162, 8:0.3629},
                cpu={2:2.844, 4:1.465}, cport4=None),
  "NG5":   dict(nodes=7.40,  col="#d62728",
                gpu={2:30.39, 4:16.27, 8:8.698, 16:4.514},
+               gpu522={2:2.4550, 4:1.4699, 8:0.7936, 16:0.4921},
                cpu={4:4.330, 8:2.239, 16:1.171}, cport4=None),
 }
 ORDER = ["CORE2","farc","dars","NG5"]
@@ -38,6 +42,16 @@ POST = {
 # to parity than dist_16's 1.60x. More work per GPU -> nearer 1 (monotone with NG5's 462k/rank=1.41x).
 DARS_DENSE = (3.16, 4.311/2.844)   # (mesh M, 2-node ratio) = 1.52x
 
+# ---- post-M5.21 FULL campaign (binary m522 = M5.18-20 coalescing/PCIe + M5.21 Lever1+2a+2b) -------
+# GPU re-measured 2026-05-31 at 4 GPU nodes (dist_16); CPU UNCHANGED (reused, #ifdef CUDA flips).
+# The campaign crosses PARITY: GPU now FASTER than CPU on the big nod3D meshes.
+POST_M521 = {  # 4-node: gpu s/step (mean reps, m522), cpu s/step (reused)
+ "CORE2": dict(nodes=0.127, gpu4=0.1345, cpu4=0.0555),   # 2.42x slower (tiny mesh, GPU starved)
+ "farc":  dict(nodes=0.638, gpu4=0.2328, cpu4=0.2281),   # 1.02x ~ parity
+ "dars":  dict(nodes=3.16,  gpu4=0.5162, cpu4=1.465),    # 0.35x = 2.84x FASTER
+ "NG5":   dict(nodes=7.40,  gpu4=1.4703, cpu4=4.330),    # 0.34x = 2.95x FASTER
+}
+
 plt.rcParams.update({"font.size":11, "axes.grid":True, "grid.alpha":0.3,
                      "figure.dpi":130, "savefig.dpi":150})
 os.makedirs("docs/figures", exist_ok=True)
@@ -49,26 +63,26 @@ fig, ax = plt.subplots(2, 2, figsize=(13, 10))
 a = ax[0,0]
 for m in ORDER:
     d = M[m]
-    gn = sorted(d["gpu"]); a.plot(gn, [d["gpu"][n] for n in gn], "-o", color=d["col"], label=f"{m} GPU")
+    gn = sorted(d["gpu522"]); a.plot(gn, [d["gpu522"][n] for n in gn], "-o", color=d["col"], label=f"{m} GPU")
     cn = sorted(d["cpu"]); a.plot(cn, [d["cpu"][n] for n in cn], "--s", color=d["col"], mfc="white", label=f"{m} CPU")
 # ideal 1/N guides anchored at each mesh's first GPU point
 for m in ORDER:
-    d=M[m]; gn=sorted(d["gpu"]); n0=gn[0]; y0=d["gpu"][n0]
+    d=M[m]; gn=sorted(d["gpu522"]); n0=gn[0]; y0=d["gpu522"][n0]
     xs=np.array([n0, max(gn)]); a.plot(xs, y0*n0/xs, ":", color="grey", lw=0.8, alpha=0.5)
 a.set_xscale("log",base=2); a.set_yscale("log"); a.set_xticks([1,2,4,8,16]); a.set_xticklabels([1,2,4,8,16])
-a.set_xlabel("nodes"); a.set_ylabel("s/step"); a.set_title("(a) Strong scaling (log-log; dotted = ideal 1/N)")
+a.set_xlabel("nodes"); a.set_ylabel("s/step"); a.set_title("(a) Strong scaling — m522 GPU vs CPU (log-log; dotted = ideal 1/N)")
 a.legend(fontsize=7.5, ncol=2)
 
 # (b) node-for-node GPU/CPU ratio vs nodes ---------------------------------------
 b = ax[0,1]
 for m in ORDER:
-    d=M[m]; common=sorted(set(d["gpu"])&set(d["cpu"]))
+    d=M[m]; common=sorted(set(d["gpu522"])&set(d["cpu"]))
     if common:
-        b.plot(common, [d["gpu"][n]/d["cpu"][n] for n in common], "-o", color=d["col"], label=m)
-b.axhline(1.0, color="k", lw=0.8); b.text(1.05,1.05,"parity",fontsize=8)
+        b.plot(common, [d["gpu522"][n]/d["cpu"][n] for n in common], "-o", color=d["col"], label=m)
+b.axhline(1.0, color="k", lw=0.8); b.text(1.05,1.05,"parity (GPU=CPU)",fontsize=8)
 b.set_xscale("log",base=2); b.set_xticks([1,2,4,8,16]); b.set_xticklabels([1,2,4,8,16])
-b.set_xlabel("nodes"); b.set_ylabel("GPU / CPU  (× slower per node)")
-b.set_title("(b) Node-for-node ratio (Kokkos CUDA / Serial)"); b.set_ylim(0,6); b.legend(fontsize=9)
+b.set_xlabel("nodes"); b.set_ylabel("GPU / CPU  (<1 = GPU faster)")
+b.set_title("(b) Node-for-node ratio, m522 (Kokkos CUDA / Serial)"); b.set_ylim(0,3); b.legend(fontsize=9)
 
 # (c) THE TREND: 4-node ratio vs mesh size ---------------------------------------
 c = ax[1,0]
@@ -80,10 +94,14 @@ post_xc = [POST[m]["nodes"] for m in ("dars","NG5")]
 post_rc = [POST[m]["gpu4"]/POST[m]["cpu4"] for m in ("dars","NG5")]
 c.plot(post_xc, post_rc, "-D", color="#1f6f3f", lw=2.4, ms=8, label="post-M5.13 device residency")
 for x,r in zip(post_xc, post_rc): c.annotate(f"{r:.2f}×", (x,r), textcoords="offset points", xytext=(7,-3), fontsize=9, fontweight="bold", color="#1f6f3f")
-c.axhline(3.6, color="red", ls=":", lw=1); c.text(0.13, 3.05, "~3.6–3.8× : old PCIe floor", color="#b3261e", fontsize=8.5)
+m521_xc=[POST_M521[m]["nodes"] for m in ORDER]; m521_rc=[POST_M521[m]["gpu4"]/POST_M521[m]["cpu4"] for m in ORDER]
+c.plot(m521_xc, m521_rc, "-o", color="#1a73e8", lw=2.6, ms=8, zorder=6, label="post-M5.21 full campaign (m522)")
+for m,x,r in zip(ORDER,m521_xc,m521_rc):
+    c.annotate((f"{1/r:.1f}× fast" if r<1 else f"{r:.1f}× slow"), (x,r), textcoords="offset points", xytext=(6,-12 if r<1 else 7), fontsize=8, fontweight="bold", color="#1a73e8")
+c.axhline(3.6, color="red", ls=":", lw=1); c.text(0.13, 3.7, "~3.6–3.8× : old PCIe floor", color="#b3261e", fontsize=8)
 c.axhline(1.0, color="k", ls=":", lw=0.8)
-c.set_xscale("log"); c.set_xlabel("mesh size (million nodes)"); c.set_ylabel("GPU/CPU per node (4 nodes)")
-c.set_title("(c) Device residency breaks the mesh-size floor"); c.set_ylim(0,10); c.legend(fontsize=8.5)
+c.set_xscale("log"); c.set_xlabel("mesh size (million nodes)"); c.set_ylabel("GPU/CPU per node (4 nodes, <1=faster)")
+c.set_title("(c) The full campaign crosses parity on big meshes"); c.set_ylim(0,6); c.legend(fontsize=8)
 c.set_xticks([0.127,0.638,3.16,7.40]); c.set_xticklabels(["0.13","0.64","3.16","7.40"])
 
 # (d) per-watt vs mesh size ------------------------------------------------------
@@ -94,8 +112,12 @@ for m,x,p in zip(ORDER,xs,pw): e.annotate(f"1/{p:.0f}", (x,p), textcoords="offse
 post_pw=[(POST[m]["gpu4"]/POST[m]["cpu4"])*POWER for m in ("dars","NG5")]
 e.plot(post_xc, post_pw, "-D", color="#1f6f3f", lw=2.4, ms=8, label="post-M5.13 device residency")
 for x,p in zip(post_xc, post_pw): e.annotate(f"1/{p:.1f}", (x,p), textcoords="offset points", xytext=(7,-3), fontsize=9, fontweight="bold", color="#1f6f3f")
-e.set_xscale("log"); e.set_xlabel("mesh size (million nodes)"); e.set_ylabel("CPU-node energy advantage (× per Wh)")
-e.set_title(f"(d) Per-watt (GPU node {2160} W / CPU {560} W = {POWER:.2f}×)")
+m521_pw=[r*POWER for r in m521_rc]
+e.plot(m521_xc, m521_pw, "-o", color="#1a73e8", lw=2.6, ms=8, zorder=6, label="post-M5.21 (m522)")
+for m,x,p in zip(ORDER,m521_xc,m521_pw): e.annotate(f"{p:.1f}×", (x,p), textcoords="offset points", xytext=(6,-12), fontsize=8, fontweight="bold", color="#1a73e8")
+e.axhline(1.0, color="k", ls=":", lw=0.8)
+e.set_xscale("log"); e.set_xlabel("mesh size (million nodes)"); e.set_ylabel("CPU energy advantage (× per Wh; 1=parity)")
+e.set_title(f"(d) Per-watt: m522 shrinks the CPU energy lead to ~1.3× (GPU {2160} W / CPU {560} W = {POWER:.2f}×)")
 e.set_xticks([0.127,0.638,3.16,7.40]); e.set_xticklabels(["0.13","0.64","3.16","7.40"]); e.set_ylim(0,24); e.legend(fontsize=8)
 
 fig.suptitle("FESOM2 C++/Kokkos — GPU (A100) vs CPU (EPYC) strong-scaling, CORE2 → farc → dars → NG5", fontsize=13, y=0.995)
@@ -115,6 +137,16 @@ g.plot(post_x, post_r, "-D", color="#1f6f3f", lw=2.6, ms=10, zorder=5,
 for x,r,dy in zip(post_x, post_r, (11,-2)):   # dars label up (clear of the dist_8 triangle), NG5 right
     g.annotate(f"{r:.2f}×", (x,r), textcoords="offset points", xytext=(10,dy), fontsize=10.5,
                fontweight="bold", color="#1f6f3f")
+# post-M5.21 FULL campaign (m522) — the new headline: GPU re-measured after the whole M5.x campaign
+# (M5.18-20 coalescing/PCIe + M5.21 Lever1+2a+2b). Crosses PARITY → GPU FASTER on the big meshes.
+m521_x = [POST_M521[m]["nodes"] for m in ORDER]
+m521_r = [POST_M521[m]["gpu4"]/POST_M521[m]["cpu4"] for m in ORDER]
+g.plot(m521_x, m521_r, "-o", color="#1a73e8", lw=2.9, ms=11, zorder=7,
+       label="post-M5.21 FULL campaign (m522, 4 nodes)")
+for m,x,r in zip(ORDER, m521_x, m521_r):
+    lab = f"{1/r:.1f}× faster" if r < 1 else f"{r:.1f}× slower"
+    g.annotate(lab, (x,r), textcoords="offset points", xytext=(8,-13 if r<1 else 9),
+               fontsize=9.5, fontweight="bold", color="#1a73e8")
 # the data/compute-balance probe: dars denser dist_8 (2N) sits closer to parity than dist_16 (4N)
 g.plot([DARS_DENSE[0]], [DARS_DENSE[1]], "v", color="#1f6f3f", ms=9, mfc="white", zorder=5)
 g.annotate(f"dars dist_8 (2N, 2× denser): {DARS_DENSE[1]:.2f}×\ndenser packing → closer to parity",
@@ -130,9 +162,9 @@ for m,xq in (("dars",3.16),("NG5",7.40)):
                arrowprops=dict(arrowstyle="->", color="#1f6f3f", lw=1.6))
 g.set_xscale("log"); g.set_xlabel("mesh size (million nodes)", fontsize=11)
 g.set_ylabel("node-for-node GPU ÷ CPU  (× slower, 4 nodes)", fontsize=11)
-g.set_title("M5.13 device residency breaks the PCIe floor: the 3.8× gap collapses to ~1.4–1.6×\n"
-            "(CORE2/farc unchanged — their halos are PCIe-cheap; the win is the big nod3D meshes)", fontsize=10.5)
-g.set_ylim(0,10); g.set_xticks([0.127,0.638,3.16,7.40]); g.set_xticklabels(["CORE2\n0.13","farc\n0.64","dars\n3.16","NG5\n7.4"])
+g.set_title("The full M5.x campaign crosses PARITY: GPU goes from 3.8–5.3× slower to ~2.9× FASTER on the\n"
+            "big nod3D meshes (m522). Crossover ≈ farc (0.64M); small meshes stay GPU-starved.", fontsize=10.5)
+g.set_ylim(0,6); g.set_xticks([0.127,0.638,3.16,7.40]); g.set_xticklabels(["CORE2\n0.13","farc\n0.64","dars\n3.16","NG5\n7.4"])
 g.legend(fontsize=9.5, loc="upper right")
 fig2.tight_layout(); fig2.savefig("docs/figures/scaling_meshsize_trend.png", bbox_inches="tight"); plt.close(fig2)
 

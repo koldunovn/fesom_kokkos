@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_scal_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/scal.%j.err
+#
+# GENERIC GPU strong-scaling run (M5.21 m522 re-run, 2026-05-31). Parametrized via --export:
+#   MESH (full path), DT, NSTEPS (default 35), TAG (eg scal_ng5_n4). nodes/ntasks via sbatch CLI.
+#   dist_$NTASKS (4 ranks/GPU-node). Internal loop timer (startup-free); 2 reps; snap_every=-1.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}
+rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then echo "ERROR: $MESH/dist_$NPES missing"; exit 2; fi
+
+run() {  # $1=tag-suffix
+  srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "${DT:?DT required}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+       > "$OUT/log_$1.txt" 2>&1
+  printf "%-12s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+echo "=== GPU scaling $TAG  mesh=$(basename $MESH)  nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES)  dt=$DT nsteps=${NSTEPS:-35} ==="
+echo "nodes: $SLURM_JOB_NODELIST"; nvidia-smi -L | head -1
+run rep_a
+run rep_b
+echo "--- CG iters + T/S sanity (rep_a, last step) ---"
+grep -E "it=" "$OUT/log_rep_a.txt" | tail -1
+rm -f "$OUT"/*.monthly.nc
