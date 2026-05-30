@@ -85,7 +85,7 @@ Per field X currently host-bracketed (`X.sync_host()` then `fesom_halo_exchange(
 - [x] **T1** — guard GM verify-only syncs (`fer_tapfac`, `fer_scal`) behind `s_verify_gm` (folded into the T2 verify-blocks)
 - [x] **T2** — flip GM host-bracket halos to device: `neutral_slope`, `sigma_xy`, `fer_K` (`fer_C` kept host = small nod2D). **Validated: Serial gm-verify max|Δ|==0, pi np1+np2 ALL-FIELDS-BIT-IDENTICAL, SYNCCHECK clean, CORE2 CUDA gate PASS (worst 8.08e-3, no staleness regression).**
 - [x] **CP1** — NG5 nsys checkpoint: **clean step 3.80→3.61 s/step (−5%), deep_copy 6.57→4.84 GB/step (−26%), nsys DtoH 4.11→2.35 (−43%), GPU util 29.8→34%, 1b_gm phase ~11-16%→4.63%; node-for-node 0.879→~0.834×.** GPU_FIDELITY §M5.15.
-- [ ] **T3** — investigate + flip the nod3D host-readers: `bvfreq` (placebo?), `dbsfc`, `ghats`, `T`/`S`, `hnode_new`
+- [x] **T3** — investigated all 6; removed `bvfreq` (`:192`, verify-only + cosmetic-print) + `dbsfc` (`:193` OUT + `:351` IN re-push, verify-only/redundant — host `kpp_bldepth` is in the verify-gated twin). **Kept: `T` (required — bulk SST forcing, T4 class), `S` (already M5.14), `ghats` (deliberate host-keep), `MLD1_ind` (tiny, GM host read).** Validated: eos/kpp/gm verify max|Δ|==0, pi np1+np2 BIT-IDENTICAL, SYNCCHECK clean, CUDA gate PASS (worst 7.47e-3, bvfreq snapshot 3.9e-7). **Result: step 3.61→3.456 s/step (−4.3%), deep_copy 4.84→4.10 GB/step (−742 MB). Cumulative M5.15: 3.80→3.456 (−9%), deep_copy 6.57→4.10 (−38%), node-for-node ~0.80×.**
 - [ ] **T4** — `uvnode` surface-only refresh (the hard one; optional/defer)
 - [ ] **CP2 / ACCEPTANCE** — NG5 full sweep + 1-yr CORE2 CUDA climate PASS (L58); decide if Lever B-overlap is still worth it
 

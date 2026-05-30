@@ -738,3 +738,25 @@ The 1.73 GB/step `deep_copy` drop matches the GM fields exactly (`neutral_slope`
 4 pts → the bulk of the remaining halo-wait is the *other* exchanges + load-imbalance (the T3 / deferred overlap-B
 target). Tooling: `FESOM_SYNC_LOG` rail in `fesom_field.hpp` (compile-guarded), `job_nsys_ng5` (now MPI-traced),
 `job_synclog_core2`, `job_m515_serial_val`. Plan: `docs/plans/20260530-m515-gm-residency.md`. Lesson L60.
+
+**T3 (`<commit>`) — the remaining nod3D host-readers, investigated + the verify-only ones removed.** Per-field
+classification (the attribution + code trace): `bvfreq` (`:192`) and `dbsfc` (`:193` OUT + `:351` IN re-push) are
+**verify-only** — their raw-`h()` readers are the host C-twins `eos_verify`/`fesom_kpp_verify`(`kpp_bldepth`), which
+run only under `FESOM_KK_VERIFY` (Serial host==device → no sync needed); production reads them on device
+(`bvfreq` eos/gm/pp/kpp `.d()` + the smoother re-dirties it; `dbsfc` `kpp_bldepth_kk` `.d()`). Removed both (the
+`dbsfc` re-push was a redundant HtoD; `bvfreq`'s cosmetic min/max console range goes stale on CUDA — accepted class).
+**Kept:** `T` (genuinely required — `fesom_bulk.cpp:259` reads SST on host next step, the JRA55 heat flux; the L50
+uvnode class), `S` (already device, M5.14), `ghats` (a deliberate host-keep — its post-exchange consumer is gated
+off in CORE2), `MLD1_ind` (tiny nod2D index, GM `init_Redi` host read). Validated: eos/kpp/gm verify max|Δ|==0,
+pi np1+np2 ALL-FIELDS-BIT-IDENTICAL, SYNCCHECK clean, **CUDA gate PASS (worst 7.47e-3; `bvfreq` snapshot 3.9e-7
+→ the pre-I/O sync fully covers it)**.
+
+| metric | M5.14 | T1+T2 | **+T3** |
+|--|--|--|--|
+| clean step (NG5 dist_16) | 3.80 s | 3.61 | **3.456 (−9% cumulative)** |
+| `deep_copy` | 6.57 GB/step (121) | 4.84 (116) | **4.10 (113) — −38% cumulative** |
+| node-for-node GPU/CPU | 0.879× | ~0.834× | **~0.80× (GPU ~25% faster)** |
+
+**Residency is now largely exhausted** — the remaining per-step DtoH is genuinely-required host readers
+(`T`/`uvnode` for the JRA55 bulk forcing, the L50 class) + small/deliberate fields. The `MPI_Waitall` (still ~47 %)
+is the next prize and is the deferred **Lever B — interior/boundary overlap** (CP2), not more residency.

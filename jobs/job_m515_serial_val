@@ -21,7 +21,7 @@ V=/work/ab0995/a270088/port2/m515_val
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 
 echo "########## 1) Serial gm-verify (max|Δ| must be 0) ##########"
-rm -rf "$V/gmv"; mkdir -p "$V/gmv"; FESOM_KK_VERIFY=gm srun -n1 "$ROOT/build-serial/fesom_port" "$MESH" "$V/gmv" 100 20 10 > "$V/gmv.log" 2>&1
+rm -rf "$V/gmv"; mkdir -p "$V/gmv"; FESOM_KK_VERIFY=eos,kpp,gm srun -n1 "$ROOT/build-serial/fesom_port" "$MESH" "$V/gmv" 100 20 10 > "$V/gmv.log" 2>&1
 echo "rc=$?"
 echo "--- NON-zero gm max|Δ|? (empty = PASS) ---"; grep "FESOM_KK_VERIFY=" "$V/gmv.log" | grep -v "0.000e+00" | head
 echo "--- gm verify ran (sample, last 2) ---"; grep "FESOM_KK_VERIFY=gm" "$V/gmv.log" | tail -2

@@ -189,8 +189,13 @@ int fesom_timestep(int                          step_n,
      * and the snapshot via the pre-I/O sync_host (L48). The gated eos verify reads it host-current on Serial. */
     /* M5.13b: hpressure/sw_alpha/sw_beta now device-halo'd below (fesom_halo_field) + stay
      * device-resident - their OUT-rail sync_host removed (PGF/GM/KPP read them on device). */
-    aux->bvfreq_fld.sync_host();
-    aux->dbsfc_fld.sync_host();
+    /* M5.15 T3: bvfreq + dbsfc OUT sync_host REMOVED — both are VERIFY-ONLY host reads (the
+     * host C-twins eos_verify / fesom_kpp_verify[kpp_bldepth] run only under FESOM_KK_VERIFY,
+     * where Serial host==device so no sync is needed anyway). Production reads them on DEVICE:
+     * bvfreq via eos/gm/pp/kpp .d() (+ the device smoother re-dirties it; snapshot covered by
+     * the pre-I/O sync fesom_main.cpp:1309), dbsfc via kpp_bldepth_kk .d(). bvfreq's cosmetic
+     * min/max console range goes stale on CUDA (accepted class, like S/density/T post-M5.13/14).
+     * MLD1_ind stays (GM init_Redi host read, tiny nod2D index). */
     aux->MLD1_ind_fld.sync_host();
     /* In-binary per-kernel gate (Serial max|Δ|==0); non-intrusive (restores the Kokkos result).
      * Reads aux host-current (just synced above). */
@@ -348,7 +353,10 @@ int fesom_timestep(int                          step_n,
          * from substep 1 but re-synced for robustness. (No-op on Serial/OpenMP.) */
         /* M5.5 (B): bvfreq is device-resident (device smoother, substep 1) — no re-push. */
         /* M5.13b: sw_alpha/sw_beta device-resident with their halo (substep-1 fesom_halo_field) - no re-push. */
-        aux->dbsfc_fld.modify_host();    aux->dbsfc_fld.sync_device();
+        /* M5.15 T3: dbsfc IN re-push REMOVED — dbsfc is device-current from substep 1 (eos_kk
+         * writes it on device) through KPP substep 3 (kpp_bldepth_kk reads it .d()); no host op
+         * mutates it in production (the host twin is verify-gated). The "robustness" re-push was
+         * a redundant HtoD. (Pairs with the T3 OUT-sync removal at substep 1.) */
         /* M5.4: uvnode device-resident with its halo (substep 3) — no re-push. */
         /* M5.14 (S flip): S values device-resident - no KPP re-push (bldepth reads S on device). */
         /* M5.13f: hnode device-resident from last step's commit - no re-push; KPP reads it on device. */
