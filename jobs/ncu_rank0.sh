@@ -4,7 +4,7 @@
 if [ "${SLURM_PROCID:-0}" = "0" ]; then
   exec ncu --set basic --launch-skip "${NCU_SKIP:-650}" --launch-count "${NCU_COUNT:-90}" \
            --kernel-name-base demangled \
-           --kernel-name 'regex:tracer_advect_one_fct|redi|fer_|sigma_xy|neutral_slope|gm_bolus' \
+           --kernel-name "regex:${NCU_REGEX:-tracer_advect_one_fct|redi|fer_|sigma_xy|neutral_slope|gm_bolus}" \
            --target-processes application-only \
            -o "$NCU_OUT" -f "$FESOM" "$@"
 else

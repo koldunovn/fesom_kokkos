@@ -1,5 +1,24 @@
 # FESOM2 C → C++/Kokkos port — session handoff
 
+> **✅ M5.17 — Lever B (MPI-comm overlap) MEASURED + CLOSED as a DEAD END (2026-05-30). Branch `m517-mpi-comms`, UNCOMMITTED.**
+> A barrier-isolation experiment (env-gated `MPI_Barrier` before every halo exchange + a per-rank Barrier/Waitall
+> accountant in `fesom_halo_device.cpp`+`fesom_halo.cpp`; instrument validated **pi np1+np2 BIT-IDENTICAL**) split the
+> per-step halo `MPI_Waitall` (0.288 s/step = 10.8 % of the 2.677 s step) into **79 % LOAD-IMBALANCE idle / 21 % comm**.
+> **The overlappable-comm ceiling is 0.065 s/step = 2.4 %** — Lever B is not worth the invasiveness. The old "47 %
+> Waitall" was rank-0 wall lumping imbalance + setup, never recoverable comm. CG/EVP `Allreduce` re-confirmed dead
+> (0.4 %). `docs/GPU_FIDELITY.md` §M5.17, **L62**, [[project-m517-mpi-comms]], `jobs/job_ng5_halo_split`.
+>
+> **→ NEXT CAMPAIGN: M5.18 — attack the GPU-compute + residual-PCIe bulk (~89 % of the step). Prompt
+> `docs/plans/20260531-m518-smoother-compute-PROMPT.md`** (the user's call). **Spearhead = `fesom_smooth_nod3D_kk`,
+> the #1 GPU kernel at 25.7 % of compute**, slow because it's an **uncoalesced node-major gather** (one-thread-per-node,
+> `arr[node*NL+nz]` strides by NL → 32 cache lines/warp) + depth divergence. Fix = a **LOCAL bit-identical
+> re-parallelization to one-thread-per-(node,LEVEL)** (level = the contiguous dim → coalesced, divergence-free) — NO
+> global layout refactor. ncu baseline scaffolding `jobs/job_ncu_smooth_ng5` (created; `NCU_REGEX` now parametrizes
+> `ncu_rank0.sh`). Then generalize the coalescing lever to the other node-major kernels (FCT/vel_rhs/sigma/diff_ver) +
+> attack the 3.41 GB/step residual `deep_copy`. **Heavyweight Lever C** (`fesom_field.hpp` rank-1→`View<double**>`) stays
+> the LAST resort; **Lever D** (re-partition the ~9 % imbalance, deployment-side) is orthogonal. **Measure-first every
+> step — the wall has moved every milestone.**
+
 > **✅ M5.13 + M5.14 + M5.15 — the device-residency arc COMPLETE + climate-validated end-to-end (2026-05-30).**
 > Three campaigns flipped every host-staged halo + finished full device residency on the ocean fields:
 > **M5.13** (branch `m513-pcie`, L57/L58) the nod3D/elem3D halos + uv/T; **M5.14** (`m514-residency`, L59) the last

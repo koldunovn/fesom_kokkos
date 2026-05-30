@@ -69,4 +69,15 @@ void fesom_halo_identity_test(fesom_partit *p);
 /* Free internal scratch buffers (called from fesom_partit_finalize). */
 void fesom_halo_free_buffers(void);
 
+/* M5.17 halo MPI profiler (barrier-isolation; env-gated FESOM_HALO_BARRIER /
+ * FESOM_HALO_MPI_PROF; zero cost in production). Splits the per-step halo wait
+ * into load-imbalance (MPI_Barrier) vs comm (MPI_Waitall). Used by both the
+ * host (fesom_halo.cpp) and device (fesom_halo_device.cpp) exchange paths;
+ * defined in fesom_halo_device.cpp (always compiled). fesom_halo_mpi_report is
+ * a COLLECTIVE — every rank must call it. */
+void fesom_halo_prof_barrier(fesom_partit *p);
+void fesom_halo_prof_waitall(int n_reqs, MPI_Request *reqs);
+void fesom_halo_prof_bytes(double bytes);
+void fesom_halo_mpi_report(int timed_steps, fesom_partit *p);
+
 #endif /* FESOM_HALO_H */

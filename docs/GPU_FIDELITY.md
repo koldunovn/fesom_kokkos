@@ -856,3 +856,51 @@ port's mean kept the zeros → a spurious decorrelation hitting ONLY the Fortran
 0.228→0.136). The residual ~0.91 is a **real but modest** C-port-vs-Fortran ice-velocity (EVP) difference — NOT a
 Kokkos/GPU artifact (the port matches the C twin at 0.99978). This correction does not change any M5.x perf/fidelity
 verdict (those rest on backend-vs-C + M5.16≡M5.15); it just relabels the Fortran `uice` number.
+
+## §M5.17 — Lever B (MPI comms) MEASURED FIRST → the `MPI_Waitall` is 79 % LOAD-IMBALANCE, NOT recoverable comm
+
+The M5.x roadmap nominated **Lever B** (overlap / aggregate the halo comms) as the next prize — the profiler had put
+`MPI_Waitall` at ~47 % of the (M5.14/M5.15) step. **The prompt's explicit discipline was MEASURE the split before
+building anything: a chunk of that 47 % is load-imbalance idle (fast ranks waiting at the exchange for slow ranks),
+which overlap canNOT recover.** A barrier-isolation experiment settled it decisively, and **Lever B is a dead end.**
+
+**Instrument (`src/fesom_halo_device.cpp` + `fesom_halo.cpp`, env-gated, zero prod cost; covers BOTH the device and
+host halo paths):** `FESOM_HALO_BARRIER=1` inserts an `MPI_Barrier(MPI_COMM_FESOM)` before every halo exchange (so the
+per-rank arrival skew is absorbed into the barrier and the following `MPI_Waitall` measures PURE comm);
+`FESOM_HALO_MPI_PROF=1` times `Barrier` + `Waitall` and reports across-rank min/mean/max via an `MPI_Reduce` at loop
+end. Validated byte-clean: **pi np1 + np2 BIT-IDENTICAL** (np2 exercises the host-path edit) → the instrument is
+measurement-only. Job `jobs/job_ng5_halo_split` runs 3 passes back-to-back on the SAME 4 GPU nodes.
+
+**Result — NG5 dist_16, M5.16 binary, 30 timed steps (job 25246957):**
+
+| run (same 4 nodes) | s/step | `MPI_Waitall` mean (min/max) | `MPI_Barrier` mean (min/max) | split |
+|--|--|--|--|--|
+| clean (no instrument) | **2.6766** | — | — | (reproduces M5.16 exactly) |
+| base (prof on, no barrier) | 2.6750 | **0.2878** (0.147 / 0.565) | — | Waitall = imbalance + comm |
+| barrier (prof + barrier) | 2.6957 | **0.0651** (0.041 / 0.082) | **0.2455** (0.094 / 0.529) | **imbalance 79 % \| comm 21 %** |
+
+- **The per-step halo `Waitall` is only 0.288 s/step = 10.8 % of the step** (NOT 47 %; the older nsys 47 % was rank-0
+  wall that lumped imbalance idle + comm + setup). Of it, the barrier shows **79 % is load imbalance** (0.2455 s/step)
+  and **only 21 % is comm** (0.0651 s/step).
+- **The overlappable-comm CEILING is 0.065 s/step = 2.4 % of the step.** Even a *perfect* interior/boundary overlap
+  (§2A) — and the GPU is only ~30 % utilized, so there is barely any interior compute to hide comm behind — saves
+  ≤ 2.4 %. **Lever B is not worth the invasiveness.**
+- **The variance corroborates:** base-`Waitall` spread across ranks is HUGE (min 0.147 → max 0.565, a 0.42 s skew);
+  barrier-`Waitall` is TIGHT (0.041 → 0.082, all ranks wait ~equally once arrival is equalized). High variance ⇒
+  imbalance-dominant; the tight post-barrier comm ⇒ comm is small and uniform.
+- **Wall-time proves the imbalance is intrinsic, not a barrier artifact:** +638 barriers/step changed the wall by
+  **+0.7 %** (2.6766 → 2.6957). The imbalance idle was ALREADY being paid as `Waitall` in the natural run; the barrier
+  just relabels it. (The per-exchange barrier is an *upper* bound on imbalance — it blocks cross-kernel skew
+  amortization — but the +0.7 % wall bounds the over-count to noise.)
+- **Aggregation (§2B) won't rescue it either:** nsys shows `MPI_Isend`/`Irecv` 95 680 each, ~87 KB avg message
+  (medium, not many-tiny) → the latency win from packing is marginal, and it only attacks the 2.4 % comm anyway.
+- **CG/EVP `Allreduce` confirmed DEAD** (nsys 0.4 % of MPI; matches M5.2 / L60).
+
+**Verdict (per the prompt's decision matrix): LOAD-IMBALANCE-DOMINANT → STOP Lever B. Document the ceiling, pivot.**
+The real remaining walls on the 2.677 s/step are: **(1) load imbalance ~0.245 s/step (9.2 %)** — fast ranks idling
+for slow ranks; recoverable only by a better mesh partition (**Lever D**, deployment-side, no port-code risk) or a
+work-weighted decomposition, *if* the skew is static (per-rank dump needed to tell static-partition from
+dynamic-physics/GPU-jitter). **(2) the GPU-compute + residual PCIe bulk (~89 %)** — nsys top kernel `fesom_smooth_nod3D`
+**25.7 % of GPU compute**, plus `deep_copy` still 3.41 GB/step → **Lever C** (rank-1 → `View<double**>` coalescing /
+layout) + any residual-residency. **(3) the comm itself (2.4 %)** — Lever B — not worth it. Lesson **L62**. Tooling:
+`jobs/job_ng5_halo_split`, the `[halo-mpi-prof]` rail in `fesom_halo_device.cpp` (env-gated).

@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ng5_hsplit
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5hsplit.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ng5hsplit.%j.err
+#
+# M5.17 GATE — the barrier-isolation experiment. Splits the per-step MPI_Waitall
+# (the dominant remaining bucket) into LOAD-IMBALANCE (recoverable only by better
+# partitioning / Lever D) vs COMM (overlappable / aggregatable, Lever B). Three
+# back-to-back runs on the SAME 4 GPU nodes (same-node, no node-mix noise):
+#   1. clean   — no instrument         -> reproduce the M5.16 2.677 s/step (zero-overhead check)
+#   2. base    — FESOM_HALO_MPI_PROF=1  -> Waitall across-rank min/mean/max (variance = imbalance signature)
+#   3. barrier — FESOM_HALO_BARRIER=1   -> MPI_Barrier(imbalance) + MPI_Waitall(pure comm) SPLIT
+# build-cuda (M5.17). snap_every=-1 (no I/O); monthly means cleaned (M5.16 50GB gotcha).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+NST=${NSTEPS:-35}
+F="$ROOT/build-cuda/fesom_port"
+echo "=== NG5 HALO-SPLIT nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=180 nsteps=$NST ==="
+nvidia-smi -L | head -1
+
+run_one() {   # $1=tag  $2..=per-run env assignments (e.g. FESOM_HALO_BARRIER=1)
+  local tag="$1"; shift
+  local OUT="$BASE/$tag"; rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "===== RUN $tag : env[$*] ====="
+  env -u FESOM_HALO_MPI_PROF -u FESOM_HALO_BARRIER "$@" \
+      srun "$F" "$MESH" "$OUT" 180 "$NST" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|halo-mpi-prof|deep_copy|STEP PROFILE" "$OUT/run.log"
+  rm -f "$OUT"/*.monthly.nc   # M5.16: drop the ~50GB monthly accumulator, keep run.log
+}
+
+run_one m517_clean
+run_one m517_base    FESOM_HALO_MPI_PROF=1
+run_one m517_barrier FESOM_HALO_MPI_PROF=1 FESOM_HALO_BARRIER=1
+echo "=== DONE ==="

@@ -141,6 +141,9 @@ void fesom_halo_exchange(real_t          *field,
 {
     if (p->npes == 1) return;          /* no halos */
 
+    // M5.17: barrier BEFORE the per-rank empty-comm early-return (uniform across all
+    // npes>1 ranks — see fesom_halo_device.cpp note; avoids a collective-vs-skip deadlock).
+    fesom_halo_prof_barrier(p);
     fesom_com_struct *cs = get_com(p, kind);
     if (cs->rPEnum == 0 && cs->sPEnum == 0) return;
 
@@ -148,6 +151,7 @@ void fesom_halo_exchange(real_t          *field,
     int    stride = n_levels * n_components;
     size_t recv_total = (size_t)(cs->rptr[cs->rPEnum] - cs->rptr[0]) * stride;
     size_t send_total = (size_t)(cs->sptr[cs->sPEnum] - cs->sptr[0]) * stride;
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(real_t));   // M5.17
 
     halo_nuke(field, cs, n_levels, n_components);
 
@@ -186,7 +190,7 @@ void fesom_halo_exchange(real_t          *field,
     }
 
     /* 6. Wait. */
-    MPI_CHECK(MPI_Waitall(n_reqs, sc->reqs, MPI_STATUSES_IGNORE));
+    fesom_halo_prof_waitall(n_reqs, sc->reqs);   /* M5.17: timed (gated FESOM_HALO_MPI_PROF) */
 
     /* 7. Unpack into halo region. */
     for (int k = 0; k < cs->rPEnum; ++k) {

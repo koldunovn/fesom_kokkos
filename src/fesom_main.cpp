@@ -1365,6 +1365,7 @@ skip_rest_state:
                 fesom_prof::report(loop_s, timed, mpi.mype);   /* M5.6: ocean substep breakdown */
                 fflush(stdout);
             }
+            fesom_halo_mpi_report(timed, &mpi);   /* M5.17: per-rank halo MPI split — COLLECTIVE, all ranks */
         }
         #undef TP_BEG
         #undef TP_END

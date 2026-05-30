@@ -18,6 +18,8 @@
 #include "fesom_halo_device.hpp"
 
 #include <cstdlib>   // getenv
+#include <cstdio>    // M5.17 halo-mpi-prof report
+#include <mpi.h>     // M5.17 barrier-isolation (MPI_Barrier/Waitall/Reduce/Wtime)
 
 bool fesom_halo_device_active()
 {
@@ -31,6 +33,88 @@ bool fesom_halo_device_active()
 #else
     return false;
 #endif
+}
+
+/* ======================================================================= *
+ * M5.17 halo MPI profiler — barrier-isolation split of the per-step halo
+ * wait into LOAD-IMBALANCE (rank arrival skew) vs COMM (messages in flight).
+ *
+ *   FESOM_HALO_BARRIER=1  inserts an MPI_Barrier before EVERY halo exchange,
+ *     so the per-rank arrival skew is absorbed into the barrier and the
+ *     following MPI_Waitall measures pure comm. (Off in production.)
+ *   FESOM_HALO_MPI_PROF=1 (implied by BARRIER) times Barrier + Waitall and
+ *     reports across-rank min/mean/max at the end of the timed loop.
+ *
+ * Both gated + cached -> zero production cost. Defined here (always compiled)
+ * and used by BOTH the device path (fesom_halo_exchange_device, below) and the
+ * host path (fesom_halo_exchange, fesom_halo.cpp) so the split covers all
+ * per-step comm and matches the nsys MPI_Waitall total.
+ * ======================================================================= */
+static int    s_halo_barrier = -1;   // FESOM_HALO_BARRIER cached
+static int    s_halo_mpiprof = -1;   // FESOM_HALO_MPI_PROF | BARRIER cached
+static double s_barrier_s    = 0.0;  // this-rank sum of MPI_Barrier wall (s)
+static double s_waitall_s    = 0.0;  // this-rank sum of MPI_Waitall wall (s)
+static long   s_waitall_n    = 0;    // this-rank Waitall call count
+static double s_halo_bytes   = 0.0;  // this-rank send+recv bytes
+
+static inline bool halo_barrier_on()
+{
+    if (s_halo_barrier < 0) { const char *e = getenv("FESOM_HALO_BARRIER"); s_halo_barrier = (e && e[0]=='1') ? 1 : 0; }
+    return s_halo_barrier != 0;
+}
+static inline bool halo_mpiprof_on()
+{
+    if (s_halo_mpiprof < 0) { const char *e = getenv("FESOM_HALO_MPI_PROF"); s_halo_mpiprof = ((e && e[0]=='1') || halo_barrier_on()) ? 1 : 0; }
+    return s_halo_mpiprof != 0;
+}
+
+void fesom_halo_prof_barrier(fesom_partit *p)
+{
+    if (!p || p->npes <= 1 || !halo_barrier_on()) return;
+    double t0 = MPI_Wtime();
+    MPI_Barrier(p->MPI_COMM_FESOM);
+    s_barrier_s += MPI_Wtime() - t0;
+}
+
+void fesom_halo_prof_waitall(int n_reqs, MPI_Request *reqs)
+{
+    if (!halo_mpiprof_on()) { MPI_Waitall(n_reqs, reqs, MPI_STATUSES_IGNORE); return; }
+    double t0 = MPI_Wtime();
+    MPI_Waitall(n_reqs, reqs, MPI_STATUSES_IGNORE);
+    s_waitall_s += MPI_Wtime() - t0;
+    s_waitall_n += 1;
+}
+
+void fesom_halo_prof_bytes(double bytes)
+{
+    if (halo_mpiprof_on()) s_halo_bytes += bytes;
+}
+
+void fesom_halo_mpi_report(int timed_steps, fesom_partit *p)
+{
+    if (!p || !halo_mpiprof_on() || timed_steps <= 0) return;   // ALL ranks evaluate identically
+    double loc[4] = { s_barrier_s, s_waitall_s, s_halo_bytes, (double)s_waitall_n };
+    double vmin[4], vmax[4], vsum[4];
+    MPI_Reduce(loc, vmin, 4, MPI_DOUBLE, MPI_MIN, 0, p->MPI_COMM_FESOM);
+    MPI_Reduce(loc, vmax, 4, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+    MPI_Reduce(loc, vsum, 4, MPI_DOUBLE, MPI_SUM, 0, p->MPI_COMM_FESOM);
+    if (p->mype != 0) return;
+    const double ts = (double)timed_steps;
+    const double inv_np = 1.0 / (double)p->npes;
+    printf("[halo-mpi-prof] steps=%d ranks=%d  barrier=%s  (per-step s, across-rank min/mean/max)\n",
+           timed_steps, p->npes, halo_barrier_on() ? "ON" : "off");
+    printf("[halo-mpi-prof]   MPI_Waitall : %.4f / %.4f / %.4f   (calls/step %.0f, halo %.1f MB/step/rank)\n",
+           vmin[1]/ts, vsum[1]*inv_np/ts, vmax[1]/ts, vsum[3]*inv_np/ts, vsum[2]*inv_np/ts/1e6);
+    if (halo_barrier_on()) {
+        printf("[halo-mpi-prof]   MPI_Barrier : %.4f / %.4f / %.4f   (= absorbed load-imbalance)\n",
+               vmin[0]/ts, vsum[0]*inv_np/ts, vmax[0]/ts);
+        const double imb = vsum[0]*inv_np/ts, comm = vsum[1]*inv_np/ts, tot = imb + comm + 1e-30;
+        printf("[halo-mpi-prof]   SPLIT (of barrier+waitall): imbalance %.4f s/step (%.0f%%)  |  comm %.4f s/step (%.0f%%)\n",
+               imb, 100.0*imb/tot, comm, 100.0*comm/tot);
+    } else {
+        printf("[halo-mpi-prof]   (re-run with FESOM_HALO_BARRIER=1 to split Waitall into imbalance vs comm)\n");
+    }
+    fflush(stdout);
 }
 
 #ifndef KOKKOS_ENABLE_CUDA
@@ -125,6 +209,11 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                                 std::size_t     base_off)
 {
     if (!p || p->npes == 1) { f.modify_device(); return; }
+    // M5.17: barrier BEFORE the per-rank empty-comm early-return — all npes>1 ranks
+    // call this exchange in lockstep (fesom_halo_field is rank-uniform), so the
+    // collective is uniform; placing it after the rPEnum==0 return could deadlock a
+    // rank with empty comm for this kind. Gated FESOM_HALO_BARRIER; absorbs arrival skew.
+    fesom_halo_prof_barrier(p);
     fesom_com_struct *cs = dev_get_com(p, kind);
     if (!cs) FESOM_DIE("fesom_halo_device: unknown kind %d", (int)kind);
     if (cs->rPEnum == 0 && cs->sPEnum == 0) { f.modify_device(); return; }
@@ -137,6 +226,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
     const size_t recv_total = (size_t)recv_count * stride;
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));   // M5.17
 
     grow(s.send_d, send_total, "halo.send_d");
     grow(s.recv_d, recv_total, "halo.recv_d");
@@ -181,7 +271,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
         MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
-    MPI_Waitall(nreq, s.reqs.data(), MPI_STATUSES_IGNORE);
+    fesom_halo_prof_waitall(nreq, s.reqs.data());   // M5.17: timed (gated FESOM_HALO_MPI_PROF)
 
     // UNPACK: scatter the recv buffer into the halo slots (race-free — each
     // rlist entry is a distinct halo node, so no atomics).
