@@ -1502,12 +1502,18 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     /* ===== 3. LO upwind vertical flux from `values` (adv_tra_ver_upw1) ===== */
     Kokkos::parallel_for("fct_upw1v_zero", RP(0, (size_t)myDim * nl),
         KOKKOS_LAMBDA(const size_t i) { aflux_v(i) = 0.0; });
-    Kokkos::parallel_for("fct_upw1v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL) — RP(0,myDim*nl), decode (n,nz). The
+     * field is node-major (aflux_v[n*nl+nz]) so the LEVEL is contiguous → coalesced. The
+     * vertical read vals[nz-1] is an INPUT (vals unmodified here) → each (n,nz) independent;
+     * each writes only its own level → no scatter, Serial AND OpenMP bit-identical. */
+    Kokkos::parallel_for("fct_upw1v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
-        if (nzmax <= nzmin) return;
-        aflux_v((size_t)n*nl+nzmin) = -W((size_t)n*nl+nzmin) * vals((size_t)n*nl+nzmin)
-                                     * area((size_t)n*nl+nzmin);
-        for (int nz = nzmin+1; nz < nzmax; ++nz) {
+        if (nz < nzmin || nz >= nzmax) return;     /* writes [nzmin,nzmax); nzmax<=nzmin ⇒ all masked */
+        if (nz == nzmin) {
+            aflux_v((size_t)n*nl+nzmin) = -W((size_t)n*nl+nzmin) * vals((size_t)n*nl+nzmin)
+                                         * area((size_t)n*nl+nzmin);
+        } else {
             real_t w_iface = W((size_t)n*nl+nz);
             real_t T_below = vals((size_t)n*nl+nz), T_above = vals((size_t)n*nl+(nz-1));
             real_t a = area((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);
@@ -1531,16 +1537,19 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             Kokkos::atomic_add(&fctLO((size_t)n2*nl+nz), -f);
         }
     });
-    Kokkos::parallel_for("fct_LO_final", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL). f_bot = aflux_v[nz+1] is an INPUT
+     * (aflux_v built in upw1v, not modified here); fctLO[k] is read-then-written at the
+     * SAME level (no cross-level dep) → each (n,nz) independent, bit-identical. */
+    Kokkos::parallel_for("fct_LO_final", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        for (int nz = nu1; nz < nl1; ++nz) {
-            size_t k = (size_t)n*nl+nz;
-            real_t a = areasvol(k), hnod_old = hnode(k), hnod_new = hnode_new(k);
-            if (hnod_new <= 0.0 || a <= 0.0) { fctLO(k) = 0.0; continue; }
-            real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
-            real_t numer = vals(k)*hnod_old + (fctLO(k) + (f_top - f_bot)) * dt / a;
-            fctLO(k) = numer / hnod_new;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        size_t k = (size_t)n*nl+nz;
+        real_t a = areasvol(k), hnod_old = hnode(k), hnod_new = hnode_new(k);
+        if (hnod_new <= 0.0 || a <= 0.0) { fctLO(k) = 0.0; return; }
+        real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
+        real_t numer = vals(k)*hnod_old + (fctLO(k) + (f_top - f_bot)) * dt / a;
+        fctLO(k) = numer / hnod_new;
     });
     /* D21 internal halo: exchange fct_LO (Zalesak a1 reads LO at halo nodes).
      * M5.4c: device-halo (GPU-aware MPI on CUDA, exact host bracket on Serial). */
@@ -1549,16 +1558,20 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     /* ===== 5. HO horizontal (MFCT): element gradient FROM `values`, exchange, fill, flux FROM valuesAB ===== */
     Kokkos::parallel_for("fct_grad_zero", RP(0, (size_t)E_full * nl * 2),
         KOKKOS_LAMBDA(const size_t i) { trxy(i) = 0.0; });
-    Kokkos::parallel_for("fct_grad_elem", RP(0, myDim_e), KOKKOS_LAMBDA(const int el) {
+    /* M5.21 flat lever: one thread per (elem,LEVEL) — RP(0,myDim_e*nl), decode (el,nz).
+     * trxy is elem-major×2-comp (trxy[(el*nl+nz)*2+c]); one-thread-per-(el,nz) writes the
+     * 2 adjacent comps → a warp writes 64 contiguous doubles (coalesced); the 3 same-level
+     * vertex reads vals[nv*nl+nz] also coalesce across consecutive nz. Per-level map, b-i. */
+    Kokkos::parallel_for("fct_grad_elem", RP(0, (size_t)myDim_e * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int el = (int)(i / nl), nz = (int)(i - (size_t)el*nl);
+        int nu = ulev_e(el)-1, nle = nlev_e(el)-1;
+        if (nz < nu || nz >= nle) return;
         int n0 = elnod(3*el+0), n1 = elnod(3*el+1), n2 = elnod(3*el+2);
         real_t g0=grad(6*el+0), g1=grad(6*el+1), g2=grad(6*el+2);
         real_t g3=grad(6*el+3), g4=grad(6*el+4), g5=grad(6*el+5);
-        int nu = ulev_e(el)-1, nle = nlev_e(el)-1;
-        for (int nz = nu; nz < nle; ++nz) {
-            real_t t0 = vals((size_t)n0*nl+nz), t1 = vals((size_t)n1*nl+nz), t2 = vals((size_t)n2*nl+nz);
-            trxy((size_t)el*nl*2+nz*2+0) = g0*t0 + g1*t1 + g2*t2;
-            trxy((size_t)el*nl*2+nz*2+1) = g3*t0 + g4*t1 + g5*t2;
-        }
+        real_t t0 = vals((size_t)n0*nl+nz), t1 = vals((size_t)n1*nl+nz), t2 = vals((size_t)n2*nl+nz);
+        trxy((size_t)el*nl*2+nz*2+0) = g0*t0 + g1*t1 + g2*t2;
+        trxy((size_t)el*nl*2+nz*2+1) = g3*t0 + g4*t1 + g5*t2;
     });
     /* D21 internal halo: exchange tr_xy (full element halo, 2-comp; fill_up_dn_grad +
      * the node gather read it at HALO elements). M5.4c: device-halo (GPU-aware MPI). */
@@ -1635,22 +1648,34 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     });
 
     /* ===== 6. HO vertical (adv_tra_ver_qr4c, num_ord=1, init_zero=0 → += HO−LO), ttf=valuesAB ===== */
-    Kokkos::parallel_for("fct_qr4c_v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL) — RP(0,myDim*nl), decode (n,nz). qr4c_v
+     * does aflux_v[k] = HO(k) - aflux_v[k] read-then-write at the SAME level; all vertical
+     * reads (valsAB[nz±1,±2], Zc[nz±2]) are INPUTS → per-level map. The branch dispatch
+     * replicates the original's surface / 2nd-layer / bottom-1 / bottom / interior cases.
+     * ⚠️ The ONE within-column write-dep: when nzmax-nzmin==2 the 2nd-layer and bottom-1
+     * writes BOTH hit level nzmin+1 (the 2nd reading the 1st's result with the SAME
+     * -0.5(Tup+Tdn)W·area term) → they cancel to a net no-op; reproduced by leaving that
+     * level untouched. Every other level is written exactly once → Serial bit-identical. */
+    Kokkos::parallel_for("fct_qr4c_v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
         if (nzmax <= nzmin) return;
+        if (nz < nzmin || nz > nzmax) return;                   /* qr4c_v writes [nzmin,nzmax] inclusive */
         const real_t num_ord = 1.0;
-        { int nz = nzmin; size_t k = (size_t)n*nl+nz;            /* surface */
-          aflux_v(k) = -valsAB(k) * W(k) * area(k) - aflux_v(k); }
-        if (nzmax - nzmin >= 2) { int nz = nzmin+1;             /* 2nd layer */
-          real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-          size_t k = (size_t)n*nl+nz;
-          aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k); }
-        if (nzmax - nzmin >= 2) { int nz = nzmax-1;             /* bottom-1 */
-          real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-          size_t k = (size_t)n*nl+nz;
-          aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k); }
-        { int nz = nzmax; size_t k = (size_t)n*nl+nz; aflux_v(k) = 0.0 - aflux_v(k); }  /* bottom */
-        for (int nz = nzmin+2; nz <= nzmax-2; ++nz) {           /* interior 4th-order quadratic */
+        size_t k = (size_t)n*nl+nz;
+        if (nzmax - nzmin == 2 && nz == nzmin+1) {
+            return;                                             /* 2nd-layer ∘ bottom-1 cancel → net no-op */
+        } else if (nz == nzmin) {                               /* surface */
+            aflux_v(k) = -valsAB(k) * W(k) * area(k) - aflux_v(k);
+        } else if (nz == nzmax) {                               /* bottom */
+            aflux_v(k) = 0.0 - aflux_v(k);
+        } else if (nz == nzmin+1) {                             /* 2nd layer (nzmax-nzmin>=3) */
+            real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
+            aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k);
+        } else if (nz == nzmax-1) {                             /* bottom-1 (nzmax-nzmin>=3) */
+            real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
+            aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k);
+        } else {                                                /* interior 4th-order quadratic */
             real_t Z_um1 = Zc(nz-1), Z_u = Zc(nz), Z_dn = Zc(nz+1), Z_um2 = Zc(nz-2);
             real_t Tum1 = valsAB((size_t)n*nl+(nz-1)), Tu = valsAB((size_t)n*nl+nz);
             real_t Tdn  = valsAB((size_t)n*nl+(nz+1)), Tum2 = valsAB((size_t)n*nl+(nz-2));
@@ -1670,26 +1695,33 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 
     /* ===== 7. Zalesak limiter (oce_tra_adv_fct), ttf = values, LO = fct_LO ===== */
     /* a1: per-node max/min(LO, ttf) over OWNED+HALO (a2 reads at halo vertices). */
-    Kokkos::parallel_for("fct_zal_a1", RP(0, N_full), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL) over OWNED+HALO (N_full). Per-level
+     * map (fmax/fmin from same-level fctLO/vals) → coalesced, bit-identical. */
+    Kokkos::parallel_for("fct_zal_a1", RP(0, (size_t)N_full * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        for (int nz = nu1; nz < nl1; ++nz) {
-            size_t k = (size_t)n*nl+nz; real_t a = fctLO(k), b = vals(k);
-            fmax(k) = (a>b)?a:b; fmin(k) = (a<b)?a:b;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        size_t k = (size_t)n*nl+nz; real_t a = fctLO(k), b = vals(k);
+        fmax(k) = (a>b)?a:b; fmin(k) = (a<b)?a:b;
     });
     /* a2: per-element max/min over 3 vertices + ±bignumber pad below nlevels. */
-    Kokkos::parallel_for("fct_zal_a2", RP(0, myDim_e), KOKKOS_LAMBDA(const int e) {
-        int n0 = elnod(3*e+0), n1 = elnod(3*e+1), n2 = elnod(3*e+2);
+    /* M5.21 flat lever: one thread per (elem,LEVEL). AUX is elem-major×2 → coalesced.
+     * Two regimes per column: [nu1,nle) = max/min over the 3 vertices (same-level reads);
+     * [nle,nl-1) = ±bignumber pad (ulevels≤nlevels ⇒ nu1≤nle, so the regimes don't gap).
+     * Per-level map, bit-identical. */
+    Kokkos::parallel_for("fct_zal_a2", RP(0, (size_t)myDim_e * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int e = (int)(i / nl), nz = (int)(i - (size_t)e*nl);
         int nu1 = ulev_e(e)-1, nle = nlev_e(e)-1;
-        for (int nz = nu1; nz < nle; ++nz) {
+        if (nz < nu1 || nz >= nl-1) return;
+        if (nz < nle) {
+            int n0 = elnod(3*e+0), n1 = elnod(3*e+1), n2 = elnod(3*e+2);
             real_t a0=fmax((size_t)n0*nl+nz), a1=fmax((size_t)n1*nl+nz), a2=fmax((size_t)n2*nl+nz);
             real_t mx=a0; if(a1>mx)mx=a1; if(a2>mx)mx=a2;
             real_t b0=fmin((size_t)n0*nl+nz), b1=fmin((size_t)n1*nl+nz), b2=fmin((size_t)n2*nl+nz);
             real_t mn=b0; if(b1<mn)mn=b1; if(b2<mn)mn=b2;
             AUX(((size_t)e*nl+nz)*2+0) = mx;
             AUX(((size_t)e*nl+nz)*2+1) = mn;
-        }
-        for (int nz = nle; nz < nl-1; ++nz) {
+        } else {
             AUX(((size_t)e*nl+nz)*2+0) = -bignumber;
             AUX(((size_t)e*nl+nz)*2+1) =  bignumber;
         }
@@ -1795,18 +1827,20 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     });
 
     /* ===== 8. flux2dtracer_fct (LO transition + limited HO into del_ttf_adv{vert,horiz}) ===== */
-    Kokkos::parallel_for("fct_f2d_v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL). Both original loops accumulate into
+     * dtv[k] at the SAME level → fuse per (n,nz), preserving the two-step += order (LO
+     * transition then antidiffusive divergence; f_bot=aflux_v[nz+1] is an INPUT). The a<=0
+     * guard skips only the 2nd term (the 1st += is unconditional, as in the C twin). b-i. */
+    Kokkos::parallel_for("fct_f2d_v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        for (int nz = nu1; nz < nl1; ++nz) {                  /* LO transition */
-            size_t k = (size_t)n*nl+nz;
-            dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);
-        }
-        for (int nz = nu1; nz < nl1; ++nz) {                  /* antidiffusive vertical divergence */
-            size_t k = (size_t)n*nl+nz; real_t a = areasvol(k);
-            if (a <= 0.0) continue;
-            real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
-            dtv(k) += (f_top - f_bot) * dt / a;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        size_t k = (size_t)n*nl+nz;
+        dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);      /* LO transition */
+        real_t a = areasvol(k);                                  /* antidiffusive vertical divergence */
+        if (a <= 0.0) return;
+        real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
+        dtv(k) += (f_top - f_bot) * dt / a;
     });
     Kokkos::parallel_for("fct_f2d_h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {   /* edge→node SCATTER */
         int n1 = edges(2*e+0), n2 = edges(2*e+1);
@@ -1828,14 +1862,17 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         KOKKOS_LAMBDA(const size_t i) { delttf(i) = dth(i) + dtv(i); });
 
     /* ===== 10. ALE reconstruction (T_new = LO + limited antidiff) ===== */
-    Kokkos::parallel_for("fct_ale_recon", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.21 flat lever: one thread per (node,LEVEL). All reads/writes at the SAME level
+     * (delttf[k], vals[k]); the vals write uses the just-updated delttf[k] → each (n,nz)
+     * independent, bit-identical. */
+    Kokkos::parallel_for("fct_ale_recon", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
-        for (int nz = nzmin; nz < nzmax; ++nz) {
-            size_t k = (size_t)n*nl+nz;
-            real_t hnode_old = hnode(k), hn_new = hnode_new(k);
-            delttf(k) += vals(k) * (hnode_old - hn_new);
-            if (hn_new > 0.0) vals(k) += delttf(k) / hn_new;
-        }
+        if (nz < nzmin || nz >= nzmax) return;
+        size_t k = (size_t)n*nl+nz;
+        real_t hnode_old = hnode(k), hn_new = hnode_new(k);
+        delttf(k) += vals(k) * (hnode_old - hn_new);
+        if (hn_new > 0.0) vals(k) += delttf(k) / hn_new;
     });
 
     tracers->data[tr_idx].values_fld.modify_device();

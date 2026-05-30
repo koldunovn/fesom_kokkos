@@ -1103,10 +1103,17 @@ void fesom_update_vel_kk(const struct fesom_mesh *mesh,
     auto uv     = dyn->uv_fld.d();
     auto uv_rhs = dyn->uv_rhs_fld.d();
 
-    Kokkos::parallel_for("fesom_update_vel", Kokkos::RangePolicy<>(0, E),
-        KOKKOS_LAMBDA(const int e) {
+    /* M5.21 flat lever: one thread per (elem,LEVEL) — RP(0,E*nl), decode (e,nz). uv is
+     * elem-major×2 (FESOM_ELEMVEC = (e*nl+nz)*2) so one-thread-per-(e,nz) writes the 2
+     * adjacent comps → coalesced warp store (vs the old per-element stride of nl*2). Fx/Fy
+     * (level-independent) are recomputed per level — cheap, and d_eta/grad reads broadcast
+     * across a same-e warp. Each (e,nz) writes its own uv slots → bit-identical. */
+    Kokkos::parallel_for("fesom_update_vel", Kokkos::RangePolicy<>(0, (size_t)E * nl),
+        KOKKOS_LAMBDA(const size_t i) {
+            const int e = (int)(i / nl), nz = (int)(i - (size_t)e*nl);
             int nzmin = ulev(e) - 1;
             int nzmax = nlev(e) - 1;
+            if (nz < nzmin || nz >= nzmax) return;
             int n0 = en(3*e + 0);
             int n1 = en(3*e + 1);
             int n2 = en(3*e + 2);
@@ -1115,11 +1122,9 @@ void fesom_update_vel_kk(const struct fesom_mesh *mesh,
             real_t e2 = coef * d_eta(n2);
             real_t Fx = grad(6*e + 0)*e0 + grad(6*e + 1)*e1 + grad(6*e + 2)*e2;
             real_t Fy = grad(6*e + 3)*e0 + grad(6*e + 4)*e1 + grad(6*e + 5)*e2;
-            for (int nz = nzmin; nz < nzmax; ++nz) {
-                size_t k = FESOM_ELEMVEC(e, nz, nl);
-                uv(k + 0) += uv_rhs(k + 0) + Fx;
-                uv(k + 1) += uv_rhs(k + 1) + Fy;
-            }
+            size_t k = FESOM_ELEMVEC(e, nz, nl);
+            uv(k + 0) += uv_rhs(k + 0) + Fx;
+            uv(k + 1) += uv_rhs(k + 1) + Fy;
         });
 
     dyn->uv_fld.modify_device();   /* driver sync_host()s before the elem3D halo */
