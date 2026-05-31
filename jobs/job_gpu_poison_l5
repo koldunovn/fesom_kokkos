@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=kk_poison_l5
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/poison_l5.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/poison_l5.%j.err
+# L5 (M5.23) dead-halo poison-test: 3 CORE2 dist_8 ice-active legs in ONE allocation, all on the
+# poison-scaffolded build-cuda, then diffed vs the cached Serial oracle (serref_core2) by
+# gpu_fidelity_check.py (run on the login node after this finishes).
+#   leg 1 CLEAN                  — sanity: the scaffolded build still PASSES (env unset = no-op).
+#   leg 2 FESOM_POISON_BVFREQ=1  — POSITIVE control: the device smoother (:234) gathers bvfreq at
+#                                  element vertices incl. halo nodes → expect FAIL (NaN propagates).
+#   leg 3 FESOM_POISON_UV_RHSAB=1— candidate: code-read finds no device reader of uv_rhsAB's halo →
+#                                  expect PASS ⇒ the :467 exchange is dead ⇒ remove it.
+ROOT=/home/a/a270088/port_kokkos; source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+BIN="$ROOT/build-cuda/fesom_port"
+
+run_leg () {   # $1 = outdir name   $2 = poison env var name (empty for clean)
+  local OUT="$BASE/$1"; rm -rf "$OUT"; mkdir -p "$OUT"
+  [ -n "$2" ] && export "$2=1"
+  echo "=== leg $1  (poison=${2:-NONE}) ==="
+  srun "$BIN" "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/log" 2>&1
+  echo "  exit=$? -> $OUT"
+  [ -n "$2" ] && unset "$2"
+}
+
+run_leg gate_dev_clean          ""
+run_leg gate_dev_poison_bvfreq  FESOM_POISON_BVFREQ
+run_leg gate_dev_poison_uvrhsab FESOM_POISON_UV_RHSAB
+echo "ALL LEGS DONE"

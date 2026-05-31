@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=kk_dars_l3ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=8
+#SBATCH --ntasks=32
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/darsl3ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/darsl3ab.%j.err
+# M5.23 L3 A/B in the COMM regime (dars dist_32 = 8 nodes = 98.8k 2D-pts/rank = the faithful
+# NG5@16N proxy). BEFORE=m522c (L1 EVP fused only) vs AFTER=m523L3 (+ 10 adjacent same-kind halo
+# PAIR fusions: FCT plus/minus ×2/step, EOS density+hpressure & sw_alpha+sw_beta, GM pairs, PGF x/y,
+# vert-vel w+fer_w & w_e+w_i, visc u_b+v_b, bulk heat+water). Same allocation, back-to-back,
+# FESOM_HALO_MPI_PROF=1 → read the [halo-mpi-prof] calls/step DROP (deterministic proof the fusion
+# took effect) + the loop-timing delta. dt=180 (the SYPD basis), 50 steps for a clean per-step mean
+# (the L3 signal is smaller than L1's, so average more). NPES=32 -> dist_32.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_HALO_MPI_PROF=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NST=${NSTEPS:-50}; DT=${DT:-180}; NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR $MESH/dist_$NPES missing"; exit 2; }
+echo "=== DARS L3 A/B dist_$NPES (${SLURM_NNODES}N, ~$((3160340/NPES/1000))k 2D/rank) dt=$DT nst=$NST ==="
+run () { # $1=binary $2=tag
+  local OUT="/work/ab0995/a270088/port2/kokkos_gpu_runs/dars_l3_$2"; rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "######## $2 :: $1 ########"
+  srun "$1" "$MESH" "$OUT" "$DT" "$NST" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|halo-mpi-prof|MPI_Waitall|SPLIT|CG share" "$OUT/run.log"
+  sed -n '/phase + kernel breakdown/,$p' "$OUT/run.log" | grep -iE "halo_pack|halo_unpack|ice_dyn|ice_evp" | head
+  rm -f "$OUT"/*.monthly.nc
+}
+run "$ROOT/build-cuda/fesom_port_m522c"  before_c
+run "$ROOT/build-cuda/fesom_port_m523L3" after_l3
+echo "=== done ==="

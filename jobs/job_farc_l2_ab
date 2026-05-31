@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=kk_farc_l2ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/farcl2ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/farcl2ab.%j.err
+# M5.23 L2 A/B bracket in the COMM regime (farc dist_8 = 2 nodes = 80k 2D-pts/rank — brackets the
+# dars-8N NG5@16N proxy; farc is CG-heavy = 220 iters/step → the persistent-request path fires most
+# on the per-iter CG NOD2D-1 halo here). SAME binary (m523L2), env toggle: BEFORE NOPERSIST=1 (fresh)
+# vs AFTER default (persist). Read the LOOP timing s/step delta (L2 doesn't change calls/step).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_HALO_MPI_PROF=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NST=${NSTEPS:-50}; DT=${DT:-900}; NPES=$SLURM_NTASKS
+BIN="$ROOT/build-cuda/fesom_port_m523L2"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR $MESH/dist_$NPES missing"; exit 2; }
+echo "=== FARC L2 A/B dist_$NPES (${SLURM_NNODES}N, ~$((638387/NPES/1000))k 2D/rank) dt=$DT nst=$NST  [same binary m523L2] ==="
+run () { # $1=tag  $2=nopersist(1/empty)
+  local OUT="/work/ab0995/a270088/port2/kokkos_gpu_runs/farc_l2_$1"; rm -rf "$OUT"; mkdir -p "$OUT"
+  [ -n "$2" ] && export FESOM_HALO_NOPERSIST=1
+  echo "######## $1 :: NOPERSIST=${2:-0} ########"
+  srun "$BIN" "$MESH" "$OUT" "$DT" "$NST" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|halo-mpi-prof|MPI_Waitall|CG share" "$OUT/run.log"
+  unset FESOM_HALO_NOPERSIST
+  rm -f "$OUT"/*.monthly.nc
+}
+run before_fresh   1
+run after_persist
+echo "=== done ==="

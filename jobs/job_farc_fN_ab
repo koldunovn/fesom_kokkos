@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=kk_farc_fNab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/farcfNab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/farcfNab.%j.err
+# M5.23 L5+fieldN A/B bracket in the COMM regime (farc dist_8 = 2 nodes = 80k 2D-pts/rank — brackets
+# the dars-8N=99k NG5@16N proxy). BEFORE=m523L3 (L1+L3 tip) vs AFTER=m523fN (+ EOS fieldN 3->1 + the
+# uv_rhsAB L5 dead-halo removal). Same allocation, back-to-back, FESOM_HALO_MPI_PROF=1 → the
+# [halo-mpi-prof] calls/step DROP (expect EXACTLY -3/step: -2 EOS, -1 uv_rhsAB) + loop-timing delta.
+# dt=900 farc-natural, 50 steps. NPES=8 -> dist_8.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_HALO_MPI_PROF=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NST=${NSTEPS:-50}; DT=${DT:-900}; NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR $MESH/dist_$NPES missing"; exit 2; }
+echo "=== FARC L5+fieldN A/B dist_$NPES (${SLURM_NNODES}N, ~$((638387/NPES/1000))k 2D/rank) dt=$DT nst=$NST ==="
+run () { # $1=binary $2=tag
+  local OUT="/work/ab0995/a270088/port2/kokkos_gpu_runs/farc_fN_$2"; rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "######## $2 :: $1 ########"
+  srun "$1" "$MESH" "$OUT" "$DT" "$NST" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|halo-mpi-prof|MPI_Waitall|SPLIT|CG share" "$OUT/run.log"
+  sed -n '/phase + kernel breakdown/,$p' "$OUT/run.log" | grep -iE "halo_pack|halo_unpack|ice_dyn|ice_evp" | head
+  rm -f "$OUT"/*.monthly.nc
+}
+run "$ROOT/build-cuda/fesom_port_m523L3" before_l3
+run "$ROOT/build-cuda/fesom_port_m523fN" after_fN
+echo "=== done ==="

@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=kk_dars_hsplit
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/darshsplit.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/darshsplit.%j.err
+#
+# M5.22-comm: the M5.17 barrier-isolation experiment on FARC as a CHEAP PROXY for the
+# comm-bound regime. The comm regime is governed by 2D-vertices-per-rank (user insight):
+#   farc dist_4 (1N) = 160k/rank, dist_8 (2N) = 80k/rank, dist_16 (4N) = 40k/rank
+#   → brackets NG5 dist_64 (16N) = 115k/rank, on 1-4 nodes instead of 16.
+# nodes/ntasks set by sbatch CLI (-N/-n); dist_$SLURM_NTASKS. dt=900 (farc natural).
+# 3 back-to-back passes on the SAME nodes:
+#   clean   — reproduce s/step (zero-overhead)
+#   base    — FESOM_HALO_MPI_PROF=1  -> Waitall across-rank min/mean/max (variance = imbalance signature)
+#   barrier — FESOM_HALO_BARRIER=1   -> MPI_Barrier(imbalance) + MPI_Waitall(pure comm) SPLIT
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/kokkos_gpu_runs
+NST=${NSTEPS:-35}; DT=${DT:-180}
+F="$ROOT/build-cuda/fesom_port"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== FARC HALO-SPLIT nodes=$SLURM_NNODES ntasks=$NPES dist_$NPES dt=$DT nsteps=$NST  (~$((3160340/NPES/1000))k 2D-pts/rank) ==="
+nvidia-smi -L | head -1
+
+run_one() {   # $1=tag  $2..=per-run env
+  local tag="dars_n${SLURM_NNODES}_$1"; shift
+  local OUT="$BASE/$tag"; rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "===== RUN $tag : env[$*] ====="
+  env -u FESOM_HALO_MPI_PROF -u FESOM_HALO_BARRIER "$@" \
+      srun "$F" "$MESH" "$OUT" "$DT" "$NST" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  echo "rc=$?"
+  grep -E "loop timing|halo-mpi-prof|deep_copy|STEP PROFILE|CG share" "$OUT/run.log"
+  echo "--- top halo/CG/exchange kernels (per-step) ---"
+  sed -n '/phase + kernel breakdown/,$p' "$OUT/run.log" | grep -iE "halo|cg_|exch|pack|unpack" | head -10
+  rm -f "$OUT"/*.monthly.nc
+}
+run_one clean
+run_one base    FESOM_HALO_MPI_PROF=1
+run_one barrier FESOM_HALO_MPI_PROF=1 FESOM_HALO_BARRIER=1
+echo "=== DONE ==="
