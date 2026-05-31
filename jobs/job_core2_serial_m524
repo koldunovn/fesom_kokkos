@@ -1,0 +1,26 @@
+#!/bin/bash
+#SBATCH --job-name=kk_core2_ser_m524
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/serm524.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/serm524.%j.err
+# M5.24 TDMA footprint-shrink, kernel #1: tracer vertical-diffusion in-place Thomas
+# aliasing (cp -> c, tp -> tr). Pure per-thread storage reuse: each c[nz]/tr[nz] is
+# read then overwritten in level order, so modified-c and eliminated-RHS share the
+# scratch (8 -> 6 NL_MAX arrays). Must be ALL-FIELDS BIT-IDENTICAL on Serial.
+# Fresh CORE2 dist_8 Serial vs the preserved m522 oracle (m523fN already == that oracle).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env.sh"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/serref_m524_test; rm -rf "$OUT"; mkdir -p "$OUT"
+srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" 1800 20 10 $PHC 1958
+echo "run rc=$?"
+echo "=== diff_snap vs preserved m522 oracle (zero-tolerance, all fields) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" /work/ab0995/a270088/port2/kokkos_gpu_runs/serref_m522_saved "$OUT"
+echo "diff_snap rc=$?"

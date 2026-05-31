@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH --job-name=kk_ncu_m524ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/tdma_profile/m524ab/job.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/tdma_profile/m524ab/job.%j.err
+# M5.24 full before/after GPU profile of the 4 reworked column kernels:
+# impl_vert_visc, fer_solve_gamma, diff_ver_part_impl_ale (Thomas aliasing) +
+# pressure_bv (hpressure fusion). BEFORE = fesom_port_m523fN, AFTER = fesom_port.
+# Targeted metrics (fast, few passes): duration + local-store + occupancy.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/tdma_profile/m524ab; mkdir -p "$OUT"
+KREGEX='impl_vert_visc|fer_solve_gamma|diff_ver_part_impl_ale|pressure_bv'
+METRICS='gpu__time_duration.sum,l1tex__t_sectors_pipe_lsu_mem_local_op_st.sum,sm__warps_active.avg.pct_of_peak_sustained_active'
+
+prof() {  # $1=binary  $2=tag
+  mkdir -p "$OUT/run_$2"
+  srun ncu --kernel-name-base demangled --kernel-name regex:"$KREGEX" --launch-count 16 \
+       --metrics "$METRICS" -o "$OUT/$2" -f "$1" "$MESH" "$OUT/run_$2" 1800 5 999999 "$PHC" 1958 > "$OUT/$2.log" 2>&1
+  echo "[$2] srun rc=$?"
+  ncu -i "$OUT/$2.ncu-rep" --csv --page raw --metrics "$METRICS" > "$OUT/$2.csv" 2>&1
+}
+prof "$ROOT/build-cuda/fesom_port_m523fN" before
+prof "$ROOT/build-cuda/fesom_port"        after
+echo "=== CSVs ready: $OUT/before.csv $OUT/after.csv ==="

@@ -439,13 +439,19 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
         Kokkos::RangePolicy<>(0, myDim_nod2D),
         KOKKOS_LAMBDA(const int n) {
             real_t a[NL_MAX], b[NL_MAX], c[NL_MAX], tr[NL_MAX];
-            real_t cp[NL_MAX], tp[NL_MAX];
             real_t zbar_n[NL_MAX], Z_n[NL_MAX];
+            /* In-place Thomas (M5.24 footprint-shrink): cp reuses c (modified-c),
+             * tp reuses tr (forward-eliminated RHS). Each c[nz]/tr[nz] is read then
+             * overwritten in level order, so the share is bit-identical; the
+             * per-thread local frame drops 8->6 NL_MAX arrays. This kernel is
+             * local-memory-traffic bound (ncu: ~3% compute, STACK:8192) so cutting
+             * the scratch directly cuts the dominant cost. */
+            real_t *cp = c, *tp = tr;
 
             /* initialise (Fortran lines 727-733) */
             for (int k = 0; k < NL_MAX; ++k) {
                 a[k] = 0.0; b[k] = 0.0; c[k] = 0.0;
-                tr[k] = 0.0; tp[k] = 0.0; cp[k] = 0.0;
+                tr[k] = 0.0;                  /* cp aliases c, tp aliases tr (zeroed above) */
                 zbar_n[k] = 0.0; Z_n[k] = 0.0;
             }
             const int nzmax = nlev_n(n) - 1;    /* bottom interface (0-based) */

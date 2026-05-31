@@ -1409,8 +1409,12 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
         KOKKOS_LAMBDA(const int n) {
             real_t zbar_n[NL_MAX], Z_n[NL_MAX];
             real_t a[NL_MAX], b[NL_MAX], c[NL_MAX];
-            real_t cp[NL_MAX], tp_x[NL_MAX], tp_y[NL_MAX];
             real_t tr_x[NL_MAX], tr_y[NL_MAX];
+            /* In-place Thomas (M5.24 footprint-shrink): cp reuses c (modified-c),
+             * tp_x/tp_y reuse tr_x/tr_y (forward-eliminated RHS). Each c/tr_x/tr_y[nz]
+             * is read then overwritten in level order → bit-identical; per-thread
+             * local frame drops 10->7 arrays. */
+            real_t *cp = c, *tp_x = tr_x, *tp_y = tr_y;
 
             /* Outer bounds. 0-based throughout. */
             int nzmax_o = nlev_n(n) - 1;     /* index of bottom interface */

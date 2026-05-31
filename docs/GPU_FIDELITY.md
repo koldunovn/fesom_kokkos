@@ -1198,3 +1198,23 @@ Implemented `MPI_Recv_init`/`Send_init` once per (kind,stride) + `Startall`/`Wai
 **Milestone close — 1-yr CORE2 CUDA climate (m523fN, job 25260494):** PASS. corr vs the **C-port** reference (= Serial = bit-identical to the C twin, so this isolates pure GPU scatter/reduce drift): sst/ssh **1.00000**, sss 0.99996, a_ice 0.99997, m_ice 0.99998, **uice 0.99978**; vs Fortran-KPP all ≥0.9999 except uice 0.919 (the known Fortran↔C marginal-ice-edge budget, not a GPU effect). No runaway drift, T/S bounded. This confirms the formality: M5.22+L1+L3+L5+fieldN preserve the climate exactly as the all-fields Serial bit-identity predicted. Tag `m5.23-comm-grind`.
 
 **M5.23 verdict — the cheap comm grind has PLATEAUED:** L1 −9.1 % → L3 −2.4 % → fieldN+L5 −0.6 % → L2 dead. The structural once-per-step halo surface is exhausted. Remaining climate-safe comm levers: **L4** (CG 2→1 Allreduce — higher potential, CG is 14–38 % of the step, but NOT bit-identical → gate-class + 1-yr; parked) and **mixed precision (≈×2 — the only lever that reaches the 2-SYPD target).** Per the user's deferral, mixed precision re-surfaces now. `PROFILE_M522.md` §8.8, lesson L71.
+
+---
+
+## §M5.24 — TDMA compute lever: in-place Thomas aliasing shrinks the ocean vertical-solver local frames (2026-05-31)
+
+The first **compute-frontier** lever after the M5.23 comm grind (the TDMA columns were flagged as the bit-identical compute frontier in `project-icon-scream-eval`). **Diagnosis** (static `cuobjdump --dump-resource-usage` + ncu on CORE2 single-GPU): the 3 ocean vertical solvers — `impl_vert_visc`, `diff_ver_part_impl_ale` (tracer), `fer_solve_gamma` (GM) — are **local-memory-traffic bound** (ncu ~3–7 % compute SM throughput, ~50 % memory). Each spills 8–10 `real_t[FESOM_MAX_LEVELS=128]` per-thread scratch arrays = STACK 8192–10240 B/thread. The spill is mesh-INDEPENDENT (128 is compile-time; real nl=47 CORE2 / 70 NG5) and the traffic is nl-bounded → the lever is **fewer arrays, not a smaller ceiling** (GPU device lambda-locals can't be VLAs, so arrays can't be sized to runtime nl).
+
+**Lever — in-place Thomas (bit-identical storage reuse):** `cp` reuses `c` (modified-c) and the forward-eliminated RHS reuses the RHS array (`tp→tr` tracer; `up,vp→ur,vr` momentum; `tp_x,tp_y→tr_x,tr_y` GM). Each `c[nz]`/RHS`[nz]` is read then overwritten in strict level order → identical FP. Coded as `real_t *cp = c, *tp = tr;` (pointers into the existing arrays, declared after them). visc/gm 10→7 arrays (10240→7168), tracer 8→6 (8192→6144 + trimmed a redundant `0..128` init zeroing).
+
+| kernel | STACK B/thr | GPU duration (CORE2) |
+|---|---|---|
+| `impl_vert_visc` | 10240→7168 | 3.62→2.92 ms (**−19.5 %**) |
+| `diff_ver_part_impl_ale` (×2/step) | 8192→6144 | 3.38→3.03 ms (**−10.2 %**) |
+| `fer_solve_gamma` | 10240→7168 | 2.30→2.15 ms (**−6.5 %**) |
+
+**Validation:** Serial ALL-FIELDS BIT-IDENTICAL (`diff_snap` vs `serref_m522_saved`); CUDA fidelity gate PASS. **Whole step CORE2 single-GPU ~−2.2 %** (the step is CG-heavy here, so the 3 TDMAs are a small slice — a larger fraction is expected on NG5's 70-deep columns). **Mechanism = CACHE LOCALITY** (the smaller per-thread working set stays in L1; `impl_vert_visc` sped up even though occupancy DROPPED 33→27 % — so NOT occupancy, and NOT store-instruction count, which the aliasing leaves unchanged).
+
+**`pressure_bv` = MEASURED DEAD END (reverted):** fused the hpressure cumulative loop into Pass 2 to drop `rho[]` (5120→4096, bit-id PASS) — but **+28.3 % SLOWER** (1.69→2.17 ms). pressure_bv is NOT memory-bound (it runs the JM-EOS polynomial evals), so the frame-shrink bought nothing while the fusion added a branch + serialized the hpressure cumulative dependency into the hot loop. `git restore src/fesom_eos.cpp`. **`redi_ver_node` (5120) + `kpp_blmix` (4096) have no clean reuse** (overlapping array lifetimes).
+
+**§M5.24 verdict:** the fewer-arrays lever is **EXHAUSTED at the 3 TDMAs** — it only pays on genuinely memory-bound column kernels (check ncu compute % FIRST); compute-bound ones get hurt by the restructure. Binary `fesom_port_m524tdma`; jobs `job_ncu_tdma` / `job_ncu_m524_ab` (profile), `job_tdma_ab` (step A/B). Lesson L72. **Mixed precision** would halve the bytes of these same spill arrays (orthogonal, the SYPD lever).

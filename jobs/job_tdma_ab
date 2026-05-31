@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=kk_tdma_ab
+#SBATCH -p gpu-devel
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/tdma_profile/ab/ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/tdma_profile/ab/ab.%j.err
+# M5.24 step-time A/B: BEFORE = fesom_port_m523fN, AFTER = fesom_port (TDMA Thomas
+# in-place aliasing on visc/gm/tracer). Single-GPU CORE2, no profiler, same config,
+# 100 steps, 2 alternating passes. Isolates the compute win (single rank => no comm).
+# NOTE: do NOT rm the $OUT dir itself (SLURM is writing ab.%j.out into it).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/tdma_profile/ab
+mkdir -p "$OUT/b" "$OUT/a"
+
+run() {  # $1=binary  $2=outsub  $3=label
+  srun "$1" "$MESH" "$OUT/$2" 1800 100 999999 "$PHC" 1958 > "$OUT/$3.log" 2>&1
+  printf "%-10s %s\n" "$3" "$(grep -iE 'loop timing' "$OUT/$3.log" | tail -1)"
+}
+echo "=== M5.24 step-time A/B: CORE2 single-GPU, 100 steps, dt=1800 ==="
+run "$ROOT/build-cuda/fesom_port_m523fN" b before1
+run "$ROOT/build-cuda/fesom_port"        a after1
+run "$ROOT/build-cuda/fesom_port_m523fN" b before2
+run "$ROOT/build-cuda/fesom_port"        a after2
+echo "=== done ==="

@@ -857,7 +857,12 @@ void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
             real_t zbar_n[FESOM_MAX_LEVELS], Z_n[FESOM_MAX_LEVELS];
             real_t a[FESOM_MAX_LEVELS], b[FESOM_MAX_LEVELS], c[FESOM_MAX_LEVELS];
             real_t ur[FESOM_MAX_LEVELS], vr[FESOM_MAX_LEVELS];
-            real_t cp[FESOM_MAX_LEVELS], up[FESOM_MAX_LEVELS], vp[FESOM_MAX_LEVELS];
+            /* In-place Thomas (M5.24 footprint-shrink): cp reuses c (modified-c),
+             * up/vp reuse ur/vr (forward-eliminated RHS). Each c/ur/vr[nz] is read
+             * then overwritten in level order → bit-identical; per-thread local
+             * frame drops 10->7 arrays. This kernel is local-memory-traffic bound
+             * (ncu: ~7% compute, STACK:10240, REG:80). */
+            real_t *cp = c, *up = ur, *vp = vr;
 
             /* Build zbar_n and Z_n from helem upward (lines 3167-3179). */
             for (int k = 0; k <= nzmax; ++k) zbar_n[k] = 0.0;
