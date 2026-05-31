@@ -288,6 +288,195 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     f.modify_device();   // device authoritative: owned (unchanged) + halo (new)
 }
 
+// M5.23 (L1): two-field fused exchange. Co-packs f0,f1 into ONE message/neighbour with per-halo-node
+// stride 2*stride ([f0(stride) f1(stride)]). The flat buffer-offset collapse is unchanged (every
+// per-entry block is just 2x wider), so PACK/UNPACK stay flat gathers/scatters indexed by g. The
+// bytes that land in each field's halo slots are identical to two separate fesom_halo_exchange_device
+// calls — message-count reduction only (no new arithmetic, no atomics; UNPACK race-free as before).
+void fesom_halo_exchange_device2(fesom::Field   &f0,
+                                 fesom::Field   &f1,
+                                 fesom_halo_kind kind,
+                                 int             n_levels,
+                                 int             n_components,
+                                 fesom_partit   *p,
+                                 std::size_t     base_off)
+{
+    if (!p || p->npes == 1) { f0.modify_device(); f1.modify_device(); return; }
+    fesom_halo_prof_barrier(p);   // M5.17: same placement as the single-field path (before early-return)
+    fesom_com_struct *cs = dev_get_com(p, kind);
+    if (!cs) FESOM_DIE("fesom_halo_device2: unknown kind %d", (int)kind);
+    if (cs->rPEnum == 0 && cs->sPEnum == 0) { f0.modify_device(); f1.modify_device(); return; }
+
+    DevHaloScratch &s = g_dev[(int)kind];
+    build_lists(s, cs);
+
+    const int    fstride    = n_levels * n_components;   // per-field per-node block
+    const int    stride     = 2 * fstride;               // co-packed: [f0 | f1] per halo node
+    const int    send_count = cs->sptr[cs->sPEnum] - cs->sptr[0];
+    const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
+    const size_t send_total = (size_t)send_count * stride;
+    const size_t recv_total = (size_t)recv_count * stride;
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));   // M5.17
+
+    grow(s.send_d, send_total, "halo.send_d");
+    grow(s.recv_d, recv_total, "halo.recv_d");
+
+    auto field0 = f0.d();
+    auto field1 = f1.d();
+    auto send   = s.send_d;
+    auto recv   = s.recv_d;
+    auto slist  = s.slist_d;
+    auto rlist  = s.rlist_d;
+    const int  fs = fstride;
+    const int  st = stride;
+    const long bo = (long)base_off;
+
+    // PACK: gather both fields' owned entries into one interleaved-per-node send buffer.
+    if (send_count > 0) {
+        Kokkos::parallel_for("fesom_halo_pack2", Kokkos::RangePolicy<>(0, send_count),
+            KOKKOS_LAMBDA(const int g) {
+                const long src = bo + (long)(slist(g) - 1) * fs;   // per-field stride into each field
+                const long dst = (long)g * st;                     // 2*fs-wide block in the buffer
+                for (int c = 0; c < fs; ++c) send(dst + c)      = field0(src + c);
+                for (int c = 0; c < fs; ++c) send(dst + fs + c) = field1(src + c);
+            });
+    }
+    Kokkos::fence();
+
+    const int tag    = 2000 + (int)kind;   // same tag family; a fused msg is symmetric on both ranks
+    const int needed = cs->rPEnum + cs->sPEnum;
+    if ((int)s.reqs.size() < needed) s.reqs.resize(needed);
+    int     nreq     = 0;
+    double *send_ptr = send.data();
+    double *recv_ptr = recv.data();
+
+    for (int k = 0; k < cs->rPEnum; ++k) {
+        const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
+        const size_t off  = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
+        MPI_Irecv(recv_ptr + off, nseg * stride, MPI_DOUBLE, cs->rPE[k], tag,
+                  p->MPI_COMM_FESOM, &s.reqs[nreq++]);
+    }
+    for (int k = 0; k < cs->sPEnum; ++k) {
+        const int    nseg = cs->sptr[k + 1] - cs->sptr[k];
+        const size_t off  = (size_t)(cs->sptr[k] - cs->sptr[0]) * stride;
+        MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
+                  p->MPI_COMM_FESOM, &s.reqs[nreq++]);
+    }
+    fesom_halo_prof_waitall(nreq, s.reqs.data());
+
+    // UNPACK: scatter each field's half of the per-node block back (race-free, no atomics).
+    if (recv_count > 0) {
+        Kokkos::parallel_for("fesom_halo_unpack2", Kokkos::RangePolicy<>(0, recv_count),
+            KOKKOS_LAMBDA(const int g) {
+                const long dst = bo + (long)(rlist(g) - 1) * fs;
+                const long src = (long)g * st;
+                for (int c = 0; c < fs; ++c) field0(dst + c) = recv(src + c);
+                for (int c = 0; c < fs; ++c) field1(dst + c) = recv(src + fs + c);
+            });
+    }
+    Kokkos::fence();
+
+    f0.modify_device();
+    f1.modify_device();
+}
+
+// M5.23 (fieldN): N-field fused exchange — generalizes device2 to any N same-kind/same-stride
+// fields in ONE message per neighbour. The per-halo-node block is [f0(fs) f1(fs) … f(N-1)(fs)],
+// stride N*fs. To sidestep the device-array-of-Views problem (a KOKKOS_LAMBDA can't deref a HOST
+// Field**), the N pack/unpack launches loop on the HOST, each capturing ONE field's view
+// fi=fields[i]->d(). The N pack kernels write DISJOINT buffer slots (field i → slot i*fs), so they
+// need NO fence between them — one fence before MPI; likewise N disjoint unpack kernels, one fence
+// after. The bytes landing in each field's halo are byte-identical to N separate
+// fesom_halo_exchange_device calls — pure message-count reduction (no new arithmetic, no atomics;
+// unpack race-free). nf==2 reproduces device2's layout exactly. All N fields MUST share
+// kind / n_levels / n_components / base_off.
+void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
+                                 fesom_halo_kind kind, int n_levels, int n_components,
+                                 fesom_partit *p, std::size_t base_off)
+{
+    if (nf <= 0) return;
+    if (!p || p->npes == 1) { for (int i = 0; i < nf; ++i) fields[i]->modify_device(); return; }
+    fesom_halo_prof_barrier(p);   // same placement as the single/two-field path (before early-return)
+    fesom_com_struct *cs = dev_get_com(p, kind);
+    if (!cs) FESOM_DIE("fesom_halo_deviceN: unknown kind %d", (int)kind);
+    if (cs->rPEnum == 0 && cs->sPEnum == 0) { for (int i = 0; i < nf; ++i) fields[i]->modify_device(); return; }
+
+    DevHaloScratch &s = g_dev[(int)kind];
+    build_lists(s, cs);
+
+    const int    fstride    = n_levels * n_components;   // per-field per-node block
+    const int    stride     = nf * fstride;              // co-packed: [f0|f1|…|f(nf-1)] per halo node
+    const int    send_count = cs->sptr[cs->sPEnum] - cs->sptr[0];
+    const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
+    const size_t send_total = (size_t)send_count * stride;
+    const size_t recv_total = (size_t)recv_count * stride;
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));
+
+    grow(s.send_d, send_total, "halo.send_d");
+    grow(s.recv_d, recv_total, "halo.recv_d");
+
+    auto send  = s.send_d;
+    auto recv  = s.recv_d;
+    auto slist = s.slist_d;
+    auto rlist = s.rlist_d;
+    const int  fs = fstride;
+    const int  st = stride;
+    const long bo = (long)base_off;
+
+    // PACK: N disjoint pack kernels (field i → buffer slot i*fs). Disjoint writes → no fence between.
+    if (send_count > 0) {
+        for (int i = 0; i < nf; ++i) {
+            auto      fi   = fields[i]->d();
+            const int slot = i * fs;
+            Kokkos::parallel_for("fesom_halo_packN", Kokkos::RangePolicy<>(0, send_count),
+                KOKKOS_LAMBDA(const int g) {
+                    const long src = bo + (long)(slist(g) - 1) * fs;
+                    const long dst = (long)g * st + slot;
+                    for (int c = 0; c < fs; ++c) send(dst + c) = fi(src + c);
+                });
+        }
+    }
+    Kokkos::fence();
+
+    const int tag    = 2000 + (int)kind;
+    const int needed = cs->rPEnum + cs->sPEnum;
+    if ((int)s.reqs.size() < needed) s.reqs.resize(needed);
+    int     nreq     = 0;
+    double *send_ptr = send.data();
+    double *recv_ptr = recv.data();
+
+    for (int k = 0; k < cs->rPEnum; ++k) {
+        const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
+        const size_t off  = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
+        MPI_Irecv(recv_ptr + off, nseg * stride, MPI_DOUBLE, cs->rPE[k], tag,
+                  p->MPI_COMM_FESOM, &s.reqs[nreq++]);
+    }
+    for (int k = 0; k < cs->sPEnum; ++k) {
+        const int    nseg = cs->sptr[k + 1] - cs->sptr[k];
+        const size_t off  = (size_t)(cs->sptr[k] - cs->sptr[0]) * stride;
+        MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
+                  p->MPI_COMM_FESOM, &s.reqs[nreq++]);
+    }
+    fesom_halo_prof_waitall(nreq, s.reqs.data());
+
+    // UNPACK: N disjoint unpack kernels (field i reads slot i*fs → its own halo). Race-free, no atomics.
+    if (recv_count > 0) {
+        for (int i = 0; i < nf; ++i) {
+            auto      fi   = fields[i]->d();
+            const int slot = i * fs;
+            Kokkos::parallel_for("fesom_halo_unpackN", Kokkos::RangePolicy<>(0, recv_count),
+                KOKKOS_LAMBDA(const int g) {
+                    const long dst = bo + (long)(rlist(g) - 1) * fs;
+                    const long src = (long)g * st + slot;
+                    for (int c = 0; c < fs; ++c) fi(dst + c) = recv(src + c);
+                });
+        }
+    }
+    Kokkos::fence();
+
+    for (int i = 0; i < nf; ++i) fields[i]->modify_device();
+}
+
 // FESOM_HALO_SELFCHECK: run the device exchange AND the host exchange on the SAME owned data,
 // compare the halo. Pinpoints a device-transport bug (kind + magnitude) isolated from the physics.
 // (Owned data is identical to the host path — the dispatcher's modify_device() then our sync_host()

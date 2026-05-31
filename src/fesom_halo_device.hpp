@@ -30,6 +30,7 @@
 #include "fesom_partit.h"
 #include <cstdlib>          // getenv (FESOM_HALO_SELFCHECK dispatch)
 #include <cstring>          // strstr (FESOM_DBG_SYNC pinpoint)
+#include <initializer_list> // M5.23 fesom_halo_fieldN({&f0,&f1,…}) call sites
 
 // Is the on-device halo path active? true only on a CUDA build with the env
 // override FESOM_HOST_HALO unset/!=1. Always defined (returns false elsewhere)
@@ -64,6 +65,28 @@ void fesom_halo_device_selfcheck(fesom::Field   &f,
                                  int             n_components,
                                  fesom_partit   *p,
                                  std::size_t     base_off = 0);
+
+// M5.23 (L1): TWO same-kind, same-(n_levels,n_components,base_off) fields exchanged in ONE
+// message per neighbour instead of two. The send/recv buffer is laid out [g: f0(stride) f1(stride)]
+// per halo node (per-entry stride 2*stride), so the existing flat buffer-offset collapse holds.
+// The halo values landing in each field's slots are BYTE-IDENTICAL to two separate
+// fesom_halo_exchange_device calls (just co-packed) — a pure message-count reduction (no new
+// arithmetic, no atomics). Both fields MUST share kind/n_levels/n_components/base_off.
+void fesom_halo_exchange_device2(fesom::Field   &f0,
+                                 fesom::Field   &f1,
+                                 fesom_halo_kind kind,
+                                 int             n_levels,
+                                 int             n_components,
+                                 fesom_partit   *p,
+                                 std::size_t     base_off = 0);
+
+// M5.23 (fieldN): N same-kind, same-(n_levels,n_components,base_off) fields exchanged in ONE message
+// per neighbour. Per halo-node block [f0(fs) f1(fs) … f(N-1)(fs)], stride N*fs; byte-identical to N
+// separate fesom_halo_exchange_device calls (pure message-count reduction). fields is a HOST array of
+// N Field*; the N pack/unpack kernels loop on the host (each captures one f_i.d()). nf==2 == device2.
+void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
+                                 fesom_halo_kind kind, int n_levels, int n_components,
+                                 fesom_partit *p, std::size_t base_off = 0);
 #endif // KOKKOS_ENABLE_CUDA
 
 // The standard D21 device-output halo bracket, with GPU-aware-MPI dispatch.
@@ -110,6 +133,77 @@ inline void fesom_halo_field(fesom::Field &f, fesom_halo_kind kind,
     fesom_halo_exchange(f.h_checked() + base_off, kind, n_levels, n_components, p);
     f.modify_host();
     f.sync_device();
+}
+
+// M5.23 (L1): exchange TWO same-kind fields in ONE message/neighbour. Semantically identical to
+// two back-to-back fesom_halo_field calls — use ONLY when f0,f1 are adjacent (no compute between)
+// and share kind/n_levels/n_components/base_off. On CUDA (device path) it co-packs into one message
+// (240->120 msg/step in the EVP subcycle). On Serial/OpenMP or FESOM_HOST_HALO=1 it falls back to
+// the EXACT two legacy host-staged brackets, so the bit-identical oracle is unchanged by construction.
+inline void fesom_halo_field2(fesom::Field &f0, fesom::Field &f1, fesom_halo_kind kind,
+                              int n_levels, int n_components, fesom_partit *p,
+                              std::size_t base_off = 0)
+{
+    f0.modify_device();
+    f1.modify_device();
+    if (!p || p->npes <= 1) return;
+#ifdef KOKKOS_ENABLE_CUDA
+    if (fesom_halo_device_active()) {
+        static int selfcheck = -1;
+        if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }
+        if (selfcheck) {   // fall back to per-field selfcheck (the diff path is single-field)
+            fesom_halo_device_selfcheck(f0, kind, n_levels, n_components, p, base_off);
+            fesom_halo_device_selfcheck(f1, kind, n_levels, n_components, p, base_off);
+        } else {
+            fesom_halo_exchange_device2(f0, f1, kind, n_levels, n_components, p, base_off);
+        }
+        return;
+    }
+#endif
+    // Serial/OpenMP/host-halo: the EXACT two legacy brackets (identical to two fesom_halo_field).
+    f0.sync_host();
+    fesom_halo_exchange(f0.h_checked() + base_off, kind, n_levels, n_components, p);
+    f0.modify_host();
+    f0.sync_device();
+    f1.sync_host();
+    fesom_halo_exchange(f1.h_checked() + base_off, kind, n_levels, n_components, p);
+    f1.modify_host();
+    f1.sync_device();
+}
+
+// M5.23 (fieldN): exchange N same-kind fields in ONE message/neighbour. Semantically identical to N
+// back-to-back fesom_halo_field calls — use ONLY when the fields are adjacent (no compute between)
+// and share kind/n_levels/n_components/base_off. On CUDA (device path) it co-packs into one message
+// (collapses the EOS 5-block 3->1). On Serial/OpenMP or FESOM_HOST_HALO=1 it falls back to N EXACT
+// legacy host-staged brackets, so the bit-identical oracle is unchanged by construction.
+inline void fesom_halo_fieldN(std::initializer_list<fesom::Field*> fields, fesom_halo_kind kind,
+                              int n_levels, int n_components, fesom_partit *p,
+                              std::size_t base_off = 0)
+{
+    for (fesom::Field *f : fields) f->modify_device();
+    if (!p || p->npes <= 1) return;
+#ifdef KOKKOS_ENABLE_CUDA
+    if (fesom_halo_device_active()) {
+        static int selfcheck = -1;
+        if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }
+        if (selfcheck) {   // fall back to per-field selfcheck (the diff path is single-field)
+            for (fesom::Field *f : fields)
+                fesom_halo_device_selfcheck(*f, kind, n_levels, n_components, p, base_off);
+        } else {
+            // initializer_list<Field*>::begin() is Field* const* — matches deviceN's HOST array param.
+            fesom_halo_exchange_deviceN(fields.begin(), (int)fields.size(),
+                                        kind, n_levels, n_components, p, base_off);
+        }
+        return;
+    }
+#endif
+    // Serial/OpenMP/host-halo: N EXACT legacy brackets (identical to N fesom_halo_field calls).
+    for (fesom::Field *f : fields) {
+        f->sync_host();
+        fesom_halo_exchange(f->h_checked() + base_off, kind, n_levels, n_components, p);
+        f->modify_host();
+        f->sync_device();
+    }
 }
 
 #endif // FESOM_HALO_DEVICE_HPP

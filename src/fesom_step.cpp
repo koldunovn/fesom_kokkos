@@ -207,11 +207,18 @@ int fesom_timestep(int                          step_n,
      * alias (production unchanged), but under -DFESOM_KK_SYNCCHECK each aborts if the field is still
      * device-authoritative — i.e. if the output sync_host() above were forgotten now that EOS runs
      * on the device (docs/SYNC_MAP.md §1). */
-    fesom_halo_field(aux->density_m_rho0_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (density flip) device-halo */
-    /* M5.13b: hpressure device-halo (PGF reads it at element vertices on device, substep 2). */
-    fesom_halo_field(aux->hpressure_fld, FESOM_HALO_NOD3D, nl, 1, p);
-    /* M5.5 (B): bvfreq stays device-resident for the device smoother below → device-halo. */
-    fesom_halo_field(aux->bvfreq_fld, FESOM_HALO_NOD3D, nl, 1, p);
+    /* M5.23 (fieldN): the FIVE EOS outputs (density, hpressure, bvfreq, sw_alpha, sw_beta) are all
+     * NOD3D nc=1 and adjacent — no compute between the exchanges; the bvfreq smoother below is the
+     * FIRST reader of any of their halos → ONE fused message/neighbour. L3 took the block 5→3
+     * (2 field2 pairs + bvfreq single); fieldN takes it 3→1, saving 2 exchanges + their fences/step.
+     * The bytes landing in each field's halo are byte-identical to the separate exchanges (co-pack
+     * only; Serial falls back to 5 sequential legacy brackets, same order → bit-identical). Consumers
+     * all read on device: density+hpressure → PGF (substep 2); sw_alpha+sw_beta → GM substep-1b +
+     * KPP substep-3; bvfreq → the device smoother below (which re-exchanges its OWN output halo) →
+     * GM/KPP/mo_convect. L5 poison-test (FESOM_POISON_BVFREQ) confirmed bvfreq's halo IS read by the
+     * smoother (NOT dead) → it stays in the fuse. */
+    fesom_halo_fieldN({&aux->density_m_rho0_fld, &aux->hpressure_fld, &aux->bvfreq_fld,
+                       &aux->sw_alpha_fld, &aux->sw_beta_fld}, FESOM_HALO_NOD3D, nl, 1, p);
     /* M5.9-pin (session 20): the M5.9 blanket sync_host here was a PLACEBO (the leave-one-out's 0.4
      * for bvfreq was sync-FENCE chaos sensitivity, not a stale read). The NaN-poison discriminator —
      * keep the sync, then NaN the host copy so only a HOST reader is affected — proved bvfreq has NO
@@ -219,9 +226,6 @@ int fesom_timestep(int                          step_n,
      * KPP / mo_convect / GM read it on the DEVICE; the device smoother below re-dirties it anyway.
      * Its only host readers are the read-only min/max print + the netCDF snapshot, both covered by
      * the snapshot-gated pre-I/O sync_host in fesom_main.cpp (L48). So: no per-step sync. */
-    /* M5.13b: sw_alpha/sw_beta device-halo (GM substep-1b + KPP substep-3 read them on device). */
-    fesom_halo_field(aux->sw_alpha_fld, FESOM_HALO_NOD3D, nl, 1, p);
-    fesom_halo_field(aux->sw_beta_fld,  FESOM_HALO_NOD3D, nl, 1, p);
     /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
      * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). M5.5 (B): DEVICE smoother
      * (no host round-trip) — bvfreq stays device-resident + halo'd through to its
@@ -275,8 +279,9 @@ int fesom_timestep(int                          step_n,
         fesom_compute_neutral_slope_kk(aux, mesh, gm);
         /* M5.13c: slope_tapered device-halo'd below (Redi diff_hor + trdiff K33 read it on device). */
         if (s_verify_gm) { gm->neutral_slope_fld.sync_host(); gm->fer_tapfac_fld.sync_host(); fesom_gm_neutral_slope_verify(aux, mesh, gm, p, step_n); }   /* M5.15 T1/T2: host rails VERIFY-ONLY — init_redi reads neutral_slope/fer_tapfac on device (.d() fesom_gm.cpp:1187/1286) */
-        fesom_halo_field(gm->neutral_slope_fld, FESOM_HALO_NOD2D, nl1, 3, p);   /* M5.15 T2: device-halo */
-        fesom_halo_field(gm->slope_tapered_fld, FESOM_HALO_NOD2D, nl1, 3, p);   /* M5.13c device-halo */
+        /* M5.23 (L3): neutral_slope+slope_tapered are same-kind (NOD2D nl1 nc=3), both written by
+         * compute_neutral_slope_kk above, adjacent → one FUSED message/neighbour. */
+        fesom_halo_field2(gm->neutral_slope_fld, gm->slope_tapered_fld, FESOM_HALO_NOD2D, nl1, 3, p);
 
         /* (G3) per-step GM/Redi coefficient builder. */
         fesom_init_redi_gm_kk(aux, mesh, gm);
@@ -284,8 +289,9 @@ int fesom_timestep(int                          step_n,
         /* M5.13c: Ki device-halo'd below (Redi + trdiff read it on device). */
         if (s_verify_gm) { gm->fer_scal_fld.sync_host(); gm->fer_K_fld.sync_host(); fesom_gm_init_redi_verify(aux, mesh, gm, p, step_n); }   /* M5.15 T1/T2: fer_scal/fer_K host rails VERIFY-ONLY (device computes them; fer_K read on device by Redi/trdiff) */
         fesom_exchange_nod2D(gm->fer_C_fld.h_checked(), p);
-        fesom_halo_field(gm->fer_K_fld, FESOM_HALO_NOD2D, nl, 1, p);   /* M5.15 T2: device-halo (was host fesom_halo_exchange) */
-        fesom_halo_field(gm->Ki_fld, FESOM_HALO_NOD2D, nl, 1, p);   /* M5.13c device-halo */
+        /* M5.23 (L3): fer_K+Ki are same-kind (NOD2D nc=1), both written by init_redi above,
+         * adjacent → one FUSED message/neighbour. */
+        fesom_halo_field2(gm->fer_K_fld, gm->Ki_fld, FESOM_HALO_NOD2D, nl, 1, p);
 
         /* (G4) streamfunction solve (per-node TDMA). */
         fesom_fer_solve_gamma_kk(aux, mesh, gm);
@@ -316,8 +322,9 @@ int fesom_timestep(int                          step_n,
     /* M5.4: pgf device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
      * sync_host + the vel_rhs IN re-push (substep 4) are gone — pgf stays device-resident
      * with its halo (vel_rhs reads it on-device). */
-    fesom_halo_field(aux->pgf_x_fld, FESOM_HALO_ELEM3D, nl, 1, p);
-    fesom_halo_field(aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
+    /* M5.23 (L3): pgf_x+pgf_y are same-kind (ELEM3D nc=1), both written by pressure_force above,
+     * adjacent → one FUSED message/neighbour. compute_vel_rhs reads them on device. */
+    fesom_halo_field2(aux->pgf_x_fld, aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
     /* M5.9-pin (session 20): placebo sync dropped — compute_vel_rhs (substep 4) reads pgf_x/pgf_y on
      * the DEVICE (device-resident with its halo); the NaN-poison discriminator proved no model-feedback
      * host reader. The only host readers are the diagnostic min/max print + netCDF snapshot, both
@@ -452,14 +459,19 @@ int fesom_timestep(int                          step_n,
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     /* M5.13f: hnode device-resident from last step's commit - no re-push; compute_vel_rhs reads it on device. */
     fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
-    /* M5.13d: uv_rhsAB OUT sync_host removed - device-halo'd below; AB2 history read on device, no host reader. */
+    /* M5.13d: uv_rhsAB OUT sync_host removed - AB2 history read on device, no host reader. */
     if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
                                                     vrhs_uv_rhsAB_in.data());
     /* M5.4: uv_rhs needed by visc_filt_bidiff on HALO elements → device-halo (GPU-aware MPI on
      * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:
      * uv_rhs now stays device-resident with its halo across substeps 4-6. */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
-    fesom_halo_field(dyn->uv_rhsAB_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* M5.13d device-halo */
+    /* M5.23 (L5): uv_rhsAB's device-halo was DEAD and is REMOVED (was at :467). compute_vel_rhs_kk
+     * reads uv_rhsAB only at OWNED elements (E=myDim_elem2D); momadv scatters into it but its flux
+     * reads uvnode_rhs, not uv_rhsAB → nothing reads uv_rhsAB's HALO on device. The poison-test
+     * (FESOM_POISON_UV_RHSAB) PASSED the CUDA fidelity gate while NaN-poisoning the halo EVERY step
+     * → confirmed dead. Dropping it removes a whole ELEM3D exchange + 2 fences/step, bit-identical.
+     * (uv_rhsAB stays device-resident — compute_vel_rhs_kk already marks it modify_device.) */
 
     PMARK("4_velrhs");
     /*  5. horizontal viscosity (biharmonic ∇⁴, opt_visc=7) — M2.4: device kernel.
@@ -716,11 +728,12 @@ int fesom_timestep(int                          step_n,
     /* M5.14 (fer_w flip): fer_w device-resident - no OUT sync_host (bolus 13a reads it on device, same step;
      * not an output field → no mean entanglement). The gated ale verify reads owned fer_w host-current on Serial. */
     if (s_verify_ale) fesom_ale_vert_vel_verify(mesh, dyn, gm ? 1 : 0, step_n);
-    fesom_halo_field(dyn->w_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w; snap-out -> pre-I/O sync) */
-    if (gm) {
-        /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). M5.14: device-halo (fer_w stays device-resident). */
-        fesom_halo_field(dyn->fer_w_fld, FESOM_HALO_NOD3D, nl, 1, p);
-    }
+    /* M5.13e device-halo (w; snap-out -> pre-I/O sync). M5.23 (L3): w+fer_w are same-kind
+     * (NOD3D nc=1), both written by vert_vel above, adjacent. When gm, FUSE into one
+     * message/neighbour; else w alone (fer_w only exists under gm). The fer_w leg mirrors
+     * Fortran oce_ale.F90:2681 exchange_nod(fer_Wvel). */
+    if (gm) fesom_halo_field2(dyn->w_fld, dyn->fer_w_fld, FESOM_HALO_NOD3D, nl, 1, p);
+    else    fesom_halo_field (dyn->w_fld,                 FESOM_HALO_NOD3D, nl, 1, p);
 
     /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
      *  Per-node accumulation into the node's OWN column → race-free (NOT a scatter).
@@ -740,8 +753,9 @@ int fesom_timestep(int                          step_n,
     fesom_ale_compute_wvel_split_kk(mesh, dyn);
     /* M5.14 (w_i flip): w_i device-resident - no OUT sync_host (substep 6 of the NEXT step reads it on device). */
     if (s_verify_ale) fesom_ale_compute_wvel_split_verify(mesh, dyn, step_n);
-    fesom_halo_field(dyn->w_e_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13e device-halo (w_e) */
-    fesom_halo_field(dyn->w_i_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (w_i flip) device-halo */
+    /* M5.23 (L3): w_e+w_i are same-kind (NOD3D nc=1), both written by compute_wvel_split above,
+     * adjacent → one FUSED message/neighbour. */
+    fesom_halo_field2(dyn->w_e_fld, dyn->w_i_fld, FESOM_HALO_NOD3D, nl, 1, p);
 
     PMARK("12_ale");
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).

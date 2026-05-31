@@ -592,8 +592,10 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
     ice->stress_atmice_x_fld.modify_device();  ice->stress_atmice_y_fld.modify_device();
 
     fesom_halo_field(forcing->stress_node_surf_fld, FESOM_HALO_NOD2D, 1, 2, partit);
-    fesom_halo_field(forcing->heat_flux_fld,        FESOM_HALO_NOD2D, 1, 1, partit);
-    fesom_halo_field(forcing->water_flux_fld,       FESOM_HALO_NOD2D, 1, 1, partit);
+    /* M5.23 (L3): heat_flux+water_flux are same-kind (NOD2D nc=1) and adjacent (the bulk kernel
+     * wrote both; nothing between) → one FUSED message/neighbour. (stress_node_surf is nc=2 → not
+     * batchable with these.) Bit-identical (co-pack only). */
+    fesom_halo_field2(forcing->heat_flux_fld, forcing->water_flux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
 
     /* DROP-IN (M5.16 Phase A): sync the FULL output set to host so the downstream — oce_fluxes_mom
      * [host] reads stress_node_surf, the ice-step IN rails (Ch/Ce → thermo, stress_atmice → EVP),

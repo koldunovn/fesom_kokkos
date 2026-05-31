@@ -709,9 +709,11 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
         ice->uice_fld.modify_device();     ice->vice_fld.modify_device();
         /* per-subcycle uice/vice halo (GPU-aware device-halo; exact host bracket on Serial, no-op
          * at npes==1). uice/vice stay DEVICE-resident across the subcycle; post-loop sync in
-         * fesom_ice.cpp pulls them once for FCT / I/O / the next step. */
-        fesom_halo_field(ice->uice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
-        fesom_halo_field(ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+         * fesom_ice.cpp pulls them once for FCT / I/O / the next step.
+         * M5.23 (L1): uice+vice are same-kind (NOD2D nc=1) and adjacent (no compute between) →
+         * one FUSED message/neighbour instead of two (240→120 halo msgs/step, the #1 message-count
+         * contributor). Bit-identical: the bytes landing in each field's halo are unchanged. */
+        fesom_halo_field2(ice->uice_fld, ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
     }
 }
 

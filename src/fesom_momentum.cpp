@@ -1489,9 +1489,10 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
     /* ---- INTERNAL HALO BRACKET: exchange_elem(U_c, V_c) (Fortran 670-672) ----
      * Stage 1 wrote Uc/Vc on device → halo → stage 2 reads halo-current Uc/Vc on
      * device (D21). M5.1: fesom_halo_field dispatches to GPU-aware-MPI on-device
-     * under CUDA; host-staged on Serial/OpenMP (a no-op round-trip at np=1). */
-    fesom_halo_field(dyn->u_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
-    fesom_halo_field(dyn->v_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
+     * under CUDA; host-staged on Serial/OpenMP (a no-op round-trip at np=1).
+     * M5.23 (L3): u_b+v_b are same-kind (ELEM3D nc=1) and adjacent (stage 1 wrote both;
+     * nothing between) → one FUSED message/neighbour. Bit-identical (co-pack only). */
+    fesom_halo_field2(dyn->u_b_fld, dyn->v_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
 
     /* Stage 2 edge loop (Fortran 677-742, non-subcycl) — EDGE→ELEMENT scatter into uv_rhs. */
     Kokkos::parallel_for("fesom_visc_bidiff_stage2", Kokkos::RangePolicy<>(0, Eedg),

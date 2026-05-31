@@ -1756,14 +1756,17 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
           fmax(k) = tvmax[nz] - fctLO(k); fmin(k) = tvmin[nz] - fctLO(k); }
     });
     /* b1: per-node vertical antidiffusive sums (zero+vertical fused → assign). */
-    Kokkos::parallel_for("fct_zal_b1v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.22 flat lever: one thread per (node,LEVEL) — RP(0,myDim*nl), decode (n,nz). Per-(n,nz)
+     * map: writes fplus/fminus[k] from aflux_v[nz] and the INPUT aflux_v[nz+1] (qr4c_v output,
+     * not written here) → level contiguous → coalesced, bit-identical. */
+    Kokkos::parallel_for("fct_zal_b1v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        for (int nz = nu1; nz < nl1; ++nz) {
-            real_t fv_top = aflux_v((size_t)n*nl+nz), fv_bot = aflux_v((size_t)n*nl+(nz+1));
-            real_t pos = (fv_top>0.0?fv_top:0.0) + (-fv_bot>0.0?-fv_bot:0.0);
-            real_t neg = (fv_top<0.0?fv_top:0.0) + (-fv_bot<0.0?-fv_bot:0.0);
-            size_t k = (size_t)n*nl+nz; fplus(k) = pos; fminus(k) = neg;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        real_t fv_top = aflux_v((size_t)n*nl+nz), fv_bot = aflux_v((size_t)n*nl+(nz+1));
+        real_t pos = (fv_top>0.0?fv_top:0.0) + (-fv_bot>0.0?-fv_bot:0.0);
+        real_t neg = (fv_top<0.0?fv_top:0.0) + (-fv_bot<0.0?-fv_bot:0.0);
+        size_t k = (size_t)n*nl+nz; fplus(k) = pos; fminus(k) = neg;
     });
     /* b1 horizontal: edge→node SCATTER (atomic_add) into fct_plus/fct_minus. */
     Kokkos::parallel_for("fct_zal_b1h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
@@ -1782,33 +1785,38 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         }
     });
     /* b2: per-node limiter factors. */
-    Kokkos::parallel_for("fct_zal_b2", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.22 flat lever: one thread per (node,LEVEL). Pure per-level map (every read/write at the
+     * same k: areasvol/hnode_new/fplus/fminus/fmax/fmin) → coalesced, bit-identical (continue→return). */
+    Kokkos::parallel_for("fct_zal_b2", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        for (int nz = nu1; nz < nl1; ++nz) {
-            size_t k = (size_t)n*nl+nz; real_t a = areasvol(k), hn = hnode_new(k);
-            if (a <= 0.0 || hn <= 0.0) { fplus(k) = 1.0; fminus(k) = 1.0; continue; }
-            real_t flux_pos = fplus(k)*dt/a/hn + flux_eps;
-            real_t r_pos = fmax(k) / flux_pos; fplus(k) = (r_pos<1.0)?r_pos:1.0;
-            real_t flux_neg = fminus(k)*dt/a/hn - flux_eps;
-            real_t r_neg = fmin(k) / flux_neg; fminus(k) = (r_neg<1.0)?r_neg:1.0;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        size_t k = (size_t)n*nl+nz; real_t a = areasvol(k), hn = hnode_new(k);
+        if (a <= 0.0 || hn <= 0.0) { fplus(k) = 1.0; fminus(k) = 1.0; return; }
+        real_t flux_pos = fplus(k)*dt/a/hn + flux_eps;
+        real_t r_pos = fmax(k) / flux_pos; fplus(k) = (r_pos<1.0)?r_pos:1.0;
+        real_t flux_neg = fminus(k)*dt/a/hn - flux_eps;
+        real_t r_neg = fmin(k) / flux_neg; fminus(k) = (r_neg<1.0)?r_neg:1.0;
     });
     /* D21 internal halo: exchange fct_plus/fct_minus (b3 horizontal reads at edge
-     * endpoints, which can be HALO nodes). M5.4c: device-halo (GPU-aware MPI). */
-    fesom_halo_field(sc->fct_plus_fld,  FESOM_HALO_NOD3D, nl, 1, partit);
-    fesom_halo_field(sc->fct_minus_fld, FESOM_HALO_NOD3D, nl, 1, partit);
+     * endpoints, which can be HALO nodes). M5.4c: device-halo (GPU-aware MPI).
+     * M5.23 (L3): fct_plus+fct_minus are same-kind (NOD3D nc=1) and adjacent (b2 wrote both;
+     * nothing reads/writes them between) → one FUSED message/neighbour instead of two. Runs
+     * 2×/step (T+S → the highest-freq L3 pair). Bit-identical (field2 = co-pack only). */
+    fesom_halo_field2(sc->fct_plus_fld, sc->fct_minus_fld, FESOM_HALO_NOD3D, nl, 1, partit);
     /* b3 vertical: limit adf_v (per-node, own column). */
-    Kokkos::parallel_for("fct_zal_b3v", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+    /* M5.22 flat lever: one thread per (node,LEVEL). Each (n,nz) RMWs only its OWN aflux_v[k];
+     * the nz-1 reads are fminus/fplus (b2 output = INPUTS here, NOT aflux_v) → no written-value
+     * recurrence → per-level map, coalesced, bit-identical. Surface level nz==nu1 folds into the mask. */
+    Kokkos::parallel_for("fct_zal_b3v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+        const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
-        if (nu1 >= nl1) return;
-        { int nz = nu1; size_t k = (size_t)n*nl+nz; real_t f = aflux_v(k);
-          real_t ae = (f>=0.0)? fplus(k) : fminus(k); aflux_v(k) = ae*f; }
-        for (int nz = nu1+1; nz < nl1; ++nz) {
-            size_t k = (size_t)n*nl+nz; real_t f = aflux_v(k); real_t ae;
-            if (f >= 0.0) { real_t a = fminus((size_t)n*nl+(nz-1)), b = fplus(k);  ae=(a<b)?a:b; }
-            else          { real_t a = fplus ((size_t)n*nl+(nz-1)), b = fminus(k); ae=(a<b)?a:b; }
-            aflux_v(k) = ae*f;
-        }
+        if (nz < nu1 || nz >= nl1) return;
+        size_t k = (size_t)n*nl+nz; real_t f = aflux_v(k); real_t ae;
+        if (nz == nu1)     { ae = (f>=0.0)? fplus(k) : fminus(k); }
+        else if (f >= 0.0) { real_t a = fminus((size_t)n*nl+(nz-1)), b = fplus(k);  ae=(a<b)?a:b; }
+        else               { real_t a = fplus ((size_t)n*nl+(nz-1)), b = fminus(k); ae=(a<b)?a:b; }
+        aflux_v(k) = ae*f;
     });
     /* b3 horizontal: limit adf_h (per-edge, own slot; reads fct_plus/minus at endpoints). */
     Kokkos::parallel_for("fct_zal_b3h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
