@@ -1131,3 +1131,68 @@ The user questioning "didn't we already do the salinity floor on device?" unrave
 - The **SSS restoring + virtual-salt + runoff are ALREADY ON DEVICE**: `fesom_ice_oce_fluxes_kk` (the ice step's oce_fluxes, `fesom_ice.cpp:616`) reads `S` on device (`trS.values_fld.d()`), computes `virtual_salt=rsss·wf` + `relax_salt=surf_relax_S·(Ssurf−S)` on device with **device-side global integrals** (`integrate_nod_2D_kk`), and **overwrites** heat/water/virtual/relax_salt; runoff is folded into the ice freshwater flux on device (`fesom_ice_thermo`, `runoff_fld.d()`).
 - The 249 D2H comes from the **redundant** host `fesom_sss_runoff_step_cal` (`fesom_main.cpp:1073`, runs BEFORE the ice step): it recomputes the same fluxes on host (reading `S`→D2H) only to have the device ice oce_fluxes overwrite them. Its ONLY non-redundant job is the **monthly `Ssurf` climatology read**. `use_sr`-gated → on for NG5, off for the CORE2 gate/climate.
 - **So "port S to device" = a control-flow trim, not a kernel port:** split `fesom_sss_runoff_step` into the monthly `Ssurf` read [keep] vs the per-step flux [redundant in ice-on runs] and re-gate the per-step half on `s_no_ice_thermo` (the ice-off fallback). Then the per-step `S.sync_host()` vanishes. ⚠️ verify the `water_flux` net-mass conservation isn't lost; ⚠️ validate in an **SSS-active config** (the gate/climate don't run restoring). Only benefits ocean-only/SSS runs, NOT the climate/coupled path → outside the campaign's measured numbers. (Lever 2b, deferred.)
+
+## §M5.22 — the deep re-profile: a measured step budget at 4N AND 16N; the frontier splits; + a 3-kernel bucket-A quick win (2026-05-31)
+
+Full analysis in **`docs/PROFILE_M522.md`**; lesson **L68**. The measurement session that re-established the whole budget from scratch (the campaign had only ever re-profiled one kernel at a time). Instruments: `jobs/job_nsys_ng5` (rank-0 CUDA+MPI trace, the anchor), `job_ng5_prof` (`FESOM_STEP_PROFILE`), `job_ng5_synclog` (per-field PCIe, synclog binary rebuilt on m522), `job_ng5_halo_split` (barrier-isolation), + `job_nsys_ng5_n16` (the 16-node clone).
+
+### The budget (NG5, m522 tip)
+
+| | 4 nodes (dist_16, 1.34 s/step) | 16 nodes (dist_64, 0.56 s/step) |
+|---|---|---|
+| GPU compute (Σ kernel, rank0) | ~640 ms = **46 %** | ~159 ms = **28 %** |
+| PCIe (per-step field syncs) | ~26–51 ms = **2–4 %** | ~41 ms = ~7 % |
+| MPI halo — overlappable comm | 64 ms = **4.6 %** | (Waitall = 82.6 % of MPI time) |
+| MPI halo — load-imbalance | 134 ms = **9.7 %** | grows with node count |
+
+**4N = COMPUTE-bound; 16N = COMM/imbalance-bound.** Per-rank GPU work falls ~4× (640→159 ms) from 4→16 nodes while the halo shrinks far less → GPU-active 46 %→28 % and `MPI_Waitall` rises 67 %→82.6 % of MPI time. This is the mechanism behind the SCALING_M522 shrink (NG5 2.95×@4N → 2.38×@16N). **The optimization frontier has SPLIT:** single-node compute (Lever C / edge-coloring) at low node-count vs comm/scaling (Lever D re-partition) at high. **PCIe is retired** — the synclog (659 MB/step) is now all forcing/nod2D; the big nod3D round-trippers `hnode_new`/`sw_3d`/`ghats`/`S` are confirmed gone. **Lever B (comm overlap) stays dead** (ceiling 4.6 %, re-confirms M5.17). The halo imbalance/comm split is now 68/32 (was 79/21 at M5.17 — the comm *share of the halo* grew only because the step shrank under the compute levers).
+
+### Per-kernel ranking (4N) — the top-5 are all bucket C/D
+`13_fct` still #1 phase (20.26 %). Fattest individual GPU kernels: `fct_eud_fill` 2.47 % (D, edge), `fesom_impl_vert_diff_tracers` 2.29 % (C, TDMA), `fct_mfct_h` 2.26 % (D), `fesom_gm_redi_ver_node` 2.06 % (B), `fesom_ale_vvel_scatter` 1.94 % (D). **Every top-5 kernel is bucket C (TDMA) or D (scatter)** — the flat lever cannot touch them. Bucket totals: C (3 TDMAs) ≈3.9 %, D (all edge/elem scatters) ≈12.4 %, B (column reductions) ≈2.3 %.
+
+### The checked lever — 3 missed bucket-A FCT b-kernels flat-levered (−3.10 %, bit-identical)
+The budget + a code-read found 3 FCT Zalesak-limiter kernels still one-thread-per-NODE that are clean **bucket A** (the §M5.19/§M5.21 sweep had declared bucket-A done — it missed these): `fct_zal_b1v` (`fesom_tracer_adv.cpp:1759`), `fct_zal_b2` (`:1785`), `fct_zal_b3v` (`:1801`). The b3v discriminator (a first read called it "marginal-B"): its `nz-1` reads are of `fplus/fminus` (the b2 *output*, an INPUT here) — NOT a recurrence on its own just-written `aflux_v` — so it's bucket A. Flipped all 3 to the M5.18 flat lever (`RP(0,myDim*nl)`, decode `(n,nz)`, mask, same-order register write).
+
+**Validation (the M5.18/M5.21 discipline):** Serial `tradv` `max|Δ|=0` every step (both tracers); **CORE2-Serial fresh-vs-saved ALL FIELDS BIT-IDENTICAL** (real bathymetry, vs `serref_m522_saved`); **CUDA fidelity gate PASS** worst h_ice 7.521e-3 (= the unchanged atomic-scatter floor; the flat-levered kernels add zero atomics). **A/B same-node (NG5 dist_16, job 25254299): clean 1.3387 → 1.2972 s/step = −3.10 %** (prof-fenced 1.3891→1.3469 = −3.04 %, consistent → fully attributed; the 3 b-kernels were 1.55+0.85+0.64 = 3.04 % of step pre-flip; deep_copy unchanged = pure-compute). Binary `build-cuda/fesom_port_m522b`; BEFORE kept as `fesom_port_m522`.
+
+### Recommendation for M5.23 — the frontier is split
+- **Compute-bound (4-node) path:** the flat lever is now exhausted. **Prototype Lever C on ONE TDMA** (`impl_vert_diff_tracers`) — a dedicated `View<double**,LayoutLeft>` scratch + transpose-in/out around the one kernel, ncu the coalescing win, touching ZERO of the 82 fields / 896 macro sites (the full refactor's blast radius). De-risks the structural direction FESOM2-GPU must eventually take for the TDMA/scatter half of the step.
+- **Comm-bound (16-node) path:** **Lever D — work-weighted re-partition** (climate-identical, no code) targets the ~9.7 %-and-growing load imbalance; the only lever whose payoff grows with node count.
+
+Which to pursue depends on whether the production target is 4-node throughput or 16-node strong-scaling.
+
+### §M5.22-comm — the comm-bound deep-dive + the SYPD verdict (2026-05-31)
+
+Followed the 4N/16N budget with a per-rank-size proxy sweep (the comm regime tracks **2D-vertices/rank**, not mesh size → reproduce NG5@16N's 115 k/rank cheaply on 1–8 nodes; user method). Full analysis `docs/PROFILE_M522.md` §8. Barrier-isolation (M5.17/L62 instrument) on farc 1/2/4N (160/80/40 k/rank) + dars 8N (99 k/rank, the faithful NG5@16N proxy — same CG-conditioning class):
+
+**The comm wall at NG5-scale per-rank (dars 8N):** halo `MPI_Waitall` ≈ **37 % of step**, of which **63 % is load imbalance** (≈23 % of step) + 37 % genuine comm (≈14 %); **CG ≈ 12.5 %** (~67 iters/step, ~2 Allreduce + 1 halo each). Both comm components GROW as you subdivide (farc 160→40 k/rank: CG 22.6→42 %, halo 19→34 %) — adding nodes worsens the comm fraction, the mechanism behind the node-for-node shrink. ⚠️ the proxy is faithful for halo (geometry) but NOT CG iters (conditioning: farc 229 vs dars 67 vs NG5 89 — use dars for CG).
+
+**SYPD verdict:** SYPD = 0.493/(s/step) at dt=180. NG5 GPU = 0.34 (4N) / 0.62 (8N) / **1.0 (16N)** / ~1.4 (32N) / ~1.8 (64N extrap.). Reaching the production 1–2 SYPD needs ~16–64 nodes. **Not a dead end** (user reframe): (1) 64 nodes is acceptable — the comparison is GPU-nodes-available vs CPU-nodes-available, not node-for-node, and CPU won't get 1000 nodes either; (2) **mixed precision ≈ ×2** (the largest un-pulled lever, halves compute+comm bytes, needs its own climate validation — wrongly shelved as "speculative" in the prompt); (3) likely **dead/redundant exchanges** to remove (L67 placebo method, bit-identical). Ranked menu in §8.4. Biggest *single* climate-safe lever is repartitioning (~23 % of step, the imbalance) — kept in memory ([[project-m522-deep-profile]]), shelved by user choice for now. Artifacts: `farc_n*`/`dars_n8`/`farc_nsys_n2`; jobs `job_{farc,dars}_halo_split`, `job_farc_nsys`.
+
+## §M5.23 — comm-regime levers on the two-field fused-halo entry point (2026-05-31)
+
+Both levers build on the `fesom_halo_field2` two-field fused exchange (co-pack two same-kind/same-stride fields into ONE message/neighbour; Serial falls back to the EXACT two legacy brackets → bit-identical by construction; **zero new arithmetic, zero atomics** → can't introduce divergence). Measured in the COMM regime (the per-rank-size proxy: dars 8N = 99k/rank = NG5@16N; farc 2N = 80k/rank brackets it). NG5 dist_16 (4N) is the compute regime → a comm lever reads ~flat there; don't measure it there.
+
+### L1 — EVP {uice,vice} fused halo: −9.1 % (dars 8N), bit-identical ✅ (the entry point)
+`fesom_ice_evp.cpp:716`, was 2 adjacent NOD2D nc=1 halos ×120 subcycles = 240 msg/step (the #1 message-count contributor). Fused → 120. dars 8N 0.3836→0.3487 = **−9.1 %**, farc 2N −7.4 %; calls/step −140, halo MB/step unchanged. Serial ALL-FIELDS-BIT-IDENTICAL + gate PASS (worst 4.5e-3). Binary `fesom_port_m522c`. Full detail `PROFILE_M522.md` §8.6, lesson L69.
+
+### L3 — adjacent same-kind PAIR fusion (10 sites): −2.4 % (dars 8N), bit-identical ✅
+Dropped `fesom_halo_field2` onto the 10 verified adjacent same-kind/same-stride pairs (a pure drop-in, no new code): FCT `fct_plus`+`fct_minus` (`tracer_adv.cpp:1806`, ×2/step), EOS `density`+`hpressure` & `sw_alpha`+`sw_beta` (5-block→3), PGF `pgf_x`+`pgf_y`, GM `neutral_slope`+`slope_tapered` & `fer_K`+`Ki`, vert-vel `w`+`fer_w` (gm-cond) & `w_e`+`w_i`, visc `u_b`+`v_b`, bulk `heat`+`water`. (NOT fused — verified mismatches: `Kv`+`Av` & `hnode`+`helem` are DIFFERENT kinds; `uv_rhs`+`uv_rhsAB` reserved for the L5 poison-test.)
+
+**Validation — all PASS:**
+- **Serial bit-identity** (CORE2 dist_8 vs `serref_m522_saved`): **ALL FIELDS BIT-IDENTICAL** (`diff_snap` rc=0) — catches any kind/nl/nc/field typo in the 10 calls.
+- **CUDA gate** (CORE2 dist_8 ice-active, m523L3 vs fresh Serial oracle): **PASS, worst h_ice 7.29e-3** (unchanged atomic-scatter floor). Every fused-halo-downstream field at floor (density 2.1e-4, bvfreq 1.8e-7, T/S 7.5e-4/2.8e-4, u/v 8.0e-5/1.8e-4, w 4.1e-8) → **no adjacency/co-pack error** (the check Serial can't do).
+- **A/B in the comm regime:** **dars 8N 0.3451→0.3369 = −2.38 %**, **farc 2N 0.2827→0.2797 = −1.06 %**. DETERMINISTIC msg drop IDENTICAL on both: single-field exchanges −21.8/−21.9, two-field +11.0 (11 fused-pair invocations/step), MPI calls/step −12, halo MB/step UNCHANGED → pure count+fence cut.
+
+**Why smaller than L1:** L1's EVP pair ran 120×/step; the L3 pairs are structural, once-per-step (FCT 2×) → ~11 removed exchanges/step vs L1's 120. The payoff tracks how comm- (vs CG-) bound the regime is: dars/NG5-class (CG ~13 %) −2.4 %, CG-heavy farc (CG 37 %) −1.1 %. There is no other EVP-like high-freq pair; the 10 structural pairs are the whole L3 surface. **Binary `fesom_port_m523L3`** (= the L5/fieldN BEFORE). `PROFILE_M522.md` §8.7, lesson L70.
+
+### L5 — dead-halo poison-test: `uv_rhsAB` REMOVED (free), `bvfreq` confirmed needed ✅
+The L67 NaN-poison method on a HALO: a gated device kernel NaNs the field's halo tail right after the exchange (`FESOM_POISON_<F>=1`); PASS-while-poisoned on the gate ⇒ no downstream reader ⇒ dead. **`bvfreq` (step.cpp:216) = the POSITIVE CONTROL** — the device smoother gathers it at halo nodes → poison CRASHED (proves the NaN propagates). **`uv_rhsAB` (step.cpp:467) = DEAD** — `compute_vel_rhs_kk` reads it only at OWNED elements; momadv's flux reads `uvnode_rhs`, not `uv_rhsAB` → nothing reads its halo. Poison PASSED (worst 8.4e-3, NaN-free) → **removed the exchange (a whole ELEM3D nl=2 halo + 2 fences/step), bit-identical.**
+
+### fieldN — EOS 5-block 3→1: −0.6 % (dars 8N), bit-identical ✅
+Generalized field2 to N fields: `fesom_halo_exchange_deviceN` + `fesom_halo_fieldN({&f0,…})` (N pack kernels → 1 fence → 1 msg/neighbour → N unpack; host-loops the launches so each lambda captures ONE `fi=fields[i]->d()` into a disjoint buffer slot — sidesteps the can't-deref-`Field**`-on-device problem). Folded density+hpressure+bvfreq+sw_alpha+sw_beta (NOD3D nl 1; L3 had them 5→3) into ONE exchange. **Serial ALL-FIELDS-BIT-IDENTICAL + gate PASS (worst h_ice 5.7e-3, 3× re-run); A/B dars 8N 0.3393→0.3374 = −0.56 %, farc 2N 0.2822→0.2800 = −0.78 %.** Deterministic **−3 MPI calls/step** (−2 EOS + −1 uv_rhsAB) + −1…2 MB/step/rank (the uv_rhsAB removal; fieldN co-pack keeps bytes constant). **Binary `fesom_port_m523fN`** (= live `fesom_port`).
+
+### L2 — persistent MPI requests: MEASURED DEAD END, reverted ❌
+Implemented `MPI_Recv_init`/`Send_init` once per (kind,stride) + `Startall`/`Waitall` (shared helper, rebuild-on-grow, env toggle). **Gate PASSED** (device-ptr persistent requests work in OpenMPI-4.1.5/UCX, byte-identical), BUT same-binary A/B was **flat-to-slower: farc-2N fresh 0.3015→persist 0.3023 (+0.27 %), dars-8N 0.3681→0.3683 (+0.05 %)**. UCX Irecv/Isend posting is already cheap; the per-exchange cost is the 2 fences + transfer + imbalance Waitall, none of which persistent requests touch (and it doesn't change calls/step → no deterministic proof). **Reverted.** Worth retrying on LUMI/AMD (Cray-MPICH). Lesson L71.
+
+**M5.23 verdict — the cheap comm grind has PLATEAUED:** L1 −9.1 % → L3 −2.4 % → fieldN+L5 −0.6 % → L2 dead. The structural once-per-step halo surface is exhausted. Remaining climate-safe comm levers: **L4** (CG 2→1 Allreduce — higher potential, CG is 14–38 % of the step, but NOT bit-identical → gate-class + 1-yr; parked) and **mixed precision (≈×2 — the only lever that reaches the 2-SYPD target).** Per the user's deferral, mixed precision re-surfaces now. `PROFILE_M522.md` §8.8, lesson L71.
