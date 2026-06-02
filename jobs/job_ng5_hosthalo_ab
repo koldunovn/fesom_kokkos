@@ -1,0 +1,47 @@
+#!/bin/bash
+# job_ng5_hosthalo_ab — A/B verify NG5 device-halo vs host-staged on the SAME binary.
+# Setting FESOM_HOST_HALO=1 forces the legacy host-staged path. Same shape as
+# job_ng5_test_lumi (2 nodes × 8 GCDs, dist_16, dt=180, 35 steps).
+
+#SBATCH --job-name=kk_ng5_hostab_lumi
+#SBATCH --account=project_465002727
+#SBATCH --partition=dev-g
+#SBATCH --nodes=2
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=7
+#SBATCH --mem=0
+#SBATCH --time=00:30:00
+#SBATCH --output=jobs/lumi_logs/%x-%j.out
+#SBATCH --error=jobs/lumi_logs/%x-%j.err
+
+set -euo pipefail
+mkdir -p jobs/lumi_logs
+
+ROOT=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos
+source "$ROOT/env_lumi.sh"
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+export FESOM_PRINT_EVERY=999
+export FESOM_HOST_HALO=1            # the A/B switch
+
+MESH=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/NG5
+PHC=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=$FESOM_JRA55_DIR/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=$FESOM_JRA55_DIR/CORE2_runoff.nc
+export FESOM_CHL_FILE=$FESOM_JRA55_DIR/Sweeney_2005.nc
+
+OUT=/scratch/project_465002727/sbeyer/fesom_runs/ng5_hosthalo_lumi_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "=== NG5 host-halo (FESOM_HOST_HALO=1) reference ==="
+srun "$ROOT/build-hip/fesom_port" "$MESH" "$OUT" "${DT:-180}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== exit=$EC ==="
+echo "--- loop timing ---"; grep "loop timing" "$OUT/run.log"
+echo "--- last step ---";   grep " it=" "$OUT/run.log" | tail -1
+exit $EC

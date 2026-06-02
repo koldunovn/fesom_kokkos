@@ -1,0 +1,49 @@
+#!/bin/bash
+# job_profile_core2_dist8_lumi — LUMI equivalent of job_profile_core2_dist8.
+#
+# Per-kernel timing breakdown via FESOM_STEP_PROFILE=1. CORE2 mesh, dist_8.
+# Single LUMI-G node, 8 ranks (1 per GCD) — pure on-node halos, no Slingshot
+# cross-node hop. To measure cross-node halo cost, drop to --nodes=2
+# --ntasks-per-node=4 (still dist_8) — those halos go over the interconnect.
+
+#SBATCH --job-name=kk_prof_d8_lumi
+#SBATCH --account=project_465002727
+#SBATCH --partition=dev-g
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=7
+#SBATCH --time=00:20:00
+#SBATCH --output=jobs/lumi_logs/%x-%j.out
+#SBATCH --error=jobs/lumi_logs/%x-%j.err
+
+set -euo pipefail
+mkdir -p jobs/lumi_logs
+
+ROOT=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos
+source "$ROOT/env_lumi.sh"
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+export FESOM_STEP_PROFILE=1
+export FESOM_PRINT_EVERY=999
+
+MESH=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/CORE2
+PHC=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=$FESOM_JRA55_DIR/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=$FESOM_JRA55_DIR/CORE2_runoff.nc
+export FESOM_CHL_FILE=$FESOM_JRA55_DIR/Sweeney_2005.nc
+
+OUT=/scratch/project_465002727/sbeyer/fesom_runs/profile_core2_dist8_lumi_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+echo "=== profile CORE2 dist_8 (LUMI, 1 node × 8 GCDs), 200 steps, JRA55=1958 ==="
+srun "$ROOT/build-hip/fesom_port" "$MESH" "$OUT" 1800 200 999999 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "exit=$?"
+echo
+echo "=== loop timing + profile lines ==="
+grep -E "loop timing|fesom_prof|deep_copy|nan|abort" "$OUT/run.log" | head -60
+echo "=== last step sanity ==="
+grep " it=" "$OUT/run.log" | tail -1
