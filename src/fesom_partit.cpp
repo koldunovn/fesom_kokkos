@@ -23,15 +23,51 @@
 } while (0)
 
 /* ------------------------------------------------------------------------ *
- * ASCII helpers — Fortran's free-format read(fileID,*) accepts whitespace- *
- * and newline-separated integers indistinguishably. fscanf("%d") matches.  *
+ * ASCII helpers — Fortran's free-format read(fileID,*) accepts whitespace,  *
+ * commas, and the `N*VALUE` repeat shorthand (e.g. `3*15857` → 15857 three  *
+ * times). The C port's partition files on LUMI use this shorthand; bare    *
+ * fscanf("%d") chokes on `*` and `,`. State is keyed by FILE* so a partial *
+ * repeat run cannot leak across the file boundary between rpart / my_list / *
+ * com_info reads.                                                          *
  * ------------------------------------------------------------------------ */
 static int read_int(FILE *f)
 {
+    static FILE *last_f       = NULL;
+    static int   rep_remaining = 0;
+    static int   rep_value     = 0;
+
+    if (f != last_f) {
+        rep_remaining = 0;
+        last_f = f;
+    }
+    if (rep_remaining > 0) {
+        rep_remaining--;
+        return rep_value;
+    }
+
+    int c;
+    do { c = fgetc(f); } while (c != EOF && (isspace((unsigned char)c) || c == ','));
+    if (c == EOF) {
+        FESOM_DIE("fesom_partit: unexpected EOF at offset %ld", ftell(f));
+    }
+    ungetc(c, f);
+
     int v;
-    if (fscanf(f, " %d", &v) != 1) {
+    if (fscanf(f, "%d", &v) != 1) {
         FESOM_DIE("fesom_partit: expected integer at offset %ld", ftell(f));
     }
+
+    int next = fgetc(f);
+    if (next == '*') {
+        int actual;
+        if (fscanf(f, "%d", &actual) != 1) {
+            FESOM_DIE("fesom_partit: expected value after '*' at offset %ld", ftell(f));
+        }
+        rep_remaining = v - 1;
+        rep_value     = actual;
+        return actual;
+    }
+    if (next != EOF) ungetc(next, f);
     return v;
 }
 
