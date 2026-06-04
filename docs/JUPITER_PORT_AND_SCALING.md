@@ -135,12 +135,18 @@ Two findings the reps make solid (they overturn an earlier single-run reading):
    comms). (An earlier single-run pass saw a "dip at 32 / low at 128 / reverse at 256"; reps
    show 32–128 is one noisy plateau and the real turn-up is at 256 — it was placement noise.)
 
-**Throughput (SYPD).** The plateau means **throughput saturates at ~3.5–3.9 SYPD@180 /
-~4.7–5.2 SYPD@240 across 32–128 nodes**, getting noisier the higher you push. The efficient
-production point is **32 nodes / 128 GPUs (~4.7 SYPD@240)** — essentially the same throughput as
-128 nodes but with ¼ the GPUs (32→128 nodes buys +11 % SYPD for 4× the hardware). Past 128 nodes
-throughput falls. (The dt=240 column is projected from the dt=180 s/step × 4/3; CG iterations may
-rise slightly at the larger dt, which would modestly trim it — measure directly to confirm.)
+**Throughput (SYPD).** The plateau means **throughput saturates at ~3.5–3.9 SYPD across 32–128
+nodes** at the stable dt=180, getting noisier the higher you push. The efficient production point
+is **32 nodes / 128 GPUs (~3.5 SYPD@180)** — essentially the same throughput as 128 nodes but with
+¼ the GPUs (32→128 nodes buys +11 % SYPD for 4× the hardware). Past 128 nodes throughput falls.
+
+> ⚠️ **The SYPD@240 column is NOT achievable as-is.** dt=240 was meant as the "production"
+> timestep, but ng5 **does not run stably at dt=240** on this code: the SSH conjugate-gradient
+> solver diverges (`CG_kk residual diverged`) around step ~200 (dt=300 NaNs by ~150). The stable
+> envelope is **dt ≤ 180** (500–1500 steps clean; verified `ng5-long-run` branch). So the realistic
+> production figure is **SYPD@180 (~3.5 at 32 nodes)**; the @240 column is kept only to show the
+> ceiling IF the barotropic-CG stability at large dt is fixed (solver/preconditioner work, or a
+> split-explicit barotropic mode — future). See `docs/NG5_LONG_RUN.md`.
 
 The gentler per-doubling vs Levante A100 (93–96 %) is expected — the H100 finishes each rank's
 work so fast that the comms-bound regime arrives at a larger per-rank size than on A100.
