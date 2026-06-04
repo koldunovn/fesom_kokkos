@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_ioab
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=32
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=00:25:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# Isolate the I/O cost at production config (ng5, 32 nodes, dt=180, GM off, lean daily).
+# 4 variants x 960 steps (2 days, timer over 955), same allocation -> clean A/B on s/step.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter_cuda.sh"; source "$ROOT/env_jupiter_data.sh"
+BIN=$ROOT/build-cuda/fesom_port; M=$FESOM_MESH_NG5; PHC=$FESOM_PHC
+AB=/e/scratch/hclimrep/koldunov1/fesom_runs/io_ab; rm -rf "$AB"; mkdir -p "$AB"
+export FESOM_NO_GMREDI=1
+
+run() {  # $1=tag  $2=daily?  $3=ckpt_every(0=off)
+  local d="$AB/$1"; mkdir -p "$d/restart"
+  if [ "$2" = 1 ]; then export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf FESOM_IO_EXCLUSIVE=1
+  else unset FESOM_IO_CONFIG; export FESOM_IO_EXCLUSIVE=1; fi
+  export FESOM_RESTART_DIR=$d/restart FESOM_RESTART_EVERY=$3 FESOM_PRINT_EVERY=999
+  srun "$BIN" "$M" "$d" 180 960 -1 "$PHC" 1958 > "$d/log" 2>&1
+  printf "  %-22s %s\n" "$1" "$(grep -oE '[0-9.]+ s/step' "$d/log" | tail -1)"
+}
+echo "=== I/O cost A/B (ng5, 32 nodes, GM off, 955 timed steps) ==="
+run "none(no-io,no-ckpt)"   0 0
+run "daily-only"            1 0
+run "ckpt-only(daily)"      0 480
+run "daily+ckpt(prod)"      1 480
