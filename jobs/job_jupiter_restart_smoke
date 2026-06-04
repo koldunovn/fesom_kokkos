@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_rstsmoke
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=00:20:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# CUDA + multi-rank (4 GPU) restart continuity smoke: core2 dist_4, JRA55. Verifies a
+# checkpointed-and-resumed run continues the same as a straight run (wet-point T/S).
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter_cuda.sh"; source "$ROOT/env_jupiter_data.sh"
+BIN=$ROOT/build-cuda/fesom_port; M=$FESOM_MESH_CORE2; PHC=$FESOM_PHC
+RT=/e/scratch/hclimrep/koldunov1/fesom_runs/rstsmoke_cuda; rm -rf "$RT"; mkdir -p "$RT/A" "$RT/B"
+export FESOM_PRINT_EVERY=20 FESOM_IO_EXCLUSIVE=1   # no output, just the per-step stats
+
+echo "=== A: 20 steps straight (4 GPU), checkpoint at 20 ==="
+FESOM_RESTART_DIR=$RT/A FESOM_RESTART_EVERY=20 srun "$BIN" "$M" "" 1800 20 999999 "$PHC" 1958 > "$RT/a.log" 2>&1
+echo "=== B1: first 10 steps, checkpoint at 10 ==="
+FESOM_RESTART_DIR=$RT/B FESOM_RESTART_EVERY=10 srun "$BIN" "$M" "" 1800 10 999999 "$PHC" 1958 > "$RT/b1.log" 2>&1
+echo "=== B2: resume + 10 more steps ==="
+FESOM_RESTART_DIR=$RT/B FESOM_RESTART_EVERY=10 srun "$BIN" "$M" "" 1800 10 999999 "$PHC" 1958 > "$RT/b2.log" 2>&1
+
+echo "--- resume confirmation ---"; grep -h "RESUMED" "$RT/b2.log" | head -1
+echo "--- step-20 wet-point state (must match) ---"
+echo "  straight: $(grep -E '^ *20  it=' $RT/a.log | grep -oE 'uv=[0-9.e+-]+ eta=[0-9.e+-]+ .*T\[[^]]*\] S\[[^]]*\]')"
+echo "  restart : $(grep -E '^ *20  it=' $RT/b2.log | grep -oE 'uv=[0-9.e+-]+ eta=[0-9.e+-]+ .*T\[[^]]*\] S\[[^]]*\]')"
+echo "--- per-rank checkpoint files written (expect 4) ---"; ls "$RT/A"/restart_*.bin | wc -l

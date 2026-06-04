@@ -1,0 +1,44 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_ng5chain
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=00:30:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# End-to-end ng5 long-run pipeline validation: dt=180 (stable), lean daily output, restart
+# chained across DAY boundaries (480 steps = 1 day). 2 chunks: 2 days, then resume + 1 day.
+# Checks: stability over 3 days, daily-mean files, restart chaining, output append behaviour.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter_cuda.sh"; source "$ROOT/env_jupiter_data.sh"
+BIN=$ROOT/build-cuda/fesom_port; M=$FESOM_MESH_NG5; PHC=$FESOM_PHC
+OUT=/e/scratch/hclimrep/koldunov1/fesom_runs/ng5_chain; rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf   # 8 lean daily fields
+export FESOM_RESTART_DIR=$OUT/restart
+export FESOM_PRINT_EVERY=240                       # ~ every half day
+DAY=480                                            # steps per day at dt=180
+
+echo "=== CHUNK 1: days 1-2 (960 steps), checkpoint at day boundaries ==="
+date
+FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT" 180 $((2*DAY)) 999999 "$PHC" 1958 > "$OUT/chunk1.log" 2>&1
+echo "  exit=$?"; grep -E "RESUMED|wrote step|loop timing" "$OUT/chunk1.log" | tail -3
+grep -ciE "nan|fatal|diverged" "$OUT/chunk1.log" | xargs echo "  chunk1 blowups:"
+
+echo "=== CHUNK 2: resume + day 3 (480 steps) ==="
+date
+FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT" 180 $DAY 999999 "$PHC" 1958 > "$OUT/chunk2.log" 2>&1
+echo "  exit=$?"; grep -E "RESUMED|wrote step" "$OUT/chunk2.log" | head -2
+grep -ciE "nan|fatal|diverged" "$OUT/chunk2.log" | xargs echo "  chunk2 blowups:"
+
+echo "=== daily output files + record counts ==="
+for f in "$OUT"/sst.fesom.1958.daily.nc "$OUT"/u_surf.fesom.1958.daily.nc; do
+  [ -f "$f" ] && echo "  $(basename $f): $(ncdump -h "$f" 2>/dev/null | grep -oE 'time = UNLIMITED ; // \([0-9]+' | grep -oE '[0-9]+$') daily records"
+done
+echo "=== last-step sanity (T/S bounded over 3 days?) ==="
+grep -E " it=" "$OUT/chunk2.log" | tail -1 | grep -oE "T\[[^]]*\] S\[[^]]*\]"
+date
