@@ -23,6 +23,8 @@ RUN=/e/scratch/hclimrep/koldunov1/fesom_runs/${RUN:-ng5_prod}
 OUT=$RUN/seg${SEG:-01}; mkdir -p "$OUT"
 export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf
 export FESOM_IO_EXCLUSIVE=1
+export FESOM_NO_GMREDI=1                           # GM/Redi OFF — ng5 is eddy-permitting; GM/Redi
+                                                   # would smooth out the eddies we want to keep
 export FESOM_RESTART_DIR=$RUN/restart            # shared -> chains across segments
 mkdir -p "$FESOM_RESTART_DIR"                     # MUST exist or per-rank checkpoint writes fail
 export FESOM_RESTART_EVERY=480                    # checkpoint daily (safety + chaining)
