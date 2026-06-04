@@ -24,12 +24,13 @@ OUT=$RUN/seg${SEG:-01}; mkdir -p "$OUT"
 export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf
 export FESOM_IO_EXCLUSIVE=1
 export FESOM_RESTART_DIR=$RUN/restart            # shared -> chains across segments
+mkdir -p "$FESOM_RESTART_DIR"                     # MUST exist or per-rank checkpoint writes fail
 export FESOM_RESTART_EVERY=480                    # checkpoint daily (safety + chaining)
 export FESOM_PRINT_EVERY=480
 
 echo "=== ng5 production: RUN=$RUN SEG=${SEG:-01} NSTEPS=${NSTEPS:-14400} dt=180 on $SLURM_NNODES nodes ==="
 date
-srun "$ROOT/build-cuda/fesom_port" "$FESOM_MESH_NG5" "$OUT" 180 "${NSTEPS:-14400}" 999999 "$FESOM_PHC" 1958 > "$OUT/run.log" 2>&1
+srun "$ROOT/build-cuda/fesom_port" "$FESOM_MESH_NG5" "$OUT" 180 "${NSTEPS:-14400}" -1 "$FESOM_PHC" 1958 > "$OUT/run.log" 2>&1
 EC=$?
 date
 echo "=== exit=$EC ==="
