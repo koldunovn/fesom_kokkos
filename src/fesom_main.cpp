@@ -11,6 +11,7 @@
 #include "fesom_kpp.h"
 #include "fesom_ic.h"
 #include "fesom_ice.h"
+#include "fesom_restart.h"   // simple per-rank checkpoint write/resume (ng5-long-run)
 #include "fesom_ice_evp.h"   // M5.8: fesom_ice_evp_free() — release the EVP coastal mask pre-finalize
 #include "fesom_ice_coupling.h"
 #include "fesom_ice_fct.h"
@@ -1053,6 +1054,30 @@ skip_rest_state:
          * abort, caught by the M5.13f gate). Steps 2+ get them from the commit. No-op on Serial/OpenMP. */
         mesh.hnode_fld.modify_host(); mesh.hnode_fld.sync_device();
         mesh.helem_fld.modify_host(); mesh.helem_fld.sync_device();
+
+        /* --- Restart (ng5-long-run): resume from a per-rank checkpoint if FESOM_RESTART_DIR
+         * is set and present. Overwrites the IC'd prognostic state + sets the resume step and
+         * io.calendar (so JRA55 forcing continues at the right date). The chunk then runs
+         * `nsteps` MORE steps; step numbers stay ABSOLUTE so the AB2 bootstrap (step_n==1)
+         * never re-fires on resume. Checkpoints are written every FESOM_RESTART_EVERY steps
+         * (if >0) and always at the end of the chunk. linfs ALE → hnode/helem are constant =
+         * IC, so they need not be checkpointed (re-established by the push just above). */
+        int         start_step    = 0;
+        const char *rst_dir       = getenv("FESOM_RESTART_DIR");
+        int         restart_every = 0;
+        { const char *re = getenv("FESOM_RESTART_EVERY"); if (re && *re) restart_every = atoi(re); }
+        if (rst_dir && *rst_dir &&
+            fesom_restart_read(rst_dir, &start_step, &io.calendar, &mesh, &dyn, &tracers, &ice, mpi.mype, mpi.npes)) {
+            /* Force the monthly-climatology reads (SSS restoring, chlorophyll) on the FIRST
+             * resumed step by faking a month crossing: those reads are gated on n_step==1
+             * (cold start) OR a month crossing, so on resume within a month they would never
+             * fire and forcing->Ssurf / chl would stay stale (wrong relax_salt). Setting
+             * prev_calendar one month back makes fesom_calendar_crossed fire once at resume. */
+            io.prev_calendar = io.calendar;
+            io.prev_calendar.month -= 1;
+            if (io.prev_calendar.month < 1) { io.prev_calendar.month = 12; io.prev_calendar.year -= 1; }
+        }
+
         dyn.uv_fld.modify_host();     dyn.uv_fld.sync_device();   /* M5.13g1: uv device-resident across the boundary; bootstrap step 1 (cold-start uv=0=zero-init, but explicit/robust to restart) */
         tracers.data[FESOM_TRACER_T].values_fld.modify_host(); tracers.data[FESOM_TRACER_T].values_fld.sync_device();   /* M5.13g1-T: T values device-resident; bootstrap step 1 (non-zero IC) */
         tracers.data[FESOM_TRACER_T].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_T].valuesold_fld.sync_device();   /* M5.13g1-T FIX: valuesold too — coherent device pair for the MFCT */
@@ -1060,8 +1085,8 @@ skip_rest_state:
         tracers.data[FESOM_TRACER_S].valuesold_fld.modify_host(); tracers.data[FESOM_TRACER_S].valuesold_fld.sync_device();   /* M5.14 (S flip): valuesold too — coherent device pair for the MFCT */
         dyn.uvnode_fld.modify_host(); dyn.uvnode_fld.sync_device();   /* M5.16: bulk_kk reads uvnode on the device in step-1's forcing phase (before substep-3 rewrites it); the IC fesom_compute_vel_nodes wrote host uvnode (cold-start 0, but explicit/robust to restart) */
 
-        for (int n = 1; n <= nsteps; ++n) {
-            if (n == time_warmup + 1) {
+        for (int n = start_step + 1; n <= start_step + nsteps; ++n) {
+            if (n == start_step + time_warmup + 1) {
                 Kokkos::fence();
                 MPI_Barrier(MPI_COMM_WORLD);
                 t_loop_start = MPI_Wtime();
@@ -1232,7 +1257,7 @@ skip_rest_state:
                 fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing };
                 fesom_io_step(&io, (double)FESOM_PHASE1_DT, &st, &mpi);
             }
-            if (n == 1 || n % print_every == 0 || n == nsteps) {
+            if (n == start_step + 1 || n % print_every == 0 || n == start_step + nsteps) {
                 /* Iterate myDim only for stat collection — halo entries are
                  * just owner copies, so global max via MPI_Allreduce is
                  * exact. Reduces noise from divergent halos before exchange. */
@@ -1377,6 +1402,11 @@ skip_rest_state:
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,
                                         &mesh, &dyn, &tracers, &aux, &ice, &mpi);
+            }
+            /* Restart checkpoint: every FESOM_RESTART_EVERY steps (if >0) + always at chunk end. */
+            if (rst_dir && *rst_dir &&
+                ((restart_every > 0 && n % restart_every == 0) || n == start_step + nsteps)) {
+                fesom_restart_write(rst_dir, n, &io.calendar, &mesh, &dyn, &tracers, &ice, mpi.mype, mpi.npes);
             }
         }
         {   /* M5.1 perf: report startup-free per-step wall (see time_warmup above). */

@@ -51,14 +51,32 @@ daily means + per-var NetCDF with a time-unlimited dim:
   sentinel ~100 there); guard the resolver with `mesh->nlevels_fld` (device IntField available).
 - Full 70 GB snapshot OOM fix (gather→write→free per field) deferred — not needed for this run.
 
-## 3. Restart (TO DO, task #11)
+## 3. Restart (DONE, task #11)
 
-No restart today. Plan: **per-rank binary checkpoints** (each rank writes/reads its local
-arrays — no gather, no OOM; requires same node/rank count on resume — fine for chaining). Save
-the prognostic state + AB2 carry-overs + step + calendar:
-- tracers: T, S (values, valuesAB, valuesold)
-- dyn: uv, uv_rhsAB, eta_n, d_eta, ssh_rhs, ssh_rhs_old
-- ice: a_ice/m_ice/m_snow (+ _old), uice/vice (+ _old), EVP sigma11/12/22
-- meta: step number, calendar date (so JRA55 resumes at the right time)
-Knobs: `FESOM_RESTART_DIR`, `FESOM_RESTART_EVERY=N`; auto-resume if a checkpoint is present.
-Verify: N steps straight vs N-with-restart-in-the-middle match to round-off.
+**Per-rank binary checkpoints** — `src/fesom_restart.{h,cpp}`. Each rank writes/reads its own
+`<dir>/restart_<rank>.bin` (no gather, no OOM, scales trivially). **Must resume on the SAME
+rank count** (enforced by an `npes` header field). Knobs:
+- `FESOM_RESTART_DIR=<path>` — enable checkpoint/resume. Auto-resumes if a checkpoint is present.
+- `FESOM_RESTART_EVERY=N` — write every N steps; always writes at the end of the chunk.
+A resumed job runs `nsteps` MORE steps from the checkpoint; step numbers stay ABSOLUTE so the
+AB2 momentum bootstrap (`step_n==1`) never re-fires on resume.
+
+Saved state (matched by name on read; the build_list in fesom_restart.cpp is the source of truth):
+- ALE thicknesses: `hnode, hnode_new, helem, hbar, hbar_old` (carry eta in linfs).
+- dyn: `uv, uvnode, uv_rhsAB, eta_n, d_eta, ssh_rhs, ssh_rhs_old`.
+- tracers (T,S): `values, valuesAB, valuesold`.
+- ice: `a/m/m_snow` (+ `_old`), `uice/vice` (+ `_old`), thermo `thdgr/thdgr_old/thdgrsn/thdgra/t_skin`.
+- meta: absolute step + full model calendar (JRA55 resumes at the right date). On resume the
+  monthly-climatology reads (SSS restoring, chl) are forced once (prev_calendar bumped a month
+  back) — else `Ssurf`/chl would stay stale within the resume month and skew `relax_salt`.
+
+**Continuity verified** (pi, JRA55, Serial; 20 steps straight vs 10 + checkpoint + resume + 10):
+wet-point prognostic state (uv/eta/w/T/S, max/min over owned points) is **bit-identical at printed
+precision** (`T[-2.01,29.75] S[19.17,37.35]` both). The raw checkpoint isn't byte-identical — the
+residual lives in physically-meaningless entries (extended-element scratch padding, ice-free nodes)
+and grows chaotically like any tiny perturbation, well within the CUDA climate-close budget (~1e-3).
+For a climate run this is exact-enough; bit-identity isn't meaningful on CUDA anyway.
+
+**Usage notes:** (1) resume on the same node/rank count; (2) the I/O-stream mean accumulator does
+NOT persist across a restart (a fresh `io_init` each chunk), so checkpoint on **period boundaries**
+(multiples of 480 steps = 1 day at dt=180) to keep daily means whole.
