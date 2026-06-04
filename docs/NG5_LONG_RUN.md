@@ -24,8 +24,11 @@ srun build-cuda/fesom_port $FESOM_MESH_NG5 <run>/chunkNN 180 <nsteps> 999999 $FE
 - **Each chunk → its own output dir** (resume `io_init` NC_CLOBBERs), concat in post with
   `cdo mergetime <run>/c*/​<var>.fesom.1958.daily.nc`. Chunk on **day boundaries** so daily
   means stay whole. Resume on the **same node count**.
-- ~0.18 s/step at 16 nodes → ~43 min/simulated-month; a 3-month run fits one 12 h job, or split
-  across jobs with `sbatch --dependency=afterok:<prev>`.
+- **Node count: 32 is the sweet spot** (0.14 s/step → ~34 min/simulated-month). 16 nodes works
+  (~43 min/mo) but 32 is ~1.4× faster; **past ~32 nodes ng5 does NOT speed up** (comms-bound —
+  64≈32, 128+ slower; see the rep sweep in JUPITER_PORT_AND_SCALING.md). Restart is rank-count
+  locked, so pick ONE node count for the whole chain. A 3-month run ≈ 1.7 h on 32 nodes — fits
+  one 12 h job, or split across jobs with `sbatch --dependency=afterok:<prev>`.
 
 ## 1. Timestep stability (RESOLVED — 2026-06-04)
 

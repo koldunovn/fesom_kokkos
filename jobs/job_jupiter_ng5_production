@@ -2,7 +2,7 @@
 #SBATCH --job-name=fkk_ng5prod
 #SBATCH --account=hclimrep
 #SBATCH --partition=booster
-#SBATCH --nodes=16
+#SBATCH --nodes=32
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-task=1
 #SBATCH --cpus-per-task=72
