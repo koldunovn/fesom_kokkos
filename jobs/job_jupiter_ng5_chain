@@ -17,28 +17,35 @@ set -u
 ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
 source "$ROOT/env_jupiter_cuda.sh"; source "$ROOT/env_jupiter_data.sh"
 BIN=$ROOT/build-cuda/fesom_port; M=$FESOM_MESH_NG5; PHC=$FESOM_PHC
-OUT=/e/scratch/hclimrep/koldunov1/fesom_runs/ng5_chain; rm -rf "$OUT"; mkdir -p "$OUT"
+OUT=/e/scratch/hclimrep/koldunov1/fesom_runs/ng5_chain; rm -rf "$OUT"; mkdir -p "$OUT/c1" "$OUT/c2"
 export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf   # 8 lean daily fields
-export FESOM_RESTART_DIR=$OUT/restart
+export FESOM_RESTART_DIR=$OUT/restart             # shared across chunks (chaining)
 export FESOM_PRINT_EVERY=240                       # ~ every half day
 DAY=480                                            # steps per day at dt=180
 
-echo "=== CHUNK 1: days 1-2 (960 steps), checkpoint at day boundaries ==="
+# Each chunk writes its OWN output dir (resume io_init NC_CLOBBERs, so per-chunk dirs
+# avoid wiping earlier days); concatenate c*/<var>.daily.nc in post (cdo mergetime).
+echo "=== CHUNK 1: days 1-2 (960 steps) -> $OUT/c1, checkpoint at day boundaries ==="
 date
-FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT" 180 $((2*DAY)) 999999 "$PHC" 1958 > "$OUT/chunk1.log" 2>&1
+FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT/c1" 180 $((2*DAY)) 999999 "$PHC" 1958 > "$OUT/chunk1.log" 2>&1
 echo "  exit=$?"; grep -E "RESUMED|wrote step|loop timing" "$OUT/chunk1.log" | tail -3
 grep -ciE "nan|fatal|diverged" "$OUT/chunk1.log" | xargs echo "  chunk1 blowups:"
 
-echo "=== CHUNK 2: resume + day 3 (480 steps) ==="
+echo "=== CHUNK 2: resume + day 3 (480 steps) -> $OUT/c2 ==="
 date
-FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT" 180 $DAY 999999 "$PHC" 1958 > "$OUT/chunk2.log" 2>&1
+FESOM_RESTART_EVERY=$DAY srun "$BIN" "$M" "$OUT/c2" 180 $DAY 999999 "$PHC" 1958 > "$OUT/chunk2.log" 2>&1
 echo "  exit=$?"; grep -E "RESUMED|wrote step" "$OUT/chunk2.log" | head -2
 grep -ciE "nan|fatal|diverged" "$OUT/chunk2.log" | xargs echo "  chunk2 blowups:"
 
-echo "=== daily output files + record counts ==="
-for f in "$OUT"/sst.fesom.1958.daily.nc "$OUT"/u_surf.fesom.1958.daily.nc; do
-  [ -f "$f" ] && echo "  $(basename $f): $(ncdump -h "$f" 2>/dev/null | grep -oE 'time = UNLIMITED ; // \([0-9]+' | grep -oE '[0-9]+$') daily records"
+echo "=== daily records per chunk (expect c1=2 days, c2=1 day) ==="
+for c in c1 c2; do
+  f="$OUT/$c/sst.fesom.1958.daily.nc"
+  [ -f "$f" ] && echo "  $c/sst: $(ncdump -h "$f" 2>/dev/null | grep -oE 'time = UNLIMITED ; // \([0-9]+' | grep -oE '[0-9]+$') records"
 done
+echo "=== merged timeseries (cdo mergetime) ==="
+module load CDO 2>/dev/null
+cdo -s mergetime "$OUT"/c*/sst.fesom.1958.daily.nc "$OUT/sst.merged.nc" 2>/dev/null && \
+  echo "  merged sst: $(cdo -s ntime "$OUT/sst.merged.nc" 2>/dev/null) records (expect 3)"
 echo "=== last-step sanity (T/S bounded over 3 days?) ==="
 grep -E " it=" "$OUT/chunk2.log" | tail -1 | grep -oE "T\[[^]]*\] S\[[^]]*\]"
 date

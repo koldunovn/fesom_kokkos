@@ -4,6 +4,29 @@ Goal: run ng5 (7.4 M nodes) for a few simulated months on GH200, chained across 
 walltime via restart, with periodic snapshots. Needs: a stable dt, restart, and ng5-capable
 snapshot output.
 
+## STATUS: pipeline validated end-to-end (2026-06-04) ✅
+
+ng5, 16 nodes (64 GPU), dt=180, lean daily output, restart-chained over 3 simulated days
+(2-day chunk + resumed 1-day chunk): **no blowups, 0.182 s/step**, chunk1 wrote 2 daily
+records, chunk2 (resumed) wrote 1, and `cdo mergetime c*/sst.fesom.1958.daily.nc` gave a clean
+3-record timeseries. All four pieces (stable dt, daily output, restart, concat) work together.
+
+**Production recipe (per chunk):**
+```
+source env_jupiter_cuda.sh; source env_jupiter_data.sh
+export FESOM_IO_CONFIG=$PWD/io_lean_daily.conf      # 8 lean daily fields
+export FESOM_IO_EXCLUSIVE=1                          # only those fields
+export FESOM_RESTART_DIR=<run>/restart              # SHARED across chunks (chaining)
+export FESOM_RESTART_EVERY=480                       # checkpoint daily (480 steps = 1 day @ dt=180)
+srun build-cuda/fesom_port $FESOM_MESH_NG5 <run>/chunkNN 180 <nsteps> 999999 $FESOM_PHC 1958
+```
+- dt = **180** (dt=240 diverges — see §1). 1 day = 480 steps; 1 month ≈ 14 400 steps.
+- **Each chunk → its own output dir** (resume `io_init` NC_CLOBBERs), concat in post with
+  `cdo mergetime <run>/c*/​<var>.fesom.1958.daily.nc`. Chunk on **day boundaries** so daily
+  means stay whole. Resume on the **same node count**.
+- ~0.18 s/step at 16 nodes → ~43 min/simulated-month; a 3-month run fits one 12 h job, or split
+  across jobs with `sbatch --dependency=afterok:<prev>`.
+
 ## 1. Timestep stability (RESOLVED — 2026-06-04)
 
 Probes: ng5, 8 nodes (32 GPU), JRA55 1958 + PHC IC, watched T/S every 25–50 steps.

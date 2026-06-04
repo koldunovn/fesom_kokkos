@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_ng5prod
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=01:30:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# ng5 production segment: dt=180, lean daily output, restart-safe (checkpoints daily).
+# Resumes automatically if RUN/restart/ already has a checkpoint (chain segments with
+# --dependency=afterok and a fresh OUT subdir each segment; concat with cdo mergetime).
+#
+# Submit:  sbatch --export=ALL,RUN=ng5_1958,SEG=01,NSTEPS=14400 jobs/job_jupiter_ng5_production
+#   NSTEPS: 480=1 day, 14400=1 month (30 d), 43200=3 months. dt=180 (240 diverges).
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter_cuda.sh"; source "$ROOT/env_jupiter_data.sh"
+RUN=/e/scratch/hclimrep/koldunov1/fesom_runs/${RUN:-ng5_prod}
+OUT=$RUN/seg${SEG:-01}; mkdir -p "$OUT"
+export FESOM_IO_CONFIG=$ROOT/io_lean_daily.conf
+export FESOM_IO_EXCLUSIVE=1
+export FESOM_RESTART_DIR=$RUN/restart            # shared -> chains across segments
+export FESOM_RESTART_EVERY=480                    # checkpoint daily (safety + chaining)
+export FESOM_PRINT_EVERY=480
+
+echo "=== ng5 production: RUN=$RUN SEG=${SEG:-01} NSTEPS=${NSTEPS:-14400} dt=180 on $SLURM_NNODES nodes ==="
+date
+srun "$ROOT/build-cuda/fesom_port" "$FESOM_MESH_NG5" "$OUT" 180 "${NSTEPS:-14400}" 999999 "$FESOM_PHC" 1958 > "$OUT/run.log" 2>&1
+EC=$?
+date
+echo "=== exit=$EC ==="
+grep -E "RESUMED|wrote step|loop timing" "$OUT/run.log" | tail -3
+echo "--- stability over the segment ---"; grep -ciE "nan|fatal|diverged|HUGE" "$OUT/run.log" | xargs echo "  blowups:"
+echo "--- last step T/S ---"; grep -E " it=" "$OUT/run.log" | tail -1 | grep -oE "T\[[^]]*\] S\[[^]]*\]"
+echo "--- daily output records ---"
+f="$OUT/sst.fesom.1958.daily.nc"; [ -f "$f" ] && echo "  sst: $(ncdump -h "$f" 2>/dev/null | grep -oE 'time = UNLIMITED ; // \([0-9]+' | grep -oE '[0-9]+$') days"
+ls "$OUT"/*.fesom.1958.daily.nc 2>/dev/null | xargs -n1 basename | tr '\n' ' '; echo
+exit $EC
