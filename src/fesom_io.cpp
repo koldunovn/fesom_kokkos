@@ -815,10 +815,80 @@ static void resolve_density_dev(const fesom_state *s, real_t *out_dev, size_t n)
     Kokkos::parallel_for("io_acc_density", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
 
+/* --- Lean surface / 100 m velocity slices (ng5-long-run lean daily output) ---
+ * u,v at the surface (layer 0) and at the model layer nearest 100 m, as 2D ELEM
+ * fields. uv layout is [elem][nl][2]; uv is device-resident, so each needs a
+ * DEVICE resolver (a host-only one reads stale host uv → zeros, the same staleness
+ * the per-step diagnostic print shows). k100 = layer nearest 100 m, from mesh Z
+ * (layer mid-depths, negative downward), computed once. */
+static int io_k_at_depth(const struct fesom_mesh *m, double target_neg)
+{
+    int best = 0; double bd = 1e30;
+    for (int k = 0; k < m->nl - 1; ++k) {
+        double d = fabs((double)m->Z[k] - target_neg);
+        if (d < bd) { bd = d; best = k; }
+    }
+    return best;
+}
+static int io_k100(const struct fesom_mesh *m)
+{
+    static int k = -1;                 /* single mesh per run → cache once */
+    if (k < 0) k = io_k_at_depth(m, -100.0);
+    return k;
+}
+static void resolve_u_surf(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *uv = s->dyn->uv; const int nl = s->mesh->nl;
+    for (size_t e = 0; e < n; ++e) out[e] += uv[e * (size_t)nl * 2 + 0];
+}
+static void resolve_v_surf(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *uv = s->dyn->uv; const int nl = s->mesh->nl;
+    for (size_t e = 0; e < n; ++e) out[e] += uv[e * (size_t)nl * 2 + 1];
+}
+static void resolve_u_100m(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *uv = s->dyn->uv; const int nl = s->mesh->nl;
+    const size_t off = (size_t)io_k100(s->mesh) * 2;
+    for (size_t e = 0; e < n; ++e) out[e] += uv[e * (size_t)nl * 2 + off + 0];
+}
+static void resolve_v_100m(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *uv = s->dyn->uv; const int nl = s->mesh->nl;
+    const size_t off = (size_t)io_k100(s->mesh) * 2;
+    for (size_t e = 0; e < n; ++e) out[e] += uv[e * (size_t)nl * 2 + off + 1];
+}
+static void resolve_u_surf_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n); auto uv = s->dyn->uv_fld.d(); const int nl = s->mesh->nl;
+    Kokkos::parallel_for("io_acc_u0", n, KOKKOS_LAMBDA(const size_t e){
+        out(e) += uv(e * (size_t)nl * 2 + 0); });
+}
+static void resolve_v_surf_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n); auto uv = s->dyn->uv_fld.d(); const int nl = s->mesh->nl;
+    Kokkos::parallel_for("io_acc_v0", n, KOKKOS_LAMBDA(const size_t e){
+        out(e) += uv(e * (size_t)nl * 2 + 1); });
+}
+static void resolve_u_100m_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n); auto uv = s->dyn->uv_fld.d(); const int nl = s->mesh->nl;
+    const size_t off = (size_t)io_k100(s->mesh) * 2;
+    Kokkos::parallel_for("io_acc_u100", n, KOKKOS_LAMBDA(const size_t e){
+        out(e) += uv(e * (size_t)nl * 2 + off + 0); });
+}
+static void resolve_v_100m_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n); auto uv = s->dyn->uv_fld.d(); const int nl = s->mesh->nl;
+    const size_t off = (size_t)io_k100(s->mesh) * 2;
+    Kokkos::parallel_for("io_acc_v100", n, KOKKOS_LAMBDA(const size_t e){
+        out(e) += uv(e * (size_t)nl * 2 + off + 1); });
+}
+
 /* Default monthly variable table. Lifetime = run.
- * If sea ice isn't initialised, callers should pass nvars = 12 instead
- * of FESOM_DEFAULT_MONTHLY_NVARS to skip the trailing 5 ice entries. */
-#define FESOM_DEFAULT_MONTHLY_NVARS 17
+ * Ocean vars first, then 5 ice entries at the tail (the advisory ice-skip count
+ * is now 16). With FESOM_IO_EXCLUSIVE set, only config-listed vars are written. */
+#define FESOM_DEFAULT_MONTHLY_NVARS 21
 
 static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_NVARS] = {
     /* 3D ocean state.  6th col = M514 device-resident accumulator (or nullptr).
@@ -841,6 +911,11 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
     { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_IFACE, resolve_Av,      resolve_Av_dev     },
     { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density, resolve_density_dev },
     { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq,  resolve_bvfreq_dev },
+    /* Lean surface / 100 m velocity slices (2D element fields) — ng5-long-run. */
+    { "u_surf",  "surface zonal velocity",         "m/s",    FESOM_VAR_2D_ELEM,       resolve_u_surf,  resolve_u_surf_dev },
+    { "v_surf",  "surface meridional velocity",    "m/s",    FESOM_VAR_2D_ELEM,       resolve_v_surf,  resolve_v_surf_dev },
+    { "u_100m",  "zonal velocity at ~100 m",       "m/s",    FESOM_VAR_2D_ELEM,       resolve_u_100m,  resolve_u_100m_dev },
+    { "v_100m",  "meridional velocity at ~100 m",  "m/s",    FESOM_VAR_2D_ELEM,       resolve_v_100m,  resolve_v_100m_dev },
     /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
     { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice,   nullptr            },
     { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice,   nullptr            },
@@ -900,6 +975,13 @@ void fesom_io_init(fesom_io_t                  *io,
      *   - if config has an entry: use its cadences (REPLACE the default)
      *   - else: keep the default [MONTHLY]
      * Then bin the variables per cadence so each stream gets its var list. */
+    /* FESOM_IO_EXCLUSIVE: write ONLY the config-listed vars (else unlisted vars
+     * default to MONTHLY — undesirable for a lean run, where the default monthly
+     * 3-D temp/salt/u/v/… would be large and pointless). With NO config + exclusive,
+     * NOTHING is written (the clean "timing run / no output" mode). Value-aware:
+     * unset / empty / "0" → off; anything else → on. */
+    const char *excl_env = getenv("FESOM_IO_EXCLUSIVE");
+    const int have_excl = (excl_env && excl_env[0] && strcmp(excl_env, "0") != 0);
     int per_cad_count[5] = {0};
     /* First pass: count vars per cadence to size buffers. */
     for (int v = 0; v < FESOM_DEFAULT_MONTHLY_NVARS; ++v) {
@@ -907,7 +989,7 @@ void fesom_io_init(fesom_io_t                  *io,
             have_cfg ? fesom_io_config_lookup(&cfg, fesom_default_monthly_table[v].name) : NULL;
         if (e) {
             for (int c = 0; c < e->n_cadences; ++c) per_cad_count[e->cadences[c]] += 1;
-        } else {
+        } else if (!have_excl) {
             per_cad_count[FESOM_PERIOD_MONTHLY] += 1;
         }
     }
@@ -930,7 +1012,7 @@ void fesom_io_init(fesom_io_t                  *io,
                 fesom_period_kind_t p = e->cadences[c];
                 io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
             }
-        } else {
+        } else if (!have_excl) {
             fesom_period_kind_t p = FESOM_PERIOD_MONTHLY;
             io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
         }

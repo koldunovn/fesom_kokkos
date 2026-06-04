@@ -35,7 +35,8 @@ export FESOM_PRINT_EVERY=${PRINT_EVERY:-500}
 
 DT=${DT:-1800}
 NSTEPS=${NSTEPS:-35}
-SNAP=999999
+SNAP=${SNAP_EVERY:--1}   # full snapshots OFF by default; SNAP_EVERY=N to enable
+export FESOM_IO_EXCLUSIVE=${FESOM_IO_EXCLUSIVE:-1}   # no monthly-default output unless FESOM_IO_CONFIG given
 YEAR=${YEAR:-1958}
 PHCARG="${PHC:-$FESOM_PHC}"
 [ "$YEAR" = "0" ] && PHCARG="${PHC:-}"

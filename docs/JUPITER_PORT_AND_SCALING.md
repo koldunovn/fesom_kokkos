@@ -94,8 +94,13 @@ cmake --build build-cuda -j 16    # ~1 min wall on the Grace login node
 
 ## Methodology
 
-- 35 steps, internal loop timer (excludes 5 warmup → **30 timed**), `snap_every` huge
-  (no I/O — rank-0 gather OOMs on ng5). JRA55-do 1958 forcing + PHC winter IC (realistic
+- 35 steps (sweep: 55), internal loop timer (excludes 5 warmup → **30/50 timed**). The runs
+  carried the default **monthly-mean I/O streams** (accumulated in-loop) + a step-0 snapshot.
+  The step-0 snapshot is **pre-loop** (outside the timer); the in-loop monthly accumulation
+  was measured by an A/B test (I/O on vs off, 8 nodes, 3 reps each) to add **~1 %** (0.3286 vs
+  0.3254 s/step) — **within the placement noise**, and I/O-off re-runs reproduce the sweep
+  means at 2/8/32 nodes. So the s/step figures are unaffected by I/O. (For pure timing use
+  `FESOM_IO_EXCLUSIVE=1`, now the job default.) JRA55-do 1958 forcing + PHC winter IC (realistic
   ocean+ice). dt = 1800 s (core2), 180 s (ng5, high-res stability). 1 MPI rank = 1 H100.
 - Jobs: `jobs/job_jupiter_gpu` (CUDA), `jobs/job_jupiter_cpu` (Serial). Answer line:
   `grep "loop timing" <out>/log`.

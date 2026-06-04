@@ -39,7 +39,12 @@ export FESOM_PRINT_EVERY=${PRINT_EVERY:-500}
 
 DT=${DT:-1800}
 NSTEPS=${NSTEPS:-35}      # internal loop timer excludes 5 warmup -> 30 timed
-SNAP=999999              # no snapshot I/O (rank-0 gather OOMs on big meshes)
+SNAP=${SNAP_EVERY:--1}   # full snapshots OFF by default (-1); SNAP_EVERY=N to enable.
+                         # NB snap_every>0 also writes a step-0 snapshot (~63GB for ng5!).
+# No output unless an io-stream config is given: EXCLUSIVE suppresses the default monthly
+# means (all 17 vars, ~50GB/ng5 run). Lean daily output: pass FESOM_IO_CONFIG=<file>
+# (e.g. io_lean_daily.conf) via --export. Set FESOM_IO_EXCLUSIVE=0 to restore monthly default.
+export FESOM_IO_EXCLUSIVE=${FESOM_IO_EXCLUSIVE:-1}
 YEAR=${YEAR:-1958}
 # YEAR=0 -> analytical forcing + analytical IC (no JRA55/PHC files needed). Otherwise
 # PHC IC + JRA55 forcing for that year (the realistic workload). PHC overridable.

@@ -31,14 +31,25 @@ caveat. Stable production throughput is **SYPD@180 ≈ 3.5 at 32 nodes**.
 A few-months run at dt=180: 1 month ≈ 14,400 steps; 3 months ≈ 43,200 steps ≈ 1.7 h wall at
 32 nodes (0.14 s/step) — fits one 12 h job, but restart is still wanted for safety + chaining.
 
-## 2. Snapshot output — ng5 OOM (TO DO, task #10)
+## 2. Output — lean daily means (DONE, task #10)
 
-`fesom_io_write_snapshot` allocates ALL ~10 global 3-D fields on rank 0 at once (g_T/S/w +
-g_uv on elements ~16 GB + dens/bv/pgf/Kv/Av) ≈ 70 GB → OOM on the step-0 snapshot. The step-0
-snapshot at line `fesom_main.cpp:1023` is why ng5 runs use `snap_every` huge today.
-**Fix:** define the NetCDF file first, then **gather → write → free one field at a time**
-(peak ≈ one field, ~24 GB). Format unchanged. (Optional `FESOM_SNAP_LEAN` to drop the 6
-diagnostic 3-D fields → smaller files for long runs.)
+Per the run spec we do NOT need the full 70 GB snapshot — only 8 lean fields, **daily**:
+`sst, sss, u_surf, v_surf, u_100m, v_100m, a_ice, m_ice`. Implemented on the existing
+time-mean stream infrastructure (`fesom_io_stream` + `fesom_io_config`), which already does
+daily means + per-var NetCDF with a time-unlimited dim:
+- Added 4 resolvers (host + **device** — uv is device-resident) for surface (layer 0) and
+  ~100 m (layer nearest 100 m via mesh Z) velocity, as `FESOM_VAR_2D_ELEM`; registered in the
+  default table. `sst/sss/a_ice/m_ice` already existed.
+- Added `FESOM_IO_EXCLUSIVE` so a config writes ONLY its listed vars (and, with no config,
+  NOTHING — the clean timing-run mode). Job scripts now default `snap_every=-1` +
+  `FESOM_IO_EXCLUSIVE=1` so timing runs write no output (the old default monthly means +
+  step-0 snapshot were filling scratch — 9 TB cleaned).
+- Config: `io_lean_daily.conf`. Run with `FESOM_IO_CONFIG=$PWD/io_lean_daily.conf`.
+- Verified (core2, 100 steps → 3 daily records): sst [-1.90,30.04]°C, u_surf/v_surf
+  [-1.05,1.19] m/s nonzero (device resolver correct). Output: `<out>/<var>.fesom.<yr>.daily.nc`.
+- ⚠️ TODO polish: `u_100m/v_100m` need masking at elements shallower than 100 m (currently a
+  sentinel ~100 there); guard the resolver with `mesh->nlevels_fld` (device IntField available).
+- Full 70 GB snapshot OOM fix (gather→write→free per field) deferred — not needed for this run.
 
 ## 3. Restart (TO DO, task #11)
 
