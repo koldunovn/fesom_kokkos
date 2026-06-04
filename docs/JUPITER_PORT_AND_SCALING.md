@@ -112,18 +112,22 @@ below is reproducible, not noise):
 |  64   |    256      |    29 k   | 0.1061 | 9.24×         |  78 % ⟵ rebound | 14 %   |
 | 128   |    512      |    14 k   | 0.1321 | 7.42×         |  **slower**  |  6 %      |
 
+The CG solver runs a **constant ~85 iterations/step at every rank count** (86/83 at dist_8 …
+85/83 at dist_512), so the solver and the domain decomposition are NOT degrading with scale —
+whatever happens below is **communication**, not solver/partition quality.
+
 Three regimes:
 1. **2→16 nodes — clean strong scaling**, 85–90 % per doubling. ng5 keeps the H100s fed down
    to ~116 k nod2D/GPU. This is the regime to run production in.
-2. **16→32→64 — non-monotonic** (dip to 57 % then rebound to 78 %). Reproducible across reps,
-   so it is a **partition-quality effect**, not noise: FESOM's domain decomposition quality
-   (edge cut / halo size / load balance) varies with rank count — `dist_128` is a worse
-   decomposition than `dist_64` or `dist_256`. **Best absolute time is 64 nodes / 256 GPUs:
-   0.106 s/step, 9.2× over the 2-node base.**
+2. **16→64 — comms-bound, non-monotonic** (per-doubling 57 % then 78 %). Per-step time here is
+   tiny (0.11–0.19 s) and dominated by halo exchange + the ~85 CG `MPI_Allreduce`s, all
+   latency-bound. The wiggle is most plausibly **inter-node placement/contention on the
+   Dragonfly+ fabric** (which nodes the scheduler assigned), NOT partition quality (CG iters
+   are flat). Reps were within 3 %, but the exact shape in this regime should not be over-read.
+   **Best absolute time is 64 nodes / 256 GPUs: 0.106 s/step, 9.2× over the 2-node base.**
 3. **64→128 — strong scaling REVERSES** (128 nodes is *slower* than 64). At ~14 k wet
-   points/GPU the step is pure comms — halo exchange + the CG solver's per-iteration
-   `MPI_Allreduce` — and adding nodes only adds communication. **Past ~64 nodes (256 GPUs)
-   ng5 does not benefit; it regresses.**
+   points/GPU almost no compute is left per H100; adding nodes only adds communication.
+   **Past ~64 nodes (256 GPUs) ng5 does not benefit; it regresses.**
 
 So the strong-scaling ceiling for ng5 on GH200 is **~64 nodes / 256 GPUs**. Larger meshes
 would push that ceiling out (more work to amortise the comms); ng5 itself is exhausted there.
@@ -145,26 +149,31 @@ MPI Allreduce in the CG solver. Do not use sub-million-node meshes to benchmark 
 
 ## GPU vs CPU node-for-node — the headline (GPU WINS on GH200)
 
-Same node count, each architecture run its natural way: GPU = 4 H100/node (1 rank/GPU);
-CPU = Kokkos Serial on the Grace cores (256 ranks/node — see the memory wall below).
+Grace has **72 physical cores/superchip, no SMT → 288 cores/node**; the CPU runs Kokkos
+Serial, **1 MPI rank = 1 physical core**. So a full CPU node is 288 ranks.
 
-| mesh  | nodes | GPU (4 H100/node) | CPU (Grace) | **GPU speedup** |
-|:------|:-----:|:-----------------:|:-----------:|:---------------:|
-| core2 |   1   | 0.0655 (dist_4)   | 0.0859 (dist_288, 288 c) | **1.31× faster** |
-| ng5   |   2   | 0.9806 (dist_8)   | 2.4785 (dist_512, 512 c) | **2.53× faster** |
+| mesh  | nodes | GPU (4 H100/node) | CPU (Grace, 1 rank/core) | cores used | **GPU speedup** |
+|:------|:-----:|:-----------------:|:------------------------:|:----------:|:---------------:|
+| core2 |   1   | 0.0655 (dist_4)   | 0.0859 (dist_288) | **288/288 (full)** | **1.31×** |
+| ng5   |   2   | 0.9806 (dist_8)   | 2.4785 (dist_512) | 512/576 = 256/node | **2.53×** (≈2.25× core-normalised) |
 
-**This reverses the Levante A100 result.** On Levante the same port was 3.8–8.9× *slower*
-per node than EPYC at the PCIe-bound floor, and ~1.4× slower even after the M5.13
-device-residency campaign. On GH200 the GPU is **faster** node-for-node — the NVLink-C2C
-(900 GB/s) erases the host↔device wall that sank the A100, and the H100 out-muscles the
-Grace cores. The margin **grows with mesh size** (1.3× core2 → 2.5× ng5), consistent with
-the mesh-size lever: bigger meshes feed the H100s better. ng5-class and larger is where
-GH200 pays off; expect the ratio to keep climbing on >7 M-node meshes.
+⚠️ **The ng5 CPU point used 256 of 288 cores/node**, *not* because that's optimal but because
+ng5's pre-generated partitions only exist at 256, 512, 1024, … (multiples of 256) — there is no
+`dist_288`/`dist_576` (this port reads partitions, it doesn't generate them). So 256 cores ran,
+32/node sat idle (89 %). Normalising to a full 288-core node (assuming ideal CPU scaling, which
+is optimistic) drops the ng5 win from 2.53× to **~2.25×**. **core2 (1.31×) is the only fully
+apples-to-apples full-node point.** A clean ng5 full-node number needs a `dist_288` partition
+generated with the FESOM mesh partitioner (future work).
 
-> ⚠️ Two honest caveats, both *favouring the CPU* (so the GPU win is conservative):
-> (1) CPU uses 256 of 288 cores/node (89 %) on ng5 — see below. (2) The CPU is Kokkos
-> *Serial* (1 thread/rank, no host vectorisation tuning); a threaded/vectorised Grace build
-> could narrow the gap somewhat. Even so, the GPU leads.
+**Either way, the GPU wins — and this reverses the Levante A100 result.** On Levante the same
+port was 3.8–8.9× *slower* per node than EPYC at the PCIe-bound floor, ~1.4× slower even after
+the M5.13 device-residency campaign. On GH200 the GPU is **faster** node-for-node — NVLink-C2C
+(900 GB/s) erases the host↔device wall that sank the A100, and the H100 out-muscles the Grace
+cores. Margin grows with mesh size (1.3× core2 → ~2.2–2.5× ng5): bigger meshes feed the H100s.
+
+> Second caveat (also favouring the CPU, so the win is conservative): the CPU is Kokkos
+> *Serial* — 1 thread/rank, no host vectorisation tuning. A threaded/vectorised Grace build
+> could narrow the gap somewhat.
 
 ### The CPU memory wall (ng5 at ≥4 nodes)
 
