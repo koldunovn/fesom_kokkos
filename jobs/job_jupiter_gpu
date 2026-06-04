@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_gpu
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --time=00:20:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# FESOM2-Kokkos CUDA runner for the JUPITER Booster (4x GH200/node, 1 MPI rank = 1 H100).
+# The model auto-selects mesh partition dist_<ntasks>, so #GPUs = #ranks = nodes*4.
+# JSC-native per-task GPU binding (--gpus-per-task=1) -> each rank sees its own GPU as
+# logical 0; src/fesom_main.cpp maps local_rank%num_visible so this is correct.
+#
+# Submit (nodes+ntasks on the CLI, the rest via --export):
+#   sbatch --nodes=1  --ntasks=4   --export=ALL,MESH=core2,TAG=c2_gpu_n1  jobs/job_jupiter_gpu
+#   sbatch --nodes=2  --ntasks=8   --export=ALL,MESH=ng5,TAG=ng5_gpu_n2   jobs/job_jupiter_gpu
+#   sbatch --nodes=4  --ntasks=16  --export=ALL,MESH=ng5,TAG=ng5_gpu_n4   jobs/job_jupiter_gpu
+# Answer line: grep "loop timing" <OUT>/log   ->  s/step
+
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter_cuda.sh"
+source "$ROOT/env_jupiter_data.sh"
+
+case "${MESH:-core2}" in
+  pi)    M=$FESOM_MESH_PI ;;
+  core2) M=$FESOM_MESH_CORE2 ;;
+  ng5)   M=$FESOM_MESH_NG5 ;;
+  *) echo "unknown MESH=${MESH:-}"; exit 1 ;;
+esac
+
+OUT=/e/scratch/hclimrep/koldunov1/fesom_runs/${TAG:-gpu_default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=${PRINT_EVERY:-500}
+
+DT=${DT:-1800}
+NSTEPS=${NSTEPS:-35}      # internal loop timer excludes 5 warmup -> 30 timed
+SNAP=999999              # no snapshot I/O (rank-0 gather OOMs on big meshes)
+YEAR=${YEAR:-1958}
+# YEAR=0 -> analytical forcing + analytical IC (no JRA55/PHC files needed). Otherwise
+# PHC IC + JRA55 forcing for that year (the realistic workload). PHC overridable.
+PHCARG="${PHC:-$FESOM_PHC}"
+[ "$YEAR" = "0" ] && PHCARG="${PHC:-}"
+
+echo "=== JUPITER GPU ${TAG:-} nodes=$SLURM_NNODES ranks=$SLURM_NTASKS gpus=$SLURM_NTASKS mesh=${MESH:-core2} dt=$DT nsteps=$NSTEPS year=$YEAR on $SLURM_JOB_NODELIST ==="
+date
+srun "$ROOT/build-cuda/fesom_port" "$M" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHCARG" "$YEAR" > "$OUT/log" 2>&1
+EC=$?
+date
+echo "=== exit=$EC ==="
+echo "--- GPU binding (per-rank) ---"; grep "device_id" "$OUT/log" | head -8
+echo "--- Kokkos backend ---"; grep "Kokkos backend" "$OUT/log" | head -1
+echo "--- loop timing (the answer) ---"; grep -E "loop timing|s/step" "$OUT/log" | tail -2
+echo "--- last step (sanity) ---"; grep " it=" "$OUT/log" | tail -1
+echo "--- errors? ---"; grep -iE "error|fatal|nan|abort|HUGE" "$OUT/log" | head -5
+exit $EC

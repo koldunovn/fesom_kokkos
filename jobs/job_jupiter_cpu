@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_cpu
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --cpus-per-task=1
+#SBATCH --time=00:20:00
+#SBATCH -o /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.out
+#SBATCH -e /e/scratch/hclimrep/koldunov1/fesom_runs/slurm-%x-%j.err
+#
+# FESOM2-Kokkos CPU (Kokkos Serial, 1 thread/rank) runner for node-for-node GPU-vs-CPU
+# comparison on the JUPITER Booster. Each booster node = 4x 72-core Grace = 288 cores.
+# The model auto-selects dist_<ntasks>. Pick RANKS_PER_NODE to match an available
+# partition (ng5: 256/node; core2: 288/node where dist_288 exists).
+#
+# Submit (nodes + ntasks-per-node on CLI; ntasks = nodes*rpn must equal a dist_<n>):
+#   sbatch --nodes=1 --ntasks-per-node=288 --export=ALL,MESH=core2,TAG=c2_cpu_n1 jobs/job_jupiter_cpu
+#   sbatch --nodes=2 --ntasks-per-node=256 --export=ALL,MESH=ng5,TAG=ng5_cpu_n2  jobs/job_jupiter_cpu
+# Answer line: grep "loop timing" <OUT>/log
+
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/fesom_kokkos
+source "$ROOT/env_jupiter.sh"
+source "$ROOT/env_jupiter_data.sh"
+
+case "${MESH:-core2}" in
+  pi)    M=$FESOM_MESH_PI ;;
+  core2) M=$FESOM_MESH_CORE2 ;;
+  ng5)   M=$FESOM_MESH_NG5 ;;
+  *) echo "unknown MESH=${MESH:-}"; exit 1 ;;
+esac
+
+OUT=/e/scratch/hclimrep/koldunov1/fesom_runs/${TAG:-cpu_default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=${PRINT_EVERY:-500}
+
+DT=${DT:-1800}
+NSTEPS=${NSTEPS:-35}
+SNAP=999999
+YEAR=${YEAR:-1958}
+PHCARG="${PHC:-$FESOM_PHC}"
+[ "$YEAR" = "0" ] && PHCARG="${PHC:-}"
+
+echo "=== JUPITER CPU ${TAG:-} nodes=$SLURM_NNODES ranks=$SLURM_NTASKS (rpn=$SLURM_NTASKS_PER_NODE) mesh=${MESH:-core2} dt=$DT nsteps=$NSTEPS year=$YEAR on $SLURM_JOB_NODELIST ==="
+date
+srun "$ROOT/build-serial/fesom_port" "$M" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHCARG" "$YEAR" > "$OUT/log" 2>&1
+EC=$?
+date
+echo "=== exit=$EC ==="
+echo "--- loop timing (the answer) ---"; grep -E "loop timing|s/step" "$OUT/log" | tail -2
+echo "--- last step (sanity) ---"; grep " it=" "$OUT/log" | tail -1
+echo "--- errors? ---"; grep -iE "error|fatal|nan|abort|OUT_OF_MEMORY|HUGE" "$OUT/log" | head -5
+exit $EC

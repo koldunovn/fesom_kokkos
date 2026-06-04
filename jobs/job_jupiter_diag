@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_diag
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=72
+#SBATCH --time=00:05:00
+#SBATCH -o /e/home/jusers/koldunov1/jupiter/fesom_kokkos/jobs/diag-%j.out
+#SBATCH -e /e/home/jusers/koldunov1/jupiter/fesom_kokkos/jobs/diag-%j.err
+
+echo "=== batch script started on $(hostname) at $(date) ==="
+echo "SLURM_NNODES=$SLURM_NNODES SLURM_NTASKS=$SLURM_NTASKS"
+echo "scratch writable? "; touch /p/scratch/hclimrep/koldunovn1/fesom_runs/diag_touch_$$ && echo "  YES" && rm -f /p/scratch/hclimrep/koldunovn1/fesom_runs/diag_touch_$$ || echo "  NO"
+echo "=== per-rank GPU visibility ==="
+srun --label bash -c 'echo "rank $SLURM_PROCID on $(hostname) CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES SLURM_LOCALID=$SLURM_LOCALID"'
+echo "=== nvidia-smi -L ==="
+nvidia-smi -L 2>&1 | head
+echo "=== done at $(date) ==="

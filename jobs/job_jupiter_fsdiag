@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=fkk_fsdiag
+#SBATCH --account=hclimrep
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --time=00:05:00
+#SBATCH -o /e/home/jusers/koldunov1/jupiter/fesom_kokkos/jobs/fsdiag-%j.out
+#SBATCH -e /e/home/jusers/koldunov1/jupiter/fesom_kokkos/jobs/fsdiag-%j.err
+
+echo "=== node $(hostname) user $(whoami) ==="
+echo "--- JSC scratch/project env vars ---"; env | grep -iE "scratch|project|^USER=|/p/" | sort
+echo "--- read meshes? ---"; ls -d /p/scratch/hclimrep/koldunovn1/meshes/core2/dist_4 2>&1 | head -1
+echo "--- read a mesh file head ---"; head -c 40 /p/scratch/hclimrep/koldunovn1/meshes/core2/nod2d.out 2>&1 | tr '\n' ' '; echo
+echo "--- ls /p/scratch/hclimrep ---"; ls -la /p/scratch/hclimrep/ 2>&1 | head
+echo "--- ls /p/scratch/hclimrep/koldunovn1 ---"; ls -la /p/scratch/hclimrep/koldunovn1/ 2>&1 | head
+echo "--- write tests (which dirs are writable from compute?) ---"
+for d in \
+  /p/scratch/hclimrep/koldunovn1 \
+  /p/scratch/hclimrep/koldunovn1/fesom_runs \
+  /p/scratch/hclimrep/$USER \
+  /p/scratch/hclimrep \
+  $HOME \
+  ; do
+  if touch "$d/.wtest_$$" 2>/dev/null; then echo "  WRITABLE: $d"; rm -f "$d/.wtest_$$"; else echo "  no-write: $d"; fi
+done
+echo "--- mount of /p/scratch ---"; df -h /p/scratch/hclimrep 2>&1 | tail -2
+echo "=== done ==="

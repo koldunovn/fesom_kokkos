@@ -314,8 +314,30 @@ int main(int argc, char **argv)
             if (slurm_localid) local_rank = atoi(slurm_localid);
         }
     }
+    /* Map the node-local rank to a VISIBLE-device index. Two GPU-visibility regimes
+     * exist and the binding must be correct under BOTH (see docs/RUN_GPU.md and
+     * docs/RUN_JUPITER.md):
+     *   (a) ALL GPUs visible to every rank — Levante `--gpu-bind=none`, or any launch
+     *       with no per-task GPU binding: CUDA_VISIBLE_DEVICES is unset or "0,1,2,3",
+     *       so num_visible>=npernode and device_id = local_rank (distinct per rank).
+     *   (b) PER-TASK isolation — JUPITER/JSC native `--gpus-per-task=1`: Slurm hands
+     *       each rank its OWN single GPU renumbered to logical 0 (CUDA_VISIBLE_DEVICES
+     *       is a single id, e.g. "2"), so num_visible==1 and device_id = local_rank%1 = 0.
+     *       Every rank binds its (distinct PHYSICAL) GPU as index 0 — this is the
+     *       affinity-correct GH200 launch (each Grace paired with its own Hopper).
+     * The modulo is a no-op for (a) and collapses (b) to 0; set_device_id is itself a
+     * no-op on Serial/OpenMP (the CPU bit-identity oracle is unaffected). */
+    int num_visible = 0;
+    {
+        const char *cvd = getenv("CUDA_VISIBLE_DEVICES");
+        if (cvd && *cvd) {
+            num_visible = 1;
+            for (const char *p = cvd; *p; ++p) if (*p == ',') ++num_visible;
+        }
+    }
+    int device_id = (num_visible > 0) ? (local_rank % num_visible) : local_rank;
     Kokkos::InitializationSettings kokkos_settings;
-    kokkos_settings.set_device_id(local_rank);     /* ignored by Serial/OpenMP */
+    kokkos_settings.set_device_id(device_id);      /* ignored by Serial/OpenMP */
     Kokkos::initialize(kokkos_settings);
 
     /* M5.11: register the deep_copy callback that counts per-step PCIe traffic
@@ -332,8 +354,11 @@ int main(int argc, char **argv)
         char procname[MPI_MAX_PROCESSOR_NAME] = {0};
         int procname_len = 0;
         MPI_Get_processor_name(procname, &procname_len);
-        printf("[fesom_port] rank %d on %s: node-local rank %d -> Kokkos device_id %d\n",
-               mpi.mype, procname, local_rank, Kokkos::device_id());
+        const char *cvd = getenv("CUDA_VISIBLE_DEVICES");
+        printf("[fesom_port] rank %d on %s: node-local rank %d -> Kokkos device_id %d "
+               "(CUDA_VISIBLE_DEVICES=%s)\n",
+               mpi.mype, procname, local_rank, Kokkos::device_id(),
+               cvd ? cvd : "(unset)");
     }
     if (mpi.mype == 0)
         printf("[fesom_port] Kokkos backend: %s\n", Kokkos::DefaultExecutionSpace::name());
@@ -839,9 +864,13 @@ skip_rest_state:
         fesom_jra55_init(&jra, &mesh);
         fesom_jra55_open_year(&jra, &mesh, jra55_year);
         use_jra = 1;
-        /* Phase 3 step 25 paths from work_core/namelist.forcing. */
-        const char *sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
-        const char *runoff_path = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
+        /* Phase 3 step 25 paths from work_core/namelist.forcing. Env-overridable for
+         * portability (FESOM_SSS_PATH / FESOM_RUNOFF_PATH); on JUPITER the runoff file
+         * is named runoff.nc, not CORE2_runoff.nc — point the env var at it. */
+        const char *sss_path    = getenv("FESOM_SSS_PATH");
+        const char *runoff_path = getenv("FESOM_RUNOFF_PATH");
+        if (!sss_path    || !*sss_path)    sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
+        if (!runoff_path || !*runoff_path) runoff_path = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
         fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
         use_sr = 1;
         printf("[fesom_port] SSS restoring: %s\n", sss_path);
