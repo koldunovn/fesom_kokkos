@@ -12,11 +12,12 @@ Booster** at Jülich (NVIDIA GH200 Grace-Hopper). Project account `hclimrep`.
   than the 288 Grace cores on core2 and **2.53×** faster on ng5 (per node). NVLink-C2C
   (900 GB/s) erased the PCIe host↔device wall that made the A100 *slower*; the margin grows
   with mesh size.
-- **ng5 (7.4 M nodes) GPU strong-scaling** (mean of 5 reps/point): clean, low-variance scaling
-  **2→32 nodes** (0.97 → 0.14 s/step, per-doubling eff 90→72 %); beyond ~32 nodes a
-  **high-variance plateau** (CoV grows 1 %→19 % — Dragonfly+ placement noise; single runs
-  scatter ~50 %). **Sweet spot 16–32 nodes** (64–128 GPU). [An earlier single-run pass saw a
-  "dip/reverse" that the reps proved was placement noise — report mean±std at scale.]
+- **ng5 (7.4 M nodes) GPU strong-scaling** (10 reps/point): clean scaling **2→32 nodes**
+  (0.96 → 0.14 s/step, per-doubling eff 89→70 %); then a **high-variance plateau** to 128 nodes
+  (CoV grows 1 %→46 % — Dragonfly+ placement noise) and a **reversal past 128** (256/512 nodes
+  are slower). **Throughput saturates ~4.7–5.2 SYPD@dt=240 across 32–128 nodes; run production
+  on ~32 nodes / 128 GPUs (~4.7 SYPD) — same throughput as 128 nodes at ¼ the GPUs.** [An
+  earlier single-run pass saw a "dip/reverse" the reps proved was placement noise — use mean±std.]
 - **core2 (127 k nodes) does NOT scale on GPU** — flat at ~0.057 s/step (it is far too
   small to fill even 8 H100s; pure launch/halo floor). Use ng5-class meshes for GPU.
 - Cross-node **CUDA-aware MPI works** (ParaStationMPI + `MPI-settings/CUDA`): on-device
@@ -101,42 +102,49 @@ cmake --build build-cuda -j 16    # ~1 min wall on the Grace login node
 
 ## GPU strong scaling — ng5 (7,402,886 nodes, 70 levels), dt=180
 
-Each point is **multiple SEPARATE job submissions** (5 reps for 2–64 nodes, 3 for 128; each
-rep gets its own SLURM allocation → samples Dragonfly+ node placement). mean ± std over reps:
+Each point is **multiple SEPARATE job submissions** (10 reps for 2–64 nodes, 6 for 128, 1 probe
+for 256/512; each rep gets its own SLURM allocation → samples Dragonfly+ node placement). SYPD =
+`dt / (365 × s_per_step)`; the **dt=240 (production) column = dt=180 × 4/3** (per-step cost is
+dt-independent — same compute per step):
 
-| nodes | GPUs | nod2D/GPU | mean s/step | std | **CoV** | min–max | per-doubling (mean) |
-|:-----:|:----:|:---------:|:-----------:|:---:|:-------:|:--------|:-------------------:|
-|   2   |   8  |  926 k    | 0.966 | 0.012 |  1.2 % | 0.955–0.984 |  —          |
-|   4   |  16  |  463 k    | 0.534 | 0.006 |  1.1 % | 0.529–0.540 | 1.81× (90 %) |
-|   8   |  32  |  231 k    | 0.316 | 0.015 |  4.9 % | 0.307–0.343 | 1.69× (84 %) |
-|  16   |  64  |  116 k    | 0.201 | 0.007 |  3.4 % | 0.192–0.210 | 1.58× (79 %) |
-|  32   | 128  |   58 k    | 0.140 | 0.014 | 10.1 % | 0.129–0.162 | 1.44× (72 %) |
-|  64   | 256  |   29 k    | 0.150 | 0.024 | 15.9 % | 0.108–0.163 | 0.93× (noise) |
-| 128   | 512  |   14 k    | 0.099 | 0.019 | 18.7 % | 0.086–0.120 | 1.52× (noise) |
+| nodes | GPUs | nod2D/GPU | reps | mean s/step | **CoV** | per-doubling | **SYPD@180** | **SYPD@240** |
+|:-----:|:----:|:---------:|:----:|:-----------:|:-------:|:------------:|:------------:|:------------:|
+|   2   |   8  |  926 k    | 10 | 0.964 |  1.0 % |  —          | 0.51 | 0.68 |
+|   4   |  16  |  463 k    | 10 | 0.541 |  3.5 % | 1.78× (89 %) | 0.91 | 1.21 |
+|   8   |  32  |  231 k    | 10 | 0.320 |  6.1 % | 1.69× (85 %) | 1.54 | 2.05 |
+|  16   |  64  |  116 k    | 10 | 0.196 |  5.0 % | 1.63× (82 %) | 2.52 | 3.36 |
+|  32   | 128  |   58 k    | 10 | 0.140 |  9.9 % | 1.40× (70 %) | **3.51** | **4.68** |
+|  64   | 256  |   29 k    | 10 | 0.136 | 20.1 % | 1.03× (flat) | 3.62 | 4.82 |
+| 128   | 512  |   14 k    |  6 | 0.126 | 46.4 % | 1.08× (flat) | 3.91 | 5.21 |
+| 256   |1024  |  7.2 k    |  1 | 0.160 |   —     | 0.79× (worse) | 3.07 | 4.10 |
+| 512   |2048  |  3.6 k    |  1 | 0.579 |   —     | 0.28× (worse) | 0.85 | 1.14 |
 
 The CG solver runs a **constant ~85 iterations/step at every rank count** (86/83 at dist_8 …
 85/83 at dist_512), so the solver and the decomposition are NOT degrading with scale —
 everything below is **communication**, not solver/partition quality.
 
 Two findings the reps make solid (they overturn an earlier single-run reading):
-1. **Clean, low-variance strong scaling 2→32 nodes** — per-doubling efficiency 90 → 84 → 79 →
-   72 %, CoV ≤ 10 %. ng5 keeps the H100s usefully fed down to ~58 k nod2D/GPU. **This is the
-   regime to run production in; practical sweet spot 16–32 nodes.**
-2. **Beyond ~32 nodes it is a high-variance plateau, not a clean trend.** Run-to-run variance
-   grows monotonically with node count — **CoV 1 % → 5 % → 10 % → 16 % → 19 %** — because the
-   step is tiny (0.10–0.15 s) and dominated by latency-bound comms (halo + ~85 CG
-   `MPI_Allreduce`s), whose cost depends on where on the Dragonfly+ fabric the job landed. At
-   64 nodes a single run ranges 0.108–0.163 s (a 50 % spread). The 32/64/128 means (0.140,
-   0.150, 0.099) overlap within that spread — node count past ~32 barely matters and **single
-   runs there are unreliable**. (An earlier single-run pass mistook these draws for a real
-   "dip at 32 / reverse at 128"; with reps that structure vanishes — it was placement noise.)
+1. **Clean, low-variance strong scaling 2→32 nodes** — per-doubling efficiency 89 → 85 → 82 →
+   70 %, CoV ≤ 10 %. ng5 keeps the H100s usefully fed down to ~58 k nod2D/GPU.
+2. **Beyond ~32 nodes: a high-variance plateau, then reversal.** The mean flattens (n32=0.140,
+   n64=0.136, n128=0.126 — a ~1.0× plateau) while **run-to-run variance explodes: CoV 10 % →
+   20 % → 46 %**. The step is tiny (~0.13 s) and dominated by latency-bound comms (halo + ~85 CG
+   `MPI_Allreduce`s) whose cost depends on which nodes the scheduler gave the job. At 128 nodes a
+   single run ranged 0.086–0.240 s (a 2.8× spread). Past 128 the mean clearly **reverses**:
+   256 nodes = 0.160, 512 nodes = 0.579 s/step (1024–2048 GPUs left ~4–7 k pts each — pure
+   comms). (An earlier single-run pass saw a "dip at 32 / low at 128 / reverse at 256"; reps
+   show 32–128 is one noisy plateau and the real turn-up is at 256 — it was placement noise.)
 
-So the useful strong-scaling range for ng5 on GH200 is **up to ~32 nodes / 128 GPUs**; past
-that the mean keeps creeping down (best observed 0.099 s at 128 nodes) but the gain is small,
-noisy, and not worth the nodes. Larger meshes would extend the clean range (more work to
-amortise the comms). The gentler per-doubling vs Levante A100 (93–96 %) is expected — the H100
-finishes each rank's work so fast that the comms-bound regime arrives at a larger per-rank size
-than on A100. **Methodological takeaway: in the comms-bound regime, report mean ± std over
+**Throughput (SYPD).** The plateau means **throughput saturates at ~3.5–3.9 SYPD@180 /
+~4.7–5.2 SYPD@240 across 32–128 nodes**, getting noisier the higher you push. The efficient
+production point is **32 nodes / 128 GPUs (~4.7 SYPD@240)** — essentially the same throughput as
+128 nodes but with ¼ the GPUs (32→128 nodes buys +11 % SYPD for 4× the hardware). Past 128 nodes
+throughput falls. (The dt=240 column is projected from the dt=180 s/step × 4/3; CG iterations may
+rise slightly at the larger dt, which would modestly trim it — measure directly to confirm.)
+
+The gentler per-doubling vs Levante A100 (93–96 %) is expected — the H100 finishes each rank's
+work so fast that the comms-bound regime arrives at a larger per-rank size than on A100.
+**Methodological takeaway: in the comms-bound regime, report mean ± std over
 several separate-allocation reps — single runs scatter by up to ~50 %.**
 
 ## GPU "scaling" — core2 (126,858 nodes), dt=1800 — the small-mesh floor
