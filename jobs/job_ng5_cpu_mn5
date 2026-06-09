@@ -1,0 +1,61 @@
+#!/bin/bash
+# job_ng5_cpu_mn5 — NG5 CPU smoke on MN5 GPP (Sapphire Rapids, 112c/node).
+#
+# Kokkos Serial backend, 1 MPI rank per core. NG5 dist_N partitions don't
+# divide evenly into 112-core nodes (LUMI-C had 128c), so we under-subscribe:
+# dist_128 on 2 MN5 nodes = 64 ranks/node. Each node has 48 idle cores, but
+# the throughput vs same-node-count GPU run is the meaningful comparison.
+#
+# Same dt + nsteps as the GPU sweep so the s/step number compares directly.
+
+#SBATCH --job-name=fesom_ng5_cpu_mn5
+#SBATCH --account=ehpc01
+#SBATCH --qos=gp_debug
+#SBATCH --partition=gpp
+#SBATCH --nodes=3
+#SBATCH --ntasks=128
+#SBATCH --cpus-per-task=2
+#SBATCH --time=00:30:00
+#SBATCH --output=jobs/mn5_logs/%x-%j.out
+#SBATCH --error=jobs/mn5_logs/%x-%j.err
+
+set -euo pipefail
+mkdir -p jobs/mn5_logs
+
+ROOT=/gpfs/projects/ehpc01/sbeyer/fesom_kokkos
+source "$ROOT/env_mn5_cpu.sh"
+
+BIN=$ROOT/build-cpu-mn5/fesom_port
+MESH=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/NG5
+PHC=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/gpfs/scratch/ehpc01/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/forcing/CORE2/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=""
+export FESOM_CHL_SOURCE=None
+export FESOM_PRINT_EVERY=999
+
+OUT=/gpfs/scratch/ehpc01/sbeyer/fesom_runs/ng5_cpu_mn5_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then
+    echo "ERROR: $MESH/dist_$NPES missing"; exit 2
+fi
+
+echo "=== NG5 CPU MN5 ($SLURM_NNODES nodes × 64 ranks = $NPES, dist_$NPES) ==="
+echo "    nodes: $SLURM_JOB_NODELIST"
+
+date
+mpirun -np "$NPES" --bind-to core \
+    "$BIN" "$MESH" "$OUT" "${DT:-240}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+date
+
+echo "=== exit=$EC ==="
+echo "--- loop timing ---"
+grep "loop timing" "$OUT/run.log" | tail -1
+echo "--- last step ---"
+grep " it=" "$OUT/run.log" | tail -1
+exit $EC
