@@ -1,353 +1,331 @@
-# FESOM2 C port
+# FESOM2 — C++/Kokkos port (CPU + GPU)
 
-A literal C port of the FESOM2 (AWI) ocean+sea-ice model, built and
-exercised on Levante. Around 15 kLoC across `src/*.{c,h}`, mirroring
-the Fortran modules with the same loop bounds and halo discipline.
+A performance-portable **C++/[Kokkos](https://github.com/kokkos/kokkos)** port of the
+FESOM2 (AWI) ocean + sea-ice model. One source tree compiles to **CPU (Serial / OpenMP)**
+and **GPU (CUDA, A100)** backends — and is written Kokkos-pure so an **AMD/HIP (LUMI MI250x)**
+backend is a build-config change, not a rewrite.
 
-Currently included physics (out of the FESOM2 superset):
+The whole ocean + sea-ice timestep is **device-resident** (halo exchange uses GPU-aware MPI;
+no per-step full-field PCIe round-trips), and the port is validated against the
+[literal C port](#relationship-to-the-c-port) it was grown from: the **Serial build is
+bit-for-bit identical** to the C reference, and the **CUDA build is climate-close**.
 
-- Ocean: linfs ALE, JM-EOS, hydrostatic PGF, AB2 Coriolis, FCT tracer
-  advection, opt_visc=5 backscatter, PP mixing + convective adjustment,
-  CG SSH solver, JRA55 forcing with NCAR bulk formulae, SSS restoring
-  + runoff.
-- Sea ice (Phases A–E): EVP dynamics (whichEVP=0), thermodynamics with
-  T-clamping at freezing, ice-ocean coupling (ocean2ice / oce_fluxes /
-  oce_fluxes_mom), FCT advection of `a_ice / m_ice / m_snow`.
-- GM/Redi (Phases G0–G9): Ferrari et al. (2010) bolus velocity +
-  isoneutral Redi diffusion, including ODM95 slope tapering and
-  scaling_GMzexp vertical scaling. Master off-switch `FESOM_NO_GMREDI`.
+~26 kLoC across `src/*.{cpp,hpp,h}`, mirroring the Fortran/C modules with the same loop
+bounds and halo discipline. Built and exercised on DKRZ **Levante** (A100 GPU partition).
 
-Not yet included: KPP mixing, GM/Redi at multi-decadal scales (zlevel /
-zstar ALE), restart I/O, time-mean output streams.
+---
 
-The model is **Levante-only**. The build script and `env.sh` source the
-gcc-11 / openmpi-4.1.2 / netcdf-c modules and set the OpenMPI runtime
-knobs that DKRZ's `fesom2/env/levante.dkrz.de/shell.gnu` uses. Other
-clusters would need their own equivalents.
+## Status
+
+| | |
+|---|---|
+| **Backends** | Serial ✅ · OpenMP ✅ · CUDA (Ampere80) ✅ · HIP (gfx90a) planned (M6) |
+| **Coverage** | Ocean + sea-ice fully device-resident & validated (M0–M4 tagged) |
+| **Current** | `M5.x` GPU-performance campaign (tip `m5.23-comm-grind` → M5.24 TDMA lever) |
+| **Kokkos** | 4.4.01, vendored as a git submodule, built in-tree (matches ICON) |
+| **Precision** | `real_t = double` (mixed precision is the next major lever toward 2 SYPD) |
+
+Milestone tags: `m0-baseline` → `m0-cpu-baseline` → `m1-datalayer` → `m2-ocean-device` →
+`m4-full-device` → `m5.1-gpu-aware-mpi` → `m5.9-pin` → `m5.16-bulk-port` →
+`m5.20-pcie-residency` → `m5.21-coalescing-ghats-sss` → `m5.23-comm-grind`.
+
+---
+
+## Performance (Levante, A100 vs EPYC, strong-scaling)
+
+Measured on CORE2 / farc / dars / NG5 meshes (≈0.13M / 0.64M / 3.2M / 7.4M surface nodes),
+GPU = 4× A100 per node (1 rank/GPU), CPU = 128 EPYC ranks per node. Full report:
+[`docs/SCALING_M524.md`](docs/SCALING_M524.md).
+
+- **Node-for-node, the GPU is 3.3–3.7× faster than a CPU node** on the big meshes (dars, NG5)
+  at low node counts, drifting toward ~1.8–2.5× by 16 nodes as per-rank work thins and the
+  step turns comm-bound.
+- **SYPD at production timestep** (simulated years per wall-clock day): NG5 GPU ≈ **1.3–1.4 @ 16
+  nodes → 1.71 @ 32 nodes**; dars GPU ≈ **1.9 @ 8N → 3.0 @ 32N** — both reach the target 1–2
+  SYPD band on GPU.
+- **5-way CPU/GPU compare** (same workload): the pure-C port ≈ Fortran (fastest, ±2%),
+  Kokkos-Serial ~1.13–1.18× slower (portability tax), Kokkos-OpenMP ~7–8% over Serial; GPU
+  2.45–3.25× faster than the fastest CPU on big meshes at low node counts (CPU catches up by 32N).
+
+![Strong-scaling overview](docs/figures/m524_scaling_overview.png)
+![SYPD](docs/figures/m524_sypd.png)
+
+> ⚠️ The big meshes (dars/NG5) are CFL-unstable from a *cold* PHC start at the 4-min production
+> step — that is a vertical-scheme robustness gap unmasked only at high vertical CFL, not an
+> infrastructure issue. Step times are measured at a stable `dt=180`; SYPD is reported at the
+> production `dt` via `dt/(365·s_step)`. Details in `docs/SCALING_M524.md`.
+
+---
+
+## Validation model
+
+The port follows a strict fidelity ladder (the user's "binary-identity when possible, else
+climate-close ≈ Fortran↔C noise"):
+
+| Backend | Standard | How |
+|---|---|---|
+| **Serial** | **Bit-for-bit** == the C port | per-kernel `array_equal` gate + per-substep dumps; `-ffp-contract=off` so host & Serial-Kokkos forms compile to the same mul+add |
+| **OpenMP** | climate-identical | only reduction-order differs |
+| **CUDA / HIP** | climate-close | fma contraction, libdevice transcendentals, atomic/reduction order → ~1e-3 floor, 1-yr CORE2 climate correlation ≈ 1.0 vs the C twin |
+
+Any device-halo / sync-rail / residency change must pass
+**`scripts/gpu_fidelity_gate.sh`** before commit — a CORE2 active-ice CUDA-vs-Serial diff.
+(The pi smoke is *insufficient*: it has no sea ice, so a stale-host bug hides at ~1e-17 there.)
+
+---
 
 ## Build
 
-```
-cd /home/a/a270088/port2/fesom2_port
-bash -l configure.sh           # incremental
-bash -l configure.sh --clean   # wipe build/ and start over
+Kokkos is vendored at `externals/kokkos`. First checkout must init the submodule:
+
+```bash
+git submodule update --init --recursive
 ```
 
-Output: `build/fesom_port`. The `bash -l` invocation is required so the
-`module load` calls in `env.sh` see Levante's profile. Don't try to
-build inside a mambaforge/conda environment — it will pick up a wrong
-mpicc/netcdf and fail at link time. If you've activated one in your
-shell, `module --force purge` in `env.sh` clears it.
+There is no Kokkos module on Levante — it builds in-tree. `cmake` is the system `/usr/bin/cmake`
+(3.26.5), which survives `module purge`. Full recipe: [`docs/BUILD.md`](docs/BUILD.md).
+
+### Serial (the bit-identity oracle / CPU default)
+
+```bash
+bash -l configure.sh            # → build/fesom_port  (incremental; --clean to wipe)
+```
+
+`configure.sh` sources `env.sh` (gcc-11 / openmpi-4.1.2 / netcdf-c) and builds a Serial backend.
+The `bash -l` is required so the `module load` calls see Levante's profile. **Don't build inside
+a mambaforge/conda env** — it picks up the wrong mpicc/netcdf and fails at link time
+(`module --force purge` in `env.sh` clears an already-activated one).
+
+Explicit per-backend builds (one build dir each):
+
+```bash
+# Serial
+cmake -S . -B build-serial -DCMAKE_BUILD_TYPE=Release -DKokkos_ENABLE_SERIAL=ON
+cmake --build build-serial -j
+
+# OpenMP
+cmake -S . -B build-omp -DCMAKE_BUILD_TYPE=Release -DKokkos_ENABLE_OPENMP=ON
+cmake --build build-omp -j
+```
+
+### CUDA (A100) — needs CUDA-aware MPI
+
+The GPU build uses the **NVIDIA-built `openmpi/4.1.5-nvhpc-24.7`** (CUDA-aware UCX), *not* the
+Serial toolchain's `openmpi/4.1.2` — device-pointer MPI segfaults on the latter. Source
+`env_cuda.sh` in the **same** shell as the configure + build:
+
+```bash
+source env_cuda.sh             # gcc-11 + nvhpc-24.7 + CUDA-aware openmpi-4.1.5
+cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release \
+      -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON \
+      -DCMAKE_CXX_COMPILER=$PWD/externals/kokkos/bin/nvcc_wrapper
+cmake --build build-cuda -j
+```
+
+### LUMI (AMD / HIP) — later (M6)
+
+Same submodule, no source changes (the no-vendor-lock contract):
+`-DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_AMD_GFX90A=ON` with ROCm `hipcc` as `CMAKE_CXX_COMPILER`.
+
+### Diagnostic build options
+
+| CMake option | Effect |
+|---|---|
+| `-DFESOM_KK_SYNCCHECK=ON` | Assert host/device `Field` coherence + bounce evolving state H↔D every step (catches stale-host reads). Compiled out by default. |
+| `-DFESOM_SYNC_LOG=ON` | Emit one `SYNCLOG D2H/H2D <label> <bytes>` line per real PCIe sync — used for per-field traffic attribution. |
+
+Build these into **separate** dirs; both are no-ops when off so the production build stays
+byte-identical.
+
+---
+
+## Running
+
+```
+fesom_port <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path] [jra55_year]
+```
+
+| arg | required | default | notes |
+|---|---|---|---|
+| `mesh_dir` | yes | — | CORE2-style mesh directory |
+| `output_dir` | no | none → no snapshots | where `snap_*.nc` lands (`mkdir -p` it first!) |
+| `dt_seconds` | no | compiled default | overrides timestep |
+| `nsteps` | no | 500 | total steps |
+| `snap_every` | no | 25 | step interval between NetCDF snapshots; `-1` = none (timing runs) |
+| `phc_nc_path` | no | none → analytical forcing | PHC initial-condition file |
+| `jra55_year` | no | 0 → no JRA forcing | year for JRA55-do daily forcing |
+
+Empty-string args (`""`) mean "use default", useful to override only later positionals.
+
+The backend is chosen at **build** time (which `build*/fesom_port` you run), not at runtime.
+The model picks `dist_<npes>` under the mesh from the SLURM `--ntasks` count, so a partition
+directory for that exact rank count must exist.
+
+### GPU SLURM job (4 A100 / node)
+
+```bash
+#!/bin/bash
+#SBATCH --job-name=fesom_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/run_<stamp>/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/run_<stamp>/slurm.%j.err
+
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+OUT=/work/ab0995/a270088/port2/run_<stamp>; mkdir -p "$OUT"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" 1800 200 50 "$PHC" 1958 \
+    > "$OUT/run.log" 2>&1
+echo "Exit: $?"; tail -3 "$OUT/run.log"
+```
+
+### CPU SLURM job (Serial backend, pure MPI)
+
+Same shape with `-p compute`, `--ntasks-per-node=128`, `source env.sh`, and the
+`build-serial/fesom_port` binary. Ready-made templates live in `jobs/` (e.g.
+`job_m524_scale_{gpu,cpu}`, `submit_m524_scaling.sh`).
+
+> **Always use a unique `OUT_DIR` per job.** Concurrent jobs sharing an `OUT_DIR` clobber each
+> other's logs and produce spurious "crashes" that are really log corruption. Send output to
+> `/work/...`, never `$HOME` (60 GB home quota; a CORE2 GPU run is ~3.5 GB).
+
+---
 
 ## Data on Levante
-
-Hard-coded in the job templates. To run elsewhere, change the paths in
-the `.sh` files.
 
 | Asset | Path |
 |---|---|
 | CORE2 mesh | `/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2` |
 | PHC3.0 winter IC | `/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc` |
 | JRA55-do forcing | reader hard-codes the `/pool/data/.../JRA55-do/` layout for the requested year |
-| Output | `/work/ab0995/a270088/port/...` (or `--out_dir`) |
+| Output | `/work/ab0995/a270088/port2/...` |
 
-Mesh layout the model expects under `<mesh_dir>`:
+Mesh layout the model expects under `<mesh_dir>`: the global files `nod2d.out`, `elem2d.out`,
+`aux3d.out`, `nlvls.out`, `elvls.out`, `edges.out`, `edge_tri.out`, `depth.out`, plus
+`dist_<NPES>/my_list*.out` + `com_info*.out` partition files **pre-generated for the exact
+rank count** you run (generated with `fesom_ini.x`).
 
-- `nod2d.out`, `elem2d.out`, `aux3d.out`, `nlvls.out`, `elvls.out`,
-  `edges.out`, `edge_tri.out`, `depth.out` — global mesh files.
-- `dist_<NPES>/my_list*.out` + `com_info*.out` — partitioning files
-  per rank count. The model picks `dist_<npes>` based on the SLURM
-  `--ntasks` value. **Multi-rank runs need pre-generated partitions
-  for the exact rank count you intend to use** — rank counts seen so
-  far in this tree: 1, 8, 16, 32, 144, 256.
+---
 
-## Running
+## Physics included
 
-The binary signature:
+- **Ocean**: linfs ALE, JM-EOS, hydrostatic PGF, AB2 Coriolis, FCT tracer advection,
+  `opt_visc=5` backscatter, **KPP** (default) and PP vertical mixing + convective adjustment,
+  parallel-CG SSH solver, JRA55 forcing with NCAR bulk formulae, SSS restoring + runoff.
+- **Sea ice**: EVP dynamics (`whichEVP=0`), thermodynamics with freezing T-clamp, ice-ocean
+  coupling (ocean2ice / oce_fluxes / oce_fluxes_mom), FCT advection of `a_ice / m_ice / m_snow`.
+- **GM/Redi**: Ferrari et al. (2010) bolus velocity + isoneutral Redi diffusion, ODM95 slope
+  tapering, `scaling_GMzexp` vertical scaling. Master off-switch `FESOM_NO_GMREDI=1` makes the
+  binary byte-identical to the pre-GM state.
+- **I/O & calendar**: serial gather-to-rank-0 NetCDF snapshots + configurable output streams.
 
-```
-fesom_port <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path] [jra55_year]
-```
-
-Positional arguments:
-
-| arg | required | default | notes |
-|---|---|---|---|
-| `mesh_dir` | yes | — | path to the CORE2-style mesh directory |
-| `output_dir` | no | none → no snapshot output | where `snap_*.nc` lands |
-| `dt_seconds` | no | compiled FESOM_PHASE1_DT (500 s) | overrides timestep |
-| `nsteps` | no | 500 | total steps to run |
-| `snap_every` | no | 25 | step interval between NetCDF snapshots |
-| `phc_nc_path` | no | none → analytical forcing | PHC initial condition file |
-| `jra55_year` | no | 0 → no JRA forcing | year to use for JRA55-do (1958 was used for sea-ice/GM validation) |
-
-Empty-string args (`""`) act as "use default" — useful when you want
-to override only later args.
-
-## Sample SLURM job (16 ranks, 200 steps)
-
-Most copies in tree look like `job_core2_16_*`. Bare-bones template:
-
-```bash
-#!/bin/bash
-#SBATCH --job-name=fesom_port_16
-#SBATCH -p compute
-#SBATCH --ntasks-per-node=16
-#SBATCH --ntasks=16
-#SBATCH --time=00:30:00
-#SBATCH -A ab0995
-#SBATCH -o /work/ab0995/a270088/port/run_<stamp>/slurm.%j.out
-#SBATCH -e /work/ab0995/a270088/port/run_<stamp>/slurm.%j.err
-
-source /sw/etc/profile.levante
-source /home/a/a270088/port2/fesom2_port/env.sh
-ulimit -s 204800
-
-OUT_DIR=/work/ab0995/a270088/port/run_<stamp>
-mkdir -p "$OUT_DIR"
-
-BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
-MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
-PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
-
-DT=500
-NSTEPS=200
-SNAP_EVERY=50
-export FESOM_PRINT_EVERY=50
-JRA55_YEAR=1958
-
-srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
-    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
-echo "Exit: $?"
-tail -3 "$OUT_DIR/run.log"
-```
-
-**Always use a unique `OUT_DIR` per job.** Concurrent jobs that share an
-`OUT_DIR` clobber each other's logs and can cause spurious "crashes"
-that are actually log corruption. The `_<stamp>` suffix (e.g.
-`20260425_204500`) earns its keep.
-
-For 256-rank month/year runs see `job_core2_256_month_e` and
-`job_core2_256_year_e` — same shape, longer wall, more snapshots.
+---
 
 ## Environment knobs
 
-All read once and cached at first use unless noted otherwise.
+All read once at first use unless noted.
 
-### Master switches for new physics phases
+**Physics master switches:** `FESOM_NO_GMREDI`, `FESOM_NO_ICE_DYN`, `FESOM_NO_ICE_ADV`,
+`FESOM_NO_ICE_THERMO` — each skips its subsystem (the GMREDI one is the byte-identity gate).
 
-| Knob | What it does |
-|---|---|
-| `FESOM_NO_GMREDI=1` | Skip ALL GM/Redi physics. Treats `ctx->gm` as `NULL` for the rest of the step → no compute_sigma_xy, no init_Redi_GM, no fer_solve_Gamma, no fer_w accumulator, no bolus add/sub, no Redi K33, no G7a/G7b. With this set the binary is **byte-identical to the pre-G HEAD** — the gating correctness invariant. |
-| `FESOM_NO_ICE_DYN=1` | Skip the EVP dynamics step inside `fesom_ice_step`. |
-| `FESOM_NO_ICE_ADV=1` | Skip ice tracer advection (TG_rhs + fct_solve). cut_off still runs. |
-| `FESOM_NO_ICE_THERMO=1` | Skip ice thermodynamics + ice→ocean flux update. |
+**Diagnostics:** `FESOM_PRINT_EVERY=N` (per-step stats cadence), `FESOM_VERBOSE_CG=1`
+(SSH CG iteration detail), `FESOM_SYNC_LOG`-built binary emits per-field PCIe traffic.
 
-### Diagnostics / instrumentation
+**Physics-bisect toggles** (zero a forcing term *after* it is computed, to localize a multi-rank
+divergence): `FESOM_NO_WIND`, `FESOM_NO_HFLUX`, `FESOM_FREEZE_TS`, `FESOM_NO_TRADV`,
+`FESOM_NO_TRDIFF`. Independent — combine freely.
 
-| Knob | What it does |
-|---|---|
-| `FESOM_PRINT_EVERY=N` | Print per-step stats every N steps (defaults to `snap_every`). |
-| `FESOM_VERBOSE_CG=1` | Print SSH CG iteration details. |
-| `FESOM_EVP_DUMP_DIR=/path` | Sea-ice EVP debug dumps (per-substep state). One dir per rank — see `reference_evp_dump_diagnostic` in project memory. Always-on companion: an unconditional stderr trace whenever `ice_strength > 1e7`. |
-
-### Physics-bisect toggles (kept in tree from MPI debug session)
-
-These zero out forcing terms after they've been computed, useful when
-hunting for which subsystem causes a multi-rank divergence.
-
-| Knob | What it does |
-|---|---|
-| `FESOM_NO_WIND=1` | Zero `stress_surf` and `stress_node_surf` after bulk + runoff write them. Also skips `fesom_ice_oce_fluxes_mom` so ice-ocean drag isn't re-introduced. |
-| `FESOM_NO_HFLUX=1` | Zero `heat_flux`, `water_flux`, `virtual_salt`, `relax_salt`. |
-| `FESOM_FREEZE_TS=1` | Restore T,S to the IC values at the start of every step (so dynamics evolves but tracers don't drift). |
-| `FESOM_NO_TRADV=1` | Skip ocean tracer advection (T then S). |
-| `FESOM_NO_TRDIFF=1` | Skip ocean tracer implicit vertical diffusion. |
-
-These are independent — set as many as you like in one run.
+---
 
 ## Output
 
-`<output_dir>/snap_NNNNNN.nc` files, one per `snap_every` (NNNNNN is
-the step number, zero-padded to 6 digits). Each contains:
+`<output_dir>/snap_NNNNNN.nc` (one per `snap_every`, `NNNNNN` = zero-padded step). Each holds:
 
-- Mesh: `lon`, `lat`, `zbar`, `Z`, `elem_nodes`, `nlevels_nod2D`,
-  `nlevels`.
-- Ocean: `T(time, nz_1, nod2)`, `S(...)`, `eta_n(time, nod2)`,
-  `w(time, nz, nod2)`, `u(time, nz_1, elem)`, `v(...)`,
-  `density_m_rho0`, `bvfreq`, `pgf_x`, `pgf_y`, `Kv`, `Av`.
-- Sea ice (when configured): `a_ice`, `m_ice`, `m_snow`, `uice`,
-  `vice`, `h_ice`, `h_snow`.
-- Globals: `:step`, `:dt`.
+- **Mesh**: `lon`, `lat`, `zbar`, `Z`, `elem_nodes`, `nlevels_nod2D`, `nlevels`.
+- **Ocean**: `T`, `S`, `eta_n`, `w`, `u`, `v`, `density_m_rho0`, `bvfreq`, `pgf_x`, `pgf_y`, `Kv`, `Av`.
+- **Sea ice** (when configured): `a_ice`, `m_ice`, `m_snow`, `uice`, `vice`, `h_ice`, `h_snow`.
+- **Globals**: `:step`, `:dt`.
 
-Per-step text stats land in `run.log` (one line per `FESOM_PRINT_EVERY`
-steps). Per-rank stderr lands in `run.err`.
+Per-step text stats go to `run.log`; per-rank stderr to `run.err`.
 
-## Validating a run
-
-Things to check at the end:
-
-```bash
-# 1. SLURM thinks it succeeded
-sacct -j <jobid> -o JobID,State,ExitCode,Elapsed --noheader -P | head
-
-# 2. No HUGE-ice_strength fires (always-on sea-ice sanity trace)
-grep -c "HUGE ice_strength" run.err   # expect 0
-
-# 3. Step-N ocean stats look physical
-grep -E "[0-9]+[ ]+it=" run.log | tail -5
-#  -> uv, T-range, S-range, stress, CG iters; T should hold -2.06 °C
-#     (ice freezing clamp) once sea ice lands
-
-# 4. Compare snapshots across rank counts (Python)
-python3 -c "
-import netCDF4 as nc, numpy as np
-a = nc.Dataset('run_1r/snap_000200.nc')
-b = nc.Dataset('run_8r/snap_000200.nc')
-for v in ['T','S','u','v']:
-    d = np.abs(a.variables[v][0,...] - b.variables[v][0,...])
-    print(f'{v} max|d|={d.max():.2e}  mean|d|={d.mean():.2e}')"
-```
-
-For a fresh GM/Redi-on smoke at 16 ranks expect roughly:
-
-- exit 0, ~3 min wall
-- `it=` (CG iters) ~30–35 throughout
-- T.min clamped at −2.06 °C, T.max ~30 °C, S in [0, 41.12]
-- `stress` ~1–2 N/m², `pgf` ~1.4e-4 m/s²
-
-Cross-rank variation: Phase E sea-ice was bit-identical at printed
-precision; with GM/Redi active there is a small partition-dependent
-signal at hot spots driven by PHC IC partition-dependence
-(see `feedback_phc_rank_dependent` memory). Mean diffs stay O(1e-4)
-relative.
-
-## Bit-identity off-switch
-
-The strongest correctness test for the GM/Redi gating:
-
-```bash
-export FESOM_NO_GMREDI=1
-sbatch job_core2_16_g9_off
-# After it runs, confirm byte-identical T/S/u/v/w vs the pre-GM HEAD
-# baseline (G4 commit 704d352).
-```
-
-Tested at 16 ranks on commit `30b59b3` — 0.0e+00 max diff vs baseline
-on every variable.
+---
 
 ## Source layout
 
 ```
 src/
-  fesom_main.c               CLI parsing, init, timestep loop, exit
-  fesom_step.{c,h}           one ALE+adv+diff+ice timestep
-  fesom_mesh.{c,h}           mesh I/O + derived geometry (areas, gradient_sca)
-  fesom_partit.{c,h}         partition + halo communicator state
-  fesom_halo.{c,h}           generic halo exchange primitives
-  fesom_mpi.{c,h}             MPI bootstrap
+  fesom_main.cpp             CLI parsing, Kokkos/MPI init, timestep loop, exit
+  fesom_step.cpp             one ALE + adv + diff + ice timestep (the driver)
+  fesom_field.hpp            FieldT<T> DualView wrapper (host↔device, h()/d()/sync/modify)
+  fesom_mesh / fesom_partit / fesom_mpi              mesh I/O, partition + halo state, MPI bootstrap
+  fesom_halo / fesom_halo_device                     host MPI halo + GPU-aware on-device halo exchange
 
-  fesom_aux.{c,h}            ocean aux: density, hpressure, bvfreq,
-                              sw_alpha/sw_beta, Kv, Av, pgf, MLD1_ind
-  fesom_dyn.{c,h}            dynamic state: uv, w, eta, ssh_rhs, fer_uv, fer_w
-  fesom_tracers.{c,h}        T, S (and tracer ID infra)
-  fesom_forcing.{c,h}        stress_node_surf, stress_surf, fluxes,
-                              forcing fields shared with bulk + ice
-  fesom_forcing_analytical.{c,h}   analytical forcing (zonal-wind toy)
+  fesom_aux / fesom_dyn / fesom_tracers / fesom_forcing(_analytical)   ocean state + forcing fields
+  fesom_eos / fesom_ale / fesom_momentum / fesom_pp / fesom_kpp        EOS, ALE, momentum, PP/KPP mixing
+  fesom_ssh / fesom_tracer_adv / fesom_tracer_diff / fesom_gm          CG SSH, FCT advection, vert diff, GM/Redi
+  fesom_jra55 / fesom_bulk / fesom_phc / fesom_ic / fesom_sss_runoff   JRA55 reader, NCAR bulk, IC, restoring
 
-  fesom_eos.{c,h}            JM-EOS, pressure_bv, sw_alpha_beta
-  fesom_ale.{c,h}             linfs ALE: thickness, vert_vel (with fer_w
-                              accumulator), CFLz, wsplit, commit
-  fesom_momentum.{c,h}       compute_vel_rhs, visc_filt_bcksct,
-                              impl_vert_visc, update_vel
-  fesom_pp.{c,h}             PP vertical mixing + convective adjustment
-  fesom_ssh.{c,h}             SSH stiffness build + parallel CG solver
-  fesom_tracer_adv.{c,h}     FCT tracer advection (T then S)
-  fesom_tracer_diff.{c,h}    implicit vert diffusion + Redi K33
-  fesom_io.{c,h}              snap_*.nc gather + serial-NetCDF write
-
-  fesom_jra55.{c,h}          JRA55-do reader, bilin to mesh, time interp
-  fesom_bulk.{c,h}            NCAR bulk formulae (open-water fluxes)
-  fesom_phc.{c,h}             PHC IC reader + bilin + extrap_nod3D
-  fesom_ic.{c,h}              hnode/helem from depth, T,S from PHC
-
-  fesom_ice.{c,h}             sea-ice driver (ocean2ice + EVP + FCT +
-                              cut_off + thermo + oce_fluxes)
-  fesom_ice_types.h           T_ICE struct mirror
-  fesom_ice_evp.{c,h}        EVP dynamics (whichEVP=0)
-  fesom_ice_thermo.{c,h}     thermodynamics, cut_off, runoff fold
-  fesom_ice_coupling.{c,h}   ocean2ice, oce_fluxes (heat/water/virt/relax),
-                              oce_fluxes_mom (Phase D5 ice-mediated stress)
-  fesom_ice_fct.{c,h}        ice tracer FCT advection (mass_matrix_fill,
-                              TG_rhs, fct_solve, solve_low/high, fem_fct)
-
-  fesom_gm.{c,h}              GM/Redi: sigma_xy, neutral_slope, init_Redi_GM,
-                              fer_solve_Gamma, fer_gamma2vel,
-                              diff_ver_part_redi_expl, diff_part_hor_redi
+  fesom_ice* (driver / evp / thermo / coupling / fct / types)          sea ice
+  fesom_io / fesom_io_stream* / fesom_io_config / fesom_calendar       NetCDF I/O, output streams, calendar
+  fesom_profile.{cpp,hpp}    internal loop timer + phase profiling
 ```
+
+Every routine carries a `Fortran <file>:<line>` (or C-port) provenance comment — grep
+`Mirror of` / `Fortran` to navigate back to the producer.
+
+---
 
 ## Documentation in tree
 
-- `docs/plans/completed/` — finished phase plans
-  (`20260425-sea-ice-port.md`, `20260425-gm-redi-port.md`, …).
-- `docs/plans/<active>.md` — in-progress plan, if any.
-- Project memory under `~/.claude/projects/-home-a-a270088-port2/memory/`
-  has feedback files for the gotchas we've paid for:
-  - `feedback_write_loops_halo.md` — Fortran loops `myDim+eDim` on a
-    write must port as `myDim+eDim` in C, not `myDim`.
-  - `feedback_array_size_vs_reader_loop.md` — forcing arrays sized
-    `myDim` only that get read at halo by another module are silent
-    OOB reads (multi-rank-only bug).
-  - `feedback_tracer_stride_nl.md` — tracer arrays are `[N * nl]`,
-    not `[N * (nl-1)]`. Wrong stride inflates derived gradients ~1000×.
-  - `feedback_unported_consumer_gaps.md` — alloc + exchange ≠ field
-    populated. New consumers expose unported producers.
-  - `feedback_bolus_divergence_balance.md` — never clamp `fer_uv` per
-    cell without scaling `fer_w` to match.
-  - `feedback_unique_outdir_per_job.md` — concurrent SLURM jobs must
-    not share `OUT_DIR`.
-  - `feedback_phc_rank_dependent.md` — PHC IC differs O(1°C)/O(10 PSU)
-    across rank counts due to extrap_nod3D's Gauss-Seidel ordering.
-    Accepted as Fortran-faithful baseline.
-  - `feedback_levante_build.md` — never use mambaforge; build via
-    `bash -l configure.sh`.
+| Doc | What |
+|---|---|
+| [`docs/BUILD.md`](docs/BUILD.md) | Per-backend build recipes + Kokkos smoke tests |
+| [`docs/KOKKOS_PORTING_LESSONS.md`](docs/KOKKOS_PORTING_LESSONS.md) | Running lesson log (D1–D22, L1–L72) — every gotcha paid for |
+| [`docs/GPU_FIDELITY.md`](docs/GPU_FIDELITY.md) | The GPU-perf campaign §M5.1–§M5.24 + the fidelity model |
+| [`docs/PROFILE_M522.md`](docs/PROFILE_M522.md) | Deep budget profile (compute-bound @low-N vs comm-bound @high-N) |
+| [`docs/SCALING_M524.md`](docs/SCALING_M524.md) | Latest strong-scaling / SYPD / step-profile sweep + the cold-start CFL finding |
+| `docs/plans/` | Phase plans (completed + active) |
+| `docs/figures/` | Scaling / SYPD / profile plots |
+
+---
+
+## Relationship to the C port
+
+This port was grown from a **validated literal C port** of FESOM2
+(`/home/a/a270088/port2/fesom2_port`, GitHub `koldunovn/fesom_port`), which itself reproduces the
+Fortran CORE2 climate to SST/SSS RMS ~0.005–0.04. The strategy was incremental:
+
+1. Flip the C sources to C++/Kokkos for a **bit-identical baseline** (Serial == C, byte-for-byte).
+2. Wrap each persistent field in a Kokkos `DualView` (`FieldT`).
+3. Convert kernels to `parallel_for` one at a time, gating every step on the Serial bit-identity
+   diff and the CUDA fidelity gate — until the whole ocean + sea-ice runs device-resident.
+
+The C port stays the bit-identity oracle, and the Fortran source
+(`/home/a/a270088/port2/fesom2/src`) is the climate ground truth.
+
+---
 
 ## Troubleshooting
 
-**Build fails with linker errors against MPI / NetCDF.** You're not in
-a clean shell. Quit the shell, log back in, and start again with
-`bash -l configure.sh`. Check `which mpicc` returns
-`/sw/spack-levante/openmpi-...`, not `~/mambaforge/bin/...`.
-
-**`Multi-rank crash early in step 2 with CG NaN.`** Most likely cause is
-a halo coverage gap on a forcing or aux field that some kernel reads
-at halo. Workflow: try the bisect knobs in order
-(`FESOM_NO_TRADV=1`, then `_TRDIFF`, then `_NO_WIND`, then
-`_NO_HFLUX`) to localize the amplifier. The
-`feedback_array_size_vs_reader_loop` and `feedback_write_loops_halo`
-memories capture the pattern.
-
-**`run.log shows S.max > 41.12 PSU at step 1.`** Tracer FCT has
-overshot. With GM/Redi this means either a divergence-balance issue
-in the bolus add (`feedback_bolus_divergence_balance`) or a stride
-bug in a gradient computation (`feedback_tracer_stride_nl`).
-
-**`HUGE ice_strength` lines in stderr.** Sea-ice EVP detected
-`ice_strength > 1e7` somewhere — almost always a halo node has bogus
-ice mass from upstream OOB. Set `FESOM_EVP_DUMP_DIR=/work/.../evp_$(date +%s)`
-to capture per-substep dumps and use `scripts/evp_dump_diff.py` to
-compare against a 1-rank reference.
-
-**Job hangs at startup.** Wrong `dist_<npes>` partition for your
-`--ntasks`. Match `--ntasks` to one of the partition directories that
-exists under the mesh.
-
-**`bash: module: command not found` in a job script.** Missing
-`source /sw/etc/profile.levante` before `source env.sh`.
-
-## Reference Fortran source
-
-Used throughout for cross-checking: `/home/a/a270088/port2/fesom2/src/`.
-Every function in this port has a `Fortran <file>:<line>` comment
-pointing back at the producer routine. Search for `Mirror of` or
-`Fortran` to navigate.
+- **Linker errors against MPI / NetCDF** — you're not in a clean shell. Log back in and build via
+  `bash -l configure.sh`; `which mpicc` must be `/sw/spack-levante/openmpi-...`, not `~/mambaforge/...`.
+- **Device-pointer MPI segfault on the GPU build** — you sourced `env.sh` instead of `env_cuda.sh`.
+  The `openmpi/4.1.2` UCX has no CUDA transports; the GPU build needs `openmpi/4.1.5-nvhpc-24.7`.
+- **Multi-rank CG NaN early in a step** — usually a halo-coverage gap on a forcing/aux field read
+  at halo. Bisect with `FESOM_NO_TRADV=1` → `_TRDIFF` → `_NO_WIND` → `_NO_HFLUX`.
+- **Job hangs at startup** — wrong `dist_<npes>` for `--ntasks`; match it to an existing partition dir.
+- **`bash: module: command not found` in a job** — missing `source /sw/etc/profile.levante` before `env*.sh`.
+- **Blowup from a cold start on dars/NG5 at the production `dt`** — expected; the cold PHC IC exceeds
+  vertical CFL. Run from a spun-up restart or a smaller `dt` (see `docs/SCALING_M524.md`).
+```
