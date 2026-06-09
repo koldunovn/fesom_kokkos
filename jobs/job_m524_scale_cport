@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=m524cp
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524cport.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524cport.%j.err
+#
+# Pure-C port (koldunovn/fesom_port) strong-scaling. No internal loop timer -> WALL-DIFF:
+# per_step = (wall(45steps) - wall(5steps)) / 40, which cancels the (identical) init/mesh-read.
+# env: MESH, DT, TAG. dist_$NTASKS, 128 ranks/node (pure MPI). Same CLI/IC/forcing as the Kokkos port.
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+CBIN=${CBIN:-/home/a/a270088/port2/fesom2_port/build/fesom_port}   # override for the 128-level build (NG5)
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+runwall(){ # $1=nsteps -> echoes wall seconds
+  local t0 t1
+  t0=$(date +%s.%N)
+  srun "$CBIN" "$MESH" "$OUT" "${DT:?DT required}" "$1" "${SNAP:-999999}" "$PHC" 1958 > "$OUT/log_$1.txt" 2>&1
+  t1=$(date +%s.%N)
+  awk -v a="$t0" -v b="$t1" 'BEGIN{printf "%.3f", b-a}'
+}
+echo "=== CPORT $TAG mesh=$(basename $MESH) nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=${DT:?} ==="
+# WARM-UP run first so the mesh/partition page-cache state is identical for both timed runs
+# -> the (constant) init/MPI/read cancels in the diff. Then short(5) and long(205), warm.
+runwall 5 >/dev/null 2>&1;  echo "  warmup(5) done (mesh cached)"
+LONGN=${LONGN:-205}; NSPAN=$((LONGN-5))
+WS=$(runwall 5);       echo "  short(5)       wall=${WS}s"
+WL=$(runwall $LONGN);  echo "  long($LONGN)   wall=${WL}s"
+PER=$(awk -v s="$WS" -v l="$WL" -v n="$NSPAN" 'BEGIN{printf "%.4f",(l-s)/n}')
+echo "[cport] short5=${WS}s long${LONGN}=${WL}s -> ${PER} s/step (warm-cache wall-diff over ${NSPAN} steps)"
+echo "--- long-run tail (sanity / NaN check) ---"; tail -4 "$OUT/log_${LONGN}.txt"

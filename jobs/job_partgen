@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=partgen
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/partgen/partgen.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/partgen/partgen.%j.err
+#
+# Generate FESOM2 mesh partitions (dist_N) into the writable /pool mesh dir via fesom_ini.x.
+# env: MESHNAME (core2|farc|dars|ng5), NPARTS (space-separated n_part list, done sequentially).
+# Single-level METIS (n_levels=1, n_part=N -> dist_N). Full node grabbed for memory (big meshes).
+set -u
+MESHNAME=${MESHNAME:?MESHNAME required}; NPARTS=${NPARTS:?NPARTS required}
+POOL=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/$MESHNAME
+SRC=/home/a/a270088/ENERGY/fesom2
+WORK=/work/ab0995/a270088/port2/partgen/${MESHNAME}_${SLURM_JOB_ID}
+mkdir -p "$WORK"; cd "$WORK" || exit 2
+source /sw/etc/profile.levante
+source "$SRC/env/levante.dkrz.de/shell"
+ulimit -s 102400
+cp "$SRC/work_NG5_sebastian/fesom_ini.x" . || exit 2
+for nl in namelist.config namelist.forcing namelist.oce namelist.ice namelist.icepack; do
+  cp "$SRC/work_NG5_sebastian/$nl" . || exit 2
+done
+# Point at the /pool mesh; force single-level partitioning.
+sed -i "s|MeshPath=.*|MeshPath='$POOL/'|" namelist.config
+sed -i "s|^n_levels=.*|n_levels=1|"        namelist.config
+echo "=== partgen $MESHNAME  NPARTS='$NPARTS'  -> $POOL  (work $WORK) ==="
+for N in $NPARTS; do
+  need=$((2*N+1)); have=$(ls "$POOL/dist_$N" 2>/dev/null | wc -l)
+  if [ -d "$POOL/dist_$N" ] && [ "$have" -ge "$need" ]; then
+    echo ">>> dist_$N already present ($have/$need) — skip"; continue
+  fi
+  sed -i "s|^n_part=.*|n_part=$N|" namelist.config
+  echo ">>> $MESHNAME n_part=$N  $(date '+%H:%M:%S')"
+  srun -l ./fesom_ini.x > "fesom_ini_${N}.out" 2>&1; rc=$?
+  have=$(ls "$POOL/dist_$N" 2>/dev/null | wc -l)
+  echo ">>> rc=$rc  dist_$N files=$have (need $need)  $(date '+%H:%M:%S')"
+  tail -4 "fesom_ini_${N}.out"
+done
+echo "=== partgen $MESHNAME DONE ==="

@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=m524so
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=16
+#SBATCH --cpus-per-task=8
+#SBATCH --hint=nomultithread
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524s.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524s.%j.err
+#
+# M5.24 Kokkos-OpenMP strong-scaling: 16 MPI ranks/node x 8 OMP threads = 1 rank/CCD (EPYC Milan optimal,
+# 128 cores/node). env: MESH, DT, NSTEPS (35), TAG. dist_$NTASKS (= 16*nodes). Internal loop timer; 2 reps.
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+export OMP_NUM_THREADS=8 OMP_PROC_BIND=close OMP_PLACES=cores
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+export FESOM_PRINT_EVERY=999
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+run(){ srun --cpu-bind=cores "$ROOT/build-omp/fesom_port" "$MESH" "$OUT" "${DT:?DT required}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+        > "$OUT/log_$1.txt" 2>&1
+  printf "%-8s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"; }
+echo "=== OMP $TAG mesh=$(basename $MESH) nodes=$SLURM_NNODES ranks=$NPES x ${OMP_NUM_THREADS}thr (dist_$NPES) dt=$DT ==="
+run rep_a; run rep_b
+echo "--- CG iters + T/S sanity (rep_a, last) ---"; grep -E "it=" "$OUT/log_rep_a.txt" | tail -1

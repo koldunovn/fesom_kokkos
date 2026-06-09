@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH --job-name=m524bu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --nodes=32
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524bu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524bu.%j.err
+#
+# STABILITY PROBE: push the Kokkos-Serial port (M5.24, bit-identical C-port twin) to 300 steps on the
+# EXACT partition where the C-port blew up — NG5 dist_4096 (32 nodes x 128 = 4096 ranks), dt=180, cold PHC IC.
+# Question: does the bit-identical Serial port hit the same step-205 BLOWUP (uv=6.5) the C-port did?
+# Prints T/S/uv every 10 steps so the instability trajectory is visible; the port's own guard aborts on blowup.
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+export FESOM_PRINT_EVERY=${PE:-10}            # step trajectory; override with PE=1 for per-step
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:-m524_ng5_serial_blowup}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+DT=${DT:-180}; NSTEPS=${NSTEPS:-300}
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== SERIAL BLOWUP PROBE  mesh=ng5 nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=$DT nsteps=$NSTEPS PE=$FESOM_PRINT_EVERY ==="
+srun "$ROOT/build-serial/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$OUT/log.txt" 2>&1
+rc=$?
+echo "rc=$rc"
+echo "--- last 3 it= diagnostic lines (T/S/uv trajectory) ---"
+grep -E "it=" "$OUT/log.txt" | tail -3
+echo "--- did it BLOW UP? ---"
+grep -iE "BLOWUP|aborting all ranks|NaN" "$OUT/log.txt" | head -3
+echo "--- last meaningful program line (excl srun cascade) ---"
+grep -vE "srun:|slurmstepd" "$OUT/log.txt" | tail -1
+echo "--- how far did it get? (max step printed) ---"
+grep -oE "^ *[0-9]+ +it=" "$OUT/log.txt" | tail -1

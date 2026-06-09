@@ -1,0 +1,58 @@
+#!/bin/bash
+#SBATCH --job-name=m524ft
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524fort.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524fort.%j.err
+#
+# Fortran FESOM2 (fesom.x) strong-scaling, FULLY ISOLATED. Copies the linfs+KPP REFERENCE namelists
+# (work_linfs_1m) into a FRESH scratch dir and overrides ONLY: MeshPath, dt(step_per_day), run-length,
+# ALE=linfs, mix=KPP, restart off, output off, ResultPath->scratch.
+# *** NEVER writes to any reference work dir — only reads the template namelists. ***
+# env: MESH (full path), MESHNAME, STEP_PER_DAY, NSTEPS (default 205), TAG.
+# NB: no `set -u` — the Intel env shell (shell.intel) does `export LD_LIBRARY_PATH=...:$LD_LIBRARY_PATH`
+# with $LD_LIBRARY_PATH unset, which is fatal under set -u. The ${VAR:?} guards below still catch unset inputs.
+SRC=/home/a/a270088/fesom27/fesom2
+TMPL=$SRC/work_linfs_1m            # linfs + KPP reference (READ-ONLY here)
+FBIN=$SRC/bin/fesom.x
+MESH=${MESH:?}; MESHNAME=${MESHNAME:?}; SPD=${STEP_PER_DAY:?}; NS=${NSTEPS:-205}
+WORK=/work/ab0995/a270088/port2/fortran_timing/${TAG:?}_${SLURM_JOB_ID}
+rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || exit 2
+source /sw/etc/profile.levante
+read -r USED_SHELL < "$SRC/bin/current_shell_path" 2>/dev/null || USED_SHELL="$SRC/env/levante.dkrz.de/shell"
+source "$USED_SHELL" 2>/dev/null
+ulimit -s unlimited 2>/dev/null || ulimit -s 204800
+ln -sf "$FBIN" fesom.x
+for nl in namelist.config namelist.forcing namelist.oce namelist.ice namelist.icepack namelist.tra namelist.io namelist.cvmix namelist.dyn; do
+  cp "$TMPL/$nl" . 2>/dev/null || { echo "missing template $nl"; exit 2; }
+done
+# --- overrides applied ONLY to the local copies in $WORK ---
+sed -i "s|MeshPath *=.*|MeshPath='$MESH/'|"                       namelist.config
+sed -i "s|ResultPath *=.*|ResultPath='$WORK/'|"                   namelist.config
+sed -i "s|step_per_day *=.*|step_per_day=$SPD|"                   namelist.config
+sed -i "s|run_length *=.*|run_length=$NS|"                        namelist.config
+sed -i "s|run_length_unit *=.*|run_length_unit='s'|"             namelist.config
+sed -i "s|which_ALE *=.*|which_ALE='linfs'|"                      namelist.config
+sed -i "s|restart_length_unit *=.*|restart_length_unit='off'|"   namelist.config
+sed -i "s|raw_restart_length_unit *=.*|raw_restart_length_unit='off'|" namelist.config
+sed -i "s|bin_restart_length_unit *=.*|bin_restart_length_unit='off'|" namelist.config
+sed -i "s|mix_scheme *=.*|mix_scheme='KPP'|"                      namelist.oce
+# keep opt_visc=5 (easy backscatter, γ0=0.003/γ1=0.1/γ2=0.285) = EXACTLY what the Kokkos/C port implements;
+# just bypass the coarse-mesh resolution check that aborts on farc/dars/NG5.
+sed -i "s|check_opt_visc *=.*|check_opt_visc=.false.|"            namelist.dyn
+sed -i "s/, *'[mdhs]' *,/, 'y',/g"                                namelist.io   # push all output to yearly -> nothing fires in <5 days
+# This FESOM2 errors on a missing fesom.clock instead of auto-creating one -> seed a cold start
+# (sec_in_day, day_of_year, year) x2 = start of 1958, matching the Kokkos/C YEAR=1958 + PHC IC.
+printf "  0.0000000000000000E+00              1        1958\n  0.0000000000000000E+00              1        1958\n" > fesom.clock
+echo "=== FORTRAN $TAG mesh=$MESHNAME nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS spd=$SPD nsteps=$NS (linfs+KPP, isolated) ==="
+echo "WORK=$WORK"; grep -E "which_ALE|step_per_day|run_length|mix_scheme|ResultPath" namelist.config namelist.oce | grep -ivE "!.*=" | head
+[ -d "$MESH/dist_$SLURM_NTASKS" ] || { echo "ERROR: $MESH/dist_$SLURM_NTASKS missing"; exit 2; }
+srun -l fesom.x > fesom2.0.out 2>&1; echo "rc=$?"
+echo "=== timing (Runtime for all timesteps) ==="
+grep -iE "Runtime for all timesteps|BENCHMARK RUNTIME|runtime total \(ice" fesom2.0.out | tail -4
+RT=$(grep -iE "Runtime for all timesteps" fesom2.0.out | grep -oE '[0-9]+\.[0-9]+' | tail -1)
+[ -n "$RT" ] && awk -v rt="$RT" -v n="$NS" 'BEGIN{printf "[fortran] Runtime_all=%s s / %d steps -> %.4f s/step\n", rt, n, rt/n}'
+echo "--- output files written (should be NONE / no .nc data) ---"; ls *.nc 2>/dev/null | head
+echo "--- tail ---"; tail -6 fesom2.0.out

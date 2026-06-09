@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=m524pg
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524prof.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524prof.%j.err
+#
+# GPU per-phase step breakdown (FESOM_STEP_PROFILE + CG_PROFILE) on build-cuda (M5.24).
+# env: MESH, DT, NSTEPS (45), TAG. dist_$NTASKS (4/node). The GPU twin of job_m524_prof_cpu.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_STEP_PROFILE=1 FESOM_CG_PROFILE=1 FESOM_PRINT_EVERY=999
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:?TAG required}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== GPU PROFILE $TAG mesh=$(basename $MESH) nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=${DT:?DT} nsteps=${NSTEPS:-45} ==="
+nvidia-smi -L | head -1
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "${NSTEPS:-45}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "rc=$?"
+echo "===== loop timing + STEP PROFILE + CG share ====="
+grep -E "loop timing|STEP PROFILE|CG share|CG-share" "$OUT/run.log"
+echo "===== per-phase breakdown (rank0) ====="
+sed -n '/\[fesom_prof\] phase + kernel breakdown/,$p' "$OUT/run.log" | head -70

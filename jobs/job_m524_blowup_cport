@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=m524bc
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --nodes=32
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/m524bc.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/m524bc.%j.err
+#
+# C-PORT STABILITY PROBE with wsplit toggle. Default binary = build_nl128_wsplit (use_wsplit=1).
+# NG5 dist_4096 (32 nodes x 128 = 4096 ranks), dt=180, cold PHC IC, snapshots OFF (snap=-1 -> no gather crash).
+# Q: does turning wsplit ON stop the step-~155 blowup the wsplit-OFF C-port hit? Prints T/S/uv every 10 steps.
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+export FESOM_PRINT_EVERY=${PE:-10}
+CBIN=${CBIN:-/home/a/a270088/port2/fesom2_port/build_nl128_wsplit/fesom_port}
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/${TAG:-m524_ng5_cport_wsplit}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+DT=${DT:-180}; NSTEPS=${NSTEPS:-300}
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== CPORT WSPLIT PROBE  bin=$(basename $(dirname $CBIN))  mesh=ng5 nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=$DT nsteps=$NSTEPS PE=$FESOM_PRINT_EVERY snap=OFF ==="
+srun "$CBIN" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$OUT/log.txt" 2>&1
+echo "rc=$?"
+echo "--- BLOWUP? ---"; grep -iE "BLOWUP|aborting all ranks" "$OUT/log.txt" | head -2
+echo "--- uv/T trajectory (every 10) ---"; grep -E "^ *[0-9]+ +it=" "$OUT/log.txt" | awk '{print $1,$3,$4}' | tail -35
+echo "--- completed all $NSTEPS steps cleanly? ---"; grep -E "loop|Runtime|\[step $NSTEPS\]|done" "$OUT/log.txt" | tail -2
