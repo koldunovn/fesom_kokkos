@@ -1,0 +1,66 @@
+#!/bin/bash
+# job_gpu_scaling_lumi — LUMI HIP equivalent of job_gpu_scaling (Levante CUDA).
+#
+# Strong-scaling test on LUMI-G (MI250X / gfx90a). CORE2 mesh; the binary
+# auto-loads dist_<ntasks>. 200 steps (5 warmup excluded by the internal loop
+# timer in fesom_main.cpp); I/O off (snap_every=999999 → only snap_000000.nc);
+# JRA55-do daily forcing for 1958 (realistic workload, not analytical).
+#
+# LUMI-G layout: 1 node = 8 GCDs = 8 MPI ranks (one per GCD). Strong-scaling
+# rank counts must match an existing dist_<N> partition under MESH:
+#   1 node × 8  = 8   ranks   (dist_8)
+#   8 nodes × 8 = 64  ranks   (dist_64)
+#  16 nodes × 8 = 128 ranks   (dist_128)
+#  32 nodes × 8 = 256 ranks   (dist_256)
+#
+# Submit (see submit_gpu_scaling_lumi.sh for the full sweep):
+#   sbatch --nodes=1  --ntasks=8   --export=ALL,TAG=n1  jobs/job_gpu_scaling_lumi
+#   sbatch --nodes=8  --ntasks=64  --export=ALL,TAG=n8  jobs/job_gpu_scaling_lumi
+#   sbatch --nodes=16 --ntasks=128 --export=ALL,TAG=n16 jobs/job_gpu_scaling_lumi
+#   sbatch --nodes=32 --ntasks=256 --export=ALL,TAG=n32 jobs/job_gpu_scaling_lumi
+#
+# Output: /scratch/project_465002727/sbeyer/fesom_runs/scaling_${TAG}/log
+# Look for: "[fesom_port] loop timing: ... s/step" — that's the answer.
+
+#SBATCH --job-name=kk_scal_lumi
+#SBATCH --account=project_465002727
+#SBATCH --partition=dev-g
+#SBATCH --ntasks-per-node=8
+#SBATCH --gpus-per-node=8
+#SBATCH --cpus-per-task=7
+#SBATCH --time=00:20:00
+#SBATCH --output=jobs/lumi_logs/%x-%j.out
+#SBATCH --error=jobs/lumi_logs/%x-%j.err
+
+set -euo pipefail
+mkdir -p jobs/lumi_logs
+
+ROOT=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos
+source "$ROOT/env_lumi.sh"
+
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+MESH=${MESH:-/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/CORE2}
+PHC=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=$FESOM_JRA55_DIR/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=$FESOM_JRA55_DIR/CORE2_runoff.nc
+export FESOM_CHL_FILE=$FESOM_JRA55_DIR/Sweeney_2005.nc
+
+OUT=/scratch/project_465002727/sbeyer/fesom_runs/scaling_${TAG:-default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=500   # quiet per-step print, the loop timer is what we want
+
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then
+    echo "ERROR: $MESH/dist_$NPES missing"; exit 2
+fi
+
+echo "=== scaling ${TAG:-?} (nodes=$SLURM_NNODES ntasks=$NPES gpus=$((SLURM_NNODES*8))) on $SLURM_JOB_NODELIST ==="
+srun "$ROOT/build-hip/fesom_port" "$MESH" "$OUT" "${DT:-1800}" 200 999999 "$PHC" 1958 > "$OUT/log" 2>&1
+EC=$?
+echo "=== exit=$EC ==="
+grep -E "loop timing|s/step" "$OUT/log" | tail -3
+echo "--- last step (sanity) ---"; grep " it=" "$OUT/log" | tail -1
+exit $EC

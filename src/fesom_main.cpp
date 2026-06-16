@@ -839,9 +839,15 @@ skip_rest_state:
         fesom_jra55_init(&jra, &mesh);
         fesom_jra55_open_year(&jra, &mesh, jra55_year);
         use_jra = 1;
-        /* Phase 3 step 25 paths from work_core/namelist.forcing. */
-        const char *sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
-        const char *runoff_path = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
+        /* Phase 3 step 25 paths from work_core/namelist.forcing. Optional env
+         * vars FESOM_SSS_PATH / FESOM_RUNOFF_PATH override them (set to ""
+         * to skip a dataset entirely — e.g. when the file isn't on this HPC). */
+        const char *sss_env    = getenv("FESOM_SSS_PATH");
+        const char *runoff_env = getenv("FESOM_RUNOFF_PATH");
+        const char *sss_path    = sss_env    ? sss_env    :
+            "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
+        const char *runoff_path = runoff_env ? runoff_env :
+            "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
         fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
         use_sr = 1;
         printf("[fesom_port] SSS restoring: %s\n", sss_path);

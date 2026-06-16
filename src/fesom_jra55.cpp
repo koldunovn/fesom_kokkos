@@ -528,6 +528,7 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
     *jra = fesom_jra55{};
 
     /* Namelist defaults from work_core/namelist.forcing */
+    static const char *const HARD_DIR = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/";
     static const char *prefixes[FESOM_JRA_NFLD] = {
         "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/uas.",
         "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/vas.",
@@ -542,12 +543,24 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         "uas", "vas", "huss", "rsds", "rlds", "tas", "prra", "prsn"
     };
 
+    /* Optional FESOM_JRA55_DIR env var swaps the Levante /pool/... directory
+     * for any other dir holding the same {uas,vas,huss,rsds,rlds,tas,prra,prsn}.YYYY.nc
+     * files (e.g. LUMI /pfs/... or any local checkout). */
+    const char *jra_dir_env = getenv("FESOM_JRA55_DIR");
+    const size_t hard_dir_len = strlen(HARD_DIR);
+
     int N_my = mesh->myDim_nod2D;
     int N    = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* physics arrays cover halo */
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
-        strncpy(flf->path_prefix, prefixes[f], sizeof(flf->path_prefix) - 1);
-        flf->path_prefix[sizeof(flf->path_prefix) - 1] = '\0';
+        if (jra_dir_env && *jra_dir_env) {
+            const char *sep = (jra_dir_env[strlen(jra_dir_env) - 1] == '/') ? "" : "/";
+            snprintf(flf->path_prefix, sizeof(flf->path_prefix), "%s%s%s",
+                     jra_dir_env, sep, prefixes[f] + hard_dir_len);
+        } else {
+            strncpy(flf->path_prefix, prefixes[f], sizeof(flf->path_prefix) - 1);
+            flf->path_prefix[sizeof(flf->path_prefix) - 1] = '\0';
+        }
         strncpy(flf->var_name, vars[f], sizeof(flf->var_name) - 1);
         flf->var_name[sizeof(flf->var_name) - 1] = '\0';
         flf->year_loaded = -1;

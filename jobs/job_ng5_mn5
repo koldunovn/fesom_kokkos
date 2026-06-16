@@ -1,0 +1,64 @@
+#!/bin/bash
+# job_ng5_mn5 — NG5 (~3.16M ocean nodes) test on MN5 ACC.
+#
+# Mirrors job_ng5_test_lumi: dt=180 s (CFL-bound at NG5 resolution), 35 steps,
+# no snapshots. dist_16 → 16 ranks → 4 nodes × 4 H100 on MN5.
+
+#SBATCH --job-name=fesom_ng5_mn5_16
+#SBATCH --account=ehpc01
+#SBATCH --qos=acc_debug
+#SBATCH --partition=acc
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=20
+#SBATCH --gres=gpu:4
+#SBATCH --time=00:30:00
+#SBATCH --output=jobs/mn5_logs/slurm-%x.%j.out
+#SBATCH --error=jobs/mn5_logs/slurm-%x.%j.err
+
+set -euo pipefail
+mkdir -p jobs/mn5_logs
+
+ROOT=/gpfs/projects/ehpc01/sbeyer/fesom_kokkos
+source "$ROOT/env_mn5.sh"
+export SLURM_CPU_BIND=none
+
+BIN=$ROOT/build-cuda-mn5/fesom_port
+MESH=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/NG5
+PHC=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/gpfs/scratch/ehpc01/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=/gpfs/scratch/ehpc01/sbeyer/inproot/fesom/v21/forcing/CORE2/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=""
+export FESOM_CHL_SOURCE=None
+export FESOM_PRINT_EVERY=999
+
+OUT=/gpfs/scratch/ehpc01/sbeyer/fesom_runs/ng5_mn5_${SLURM_JOB_ID:-$(date +%s)}
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then
+    echo "ERROR: $MESH/dist_$NPES missing"; exit 2
+fi
+
+echo "=== NG5 MN5 ($SLURM_NNODES nodes × 4 H100 = $NPES ranks, dist_$NPES) ==="
+echo "    mesh=$MESH"
+echo "    out=$OUT"
+echo "    nodes: $SLURM_JOB_NODELIST"
+
+date
+mpirun --bind-to none -np "$NPES" \
+    "$BIN" "$MESH" "$OUT" "${DT:-180}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+date
+
+echo "=== exit=$EC ==="
+echo "--- loop timing ---"
+grep -E "loop timing" "$OUT/run.log" | tail -3
+echo "--- last step sanity ---"
+grep " it=" "$OUT/run.log" | tail -1
+echo "--- any FATAL ---"
+grep -E "FATAL|abort|ERROR|NaN" "$OUT/run.err" | head -10 || true
+exit $EC

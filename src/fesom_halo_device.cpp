@@ -1,7 +1,8 @@
 /*
  * fesom_halo_device.cpp — on-device halo exchange (GPU-aware MPI), M5.1.
  *
- * See fesom_halo_device.hpp for the why. This is the CUDA-only device path:
+ * See fesom_halo_device.hpp for the why. This is the GPU-resident device path
+ * (CUDA + HIP — gated by FESOM_GPU_RESIDENT):
  *   PACK   (device gather): send[g*stride+c] = field[(slist[g]-1)*stride + c]
  *   MPI    (device ptrs):   Irecv/Isend on send/recv DEVICE buffers (same tag,
  *                           PE order, MPI_DOUBLE counts as the host path)
@@ -13,7 +14,12 @@
  * gathers/scatters indexed by the global list position g — no per-PE bookkeeping
  * in the kernel. UNPACK is race-free (each halo node appears once in rlist), so
  * no atomics — Serial would be bit-identical too (but Serial never takes this
- * path; it is CUDA-only).
+ * path; it is gated on FESOM_GPU_RESIDENT).
+ *
+ * The implementation is 100% Kokkos + MPI: Kokkos::View / parallel_for /
+ * deep_copy / fence; MPI_Isend/Irecv on the View::data() raw pointer. There is
+ * deliberately NO `cuda` or `hip` API call -- the same source compiles under
+ * both backends, and HIP support is purely the FESOM_GPU_RESIDENT widening.
  */
 #include "fesom_halo_device.hpp"
 
@@ -23,7 +29,7 @@
 
 bool fesom_halo_device_active()
 {
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     static int cached = -1;
     if (cached < 0) {
         const char *e = getenv("FESOM_HOST_HALO");
@@ -117,9 +123,9 @@ void fesom_halo_mpi_report(int timed_steps, fesom_partit *p)
     fflush(stdout);
 }
 
-#ifndef KOKKOS_ENABLE_CUDA
+#if !FESOM_GPU_RESIDENT
 void fesom_halo_device_free() { /* no device Views on host backends */ }
-#else  // ====================== CUDA device path ===========================
+#else  // ====================== GPU-resident device path ===================
 
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
@@ -520,4 +526,4 @@ void fesom_halo_device_selfcheck(fesom::Field &f, fesom_halo_kind kind,
                     cs->rPEnum, gfails, gmax);
 }
 
-#endif // KOKKOS_ENABLE_CUDA
+#endif // FESOM_GPU_RESIDENT

@@ -705,7 +705,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
      * it; sync_device() at the end re-pushes the halo'd field for the next SpMV (D21). */
     auto exch = [&](fesom::Field &f) {
         if (!parallel) return;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) {            /* M5.1: device pack -> GPU-aware MPI -> device unpack */
             fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit);
             return;

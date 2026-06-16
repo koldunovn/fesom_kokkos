@@ -18,23 +18,37 @@
 // the spack openmpi/4.1.2 SEGFAULTS on device ptrs — see env_cuda.sh).
 //
 // APPROACH B (zero risk to the Serial bit-identity oracle): this path is
-// compiled + used ONLY under KOKKOS_ENABLE_CUDA. On Serial/OpenMP the call
-// sites keep the EXACT legacy host-staged bracket (the #ifdef vanishes), so the
-// gate is unchanged by construction. Within the CUDA build the env var
+// compiled + used ONLY on backends with a SEPARATE device memory space — i.e.
+// KOKKOS_ENABLE_CUDA (Levante / NVIDIA) and KOKKOS_ENABLE_HIP (LUMI-G / AMD
+// gfx90a, added 2026-06). On Serial/OpenMP the call sites keep the EXACT
+// legacy host-staged bracket (FESOM_GPU_RESIDENT vanishes), so the gate is
+// unchanged by construction. With FESOM_GPU_RESIDENT, the env var
 // FESOM_HOST_HALO=1 forces the legacy host path (the A/B regression toggle:
-// device-halo result MUST byte-match the host-staged CUDA result — data path
-// only, not new arithmetic).
+// device-halo result MUST byte-match the host-staged result — data path only,
+// not new arithmetic).
 //
-#include "fesom_field.hpp"
+#include "fesom_field.hpp"   // pulls in Kokkos_Core.hpp -> KOKKOS_ENABLE_* macros
 #include "fesom_halo.h"      // fesom_halo_kind, the host fesom_halo_exchange
 #include "fesom_partit.h"
 #include <cstdlib>          // getenv (FESOM_HALO_SELFCHECK dispatch)
 #include <cstring>          // strstr (FESOM_DBG_SYNC pinpoint)
 #include <initializer_list> // M5.23 fesom_halo_fieldN({&f0,&f1,…}) call sites
 
-// Is the on-device halo path active? true only on a CUDA build with the env
-// override FESOM_HOST_HALO unset/!=1. Always defined (returns false elsewhere)
-// so the dispatch reads cleanly on every backend.
+// FESOM_GPU_RESIDENT is the single source-of-truth gate for the device-pointer
+// halo path. MUST come AFTER the Kokkos include above so KOKKOS_ENABLE_HIP /
+// _CUDA are already defined. Its negation is the host-staged-only fallback.
+// The implementation in fesom_halo_device.cpp is 100% Kokkos + MPI-on-device-
+// pointer (no cuda/hip API call), so widening the gate to HIP needed no code
+// change beyond this macro.
+#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP)
+#  define FESOM_GPU_RESIDENT 1
+#else
+#  define FESOM_GPU_RESIDENT 0
+#endif
+
+// Is the on-device halo path active? true only on a FESOM_GPU_RESIDENT build
+// with the env override FESOM_HOST_HALO unset/!=1. Always defined (returns
+// false elsewhere) so the dispatch reads cleanly on every backend.
 bool fesom_halo_device_active();
 
 // Free the persistent device comm-lists + send/recv buffers. MUST be called
@@ -42,7 +56,7 @@ bool fesom_halo_device_active();
 // non-CUDA builds. (fesom_halo_free_buffers() frees the host scratch.)
 void fesom_halo_device_free();
 
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
 // On-device halo exchange of a nod/elem Field. CONTRACT: f's DEVICE view holds
 // current OWNED data (a device kernel just wrote it) on entry; on exit f is
 // DEVICE-authoritative with owned unchanged + halo filled (f.modify_device()
@@ -87,7 +101,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
 void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
                                  fesom_halo_kind kind, int n_levels, int n_components,
                                  fesom_partit *p, std::size_t base_off = 0);
-#endif // KOKKOS_ENABLE_CUDA
+#endif // FESOM_GPU_RESIDENT
 
 // The standard D21 device-output halo bracket, with GPU-aware-MPI dispatch.
 // Replaces the boilerplate:
@@ -120,7 +134,7 @@ inline void fesom_halo_field(fesom::Field &f, fesom_halo_kind kind,
 {
     f.modify_device();
     if (!p || p->npes <= 1) return;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     if (fesom_halo_device_active()) {
         static int selfcheck = -1;
         if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }
@@ -147,7 +161,7 @@ inline void fesom_halo_field2(fesom::Field &f0, fesom::Field &f1, fesom_halo_kin
     f0.modify_device();
     f1.modify_device();
     if (!p || p->npes <= 1) return;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     if (fesom_halo_device_active()) {
         static int selfcheck = -1;
         if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }
@@ -182,7 +196,7 @@ inline void fesom_halo_fieldN(std::initializer_list<fesom::Field*> fields, fesom
 {
     for (fesom::Field *f : fields) f->modify_device();
     if (!p || p->npes <= 1) return;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     if (fesom_halo_device_active()) {
         static int selfcheck = -1;
         if (selfcheck < 0) { const char *e = getenv("FESOM_HALO_SELFCHECK"); selfcheck = (e && e[0]=='1') ? 1 : 0; }

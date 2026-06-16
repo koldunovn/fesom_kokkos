@@ -1,0 +1,62 @@
+#!/bin/bash
+# job_cpu_scaling_lumi — LUMI-C (AMD EPYC) Kokkos Serial strong-scaling driver.
+#
+# Mirror of jobs/job_gpu_scaling_lumi but for the CPU partition. 128 MPI ranks
+# per node (1 per core, no OpenMP) to match the Levante CPU baseline shape.
+# Same model parameters: dt=1800, 200 steps (5 warmup excluded), I/O off,
+# JRA55 1958, full physics.
+#
+# LUMI-C layout: 1 node = 128 cores = 128 MPI ranks. Strong-scaling rank counts
+# match an existing dist_<N> under MESH:
+#   1 LUMI-C node × 128 = 128  ranks   (dist_128)
+#   2 LUMI-C nodes × 128 = 256 ranks   (dist_256)
+#   4 LUMI-C nodes × 128 = 512 ranks   (dist_512)
+#   8 LUMI-C nodes × 128 = 1024 ranks  (dist_1024)
+#
+# Submit:
+#   sbatch --nodes=1 --ntasks=128  --partition=small    --export=ALL,TAG=cpu_n1 jobs/job_cpu_scaling_lumi
+#   sbatch --nodes=2 --ntasks=256  --partition=small    --export=ALL,TAG=cpu_n2 jobs/job_cpu_scaling_lumi
+#   sbatch --nodes=4 --ntasks=512  --partition=small    --export=ALL,TAG=cpu_n4 jobs/job_cpu_scaling_lumi
+#   sbatch --nodes=8 --ntasks=1024 --partition=standard --export=ALL,TAG=cpu_n8 jobs/job_cpu_scaling_lumi
+
+#SBATCH --job-name=kk_cpu_scal_lumi
+#SBATCH --account=project_465002727
+#SBATCH --ntasks-per-node=128
+#SBATCH --cpus-per-task=1
+#SBATCH --hint=nomultithread
+#SBATCH --mem=0
+#SBATCH --time=00:30:00
+#SBATCH --output=jobs/lumi_logs/%x-%j.out
+#SBATCH --error=jobs/lumi_logs/%x-%j.err
+
+set -euo pipefail
+mkdir -p jobs/lumi_logs
+
+ROOT=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos
+source "$ROOT/env_lumi_cpu.sh"
+
+MESH=${MESH:-/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/CORE2}
+PHC=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+export FESOM_JRA55_DIR=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_forcing/JRA5
+export FESOM_SSS_PATH=$FESOM_JRA55_DIR/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=$FESOM_JRA55_DIR/CORE2_runoff.nc
+export FESOM_CHL_FILE=$FESOM_JRA55_DIR/Sweeney_2005.nc
+
+OUT=/scratch/project_465002727/sbeyer/fesom_runs/scaling_${TAG:-cpu_default}
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=500
+
+NPES=$SLURM_NTASKS
+if [ ! -d "$MESH/dist_$NPES" ]; then
+    echo "ERROR: $MESH/dist_$NPES missing"; exit 2
+fi
+
+echo "=== CPU scaling ${TAG:-?} (nodes=$SLURM_NNODES ntasks=$NPES, dist_$NPES) on $SLURM_JOB_NODELIST ==="
+srun "$ROOT/build-cpu/fesom_port" "$MESH" "$OUT" "${DT:-1800}" "${NSTEPS:-200}" 999999 "$PHC" 1958 \
+    > "$OUT/log" 2>&1
+EC=$?
+echo "=== exit=$EC ==="
+grep -E "loop timing|s/step" "$OUT/log" | tail -3
+echo "--- last step ---"; grep " it=" "$OUT/log" | tail -1
+exit $EC

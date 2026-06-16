@@ -1,0 +1,75 @@
+#!/bin/bash
+# job_core2_8_lumi — LUMI-G smoke test (1 node, 8 ranks, 8 GCDs, MI250X / gfx90a).
+#
+# Mirrors job_core2_16 (Levante) in shape: 200 steps at dt=500s, 4 NetCDF
+# snapshots. Picks 8 ranks because the mesh under inproot has dist_8 but no
+# dist_16 (the C port matches --ntasks to dist_<NPES>).
+#
+# Submit from: /pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos
+#   sbatch jobs/job_core2_8_lumi
+
+#SBATCH --job-name=fesom_lumi_8
+#SBATCH --account=project_465002727
+#SBATCH --partition=dev-g
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --cpus-per-task=7
+#SBATCH --gpus-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH --output=jobs/lumi_logs/slurm-%x.%j.out
+#SBATCH --error=jobs/lumi_logs/slurm-%x.%j.err
+
+set -euo pipefail
+
+mkdir -p jobs/lumi_logs
+
+# Run-output directory under project scratch (kept per-jobid to avoid clobber).
+STAMP=$(date +%Y%m%d_%H%M%S)
+OUT_DIR=/scratch/project_465002727/sbeyer/fesom_runs/core2_8_lumi_${SLURM_JOB_ID:-$STAMP}
+mkdir -p "$OUT_DIR"
+
+# Toolchain + runtime LD path (same modules as the build).
+source /pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos/env_lumi.sh
+
+BIN=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_kokkos/build-hip/fesom_port
+MESH=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/CORE2
+PHC=/pfs/lustrep4/projappl/project_465002727/sbeyer/inproot/fesom/v21/hydrography/phc3.0/phc3.0_winter.nc
+
+# FESOM_JRA55_DIR overrides the hardcoded Levante /pool/... path inside the
+# JRA55 reader; the directory must hold {uas,vas,huss,rsds,rlds,tas,prra,prsn}.YYYY.nc.
+export FESOM_JRA55_DIR=/pfs/lustrep4/projappl/project_465002727/sbeyer/fesom_forcing/JRA5
+
+# SSS restoring + CORE2 runoff + Sweeney chlorophyll climatology — all three
+# files now live next to the JRA55 files under FESOM_JRA55_DIR.
+export FESOM_SSS_PATH=$FESOM_JRA55_DIR/PHC2_salx.nc
+export FESOM_RUNOFF_PATH=$FESOM_JRA55_DIR/CORE2_runoff.nc
+export FESOM_CHL_FILE=$FESOM_JRA55_DIR/Sweeney_2005.nc
+
+# GPU-aware MPI is enabled in env_lumi.sh; reinforce here for clarity.
+export MPICH_GPU_SUPPORT_ENABLED=1
+
+# Per-rank GCD pinning: leave all 8 GCDs visible to every rank and let Kokkos
+# pick device = local_rank. Restricting ROCR_VISIBLE_DEVICES=$SLURM_LOCALID
+# breaks Kokkos's HIP init — it still asks for GPU id == rank, so a 1-GPU view
+# fails for ranks 1..7 with "Requested GPU with id 'N' but only 1GPU(s) available".
+
+DT=500
+NSTEPS=200
+SNAP_EVERY=50
+JRA55_YEAR=1958
+export FESOM_PRINT_EVERY=50
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EXITCODE=$?
+date
+
+echo "Exit code: $EXITCODE"
+echo "Run dir:   $OUT_DIR"
+echo "Contents:"
+ls -la "$OUT_DIR"
+echo "Tail of run.log:"
+tail -40 "$OUT_DIR/run.log"
+exit $EXITCODE
