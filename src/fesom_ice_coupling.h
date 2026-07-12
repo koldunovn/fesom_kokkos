@@ -9,6 +9,7 @@ struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_forcing;
 struct fesom_sss_runoff;
+struct fesom_jra55;
 
 /*
  * Ocean → ice direction. Mirror of Fortran ocean2ice (ice_oce_coupling.F90:154).
@@ -68,6 +69,8 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
                              struct fesom_mesh             *mesh,
                              const struct fesom_tracers    *tracers,
                              struct fesom_forcing          *forcing,
+                             const struct fesom_jra55      *jra,   /* M6.3: prec_rain/prec_snow
+                                     feed the zstar freshwater balancing; NULL is tolerated */
                              const struct fesom_sss_runoff *sr);
 void fesom_ice_oce_fluxes_verify(fesom_ice *ice, struct fesom_partit *partit, struct fesom_mesh *mesh,
                                  const struct fesom_tracers *tracers, struct fesom_forcing *forcing,

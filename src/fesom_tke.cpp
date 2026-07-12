@@ -145,7 +145,8 @@ static void tke_column_loop(fesom_tke                  *t,
     const real_t rho0  = (real_t)FESOM_DENSITY_0;          /* gen:445 */
     const real_t grav  = (real_t)FESOM_G;                  /* gen:446 */
 
-    auto Z       = mesh->Z_fld.d();
+    auto Z3d     = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C reads Z_3d_n here; re-pointed
+                                            * from the static Z at Task 3.6, as planned. */
     auto hnode   = mesh->hnode_fld.d();
     auto ulev_n  = mesh->ulevels_nod2D_fld.d();
     auto nlev_n  = mesh->nlevels_nod2D_fld.d();
@@ -197,7 +198,8 @@ static void tke_column_loop(fesom_tke                  *t,
                           - uvnode(FESOM_ELEMVEC(node, nz,     nl) + 0);
                 real_t dv = uvnode(FESOM_ELEMVEC(node, nz - 1, nl) + 1)
                           - uvnode(FESOM_ELEMVEC(node, nz,     nl) + 1);
-                real_t dz = Z(nz - 1) - Z(nz);             /* == Z_3d_n(nz-1) - Z_3d_n(nz) */
+                real_t dz = Z3d(FESOM_NODE3D(node, nz - 1, nl))
+                          - Z3d(FESOM_NODE3D(node, nz,     nl));
                 vshear2[nz] = (du * du + dv * dv) / (dz * dz);
             }
 
@@ -211,7 +213,8 @@ static void tke_column_loop(fesom_tke                  *t,
              * entries are HALF the layer thickness. (Z again — see the Task 3.6 note above.) */
             for (int k = 0; k < nl; ++k) dz_trr[k] = 0.0;
             for (int nz = uln0 + 1; nz <= nln0; ++nz)
-                dz_trr[nz] = Kokkos::fabs(Z(nz - 1) - Z(nz));
+                dz_trr[nz] = Kokkos::fabs(Z3d(FESOM_NODE3D(node, nz - 1, nl))
+                                        - Z3d(FESOM_NODE3D(node, nz,     nl)));
             dz_trr[uln0]     = hnode(FESOM_NODE3D(node, uln0, nl)) / 2.0;
             dz_trr[nln0 + 1] = hnode(FESOM_NODE3D(node, nln0, nl)) / 2.0;
 

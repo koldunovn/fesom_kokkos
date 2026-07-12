@@ -28,8 +28,21 @@ typedef struct fesom_forcing {
     /* Phase 3 step 25 — SSS restoring + CORE2 runoff (o_ARRAYS in Fortran). */
     real_t *runoff;          /* [nod2D]  freshwater input from rivers, m/s   */
     real_t *Ssurf;           /* [nod2D]  monthly SSS climatology, PSU       */
-    real_t *virtual_salt;    /* [nod2D]  rsss·water_flux (linfs only)        */
-    real_t *relax_salt;      /* [nod2D]  surf_relax_S·(Ssurf - S_top)        */
+    real_t *virtual_salt;    /* [nod2D]  rsss·water_flux (LINFS only — under zstar the whole
+                                block is skipped and this stays 0)          */
+    real_t *relax_salt;      /* [nod2D]  surf_relax_S·(Ssurf - S_top) — runs under BOTH  */
+
+    /* M6.3 (zstar). Fortran g_forcing_arrays.
+     *  real_salt_flux: assigned UNCONDITIONALLY by therm_ice (ice_thermo_oce.F90:352); the
+     *    VALUE is use_virt_salt-branched inside it (0 under linfs; fwice·Sice −
+     *    iflice·ρice/ρwat·Sice under zstar). Under zstar it carries the sea-ice
+     *    brine-rejection / melt salt flux that REPLACES virtual_salt in the S surface BC.
+     *    The port already COMPUTED it in therm_ice and threw it away — now it is stored.
+     *  evaporation / ice_sublimation: therm_ice :324-325. They feed the zstar freshwater
+     *    global-balancing assembly in oce_fluxes. Dead stores under linfs. */
+    real_t *real_salt_flux;  /* [nod2D] */
+    real_t *evaporation;     /* [nod2D] */
+    real_t *ice_sublimation; /* [nod2D] */
 
     /* Per-node bulk transfer coefficients for the open-water (atm-ocean) path.
        Computed by fesom_bulk_compute via L&Y09; consumed by sea-ice
@@ -62,6 +75,7 @@ typedef struct fesom_forcing {
     fesom::Field heat_flux_fld, water_flux_fld;
     fesom::Field stress_node_surf_fld, stress_surf_fld;
     fesom::Field runoff_fld, Ssurf_fld, virtual_salt_fld, relax_salt_fld;
+    fesom::Field real_salt_flux_fld, evaporation_fld, ice_sublimation_fld;  // M6.3 (zstar)
     fesom::Field Ch_atm_oce_fld, Ce_atm_oce_fld;
     fesom::Field chl_fld, sw_3d_fld;
 } fesom_forcing;

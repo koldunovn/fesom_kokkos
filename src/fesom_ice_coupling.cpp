@@ -1,4 +1,5 @@
 #include "fesom_ice_coupling.h"
+#include "fesom_jra55.h"   // M6.3: prec_rain/prec_snow for the zstar freshwater balancing
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
@@ -338,6 +339,8 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
                              struct fesom_mesh             *mesh,
                              const struct fesom_tracers    *tracers,
                              struct fesom_forcing          *forcing,
+                             const struct fesom_jra55      *jra,   /* M6.3: prec_rain/prec_snow
+                                     feed the zstar freshwater balancing; NULL is tolerated */
                              const struct fesom_sss_runoff *sr)
 {
     const int    N     = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -385,6 +388,49 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
     /* subtract net_relax over OWNED (C lines 293-295 — NO cavity skip, unlike virtual_salt). */
     Kokkos::parallel_for("ice_ocefl_rssub", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int n) { rs(n) -= net_relax; });
+
+    /* M6.3 (zstar) — freshwater-flux GLOBAL BALANCING (ice_oce_coupling.F90:584-686). LIVE ONLY
+     * under zstar (use_virt_salt == false):
+     *   flux(n) = evaporation - ice_sublimation + prec_rain + prec_snow*(1 - a_ice_old) + runoff
+     *   flux(n) -= thdgr*rhoice/rhowat + thdgrsn*rhosno/rhowat    (ice growth = a REAL volume change)
+     *   net = integral(flux) / ocean_area ;  water_flux(n) += net
+     *
+     * ⚠️ DOCUMENTED DEVIATION (inherited verbatim from the C oracle, fesom_ice_coupling.c:178-192):
+     * the Fortran runs this assembly under linfs TOO, but there the balanced water_flux is
+     * physically INVISIBLE -- its only non-diagnostic consumers are the is_nonlinfs-gated terms
+     * and the zstar ssh/Wvel plumbing, all of which are off. The v1.0 linfs path never applied it
+     * and is BYTE-LOCKED, so the block is gated to preserve linfs byte-identity. The C made the
+     * same call; we mirror it, and the knob-OFF byte gate is what holds us to it. */
+    if (!uvs) {
+        const real_t rhoice     = ice->thermo.rhoice;
+        const real_t rhosno     = ice->thermo.rhosno;
+        const real_t inv_rhowat = ice->thermo.inv_rhowat;
+        auto evapo   = forcing->evaporation_fld.d();
+        auto subli   = forcing->ice_sublimation_fld.d();
+        auto runoff  = forcing->runoff_fld.d();
+        auto a_old   = ice->data[FESOM_ICE_AICE].values_old_fld.d();
+        auto thdgr   = ice->thermo.thdgr_fld.d();
+        auto thdgrsn = ice->thermo.thdgrsn_fld.d();
+        const bool have_jra = (jra != nullptr);
+        auto prain = have_jra ? jra->prec_rain_fld.d() : forcing->runoff_fld.d();
+        auto psnow = have_jra ? jra->prec_snow_fld.d() : forcing->runoff_fld.d();
+
+        fesom::Field flux_fld;
+        flux_fld.alloc("ice.oce_fluxes.zstar_flux", (size_t)N);
+        auto flux = flux_fld.d();
+        Kokkos::parallel_for("ice_ocefl_fwbal", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                const real_t pr = have_jra ? prain(n) : 0.0;
+                const real_t ps = have_jra ? psnow(n) : 0.0;
+                real_t f = evapo(n) - subli(n) + pr + ps * (1.0 - a_old(n)) + runoff(n);
+                f -= thdgr(n) * rhoice * inv_rhowat + thdgrsn(n) * rhosno * inv_rhowat;
+                flux(n) = f;
+            });
+        flux_fld.modify_device();
+        const real_t net_fw = integrate_nod_2D_kk(flux_fld, mesh, partit) / ocean_area;
+        Kokkos::parallel_for("ice_ocefl_fwadd", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) { wf(n) += net_fw; });
+    }
 
     forcing->heat_flux_fld.modify_device();    forcing->water_flux_fld.modify_device();
     forcing->virtual_salt_fld.modify_device(); forcing->relax_salt_fld.modify_device();

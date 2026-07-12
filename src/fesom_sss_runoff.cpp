@@ -3,6 +3,7 @@
  * Literal port of the Fortran routines listed in fesom_sss_runoff.h.
  */
 #include "fesom_sss_runoff.h"
+#include "fesom_ale.h"   // M6.3: use_virt_salt is DERIVED from FESOM_ALE
 
 #include "fesom_constants.h"
 #include "fesom_forcing.h"
@@ -307,7 +308,9 @@ void fesom_sss_runoff_init(fesom_sss_runoff       *sr,
     sr->ref_sss_local = 1;
     /* use_virt_salt set by which_ALE in Fortran oce_setup_step.F90:115-125;
      * for linfs (our case) this is .true. */
-    sr->use_virt_salt = 1;
+    /* M6.3: DERIVED from which_ALE in the Fortran (oce_setup_step.F90:115-125) — linfs =>
+     * .true., zstar => .false. fesom_ale_mode_init() runs at the top of main, before this. */
+    sr->use_virt_salt = fesom_ale_use_virt_salt();
 
     if (sss_path && sss_path[0]) {
         strncpy(sr->sss_path, sss_path, sizeof(sr->sss_path) - 1);

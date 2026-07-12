@@ -24,6 +24,11 @@ void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh)
     f->Ssurf_fld.alloc("forcing.Ssurf", n);                         f->Ssurf            = f->Ssurf_fld.h();
     f->virtual_salt_fld.alloc("forcing.virtual_salt", n);           f->virtual_salt     = f->virtual_salt_fld.h();
     f->relax_salt_fld.alloc("forcing.relax_salt", n);               f->relax_salt       = f->relax_salt_fld.h();
+    /* M6.3 (zstar): stored by therm_ice; consumed by the S surface BC and the zstar
+     * freshwater global-balancing assembly. Zero (dead stores) under linfs. */
+    f->real_salt_flux_fld.alloc("forcing.real_salt_flux", n);       f->real_salt_flux   = f->real_salt_flux_fld.h();
+    f->evaporation_fld.alloc("forcing.evaporation", n);             f->evaporation      = f->evaporation_fld.h();
+    f->ice_sublimation_fld.alloc("forcing.ice_sublimation", n);     f->ice_sublimation  = f->ice_sublimation_fld.h();
     f->Ch_atm_oce_fld.alloc("forcing.Ch_atm_oce", n);               f->Ch_atm_oce       = f->Ch_atm_oce_fld.h();
     f->Ce_atm_oce_fld.alloc("forcing.Ce_atm_oce", n);               f->Ce_atm_oce       = f->Ce_atm_oce_fld.h();
     f->chl_fld.alloc("forcing.chl", n);                             f->chl              = f->chl_fld.h();

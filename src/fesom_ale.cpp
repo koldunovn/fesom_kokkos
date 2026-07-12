@@ -2,6 +2,7 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
+#include "fesom_forcing.h"   // M6.3: water_flux for the zstar vert_vel BC
 #include "fesom_partit.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"
@@ -695,20 +696,10 @@ void fesom_ale_mode_init(void)
     s_use_virt_salt = s_ale_zstar ? 0 : 1;
     s_is_nonlinfs   = s_ale_zstar ? 1.0 : 0.0;
 
-    /* ⚠️ TEMPORARY (M6.3 in progress). Task 3.1 lands the geometry state + the thickness
-     * init/commit, but the zstar chain is not yet closed: the forcing flip (3.2), the SSH
-     * stiffness update (3.3), the vert_vel zstar branch that actually WRITES hnode_new (3.4),
-     * the Shchepetkin PGF (3.5) and the geometry re-points (3.6) are still to come. Running
-     * zstar now would silently produce wrong physics rather than fail — which is exactly the
-     * trap the TKE and mEVP stubs avoided. Delete this block when Task 3.6 lands. */
-    if (s_ale_zstar) {
-        fprintf(stderr,
-                "FESOM_ALE=zstar is NOT USABLE at this commit: the M6.3 chain is incomplete "
-                "(Task 3.1 of 3.1-3.6 landed — geometry + thickness only; the forcing flip, "
-                "stiffness update, vert_vel zstar branch, Shchepetkin PGF and geometry "
-                "re-points are missing). Refusing to run rather than produce wrong physics.\n");
-        exit(1);
-    }
+    /* (The temporary "zstar incomplete" abort that lived here from Task 3.1 is GONE: the chain
+     * closed at Task 3.6 -- geometry + thickness (3.1), the forcing flip (3.2), the SSH
+     * stiffness update + rhs/hbar tails (3.3), the vert_vel branch that writes hnode_new (3.4),
+     * the Shchepetkin PGF + hpressure gating (3.5), and the geometry re-points (3.6).) */
 }
 
 int    fesom_ale_is_zstar(void)      { return s_ale_zstar; }
@@ -878,4 +869,75 @@ void fesom_ale_update_thickness_zstar_kk(struct fesom_mesh   *mesh,
 
     /* exchange_elem(helem) (:1440) */
     fesom_halo_field(mesh->helem_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
+}
+
+/*--- M6.3 (zstar): vert_vel_ale zstar branch — DEVICE (oce_ale.F90:2755-2827) ----------------
+ * Distributes the per-step SSH change (hbar − hbar_old) proportionally over the STRETCHED part
+ * of each column, on top of the shared divergence-built Wvel:
+ *
+ *   dd1  = zbar_3d_n(nzmax, n),  nzmax = nlevels_nod2D_min − 1     (LIVE geometry)
+ *   dd   = (hbar − hbar_old) / (zbar_3d_n(1, n) − dd1);   dddt = dd/dt
+ *   nz = 1..nzmax−1:
+ *          Wvel(nz)      −= (zbar_3d_n(nz, n) − dd1) · dddt
+ *          hnode_new(nz)  = hnode(nz) + (zbar_3d_n(nz) − zbar_3d_n(nz+1)) · dd
+ *   Wvel(1) −= water_flux(n)                    (the real volume flux as the surface BC)
+ *
+ * ⚠️ INVARIANT 5: the Wvel correction is the vertically-INTEGRATED form
+ * −(zbar_3d_n(nz) − dd1)·dddt — it is the bottom-to-top SUM of the layer dh/dt, NOT a per-layer
+ * h·dd/dt. Port it as written, and using the CURRENT (pre-update) zbar_3d_n.
+ * ⚠️ INVARIANT 3: the loop stops at nlevels_nod2D_min − 1, so bottom-intersecting levels are
+ * never stretched.
+ *
+ * OWNED nodes only; the caller exchanges BOTH Wvel and hnode_new (:2870-2871) — hnode_new's halo
+ * is what the Z1 commit (myDim+eDim) reads. Cavity columns (nzmin>1) are left untouched.
+ *
+ * The Fortran's NaN / negative-hnode_new checks (:2812-2868) are write-and-continue warnings.
+ * They are NOT ported into the device kernel: a per-thread fprintf is not device-callable, and a
+ * Kokkos::abort would turn a Fortran WARNING into a hard failure — changing behaviour. The Z-ladder
+ * gates (bit-id vs the C oracle, then the CUDA gate, then the 1-yr climate) are what actually
+ * catch a broken column here, and they catch it harder than a printf would.
+ */
+void fesom_ale_vert_vel_zstar_kk(struct fesom_mesh          *mesh,
+                                 struct fesom_dyn           *dyn,
+                                 const struct fesom_forcing *forcing)
+{
+    const int    nl = mesh->nl;
+    const int    N  = mesh->myDim_nod2D;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+
+    auto w         = dyn->w_fld.d();
+    auto hnode     = mesh->hnode_fld.d();
+    auto hnode_new = mesh->hnode_new_fld.d();
+    auto zbar3d    = mesh->zbar_3d_n_fld.d();
+    auto hbar      = mesh->hbar_fld.d();
+    auto hbar_old  = mesh->hbar_old_fld.d();
+    auto ulev_n    = mesh->ulevels_nod2D_fld.d();
+    auto nlev_min  = mesh->nlevels_nod2D_min_fld.d();
+    auto wf        = forcing->water_flux_fld.d();
+
+    Kokkos::parallel_for("fesom_ale_vert_vel_zstar", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            const int nzmin_f = ulev_n(n);                 /* 1-based */
+            const int nzmax_f = nlev_min(n) - 1;           /* 1-based */
+            if (nzmin_f != 1) return;                      /* cavity -> linfs-like */
+
+            const real_t dd1 = zbar3d(FESOM_NODE3D(n, nzmax_f - 1, nl));
+            real_t dd = zbar3d(FESOM_NODE3D(n, 0, nl)) - dd1;
+            dd = (hbar(n) - hbar_old(n)) / dd;
+            const real_t dddt = dd / dt;
+
+            for (int nzf = nzmin_f; nzf <= nzmax_f - 1; ++nzf) {
+                const int    nz = nzf - 1;                 /* 0-based layer */
+                const size_t k  = FESOM_NODE3D(n, nz,     nl);
+                const size_t k1 = FESOM_NODE3D(n, nz + 1, nl);
+                w(k)         -= (zbar3d(k) - dd1) * dddt;
+                hnode_new(k)  = hnode(k) + (zbar3d(k) - zbar3d(k1)) * dd;
+            }
+
+            /* surface freshwater flux as the upper continuity BC (:2809) */
+            w(FESOM_NODE3D(n, nzmin_f - 1, nl)) -= wf(n);
+        });
+
+    dyn->w_fld.modify_device();
+    mesh->hnode_new_fld.modify_device();
 }

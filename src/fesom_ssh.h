@@ -7,6 +7,7 @@
 
 struct fesom_mesh;
 struct fesom_dyn;
+struct fesom_forcing;
 
 /*
  * SSH stiffness matrix in CSR. Mirrors mesh%ssh_stiff (a t_sparse_matrix).
@@ -112,8 +113,15 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
 
 /* compute_ssh_rhs_linfs on device: edge→node SCATTER (atomic_add, D22) + the
  * (1-alpha)*ssh_rhs_old linfs map. Marks dyn->ssh_rhs modify_device(). */
-void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
-                                    struct fesom_dyn        *dyn);
+void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh    *mesh,
+                                    struct fesom_dyn           *dyn,
+                                    const struct fesom_forcing *forcing);  /* M6.3: water_flux
+                                          feeds the zstar tail; unused under linfs */
+
+/* M6.3 (zstar) — the per-step CUMULATIVE stiffness-matrix increment. Called ONLY under zstar,
+ * and BEFORE compute_ssh_rhs (Fortran gate oce_ale.F90:3914). The base matrix is never rebuilt
+ * and the preconditioner is never refreshed -- see the banner in fesom_ssh.cpp. */
+void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh);
 
 /* Preconditioned CG on device. Same numerics as fesom_ssh_solve_cg; the SpMV is
  * a per-row CSR gather (race-free), the dots are Kokkos::parallel_reduce + the

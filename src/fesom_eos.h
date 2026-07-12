@@ -113,6 +113,12 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
  * set-once mesh gradient_sca/elem_nodes/ulevels/nlevels are already device-current.
  * Marks pgf_x/pgf_y modify_device(). See docs/SYNC_MAP.md §2 row 2.
  */
+/* M6.3 (Z6) — the zstar/zlevel PGF (which_pgf='shchepetkin', the module default the reference
+ * uses). Self-contained on density_m_rho0 + the LIVE Z_3d_n/helem; makes ZERO hpressure
+ * references (which is why hpressure is skipped entirely under zstar). One thread per element. */
+void fesom_pressure_force_zxxxx_shchepetkin_kk(const struct fesom_mesh *mesh,
+                                               struct fesom_aux        *aux);
+
 void fesom_pressure_force_linfs_fullcell_kk(const struct fesom_mesh *mesh,
                                             struct fesom_aux        *aux);
 

@@ -352,6 +352,7 @@ static void kpp_ri_iwmix_kk(fesom_kpp *k, const struct fesom_aux *aux,
     auto bvfreq = aux->bvfreq_fld.d();
     auto uvnode = dyn->uvnode_fld.d();
     auto Z      = mesh->Z_fld.d();
+    auto Z3d    = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C reads Z_3d_n (fesom_kpp.c:238) */
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
 
@@ -361,7 +362,8 @@ static void kpp_ri_iwmix_kk(fesom_kpp *k, const struct fesom_aux *aux,
             int nzmin = ulev_n(n) - 1;
             int nzmax = nlev_n(n) - 1;
             for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-                real_t dz_inv = 1.0 / (Z(nz - 1) - Z(nz));      /* > 0 */
+                real_t dz_inv = 1.0 / (Z3d(FESOM_NODE3D(n, nz - 1, nl))
+                                     - Z3d(FESOM_NODE3D(n, nz,     nl)));   /* > 0 */
                 real_t du = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 0)
                           - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 0);
                 real_t dv = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 1)
@@ -884,6 +886,7 @@ static void kpp_blmix_kk(fesom_kpp *k, const struct fesom_mesh *mesh)
     auto wst = k->wst_fld.d();
     auto hnode = mesh->hnode_fld.d();
     auto Z     = mesh->Z_fld.d();
+    auto Z3d   = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C reads Z_3d_n (fesom_kpp.c:553) */
     auto zbar3 = mesh->zbar_3d_n_fld.d();
     auto ulev_n = mesh->ulevels_nod2D_fld.d();   /* 1-based counts (skip checks) */
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
@@ -966,7 +969,7 @@ static void kpp_blmix_kk(fesom_kpp *k, const struct fesom_mesh *mesh)
             real_t sig, a1, a2, a3, Gm, Gs, Gt;
             for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
                 if (nz >= kbl) break;
-                sig   = Kokkos::fabs(Z(nz)) / (hbl + KPP_EPSLN);
+                sig   = Kokkos::fabs(Z3d(FESOM_NODE3D(n, nz, nl))) / (hbl + KPP_EPSLN);
                 sigma = stable * sig + (1.0 - stable) * Kokkos::fmin(sig, (real_t)KPP_EPSILON);
                 zehat = KPP_VONK * sigma * hbl * bfsfc;
                 kpp_wscale_kk(wmt, wst, deltaz, deltau, zehat, us, wm, ws);

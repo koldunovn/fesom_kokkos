@@ -5,6 +5,7 @@
 
 struct fesom_mesh;
 struct fesom_dyn;
+struct fesom_forcing;
 
 /*
  * ALE (Arbitrary Lagrangian-Eulerian) step. Phase 1 implements only the
@@ -125,5 +126,12 @@ void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
  * mean over owned elements; then exchange_elem(helem). This is where the geometry goes LIVE. */
 void fesom_ale_update_thickness_zstar_kk(struct fesom_mesh   *mesh,
                                          struct fesom_partit *partit);
+
+/* zstar branch of vert_vel_ale (oce_ale.F90:2755-2827). Runs AFTER the shared divergence-built
+ * Wvel, over OWNED nodes. Writes BOTH w and hnode_new; the caller must then exchange BOTH
+ * (:2870-2871) -- hnode_new's halo is what the Z1 commit reads. See the banner in fesom_ale.cpp. */
+void fesom_ale_vert_vel_zstar_kk(struct fesom_mesh          *mesh,
+                                 struct fesom_dyn           *dyn,
+                                 const struct fesom_forcing *forcing);
 
 #endif /* FESOM_ALE_H */

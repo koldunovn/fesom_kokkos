@@ -16,6 +16,8 @@
  *   - Serial (1 MPI rank): exchange_nod and MPI_Allreduce are no-ops.
  */
 #include "fesom_ssh.h"
+#include "fesom_ale.h"       // M6.3: fesom_ale_is_zstar()
+#include "fesom_forcing.h"   // M6.3: water_flux for the zstar ssh_rhs tail
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
@@ -602,8 +604,10 @@ static real_t cg_dot(DV a, DV b, int N)
 /* (cg_dot2 removed in M5.2 — the in-loop sp0/sp1 dot is now fused into the
  * preconditioner SpMV; the only remaining dot is the single-accumulator cg_dot.) */
 
-void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
-                                    struct fesom_dyn        *dyn)
+void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh    *mesh,
+                                    struct fesom_dyn           *dyn,
+                                    const struct fesom_forcing *forcing)  /* M6.3: water_flux
+                                          feeds the zstar tail; unused under linfs */
 {
     const int    N       = mesh->myDim_nod2D;
     const int    N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -670,11 +674,117 @@ void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh *mesh,
             Kokkos::atomic_add(&ssh_rhs(n2), -(c1 + c2));    /* L32: parenthesise the negation */
         });
 
-    /* linfs: ssh_rhs += (1-alpha)*ssh_rhs_old over OWNED rows (the C `for n in [0,N)`). */
-    Kokkos::parallel_for("fesom_ssh_rhs_linfs", Kokkos::RangePolicy<>(0, N),
-        KOKKOS_LAMBDA(const int n) { ssh_rhs(n) += one_minus_alpha * ssh_rhs_old(n); });
+    /* Water-flux tail (oce_ale.F90:2122-2143).
+     *  zstar (non-linfs), no-cavity arm (:2133):
+     *      ssh_rhs(n) += -alpha*water_flux(n)*areasvol(nzmin,n) + (1-alpha)*ssh_rhs_old(n)
+     *  linfs (:2138-2142):
+     *      ssh_rhs(n) += (1-alpha)*ssh_rhs_old(n)                        <- the v1.0 path
+     * (The cavity arm's use_cavity_fw2press gate is unreachable -- no cavities in our meshes.) */
+    if (fesom_ale_is_zstar()) {
+        auto wf       = forcing->water_flux_fld.d();
+        auto areasvol = mesh->areasvol_fld.d();
+        auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+        Kokkos::parallel_for("fesom_ssh_rhs_zstar", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                const int nzmin_f = ulev_n(n);                 /* 1-based */
+                if (nzmin_f > 1) return;                       /* cavity arm: not ported */
+                ssh_rhs(n) += -alpha * wf(n)
+                                * areasvol(FESOM_NODE3D(n, nzmin_f - 1, nl))
+                            + one_minus_alpha * ssh_rhs_old(n);
+            });
+    } else {
+        Kokkos::parallel_for("fesom_ssh_rhs_linfs", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) { ssh_rhs(n) += one_minus_alpha * ssh_rhs_old(n); });
+    }
 
     dyn->ssh_rhs_fld.modify_device();   /* driver sync_host()s before the nod2D halo */
+}
+
+/*===========================================================================================
+ * M6.3 (zstar) — update_stiff_mat_ale (oce_ale.F90:1892-2001), DEVICE kernel.
+ *
+ * Per-step CUMULATIVE increment of the SSH stiffness:
+ *   factor = g*dt*alpha*theta
+ *   per OWNED edge, per adjacent element i in {1,2}, per row j in {1,2} (halo rows skipped):
+ *     fy(k) = -dhe(elem) * ( dN_k/dx * dy_i - dN_k/dy * dx_i ),   k = 1..3
+ *     i==2 -> fy = -fy ;  the j==2 row takes -fy
+ *     values(npos(k)) += fy(k) * factor
+ * i.e. exactly the BASE-matrix edge assembly with the static column depth replaced by the
+ * per-step elemental delta-hbar = dhe (filled by the PREVIOUS step's compute_hbar).
+ *
+ * ⚠️ INVARIANT 1: the base matrix is NEVER rebuilt -- this INCREMENTS the same CSR object, so
+ * sum(dhe) over steps == hbar - hbar(init). At cold start dhe == 0, so the step-1 update is a
+ * no-op by construction.
+ *
+ * ⚠️ PRECONDITIONER: the Fortran builds it ONCE at the first solve (oce_ale.F90:3306,
+ * `if (lfirst) call ssh_solve_preconditioner`) and NEVER refreshes it as the matrix evolves.
+ * The C verified this and does nothing here. So do we: pr_values is NOT touched. Refreshing it
+ * would be "fixing" the reference.
+ *
+ * Device shape: the C uses a per-row `spos` scatter table (nodeid -> sparse position). That is
+ * a full [myDim+eDim] int array -- untenable per-thread. Instead each (row, column) does a
+ * LINEAR SEARCH over the row's colind range. CSR rows have UNIQUE column indices, so the match
+ * is unique and the result is identical to the spos lookup (rows are ~7 entries wide here).
+ * Accumulation is edge-order Kokkos::atomic_add (D22): on Serial the range is sequential, so
+ * the accumulation order is exactly the C's loop order => bit-identical.
+ *===========================================================================================*/
+void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh)
+{
+    const int N = mesh->myDim_nod2D;
+    const int E = mesh->myDim_edge2D;
+    const int Eo = mesh->myDim_elem2D;
+    const real_t factor = (real_t)FESOM_G * (real_t)FESOM_PHASE1_DT
+                        * (real_t)FESOM_PHASE1_ALPHA * (real_t)FESOM_PHASE1_THETA;
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto values = S->values_fld.d();
+    auto edge_tri = mesh->edge_tri_fld.d();
+    auto edges    = mesh->edges_fld.d();
+    auto elnod    = mesh->elem_nodes_fld.d();
+    auto gsca     = mesh->gradient_sca_fld.d();
+    auto ecdxdy   = mesh->edge_cross_dxdy_fld.d();
+    auto dhe      = mesh->dhe_fld.d();
+
+    Kokkos::parallel_for("fesom_update_stiff_mat_ale", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int ed) {
+            const int el[2]  = { edge_tri(2*ed + 0), edge_tri(2*ed + 1) };
+            const int e_n[2] = { edges(2*ed + 0),    edges(2*ed + 1)    };
+            for (int i = 0; i < 2; ++i) {
+                /* Fortran: if (elem < 1) cycle. Same defensive bound as the base builder:
+                 * adjacent elements of OWNED edges are owned. */
+                if (el[i] < 0 || el[i] >= Eo) continue;
+                const int en[3] = { elnod(3*el[i] + 0), elnod(3*el[i] + 1), elnod(3*el[i] + 2) };
+                const size_t g  = (size_t)6 * el[i];
+                const real_t dx_i = ecdxdy(4*ed + 2*i + 0);
+                const real_t dy_i = ecdxdy(4*ed + 2*i + 1);
+
+                real_t fy[3];
+                for (int k = 0; k < 3; ++k)
+                    fy[k] = -dhe(el[i]) * (gsca(g + k) * dy_i - gsca(g + 3 + k) * dx_i);
+                if (i == 1) { fy[0] = -fy[0]; fy[1] = -fy[1]; fy[2] = -fy[2]; }   /* Fortran i==2 */
+
+                /* j = 1 row (+fy) and j = 2 row (-fy); halo rows skipped
+                 * (Fortran: if (row > myDim_nod2D) cycle). */
+                for (int j = 0; j < 2; ++j) {
+                    const int row = e_n[j];
+                    if (row >= N) continue;
+                    const real_t sgn = (j == 0) ? 1.0 : -1.0;
+                    for (int k = 0; k < 3; ++k) {
+                        /* linear search for the sparse position of column en[k] in this row --
+                         * identical to the C's spos[] lookup (CSR columns are unique per row). */
+                        for (int q = rowptr(row); q < rowptr(row + 1); ++q) {
+                            if (colind(q) == en[k]) {
+                                Kokkos::atomic_add(&values(q), sgn * fy[k] * factor);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    S->values_fld.modify_device();
+    /* pr_values deliberately NOT refreshed -- see the banner above. */
 }
 
 int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,

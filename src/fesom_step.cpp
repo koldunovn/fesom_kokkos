@@ -330,7 +330,12 @@ int fesom_timestep(int                          step_n,
      *  nlevels are set-once device-current (mesh_sync_geometry_device). No-op on Serial/OpenMP. */
     /* M5.13b: hpressure is device-resident with its halo (substep-1 fesom_halo_field) - the IN
      * re-push is GONE; PGF reads it at the element's 3 vertices (incl. HALO) directly on device. */
-    fesom_pressure_force_linfs_fullcell_kk(mesh, aux);   /* device: pgf_x, pgf_y (elem) */
+    /* M6.3 (Z6) PGF dispatch: linfs IGNORES which_pgf and uses the full-cell branch; zstar
+     * HONOURS it -> shchepetkin (the module default, and what the reference runs use). */
+    if (fesom_ale_is_zstar())
+        fesom_pressure_force_zxxxx_shchepetkin_kk(mesh, aux);   /* device: pgf_x, pgf_y (elem) */
+    else
+        fesom_pressure_force_linfs_fullcell_kk(mesh, aux);      /* device: pgf_x, pgf_y (elem) */
     if (s_verify_pgf) fesom_pressure_force_verify(mesh, aux, step_n);
     /* M5.4: pgf device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
      * sync_host + the vel_rhs IN re-push (substep 4) are gone — pgf stays device-resident
@@ -594,9 +599,16 @@ int fesom_timestep(int                          step_n,
     mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
 
     PMARK("6_ivisc");
-    /*  7. SSH RHS (linfs) — device. CG reads ssh_rhs at OWNED rows only, so no re-push
-     *     after the halo (the device owned ssh_rhs from the kernel stays current). */
-    fesom_compute_ssh_rhs_linfs_kk(mesh, dyn);
+    /*  6b. M6.3 (zstar): the CUMULATIVE stiffness update from the PREVIOUS step's dhe, BEFORE
+     *      the SSH RHS (Fortran gate oce_ale.F90:3914:
+     *      `if (.not. trim(which_ale)=='linfs') call update_stiff_mat_ale`).
+     *      Step 1 from cold start: dhe == 0 -> a no-op by construction. */
+    if (fesom_ale_is_zstar())
+        fesom_update_stiff_mat_ale_kk(ctx->stiff, mesh);
+
+    /*  7. SSH RHS (linfs + the M6.3 zstar water-flux tail) — device. CG reads ssh_rhs at OWNED
+     *     rows only, so no re-push after the halo (the device owned ssh_rhs stays current). */
+    fesom_compute_ssh_rhs_linfs_kk(mesh, dyn, forcing);
     dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
     fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
 
@@ -619,12 +631,39 @@ int fesom_timestep(int                          step_n,
      *     uv at edge_tri (interior elements), but uv was just halo'd on the host (line above),
      *     so re-push it (L30) to keep the device copy coherent with the host. */
     /* M5.13g1: uv device-resident (update_vel fesom_halo_field) - no re-push; compute_hbar reads it on device. */
-    fesom_compute_hbar_kk(mesh, dyn);
+    fesom_compute_hbar_kk(mesh, dyn, forcing);
     dyn->ssh_rhs_old_fld.sync_host();                      /* OUT (3 fields) before the halos */
     mesh->hbar_fld.sync_host();
     mesh->hbar_old_fld.sync_host();
     fesom_exchange_nod2D(dyn->ssh_rhs_old_fld.h_checked(), p);   /* Fortran oce_ale.F90:2078 */
     fesom_exchange_nod2D(mesh->hbar_fld.h_checked(),       p);   /* Fortran oce_ale.F90:2102 */
+
+    /* M6.3 — dhe fill (oce_ale.F90:2298-2305): the NEXT step's cumulative stiffness increment,
+     * mean(hbar - hbar_old) per element. ⚠️ UNCONDITIONAL in the Fortran (it runs under linfs
+     * too, where nothing reads it) and the C mirrors that, so we do as well -- a dead store
+     * under linfs, which the knob-OFF byte gate proves. MUST run AFTER the hbar exchange: the
+     * element's vertices reach HALO nodes. Per-element gather => race-free, no atomics. */
+    mesh->hbar_fld.modify_host();     mesh->hbar_fld.sync_device();
+    mesh->hbar_old_fld.modify_host(); mesh->hbar_old_fld.sync_device();
+    {
+        auto dhe_v    = mesh->dhe_fld.d();
+        auto hbar_v   = mesh->hbar_fld.d();
+        auto hbaro_v  = mesh->hbar_old_fld.d();
+        auto elnod_v  = mesh->elem_nodes_fld.d();
+        auto uleve_v  = mesh->ulevels_fld.d();
+        const int Eo  = mesh->myDim_elem2D;
+        Kokkos::parallel_for("fesom_dhe_fill", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int e) {
+                if (uleve_v(e) > 1) { dhe_v(e) = 0.0; return; }        /* cavity guard */
+                const int n0 = elnod_v(3*e + 0);
+                const int n1 = elnod_v(3*e + 1);
+                const int n2 = elnod_v(3*e + 2);
+                dhe_v(e) = ((hbar_v(n0) - hbaro_v(n0))
+                          + (hbar_v(n1) - hbaro_v(n1))
+                          + (hbar_v(n2) - hbaro_v(n2))) / 3.0;
+            });
+        mesh->dhe_fld.modify_device();
+    }
 
     /* DEBUG (FESOM_DIAG_SSHSLV=<gid>): dump ssh_rhs / d_eta / hbar at one node,
        matching the Fortran [FSSH] format, to compare the implicit free-surface
@@ -765,8 +804,23 @@ int fesom_timestep(int                          step_n,
      * (NOD3D nc=1), both written by vert_vel above, adjacent. When gm, FUSE into one
      * message/neighbour; else w alone (fer_w only exists under gm). The fer_w leg mirrors
      * Fortran oce_ale.F90:2681 exchange_nod(fer_Wvel). */
+    /* M6.3 (zstar): distribute the SSH change over the stretched levels + the surface
+     * water-flux BC, ON TOP of the shared divergence Wvel (C fesom_step.c:327-328). This is
+     * also the ONLY writer of hnode_new under zstar. */
+    if (fesom_ale_is_zstar())
+        fesom_ale_vert_vel_zstar_kk(mesh, dyn, forcing);
+
     if (gm) fesom_halo_field2(dyn->w_fld, dyn->fer_w_fld, FESOM_HALO_NOD3D, nl, 1, p);
     else    fesom_halo_field (dyn->w_fld,                 FESOM_HALO_NOD3D, nl, 1, p);
+
+    /* M6.3 (zstar) — ⚠️ THE hnode_new HALO RAIL, restored (Fortran oce_ale.F90:2871).
+     * Under linfs hnode_new == hnode everywhere including the halo (the step-12a device copy),
+     * so v1.0 needed no exchange and M5.20 could leave hnode_new device-resident with no halo.
+     * Under zstar hnode_new is written over OWNED nodes ONLY, and the step-14 commit reads it
+     * over myDim+eDim -- so without this exchange the halo columns would commit STALE thickness.
+     * This is exactly the rail the M5.20 note above predicted would have to come back. */
+    if (fesom_ale_is_zstar())
+        fesom_halo_field(mesh->hnode_new_fld, FESOM_HALO_NOD3D, nl, 1, p);
 
     /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
      *  Per-node accumulation into the node's OWN column → race-free (NOT a scatter).

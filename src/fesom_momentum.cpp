@@ -8,6 +8,7 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
+#include "fesom_ale.h"   // M6.3: fesom_ale_is_zstar()
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_mesh.h"
@@ -1667,8 +1668,10 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
  * (interior elements) so its owned device copy from update_vel_kk is current —
  * the driver re-pushes it (L30) since the line-472 halo wrote uv on the host.
  *===========================================================================*/
-void fesom_compute_hbar_kk(struct fesom_mesh *mesh,
-                           struct fesom_dyn  *dyn)
+void fesom_compute_hbar_kk(struct fesom_mesh          *mesh,
+                           struct fesom_dyn           *dyn,
+                           const struct fesom_forcing *forcing)  /* M6.3: water_flux for the
+                                 zstar elevation term; unused under linfs */
 {
     const int    N       = mesh->myDim_nod2D;
     const int    N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -1729,6 +1732,21 @@ void fesom_compute_hbar_kk(struct fesom_mesh *mesh,
             Kokkos::atomic_add(&ssh_rhs_old(n1),  (c1 + c2));
             Kokkos::atomic_add(&ssh_rhs_old(n2), -(c1 + c2));   /* L32 */
         });
+
+    /* (2b) M6.3 (zstar) — the freshwater VOLUME flux enters the elevation equation
+     * (oce_ale.F90:2262-2271): ssh_rhs_old(n) -= water_flux(n) * areasvol(nzmin, n).
+     * OWNED nodes, cavity skip. The matching exchange_nod(ssh_rhs_old) that the Fortran emits
+     * ONLY in this non-linfs branch is already covered by the always-on exchange the step does
+     * right after this returns (v1.0 kept it unconditional). linfs: the term is skipped. */
+    if (fesom_ale_is_zstar()) {
+        auto wf = forcing->water_flux_fld.d();
+        Kokkos::parallel_for("fesom_hbar_zstar_wf", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                const int nzmin_f = ulev_n(n);             /* 1-based */
+                if (nzmin_f > 1) return;                   /* cavity guard */
+                ssh_rhs_old(n) -= wf(n) * areasvol(FESOM_NODE3D(n, nzmin_f - 1, nl));
+            });
+    }
 
     /* (3) hbar update over OWNED nodes (the C `for n in [0,N)`). */
     Kokkos::parallel_for("fesom_hbar_upd", Kokkos::RangePolicy<>(0, N),

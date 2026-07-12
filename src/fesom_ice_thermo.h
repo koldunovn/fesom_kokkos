@@ -225,7 +225,8 @@ void fesom_therm_ice(const fesom_ice_thermo *th,
 void fesom_ice_thermodynamics(fesom_ice                     *ice,
                               struct fesom_partit           *partit,
                               struct fesom_mesh             *mesh,
-                              const struct fesom_forcing    *forcing,
+                              struct fesom_forcing          *forcing,   /* M6.3: now a PRODUCER
+                                    (real_salt_flux / evaporation / ice_sublimation) */
                               const struct fesom_jra55      *jra,
                               const struct fesom_sss_runoff *sr);
 
@@ -237,7 +238,7 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
 void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
                                  struct fesom_partit           *partit,
                                  struct fesom_mesh             *mesh,
-                                 const struct fesom_forcing    *forcing,
+                                 struct fesom_forcing          *forcing,  /* M6.3: PRODUCER */
                                  const struct fesom_jra55      *jra,
                                  const struct fesom_sss_runoff *sr);
 
@@ -246,7 +247,7 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
  * restores the 5 inputs, runs the C twin (on ALL ranks — its ustar halo is collective), diffs,
  * restores KK. Asserts max|Δ|==0 on Serial. ⚠️ Meaningful only on CORE2 (L42). */
 void fesom_ice_thermodynamics_verify(fesom_ice *ice, struct fesom_partit *partit,
-                                     struct fesom_mesh *mesh, const struct fesom_forcing *forcing,
+                                     struct fesom_mesh *mesh, struct fesom_forcing *forcing,
                                      const struct fesom_jra55 *jra, const struct fesom_sss_runoff *sr,
                                      int step_n,
                                      const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s,

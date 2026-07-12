@@ -1318,3 +1318,26 @@ count and percentage are now always printed, never silently swallowed. The KPP p
 
 **Lesson for the rest of M6:** mEVP and zstar also carry clamps and ratios. Expect isolated
 over-ceiling entries on CUDA; check the COUNT before believing a FAIL.
+(Confirmed at M6.2: mEVP has no min/max clamps — its `delta_min` is ADDITIVE — and its CUDA gate
+came back with **zero** outliers, worst field 68× under ceiling.)
+
+### 1-yr CORE2 climate close (linfs + TKE, CUDA) — **PASS**
+
+17280 steps @ dt=1800 on 8×A100 / 2 gpu nodes, monthly means (SLURM 26210747). Comparators: the
+C-port `c_tke_2yr` yr-1 (rotated frame) and the Fortran `fortran_linfs_tke` yr-1 (geo). Vectors
+rotated to geographic on both sides (`scripts/fesom_frame.py`).
+
+| field | CUDA-TKE vs Fortran | CUDA-TKE vs C-port |
+|---|---|---|
+| sst   | corr **1.00000**, bias −3.1e-4 °C | corr **1.00000**, bias −4.1e-5 °C |
+| sss   | corr 0.99997, bias −7.7e-4        | corr 0.99997, bias −3.3e-4 |
+| ssh   | corr **1.00000**, bias +3.4e-5    | corr **1.00000**, bias −1.4e-5 |
+| a_ice | corr 0.99997                      | corr 0.99997 |
+| m_ice | corr 0.99997                      | corr 0.99998 |
+| uice  | corr 0.99975                      | corr 0.99976 |
+| vice  | corr 0.99977                      | corr 0.99978 |
+
+**Every field ≥ 0.9997 against BOTH anchors**, and CUDA-vs-Fortran is indistinguishable from
+CUDA-vs-C-port — the signature of a faithful port. T/S bounded, no runaway. Note `uice`/`vice`
+are only this clean because the vector frame is now handled (L74); the old comparator would have
+reported 0.92 / 0.43 for the same run. **M6.1 COMPLETE.**

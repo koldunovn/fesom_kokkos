@@ -490,7 +490,8 @@ void fesom_therm_ice(const fesom_ice_thermo *th,
 void fesom_ice_thermodynamics(fesom_ice                     *ice,
                               struct fesom_partit           *partit,
                               struct fesom_mesh             *mesh,
-                              const struct fesom_forcing    *forcing,
+                              struct fesom_forcing          *forcing,   /* M6.3: now a PRODUCER
+                                    (real_salt_flux / evaporation / ice_sublimation) */
                               const struct fesom_jra55      *jra,
                               const struct fesom_sss_runoff *sr)
 {
@@ -581,14 +582,23 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
         ice->thermo.thdgrsn[n]  = ithdgrsn;
         ice->thermo.thdgra [n]  = ithdgra;
 
-        /* Diagnostics intentionally not stored in this Phase — we have no
-         * arrays for evap/ice_sublimation/real_salt_flux/fw_ice/fw_snw/hf_Q*
-         * yet. They land when oce_fluxes (Phase C) wires them up. */
-        (void)evap; (void)rsf; (void)iflice;
+        /* M6.3 (zstar): the three per-node flux stores the port used to THROW AWAY.
+         *   real_salt_flux — ice_thermo_oce.F90:352, assigned UNCONDITIONALLY. The VALUE is
+         *     use_virt_salt-branched inside therm_ice (0 under linfs; fwice·Sice −
+         *     iflice·ρice/ρwat·Sice under zstar), so storing it unconditionally is safe AND
+         *     faithful: under linfs it stores a hard 0.
+         *   evaporation / ice_sublimation — :324-325; they feed the zstar freshwater
+         *     global-balancing assembly in oce_fluxes. Dead stores under linfs.
+         * All three are therefore INVISIBLE to the linfs path (the byte gate proves it). */
+        forcing->real_salt_flux [n] = rsf;
+        forcing->evaporation    [n] = evap;
+        forcing->ice_sublimation[n] = subli;
+
+        /* Remaining diagnostics (fw_ice/fw_snw/hf_Q*) still unstored — no arrays, no consumer. */
+        (void)iflice;
         (void)fwice; (void)fwsnw;
         (void)hflatow; (void)hfsenow; (void)hflwrdout;
         (void)hfswrow; (void)hflwrow; (void)hfradow;
-        (void)subli;
     }
 
     (void)nl;  /* unused for now; reserved if surface-level extraction is moved here */
@@ -724,7 +734,9 @@ void therm_ice_kk(const IceThermC &th, int use_virt_salt,
                   real_t *fw, real_t *fwice, real_t *fwsnw,
                   real_t *ehf, real_t *evap, real_t *rsf,
                   real_t *dhgrowth, real_t *dhsngrowth, real_t *dAgrowth,
-                  real_t *iflice, real_t lid_clo)
+                  real_t *iflice, real_t lid_clo,
+                  real_t *subli)   /* M6.3: the device twin computed _subli and dropped it; the
+                                    * HOST twin has always returned it. Now both do. */
 {
     real_t _dhgrowth = *h;
     real_t snthick = (*hsn) * (th.con / th.consn) / fmax_kk(*A, th.armin);
@@ -823,6 +835,7 @@ void therm_ice_kk(const IceThermC &th, int use_virt_salt,
     *rsf = _rsf;
     *fw  = _fw;
     *evap = _evap + _subli;
+    if (subli) *subli = _subli;   /* M6.3 (zstar): feeds the freshwater balancing assembly */
 }
 
 /* D21 internal-halo bracket on a nod2D Field (the FCT/EVP idiom): modify_device() always so the
@@ -843,7 +856,7 @@ static inline void therm_halo_nod2D(fesom::Field &f, struct fesom_partit *partit
 void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
                                  struct fesom_partit           *partit,
                                  struct fesom_mesh             *mesh,
-                                 const struct fesom_forcing    *forcing,
+                                 struct fesom_forcing          *forcing,  /* M6.3: PRODUCER */
                                  const struct fesom_jra55      *jra,
                                  const struct fesom_sss_runoff *sr)
 {
@@ -883,6 +896,10 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
     auto uw     = jra->u_wind_fld.d();    auto vw  = jra->v_wind_fld.d();
     auto runoff = forcing->runoff_fld.d();
     auto chatm  = forcing->Ch_atm_oce_fld.d(); auto ceatm = forcing->Ce_atm_oce_fld.d();
+    /* M6.3 (zstar): the three flux OUTPUTS therm_ice produces and the port used to drop. */
+    auto rsf_o  = forcing->real_salt_flux_fld.d();
+    auto evap_o = forcing->evaporation_fld.d();
+    auto subli_o= forcing->ice_sublimation_fld.d();
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto geo    = mesh->geo_coord_nod2D_fld.d();
 
@@ -920,12 +937,12 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
             const real_t ce    = ceatm(n);
             const real_t lid_clo = (geo(2*n + 1) > 0.0) ? h0 : h0_s;
 
-            real_t fw=0, fwice=0, fwsnw=0, ehf=0, evap=0, rsf=0;
+            real_t fw=0, fwice=0, fwsnw=0, ehf=0, evap=0, rsf=0, subli=0;
             real_t ithdgr=0, ithdgrsn=0, ithdgra=0, iflice=0;
             therm_ice_kk(thc, uvs, &h, &hsn, &A, fsh, flo, Ta, qa, rain, snow, runo, rsss,
                          ug, ustar, T_oc, S_oc, h_ml, &t, ice_dt, ch, ce, ch_i, ce_i,
                          &fw, &fwice, &fwsnw, &ehf, &evap, &rsf,
-                         &ithdgr, &ithdgrsn, &ithdgra, &iflice, lid_clo);
+                         &ithdgr, &ithdgrsn, &ithdgra, &iflice, lid_clo, &subli);
 
             /* backup old (Fortran lines 311-314) */
             vold_m(n) = m_ice(n); vold_s(n) = m_snw(n); vold_a(n) = a_ice(n);
@@ -934,6 +951,10 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
             m_ice(n) = h; m_snw(n) = hsn; a_ice(n) = A;
             tskin(n) = t; flxfw(n) = fw; flxh(n) = ehf;
             thdgr(n) = ithdgr; thdgrsn(n) = ithdgrsn; thdgra(n) = ithdgra;
+            /* M6.3 (zstar): the three flux stores the port used to throw away. rsf's VALUE is
+             * use_virt_salt-branched INSIDE therm_ice (a hard 0 under linfs), so storing it
+             * unconditionally is both safe and faithful — invisible to the linfs path. */
+            rsf_o(n) = rsf; evap_o(n) = evap; subli_o(n) = subli;
         });
 
     ice->data[FESOM_ICE_AICE].values_fld.modify_device();
@@ -946,6 +967,12 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
     ice->flx_fw_fld.modify_device(); ice->flx_h_fld.modify_device();
     ice->thermo.thdgr_fld.modify_device();   ice->thermo.thdgrsn_fld.modify_device();
     ice->thermo.thdgra_fld.modify_device();  ice->thermo.thdgr_old_fld.modify_device();
+    /* M6.3 (zstar): the three new flux outputs. Consumed on the DEVICE by the S surface BC
+     * (real_salt_flux) and, under zstar, by the freshwater balancing assembly in oce_fluxes
+     * (evaporation / ice_sublimation) — so they stay device-resident, no sync_host here. */
+    forcing->real_salt_flux_fld.modify_device();
+    forcing->evaporation_fld.modify_device();
+    forcing->ice_sublimation_fld.modify_device();
 }
 
 /* FESOM_KK_VERIFY=icethermo — thermo read-modify-writes m_ice/m_snow/a_ice + t_skin + thdgr
@@ -956,7 +983,7 @@ void fesom_ice_thermodynamics_kk(fesom_ice                     *ice,
  * diff the 9, restore KK. The inputs jra/forcing/srfoce are intact (thermo doesn't modify them).
  * Race-free per-node → max|Δ|==0 on Serial AND OpenMP. ⚠️ Meaningful only with ACTIVE ice (CORE2). */
 void fesom_ice_thermodynamics_verify(fesom_ice *ice, struct fesom_partit *partit,
-                                     struct fesom_mesh *mesh, const struct fesom_forcing *forcing,
+                                     struct fesom_mesh *mesh, struct fesom_forcing *forcing,
                                      const struct fesom_jra55 *jra, const struct fesom_sss_runoff *sr,
                                      int step_n,
                                      const std::vector<real_t> &pre_m, const std::vector<real_t> &pre_s,

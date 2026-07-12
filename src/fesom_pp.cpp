@@ -246,6 +246,7 @@ void fesom_pp_mixing_kk(const struct fesom_mesh *mesh,
     const real_t A_bg      = (real_t)FESOM_PHASE1_A_VER;
 
     auto Z      = mesh->Z_fld.d();
+    auto Z3d    = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C reads Z_3d_n (fesom_pp.c:108) */
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
     auto ulev_e = mesh->ulevels_fld.d();
@@ -262,7 +263,8 @@ void fesom_pp_mixing_kk(const struct fesom_mesh *mesh,
             int nzmin = ulev_n(n) - 1;
             int nzmax = nlev_n(n) - 1;
             for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-                real_t dz = Z(nz - 1) - Z(nz);              /* > 0 */
+                real_t dz = Z3d(FESOM_NODE3D(n, nz - 1, nl))
+                          - Z3d(FESOM_NODE3D(n, nz,     nl));   /* > 0 */
                 real_t dz_inv = 1.0 / dz;
                 real_t du = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 0)
                           - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 0);

@@ -675,10 +675,10 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
         }
         /* Interior (nzmin+2 .. nzmax-2 inclusive): 4th-order quadratic. */
         for (int nz = nzmin + 2; nz <= nzmax - 2; ++nz) {
-            real_t Z_um1 = mesh->Z[nz - 1];
-            real_t Z_u   = mesh->Z[nz];
-            real_t Z_dn  = mesh->Z[nz + 1];
-            real_t Z_um2 = mesh->Z[nz - 2];
+            real_t Z_um1 = mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t Z_u   = mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)];
+            real_t Z_dn  = mesh->Z_3d_n[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t Z_um2 = mesh->Z_3d_n[FESOM_NODE3D(n, nz - 2, nl)];
             real_t Tum1 = ttf[FESOM_NODE3D(n, nz - 1, nl)];
             real_t Tu   = ttf[FESOM_NODE3D(n, nz,     nl)];
             real_t Tdn  = ttf[FESOM_NODE3D(n, nz + 1, nl)];
@@ -1432,6 +1432,11 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     auto area     = mesh->area_fld.d();
     auto areasvol = mesh->areasvol_fld.d();
     auto zbar     = mesh->zbar_fld.d();
+    /* M6.3 (Z7): the C reads the LIVE per-node geometry here (fesom_tracer_adv.c:677-690) --
+     * Z_3d_n for the 4th-order quadratic reconstruction and zbar_3d_n for the interface depth.
+     * Identical to the static arrays under linfs; the whole point under zstar. */
+    auto Z3d      = mesh->Z_3d_n_fld.d();
+    auto zbar3d   = mesh->zbar_3d_n_fld.d();
     auto Zc       = mesh->Z_fld.d();
     auto nlev_e   = mesh->nlevels_fld.d();
     auto ulev_e   = mesh->ulevels_fld.d();
@@ -1676,13 +1681,14 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
             aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k);
         } else {                                                /* interior 4th-order quadratic */
-            real_t Z_um1 = Zc(nz-1), Z_u = Zc(nz), Z_dn = Zc(nz+1), Z_um2 = Zc(nz-2);
+            real_t Z_um1 = Z3d(FESOM_NODE3D(n, nz-1, nl)), Z_u   = Z3d(FESOM_NODE3D(n, nz,   nl));
+            real_t Z_dn  = Z3d(FESOM_NODE3D(n, nz+1, nl)), Z_um2 = Z3d(FESOM_NODE3D(n, nz-2, nl));
             real_t Tum1 = valsAB((size_t)n*nl+(nz-1)), Tu = valsAB((size_t)n*nl+nz);
             real_t Tdn  = valsAB((size_t)n*nl+(nz+1)), Tum2 = valsAB((size_t)n*nl+(nz-2));
             real_t qc = (Tum1 - Tu) / (Z_um1 - Z_u);
             real_t qu = (Tu - Tdn) / (Z_u - Z_dn);
             real_t qd = (Tum2 - Tum1) / (Z_um2 - Z_um1);
-            real_t zb = zbar(nz);
+            real_t zb = zbar3d(FESOM_NODE3D(n, nz, nl));
             real_t Tmean1 = Tu   + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
             real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
             real_t w_iface = W((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);

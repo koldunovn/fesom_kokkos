@@ -157,8 +157,9 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
  * ssh_rhs_old + the hbar_old/hbar maps. Marks ssh_rhs_old/hbar/hbar_old
  * modify_device() (so mesh is NON-const, the ALE commit_thickness pattern). Serial
  * bit-identical; OpenMP/CUDA climate-close (the scatter). */
-void fesom_compute_hbar_kk(struct fesom_mesh *mesh,
-                           struct fesom_dyn  *dyn);
+void fesom_compute_hbar_kk(struct fesom_mesh          *mesh,
+                           struct fesom_dyn           *dyn,
+                           const struct fesom_forcing *forcing);  /* M6.3: zstar water-flux term */
 
 /*
  * Horizontal harmonic viscosity with easy backscatter (opt_visc=5).

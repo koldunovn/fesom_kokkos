@@ -692,7 +692,7 @@ void fesom_ice_step(int                            step,
          * (oce_fluxes is a full overwrite from intact inputs → no capture-before). */
         /* M5.14 (S flip): S values device-resident (floor → device) - no re-push; oce_fluxes reads surface S on device. */
         forcing->Ssurf_fld.modify_host(); forcing->Ssurf_fld.sync_device();
-        fesom_ice_oce_fluxes_kk(ice, partit, mesh, tracers, forcing, sr);
+        fesom_ice_oce_fluxes_kk(ice, partit, mesh, tracers, forcing, jra, sr);
         if (s_verify_iceflux) fesom_ice_oce_fluxes_verify(ice, partit, mesh, tracers, forcing, sr, step);
     }
 

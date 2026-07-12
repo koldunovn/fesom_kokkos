@@ -24,6 +24,7 @@
  * collapse to zero — preserving the pre-G5 numerical path.
  */
 #include "fesom_tracer_diff.h"
+#include "fesom_ale.h"   // M6.3: fesom_is_nonlinfs()
 
 #include "fesom_aux.h"
 #include "fesom_constants.h"
@@ -57,25 +58,28 @@ static real_t bc_surface(int n,
 {
     const real_t dt          = (real_t)FESOM_PHASE1_DT;
     const real_t vcpw        = (real_t)FESOM_VCPW;
-    const real_t is_nonlinfs = 0.0;     /* linfs */
+    /* M6.3: o_PARAM is_nonlinfs — 0.0 under linfs, 1.0 under zstar. DERIVED from which_ALE
+     * (oce_setup_step.F90:115-125), not an independent knob. Under linfs it is exactly 0, so
+     * BOTH new terms below vanish identically and the linfs path is byte-locked. */
+    const real_t is_nonlinfs = fesom_is_nonlinfs();
 
     real_t bc = 0.0;
     if (id == 1) {
-        /*___temperature_____________________________________________________*/
+        /*___temperature_____________________________________________________
+         * Fortran line 1517:
+         *   bc_surface = -dt*(heat_flux(n)/vcpw + sval*water_flux(n)*is_nonlinfs)   */
         bc = -dt * (forcing->heat_flux[n] / vcpw
                    + sval * forcing->water_flux[n] * is_nonlinfs);
     } else if (id == 2) {
         /*___salinity________________________________________________________
-         * Fortran line 1523:
-         *   bc_surface = dt*(virtual_salt(n) + relax_salt(n)
-         *                    + real_salt_flux(n)*is_nonlinfs)
-         * For linfs (us): virtual_salt is rsss·water_flux balanced;
-         * relax_salt comes from SSS climatology restoring; real_salt_flux is
-         * a sea-ice contribution (still 0 — sea ice not yet ported). */
-        const real_t real_salt_flux = 0.0;  /* sea ice */
+         * Fortran lines 1523-1524 (POSITIVE dt, and NO sval*water_flux term):
+         *   bc_surface = dt*(virtual_salt(n) + relax_salt(n) + real_salt_flux(n)*is_nonlinfs)
+         * linfs: virtual_salt = rsss*water_flux (balanced), real_salt_flux = 0.
+         * zstar: virtual_salt = 0 (its whole block is skipped), and real_salt_flux carries the
+         *        sea-ice brine-rejection / melt salt flux that REPLACES it. */
         bc = dt * (forcing->virtual_salt[n]
                   + forcing->relax_salt[n]
-                  + real_salt_flux * is_nonlinfs);
+                  + forcing->real_salt_flux[n] * is_nonlinfs);
     }
     return bc;
 }
@@ -374,18 +378,19 @@ template <class DV>
 KOKKOS_INLINE_FUNCTION
 static real_t bc_surface_kk(int n, int id, real_t sval, real_t dt, real_t vcpw,
                             const DV &heat_flux, const DV &water_flux,
-                            const DV &virtual_salt, const DV &relax_salt)
+                            const DV &virtual_salt, const DV &relax_salt,
+                            const DV &real_salt_flux, real_t is_nonlinfs)
 {
-    const real_t is_nonlinfs = 0.0;     /* linfs */
+    /* M6.3: is_nonlinfs is PASSED IN (a device kernel cannot call the host getter). 0.0 under
+     * linfs => both new terms vanish identically => the linfs path stays byte-locked. */
     real_t bc = 0.0;
     if (id == 1) {
         bc = -dt * (heat_flux(n) / vcpw
                    + sval * water_flux(n) * is_nonlinfs);
     } else if (id == 2) {
-        const real_t real_salt_flux = 0.0;  /* sea ice */
         bc = dt * (virtual_salt(n)
                   + relax_salt(n)
-                  + real_salt_flux * is_nonlinfs);
+                  + real_salt_flux(n) * is_nonlinfs);
     }
     return bc;
 }
@@ -425,6 +430,11 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
     auto trv        = tracers->data[tr_num].values_fld.d();
     auto heat_flux  = forcing->heat_flux_fld.d();
     auto water_flux = forcing->water_flux_fld.d();
+    /* M6.3 (zstar): real_salt_flux is stored by therm_ice (device-resident) and is_nonlinfs is
+     * captured by VALUE — a device lambda cannot call the host getter. Both are inert under
+     * linfs (rsf is a hard 0 from therm_ice, and is_nonlinfs is 0.0). */
+    auto rsflux     = forcing->real_salt_flux_fld.d();
+    const real_t is_nonlinfs = fesom_is_nonlinfs();
     auto vsalt      = forcing->virtual_salt_fld.d();
     auto rsalt      = forcing->relax_salt_fld.d();
     auto sw         = forcing->sw_3d_fld.d();
@@ -571,7 +581,8 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
                 const int    nz   = nzmin;
                 const real_t sval = trv(FESOM_NODE3D(n, nz, nl));
                 tr[nz] += bc_surface_kk(n, id, sval, dt, vcpw,
-                                        heat_flux, water_flux, vsalt, rsalt);
+                                        heat_flux, water_flux, vsalt, rsalt,
+                                        rsflux, is_nonlinfs);
             }
 
             /* Shortwave penetration (Fortran 990; id==1, sw_3d flux divergence). */
