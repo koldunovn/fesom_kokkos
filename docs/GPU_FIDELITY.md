@@ -1439,8 +1439,36 @@ of entries; these are 1 and 4). The coherence criterion (`OUTLIER_TOL=32`) handl
 even if the max crossed the ceiling, count 1 ≤ 32 would not fail the gate. **The gate is robust
 here, not lucky — but read the COUNT, never the max.**
 
-Perf, same job / same nodes / same day: knob-OFF 0.2715 s/step, all-3 0.2756 s/step (+1.5%).
-Every option knob in M6 is perf-neutral.
+### ⚠️ What the M6 perf numbers do and do NOT say
+
+Every M6 timing is **CORE2, 8 ranks (2 nodes, 8×A100), 15 timed steps**, taken as a sanity leg
+inside the fidelity-gate jobs. Both legs of each job ran back-to-back on the SAME nodes, which is
+the right way to compare — but the knob-OFF leg (an *identical* configuration) also ran in all four
+gate jobs on different nodes, and that gives the repeatability for free:
+
+| gate job | knob-OFF (identical config) | knob-ON | within-job Δ |
+|---|---|---|---|
+| TKE | 0.2658 | 0.2636 | −0.8% |
+| mEVP | **0.2806** | 0.2675 | −4.7% |
+| zstar | 0.2725 | 0.2709 | −0.6% |
+| all-3 | 0.2715 | 0.2756 | +1.5% |
+
+**The same configuration spans 0.2658 → 0.2806 — a 5.6% spread.** That is the noise floor (Levante
+node-mix + contention; cf. the standing rule never to compare a timing across jobs). **Every knob
+delta is smaller than it.** So the only defensible claim is **"no measurable cost at this size"** —
+NOT "+1.5%", and NOT "mEVP is 4.7% faster" (mEVP's baseline leg is the slowest of the four
+knob-OFF runs, i.e. that job landed on busier nodes).
+
+**No other mesh was measured. No strong scaling. No SYPD.** NG5/dars were out of M6 scope.
+
+⚠️ **And CORE2 at 8 ranks is the wrong regime to generalise from**: ~15.9k 2D-verts/rank
+(126,858 / 8). Per M5.22 the bottleneck FLIPS with per-rank load (4N compute-bound → 16N
+comm-bound), and the knobs add exactly the costs a small low-rank run hides — above all **zstar's
+restored `hnode_new` NOD3D halo, a full nl-level exchange EVERY step** (the rail M5.20 had deleted
+as a linfs-only optimisation). At NG5/16N, where halo `Waitall` dominates, that is the worst thing
+to add. **"Perf-neutral on CORE2/8" does not license "perf-neutral at scale."** The cheap way to
+find out is the per-rank-size proxy (reproduce the NG5@16N per-rank load on dars 8N / farc 1-4N)
+rather than a 16-node GPU allocation.
 
 ### M6.3 zstar — 1-yr CORE2 CUDA climate (year 1958, vectors rotated to geographic)
 

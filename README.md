@@ -249,8 +249,14 @@ to the pre-M6 model, and each was ported strictly faithfully to the C reference 
 | `FESOM_WHICH_EVP` | `0` \| `1` | `0` | sea-ice rheology (`1` = modified EVP, α=β=250) |
 | `FESOM_ALE` | `linfs` \| `zstar` | `linfs` | vertical coordinate (`zstar` = moving levels + Shchepetkin PGF + real freshwater fluxes) |
 
-An unrecognised value **aborts loudly** rather than silently falling back. Every knob is
-perf-neutral (0.264–0.276 s/step on CORE2, 8×A100 — within noise of the default 0.266).
+An unrecognised value **aborts loudly** rather than silently falling back.
+
+**Cost:** no measurable cost on CORE2 at 8 ranks (8×A100) — every knob's delta (−0.8% to +1.5%)
+is smaller than the 5.6% run-to-run spread of the *identical* default configuration across jobs.
+⚠️ That is the only size measured: **no large mesh, no strong scaling, no SYPD.** CORE2/8 is
+~16k 2D-verts/rank, and the bottleneck flips with per-rank load, so this does **not** establish
+cost at scale — zstar in particular adds a full NOD3D halo exchange every step. See
+`docs/GPU_FIDELITY.md` §M6.4.
 
 **Physics master switches:** `FESOM_NO_GMREDI`, `FESOM_NO_ICE_DYN`, `FESOM_NO_ICE_ADV`,
 `FESOM_NO_ICE_THERMO` — each skips its subsystem (the GMREDI one is the byte-identity gate).
