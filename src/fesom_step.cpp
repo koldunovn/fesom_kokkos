@@ -6,6 +6,7 @@
 #include <cmath>   /* sqrt used in the FESOM_DIAG_SPREAD block */
 #include "fesom_step.h"
 #include "fesom_ale.h"
+#include "fesom_ale_dump.h"   // M6.3 bisect rail (FESOM_ALE_DUMP_DIR) — mirrors the C oracle
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -102,6 +103,11 @@ int fesom_timestep(int                          step_n,
     }
     /* Local alias so the original ctx->gm isn't mutated. */
     struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
+
+    /* M6.3 bisect rail (C fesom_step.c:65). Surface freshwater/salt forcing ENTERING this
+     * step -- produced by the ice/coupling phase, which fesom_main runs BEFORE the ocean
+     * step. No-op unless FESOM_ALE_DUMP_DIR is set. */
+    fesom_ale_dump_forcing(step_n, forcing, mesh, p);
 
     /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3713-3752 mix_scheme_nmb).
      *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing_kk (K-Profile) — the CORE2
@@ -343,6 +349,7 @@ int fesom_timestep(int                          step_n,
     /* M5.23 (L3): pgf_x+pgf_y are same-kind (ELEM3D nc=1), both written by pressure_force above,
      * adjacent → one FUSED message/neighbour. compute_vel_rhs reads them on device. */
     fesom_halo_field2(aux->pgf_x_fld, aux->pgf_y_fld, FESOM_HALO_ELEM3D, nl, 1, p);
+    fesom_ale_dump_pgf(step_n, aux, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:131) */
     /* M5.9-pin (session 20): placebo sync dropped — compute_vel_rhs (substep 4) reads pgf_x/pgf_y on
      * the DEVICE (device-resident with its halo); the NaN-poison discriminator proved no model-feedback
      * host reader. The only host readers are the diagnostic min/max print + netCDF snapshot, both
@@ -617,6 +624,7 @@ int fesom_timestep(int                          step_n,
     int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
     dyn->d_eta_fld.sync_host();                            /* OUT: before the nod2D halo */
     fesom_exchange_nod2D(dyn->d_eta_fld.h_checked(), p);   /* Fortran solver.F90:279 */
+    fesom_ale_dump_sshsolve(step_n, dyn, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:199) */
 
     /*  9. velocity update — device. update_vel reads d_eta at the 3 element vertices
      *     (incl. HALO), so re-push d_eta after its halo (L30 cross-op re-push). */
@@ -749,6 +757,7 @@ int fesom_timestep(int                          step_n,
         }
     }
     /* eta_n already covers myDim+eDim because hbar/hbar_old are exchanged. */
+    fesom_ale_dump_hbar(step_n, dyn, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:313) */
 
     /* M4.2 FESOM_KK_VERIFY=ssh — gate the whole §5 block (substeps 7-11) against the C
      * twins. Runs AFTER eta_n so the host mirrors hold the full KK result; capture-before
@@ -821,6 +830,10 @@ int fesom_timestep(int                          step_n,
      * This is exactly the rail the M5.20 note above predicted would have to come back. */
     if (fesom_ale_is_zstar())
         fesom_halo_field(mesh->hnode_new_fld, FESOM_HALO_NOD3D, nl, 1, p);
+
+    /* M6.3 bisect rail (C fesom_step.c:344) — right after vert_vel + exchanges, BEFORE the
+     * GM bolus add further down, which modifies dyn->w in place. */
+    fesom_ale_dump_vertvel(step_n, dyn, mesh, p);
 
     /* 12c. vertical CFL. IN: w (just halo'd → host-current), hnode_new (Synced from 12a).
      *  Per-node accumulation into the node's OWN column → race-free (NOT a scatter).
@@ -1089,6 +1102,7 @@ int fesom_timestep(int                          step_n,
      * boundary); the ~10 next-step IN re-pushes are removed. NOT snap-out. */
     fesom_halo_field(mesh->hnode_fld, FESOM_HALO_NOD3D,  nl, 1, p);   /* M5.13f device-halo (hnode) */
     fesom_halo_field(mesh->helem_fld, FESOM_HALO_ELEM3D, nl, 1, p);   /* M5.13f device-halo (helem) */
+    fesom_ale_dump_thickness(step_n, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:491) */
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */

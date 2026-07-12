@@ -291,7 +291,9 @@ static void kpp_ri_iwmix(fesom_kpp *k, const struct fesom_aux *aux,
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-            real_t dz_inv = 1.0 / (mesh->Z[nz - 1] - mesh->Z[nz]);   /* > 0 */
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_kpp.c:238). */
+            real_t dz_inv = 1.0 / (mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                                 - mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)]);   /* > 0 */
             real_t du = dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 0]
                       - dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 0];
             real_t dv = dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 1]
@@ -785,7 +787,8 @@ static void kpp_blmix(fesom_kpp *k, const struct fesom_mesh *mesh)
         int knp1 = kn + 1; if (knp1 > nzmax) knp1 = nzmax;   /* MIN(kn+1, nl1) */
 
         /* interior viscosities + one-sided derivatives at hbl (eqn 18, :1220-1242) */
-        real_t delhat = fabs(mesh->Z[kn]) - hbl;
+        /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_kpp.c:516). */
+        real_t delhat = fabs(mesh->Z_3d_n[FESOM_NODE3D(n, kn, nl)]) - hbl;
         real_t R      = 1.0 - delhat / dthick[kn];
         real_t dvdzup, dvdzdn;
         dvdzup = (dcol[knm1][0] - dcol[kn][0]) / dthick[kn];
@@ -821,7 +824,8 @@ static void kpp_blmix(fesom_kpp *k, const struct fesom_mesh *mesh)
         real_t sig, a1, a2, a3, Gm, Gs, Gt;
         for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
             if (nz >= kbl) break;
-            sig   = fabs(mesh->Z[nz]) / (hbl + KPP_EPSLN);
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_kpp.c:553). */
+            sig   = fabs(mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)]) / (hbl + KPP_EPSLN);
             sigma = stable * sig + (1.0 - stable) * fmin(sig, KPP_EPSILON);
             zehat = KPP_VONK * sigma * hbl * bfsfc;
             kpp_wscale(k, zehat, us, &wm, &ws);
@@ -934,7 +938,12 @@ static void kpp_blmix_kk(fesom_kpp *k, const struct fesom_mesh *mesh)
             int knm1 = kn - 1; if (knm1 < nzmin) knm1 = nzmin;
             int knp1 = kn + 1; if (knp1 > nzmax) knp1 = nzmax;
 
-            real_t delhat = Kokkos::fabs(Z(kn)) - hbl;
+            /* M6.3 (Z7) — ⚠️ THE zstar BIT-ID BUG. The C reads Z_3d_n (fesom_kpp.c:516), which is
+             * LIVE under zstar. This kernel read the STATIC Z. Invisible under linfs (Z_3d_n == Z
+             * always) AND at cold start (hbar==0 => Z_3d_n == Z BITWISE), so it survived every gate
+             * and only bit from step 2 on: a wrong delhat moves the KPP boundary-layer shape
+             * function => Kv/Av shift ~9e-5 => u/v via impl_vert_visc => ssh_rhs => eta_n. */
+            real_t delhat = Kokkos::fabs(Z3d(FESOM_NODE3D(n, kn, nl))) - hbl;
             real_t R      = 1.0 - delhat / dthick[kn];
             real_t dvdzup, dvdzdn;
             dvdzup = (dcol[knm1][0] - dcol[kn][0]) / dthick[kn];

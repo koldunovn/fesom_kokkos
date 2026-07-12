@@ -172,7 +172,9 @@ void fesom_pp_mixing(const struct fesom_mesh *mesh,
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-            real_t dz = mesh->Z[nz - 1] - mesh->Z[nz];      /* > 0 */
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_pp.c:108). */
+            real_t dz = mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                      - mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)];   /* > 0 */
             real_t dz_inv = 1.0 / dz;
             real_t du = dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 0]
                       - dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 0];

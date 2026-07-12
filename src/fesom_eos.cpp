@@ -186,9 +186,10 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
            db_max accumulates the max buoyancy-gradient over the full column,
            used by MLD1 (Large et al. 1997). Fortran lines 314-335. */
         real_t db_max = 0.0;
-        real_t z_nzmin = mesh->Z[nzmin];
+        /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_eos.c:124,126). */
+        real_t z_nzmin = mesh->Z_3d_n[FESOM_NODE3D(n, nzmin, nl)];
         for (int nz = nzmin; nz < nzmax; ++nz) {
-            real_t z = mesh->Z[nz];
+            real_t z = mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)];
             real_t bulk = bulk_0[nz] + z*(bulk_pz[nz] + z*bulk_pz2[nz]);
             real_t r = bulk * rhopot[nz] / (bulk + 0.1 * z * state_eq_int) - rho_ref;
             rho[nz] = r;
@@ -216,7 +217,8 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
              * non-zero divisor; at that level dbsfc1 is 0 anyway since
              * rho_surf == r_full, so the term contributes nothing. */
             int nz_eff = (nz > nzmin) ? nz : (nzmin + 1);
-            real_t denom = fabs(z_nzmin - mesh->Z[nz_eff]);
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_eos.c:155). */
+            real_t denom = fabs(z_nzmin - mesh->Z_3d_n[FESOM_NODE3D(n, nz_eff, nl)]);
             real_t cand = dbsfc1 / denom;
             if (cand > db_max) db_max = cand;
         }
@@ -255,12 +257,15 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
            (Phase G2a): the shallowest level where N² > db_max. */
         int mld1_done = 0;
         for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-            real_t zmean   = 0.5 * (mesh->Z[nz - 1] + mesh->Z[nz]);
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_eos.c:190-191,196-197). */
+            real_t zmean   = 0.5 * (mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                                  + mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)]);
             real_t bulk_up = bulk_0[nz - 1] + zmean*(bulk_pz[nz - 1] + zmean*bulk_pz2[nz - 1]);
             real_t bulk_dn = bulk_0[nz    ] + zmean*(bulk_pz[nz    ] + zmean*bulk_pz2[nz    ]);
             real_t rho_up  = bulk_up * rhopot[nz - 1] / (bulk_up + 0.1 * zmean * state_eq_int);
             real_t rho_dn  = bulk_dn * rhopot[nz    ] / (bulk_dn + 0.1 * zmean * state_eq_int);
-            real_t dz_inv  = 1.0 / (mesh->Z[nz - 1] - mesh->Z[nz]);
+            real_t dz_inv  = 1.0 / (mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                                  - mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)]);
             real_t bv = -g * dz_inv * (rho_up - rho_dn) / rho_ref;
             aux->bvfreq[FESOM_NODE3D(n, nz, nl)] = bv;
 
@@ -839,7 +844,8 @@ void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
         for (int nz = nzmin; nz < nzmax; ++nz) {
             real_t t1 = T[FESOM_NODE3D(n, nz, nl)] * 1.00024;
             real_t s1 = S[FESOM_NODE3D(n, nz, nl)];
-            real_t p1 = fabs(mesh->Z[nz]);
+            /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_eos.c:530). */
+            real_t p1 = fabs(mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)]);
 
             real_t t1_2 = t1*t1;
             real_t t1_3 = t1_2*t1;

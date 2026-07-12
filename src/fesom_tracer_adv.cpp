@@ -688,7 +688,8 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
             real_t qu = (Tu   - Tdn) / (Z_u   - Z_dn);
             real_t qd = (Tum2 - Tum1)/ (Z_um2 - Z_um1);
 
-            real_t zb = mesh->zbar[nz];
+            /* M6.3 (Z7): the C reads zbar_3d_n, LIVE under zstar (fesom_tracer_adv.c:690). */
+            real_t zb = mesh->zbar_3d_n[FESOM_NODE3D(n, nz, nl)];
             real_t Tmean1 = Tu  + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
             real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
             real_t w_iface = W[FESOM_NODE3D(n, nz, nl)];

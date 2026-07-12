@@ -225,9 +225,11 @@ static void load_one_variable(int ncid, const char *varname,
         /* Vertical interpolation onto FESOM Z[k] (lines 463-482, non-cavity). */
         for (int k = ul1; k < nl1; ++k) {
             /* Fortran: -Z_3d_n[k, ii] (positive depth in metres). */
-            /* M6.3 (Z7): the C reads Z_3d_n (fesom_phc.c:227). At IC time zstar has not moved
-             * the levels yet, so this is the same value -- but keep it faithful. */
-            double depth_pos = -(double)mesh->Z_3d_n[FESOM_NODE3D(ii, k, mesh->nl)];
+            /* M6.3 (Z7): the C oracle reads the STATIC mesh->Z[k] here (fesom_phc.c:228) even
+             * though its own comment cites the Fortran's Z_3d_n -- so we do too (golden rule:
+             * faithful to the C, never "fix" its asymmetries). Inert either way: PHC runs once at
+             * IC, where hbar==0 => Z_3d_n == Z BITWISE. */
+            double depth_pos = -(double)mesh->Z[k];
             int d_indx = binarysearch_d(Ndepth, nc_depth, depth_pos);
             if (d_indx >= 0 && d_indx < Ndepth - 1) {
                 int d_indx_p1 = d_indx + 1;
@@ -237,9 +239,9 @@ static void load_one_variable(int ncid, const char *varname,
                 if (d1 < 0.99*PHC_DUMMY && d2 < 0.99*PHC_DUMMY) {
                     double cf_a = (d2 - d1) / delta_d;
                     double cf_b = d1 - cf_a * nc_depth[d_indx];
-                    /* Fortran: -cf_a * Z_3d_n[k, ii] + cf_b */
+                    /* Fortran: -cf_a * Z_3d_n[k, ii] + cf_b. C reads static Z (fesom_phc.c:240). */
                     out[FESOM_NODE3D(ii, k, nl)] =
-                        (real_t)(-cf_a * (double)mesh->Z_3d_n[FESOM_NODE3D(ii, k, mesh->nl)] + cf_b);
+                        (real_t)(-cf_a * (double)mesh->Z[k] + cf_b);
                 }
             } else if (d_indx == -1) {
                 /* Above the topmost PHC depth — use surface value. */

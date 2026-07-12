@@ -60,7 +60,7 @@ set(FESOM_SRC
   src/fesom_main.cpp        src/fesom_mesh.cpp        src/fesom_mpi.cpp
   src/fesom_dyn.cpp         src/fesom_tracers.cpp     src/fesom_aux.cpp
   src/fesom_forcing.cpp     src/fesom_ic.cpp          src/fesom_eos.cpp
-  src/fesom_ale.cpp         src/fesom_ssh.cpp         src/fesom_momentum.cpp
+  src/fesom_ale.cpp         src/fesom_ale_dump.cpp    src/fesom_ssh.cpp         src/fesom_momentum.cpp
   src/fesom_tracer_adv.cpp  src/fesom_pp.cpp          src/fesom_step.cpp
   src/fesom_forcing_analytical.cpp                    src/fesom_io.cpp
   src/fesom_constants.cpp   src/fesom_phc.cpp         src/fesom_jra55.cpp
