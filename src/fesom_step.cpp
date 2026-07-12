@@ -17,6 +17,7 @@
 #include "fesom_profile.hpp"       // M5.6: per-substep host+device timing (FESOM_STEP_PROFILE)
 #include "fesom_ice.h"
 #include "fesom_kpp.h"
+#include "fesom_tke.h"
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_partit.h"
@@ -102,18 +103,30 @@ int fesom_timestep(int                          step_n,
     /* Local alias so the original ctx->gm isn't mutated. */
     struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
 
-    /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3515 mix_scheme_nmb).
-     *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing (K-Profile) — the CORE2
+    /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3713-3752 mix_scheme_nmb).
+     *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing_kk (K-Profile) — the CORE2
      *                                    production scheme (mix_scheme='KPP'),
      *                                    validated end-to-end (K0-K10).
-     *   FESOM_MIX_SCHEME=PP            → fesom_pp_mixing (Pacanowski-Philander), opt-out
-     * Env knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after either
-     * scheme (Fortran calls it in both branches, :3524 / :3531). */
+     *   FESOM_MIX_SCHEME=PP            → fesom_pp_mixing_kk (Pacanowski-Philander), opt-out
+     *   FESOM_MIX_SCHEME=TKE|cvmix_TKE → fesom_tke_mixing_kk (CVMix classical TKE,
+     *                                    mix_scheme_nmb==5, oce_ale.F90:3749-52) — M6.1
+     * mo_convect runs after EVERY scheme (Fortran calls it in each branch, :3722/:3729/:3752).
+     *
+     * M6.1: transcribed arg-for-arg from the C oracle (fesom_step.c:76-88) so the string
+     * matching is identical — a leading 'P'/'p' selects PP; only the exact strings "TKE" or
+     * "cvmix_TKE" select TKE; everything else (incl. unset) is KPP. Anything looser here
+     * would silently diverge from the oracle on a typo'd knob. */
+    enum { FESOM_MIX_KPP, FESOM_MIX_PP, FESOM_MIX_TKE };
     static int s_mix_env_loaded = 0;
-    static int s_use_kpp        = 1;
+    static int s_mix            = FESOM_MIX_KPP;
     if (!s_mix_env_loaded) {
         const char *e = getenv("FESOM_MIX_SCHEME");
-        s_use_kpp = !(e && (e[0] == 'P' || e[0] == 'p'));   /* default KPP; =PP to opt out */
+        if (e && (e[0] == 'P' || e[0] == 'p'))
+            s_mix = FESOM_MIX_PP;
+        else if (e && (strcmp(e, "TKE") == 0 || strcmp(e, "cvmix_TKE") == 0))
+            s_mix = FESOM_MIX_TKE;
+        else
+            s_mix = FESOM_MIX_KPP;                          /* default */
         s_mix_env_loaded = 1;
     }
 
@@ -355,7 +368,7 @@ int fesom_timestep(int                          step_n,
      * KPP already read uvnode on the device via its device-resident halo. (uvnode is not a snapshot
      * output; the verify-only host read is gated in fesom_main.cpp.) */
 
-    if (s_use_kpp) {
+    if (s_mix == FESOM_MIX_KPP) {
         /* KPP on device (M2.3). It writes aux->Av (elements) + the single aux->Kv (T-channel,
          * oce_ale.F90:3518-3522) and does its OWN internal halo exchanges (bracketed inside
          * fesom_kpp_mixing_kk). INPUT rail: push every host-authoritative input KPP reads to
@@ -395,6 +408,22 @@ int fesom_timestep(int                          step_n,
             aux->Kv_fld.sync_host();
             fesom_kpp_verify(ctx->kpp, aux, tracers, forcing, dyn, mesh, p, step_n);
         }
+    } else if (s_mix == FESOM_MIX_TKE) {
+        /* CVMix classical-TKE (M6.1; FESOM_MIX_SCHEME=TKE). Like KPP, the driver owns its
+         * OWN internal halo exchanges (tke_Kv, tke_Av — see fesom_tke.h) and writes
+         * aux->Kv (node, full copy) + aux->Av (element, OWNED only; its halo comes from the
+         * shared post-mo_convect ELEM3D exchange below, exactly as for KPP/PP).
+         *
+         * INPUT rail: the C driver reads stress_node_surf (→ forc_normstress), UVnode,
+         * bvfreq, and the vertical geometry. bvfreq and uvnode are device-resident from
+         * substep 1/3 (M5.5/M5.4) — no re-push. forcing is host-produced, so its
+         * stress_node_surf needs the same coherence push KPP does; forcing is const in the
+         * step, so the const_cast is a pure host→device copy with no logical mutation
+         * (D21, same as the KPP branch above). Task 1.3 owns the rest of the rail. */
+        auto *fnc = const_cast<struct fesom_forcing *>(forcing);
+        fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+
+        fesom_tke_mixing_kk(ctx->tke, aux, forcing, dyn, mesh, p);
     } else {
         /* PP branch (opt-in; FESOM_MIX_SCHEME=PP). INPUT rail: bvfreq (host-written by
          * smooth_nod3D, substep 1) → device. M5.4: uvnode is device-resident (substep 3, no re-push). */

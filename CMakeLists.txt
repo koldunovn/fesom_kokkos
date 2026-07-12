@@ -70,6 +70,7 @@ set(FESOM_SRC
   src/fesom_ice_thermo.cpp  src/fesom_ice_coupling.cpp src/fesom_ice_evp.cpp
   src/fesom_ice_fct.cpp     src/fesom_gm.cpp          src/fesom_kpp.cpp
   src/fesom_calendar.cpp    src/fesom_io_stream.cpp   src/fesom_io_stream_dispatch.cpp
+  src/fesom_tke.cpp
   src/fesom_io_config.cpp
 )
 add_executable(fesom_port ${FESOM_SRC})

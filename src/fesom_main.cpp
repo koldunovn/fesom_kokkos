@@ -9,6 +9,7 @@
 #include "fesom_forcing_analytical.h"
 #include "fesom_gm.h"
 #include "fesom_kpp.h"
+#include "fesom_tke.h"
 #include "fesom_ic.h"
 #include "fesom_ice.h"
 #include "fesom_ice_evp.h"   // M5.8: fesom_ice_evp_free() — release the EVP coastal mask pre-finalize
@@ -425,6 +426,32 @@ int main(int argc, char **argv)
     fesom_kpp_init(&kpp);
     fesom_kpp_dump_init(&kpp, mpi.mype);          /* K1 validation dump (gated) */
     fesom_kpp_dump_wscale_sweep(&kpp, mpi.mype);  /* K2 validation dump (gated) */
+
+    /* CVMix-TKE mixing state (M6.1; mirrors g_cvmix_tke — the third FESOM_MIX_SCHEME
+     * option). Allocated ONLY when selected, matching the C (fesom_main.c:357-377) and the
+     * Fortran (oce_setup_step.F90:185-187 runs the init only for mix_scheme_nmb==5). The
+     * string test is the C's, verbatim. Diag slabs (13×[N*nl]) additionally need
+     * FESOM_TKE_DIAG=1 — or an FESOM_TKE_DUMP_DIR (whose dump reads the stored slabs).
+     * Model state is byte-identical either way (the C's T3 gate). */
+    fesom_tke tke;
+    int use_tke = 0;
+    {
+        const char *e = getenv("FESOM_MIX_SCHEME");
+        use_tke = (e && (strcmp(e, "TKE") == 0 || strcmp(e, "cvmix_TKE") == 0));
+        if (use_tke) {
+            const char *d = getenv("FESOM_TKE_DIAG");
+            int diag_on = (d && atoi(d)) || (fesom_tke_dump_dir() != NULL);
+            fesom_tke_alloc(&tke, &mesh, diag_on);
+            if (mpi.mype == 0) {
+                printf("TKE mixing selected (FESOM_MIX_SCHEME=%s): cvmix_TKE port, "
+                       "cd=3.75, diag %s\n", e, diag_on ? "ON" : "off");
+                if (fesom_tke_dump_dir())
+                    printf("  NOTE: FESOM_TKE_DUMP_DIR is set — the Kokkos port STORES the "
+                           "diag slabs but does NOT write the C's dump files. Use the C "
+                           "oracle binary for dump-based bisection.\n");
+            }
+        }
+    }
 
     /* Sea-ice state (Phase A: allocator + no-op driver only).
      * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs
@@ -918,6 +945,7 @@ skip_rest_state:
         ctx.ice    = &ice;
         ctx.gm     = &gm;
         ctx.kpp    = &kpp;
+        ctx.tke    = use_tke ? &tke : NULL;   /* NULL unless FESOM_MIX_SCHEME selected TKE */
         ctx.jra    = use_jra ? &jra : NULL;
         ctx.sr     = use_sr  ? &sr  : NULL;
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
@@ -1398,6 +1426,7 @@ skip_rest_state:
     fesom_ice_free    (&ice);
     fesom_gm_free     (&gm);
     fesom_kpp_free    (&kpp);
+    if (use_tke) fesom_tke_free(&tke);   /* only allocated when TKE was selected */
     fesom_aux_free    (&aux);
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);

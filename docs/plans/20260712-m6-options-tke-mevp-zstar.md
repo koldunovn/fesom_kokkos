@@ -318,23 +318,40 @@ Port the C's **gate-only abort** too (`fesom_tke.c:246-253`): fail loudly if
 | `opt_visc` | 7 | as in the linfs pair |
 | `alpha` / `theta` | module defaults | not in namelist.dyn |
 
-### Task 1.1: M6.1 — three-way mixing dispatch + TKE state
+### Task 1.1: M6.1 — three-way mixing dispatch + TKE state ✅ DONE (2026-07-12)
 
 **Files:**
-- Create: `src/fesom_tke.h`, `src/fesom_tke.cpp` (state struct, alloc, IC, dispatch entry)
-- Modify: `src/fesom_step.cpp` (dispatch `:105-118` → enum KPP/PP/TKE; branch at `:358`)
-- Modify: `src/fesom_main.cpp` (alloc/init call, ctx wiring)
-- Modify: `CMakeLists.txt` (new source files)
+- Create: `src/fesom_tke.h`, `src/fesom_tke.cpp` (state struct, alloc, dispatch entry) ✅
+- Create: `src/fesom_cvmix_tke.hpp` (params block — pulled forward from Task 1.2, see note) ✅
+- Create: `jobs/job_m6_gate_serial` (the reusable knob-OFF byte gate) ✅
+- Modify: `src/fesom_step.cpp` / `.h`, `src/fesom_main.cpp`, `CMakeLists.txt` ✅
 
-- [ ] extend the `FESOM_MIX_SCHEME` parse to `{KPP(default), PP, TKE}` mirroring the C
-      semantics exactly (C `fesom_main.c` / step dispatch; same string matching)
-- [ ] transcribe the TKE state block from `fesom_tke.c`: `tke` (3D node, prognostic),
-      `tke_Kv`, `tke_Av`, surface-forcing arrays, the 13 diag slabs — DualViews, literal
-      sizes, C's init values (IC transcribed exactly)
-- [ ] allocate only when knob=TKE (mirror C's `mix_scheme_nmb==5`-gated init) unless C
-      allocates unconditionally — match C
-- [ ] knob-OFF byte gate: 8r/20-step run vs `m6_baseline_serial` → bit-identical
-- [ ] build-cuda compiles clean (no gate run needed yet — no device kernels added)
+- [x] `FESOM_MIX_SCHEME` parse extended to `{KPP(default), PP, TKE}` — transcribed
+      arg-for-arg from the C (`fesom_step.c:76-88`): leading `P`/`p` → PP; **exact** strings
+      `TKE` or `cvmix_TKE` → TKE; everything else (incl. unset) → KPP. Anything looser would
+      diverge from the oracle on a typo'd knob.
+- [x] TKE state transcribed from `fesom_tke.{h,c}`: `tke` (prognostic — the Fortran comment
+      calling it "diagnostic" is wrong), `tke_Av`, `tke_Kv` `[N*nl]`; `forc_normstress` /
+      `forc_botfrict` / `forc_rhosurf` `[N]`; the 13 diag slabs `[N*nl]` gated by `diag_on`.
+      All `fesom::Field` + raw non-owning alias (D12/M2.3 pattern, as `fesom_kpp.h`);
+      zero-init via `Field::alloc` (== the C's `calloc`). `TKE_NL_MAX=128` guard ported.
+- [x] allocated ONLY when the knob selects TKE — matches the C (`fesom_main.c:357-377`) and
+      the Fortran (`oce_setup_step.F90:185-187`, init runs only for `mix_scheme_nmb==5`).
+      `diag_on = FESOM_TKE_DIAG || FESOM_TKE_DUMP_DIR` exactly as C.
+- [x] **knob-OFF byte gate: ALL FIELDS BIT-IDENTICAL** vs `m6_baseline_serial` (SLURM 26210193).
+- [x] `build-cuda` compiles clean (no device kernels added yet).
+- [x] ➕ **dispatch reachability smoke** (SLURM 26210206, not in the original plan): with
+      `FESOM_MIX_SCHEME=TKE` the state allocates AND the step reaches the TKE branch (the
+      Task-1.3 stub aborts, exit 134). Without this, a wrong string match would silently run
+      KPP and make Task 1.5's bit-id gate fail in a maximally confusing way.
+
+**Note on file staging:** `src/fesom_cvmix_tke.hpp` was created here (not in Task 1.2) holding
+just the parameter block, because `fesom_tke_alloc`'s gate-only guard needs it — exactly as in
+the C, where the params live in `fesom_cvmix_tke.h` and `fesom_tke_alloc` calls
+`fesom_cvmix_init_tke`. Task 1.2 appends the column core to the same file. The 15 params are
+`constexpr` (device-usable with no `__constant__` copy or params-struct push), so the C's
+runtime abort on an unported option additionally becomes a **compile-time `static_assert`** —
+strictly stronger; the runtime check is kept too.
 
 ### Task 1.2: M6.1 — cvmix-TKE column core as device function
 
