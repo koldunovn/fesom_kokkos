@@ -1,0 +1,146 @@
+#!/bin/bash
+#SBATCH --job-name=m6_oracle_cert
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/cert.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/cert.%j.err
+#
+# M6 Task 0.1 — ORACLE-SWITCH CERTIFICATION.
+#
+# The M6 campaign replaces the old C oracle (fesom2_port) with the zstar tree
+# (fesom2_port_zstar @ df8b9a8), which carries TKE + mEVP + zstar. Before any of
+# those knobs is trusted, the NEW oracle must be proven to still reproduce the
+# port's DEFAULT config bit-for-bit -- i.e. with every M6 knob unset the zstar
+# tree is the same model the Kokkos port was validated against.
+#
+# Three legs, one node:
+#   A) C oracle   fesom2_port_zstar @ df8b9a8, fresh Release build (build-m6oracle)
+#   B) Kokkos-Serial  port_kokkos @ HEAD (m5.24-tdma-scaling lineage), fresh build-serial
+#   C) gates:  (1) C-oracle  vs Kokkos-Serial  -> ALL FIELDS BIT-IDENTICAL  (the certification)
+#              (2) Kokkos-Serial vs serref_m522_saved -> ALL FIELDS BIT-IDENTICAL
+#                  (regression check: today's rebuild has not drifted from the standing oracle)
+# On PASS, leg B's snapshots become the M6 knob-OFF baseline (m6_baseline_serial).
+#
+# Config = the standard bit-id run (plan Technical Details): CORE2 dist_8, 8 ranks,
+# dt=1800, 20 steps, snap_every=10.
+#
+# L18: OMPI_MCA_btl_vader_single_copy_mechanism=none on BOTH legs. The vader CMA
+# single-copy path makes MPI_Gatherv (the snapshot gather) buffer-address-dependent --
+# deterministic WITHIN a build but NOT ACROSS builds. This job compares a C binary
+# against a Kokkos binary, so it is exactly the cross-build case L18 warns about.
+# Both env.sh files are byte-identical (same gcc-11 / openmpi-4.1.2 / netcdf-c).
+
+set -u
+
+C_REPO=/home/a/a270088/port2/fesom2_port_zstar
+K_REPO=/home/a/a270088/port_kokkos
+C_BIN=$C_REPO/build-m6oracle/fesom_port          # fresh Release build @ df8b9a8
+K_BIN=$K_REPO/build-serial/fesom_port            # fresh build @ port_kokkos HEAD
+
+# M6 PRIVATE MESH -- not /pool. The shared /pool CORE2 mesh had nlvls.out/elvls.out
+# replaced on 2026-07-03 (2 nodes / 4 elems, Ross Sea shelf, shallower), which silently
+# breaks bit-comparability with every reference archived before that date. This copy
+# restores the 2026-05-28 bathymetry that all the C/Fortran refs and serref_m522_saved
+# were produced on. See $MESH/MESH_PROVENANCE.md. ALL M6 jobs must use it.
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=20
+SNAP_EVERY=10
+YEAR=1958
+
+BASE=/work/ab0995/a270088/port2/m6/oracle_cert
+OUT_C=$BASE/c_oracle_default
+OUT_K=$BASE/kokkos_serial_default
+BASELINE=/work/ab0995/a270088/port2/m6_baseline_serial
+
+rm -rf "$OUT_C" "$OUT_K"; mkdir -p "$OUT_C" "$OUT_K"
+
+# All three M6 knobs OFF (= the port's default config: linfs + KPP + standard EVP),
+# and every C-side debug/dump rail explicitly disabled.
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_ALE_DUMP_DIR FESOM_ALE_DUMP_STEPS FESOM_TKE_DUMP_DIR FESOM_TKE_REPLAY_DIR
+unset FESOM_TKE_DIAG FESOM_TKE_HALO_PROBE FESOM_KPP_DUMP_DIR FESOM_EVP_DUMP_DIR
+unset FESOM_IO_VECTOR_FRAME FESOM_KK_VERIFY
+
+# ---------------------------------------------------------------- leg A: C oracle
+echo "=============== LEG A: C oracle (fesom2_port_zstar) ==============="
+source /sw/etc/profile.levante
+source "$C_REPO/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none     # L18 deterministic gather
+ulimit -s 204800
+
+( cd "$C_REPO" && git rev-parse HEAD ) > "$OUT_C/SHA.txt"
+( cd "$C_REPO" && git status --short ) > "$OUT_C/status.txt"
+echo "C  bin: $C_BIN  ($(cd "$C_REPO" && git rev-parse --short HEAD))"
+
+srun -l "$C_BIN" "$MESH" "$OUT_C" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT_C/run.log" 2> "$OUT_C/run.err"
+echo "leg A exit: $?"
+tail -3 "$OUT_C/run.log"
+
+# ------------------------------------------------------- leg B: Kokkos-Serial
+echo
+echo "=============== LEG B: Kokkos-Serial (port_kokkos) ==============="
+source "$K_REPO/env.sh"                                   # byte-identical modules to the C env
+export OMPI_MCA_btl_vader_single_copy_mechanism=none      # L18, same as leg A
+
+( cd "$K_REPO" && git rev-parse HEAD ) > "$OUT_K/SHA.txt"
+( cd "$K_REPO" && git status --short ) > "$OUT_K/status.txt"
+echo "KK bin: $K_BIN  ($(cd "$K_REPO" && git rev-parse --short HEAD))"
+
+srun -l "$K_BIN" "$MESH" "$OUT_K" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT_K/run.log" 2> "$OUT_K/run.err"
+echo "leg B exit: $?"
+tail -3 "$OUT_K/run.log"
+
+# ------------------------------------------------------------------ leg C: gates
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+echo
+echo "=========== GATE 1 (THE CERTIFICATION): C oracle vs Kokkos-Serial ==========="
+"$PY" "$K_REPO/scripts/diff_snap.py" "$OUT_C" "$OUT_K"
+G1=$?
+echo "gate1 rc=$G1"
+
+echo
+echo "=========== GATE 2 (regression): Kokkos-Serial vs serref_m522_saved ==========="
+"$PY" "$K_REPO/scripts/diff_snap.py" \
+      /work/ab0995/a270088/port2/kokkos_gpu_runs/serref_m522_saved "$OUT_K"
+G2=$?
+echo "gate2 rc=$G2"
+
+echo
+if [ "$G1" -eq 0 ] && [ "$G2" -eq 0 ]; then
+    echo "=== M6 ORACLE CERTIFIED: fesom2_port_zstar@df8b9a8 == Kokkos-Serial@HEAD, all fields ==="
+    rm -rf "$BASELINE"; mkdir -p "$BASELINE"
+    cp "$OUT_K"/snap_*.nc "$OUT_K"/SHA.txt "$OUT_K"/run.log "$BASELINE"/
+    cat > "$BASELINE/PROVENANCE.md" <<EOF
+# M6 knob-OFF baseline (Kokkos-Serial, default config)
+
+Produced by jobs/job_m6_oracle_cert (SLURM job $SLURM_JOB_ID).
+
+- binary      : $K_BIN
+- port_kokkos : $(cd "$K_REPO" && git rev-parse HEAD)
+- config      : CORE2 dist_8, 8 ranks, dt=$DT, $NSTEPS steps, snap_every=$SNAP_EVERY, year $YEAR
+- knobs       : FESOM_ALE / FESOM_MIX_SCHEME / FESOM_WHICH_EVP all UNSET (linfs + KPP + std EVP)
+- MPI         : OMPI_MCA_btl_vader_single_copy_mechanism=none (L18)
+- mesh        : $MESH   (M6 private copy -- NOT /pool; see \$MESH/MESH_PROVENANCE.md)
+- mesh levels : sum(nlvls)=$(awk '{s+=\$1} END {print s}' "$MESH/nlvls.out")  sum(elvls)=$(awk '{s+=\$1} END {print s}' "$MESH/elvls.out")
+                (the 2026-05-28 bathymetry = the one every archived reference used;
+                 /pool's current nlvls/elvls differ -- 2 Ross Sea nodes, replaced 2026-07-03)
+- certified   : bit-identical to C oracle fesom2_port_zstar@$(cd "$C_REPO" && git rev-parse --short HEAD)
+                AND to the standing serref_m522_saved oracle (2026-05-31).
+
+Every M6 task that touches shared code re-runs this config and must reproduce these
+snapshots byte-for-byte (the knob-OFF byte gate).
+EOF
+    echo "baseline saved -> $BASELINE"
+    ls "$BASELINE"
+else
+    echo "=== CERTIFICATION FAILED (gate1=$G1 gate2=$G2) -- STOP, do not proceed to Task 1.1 ==="
+fi

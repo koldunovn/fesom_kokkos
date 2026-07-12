@@ -162,49 +162,161 @@ test). Every task ends with its gate rung; a task is not done until its gate pas
 
 ## Implementation Steps
 
-### Task 0.1: Phase 0 — oracle-switch certification
+### Task 0.1: Phase 0 — oracle-switch certification ✅ DONE (2026-07-12)
 
 **Files:**
-- Create: `jobs/job_m6_oracle_cert` (C-oracle + Kokkos-Serial paired short runs)
-- Modify: `docs/REFERENCE_RUNS.md` (record the oracle switch)
+- Create: `jobs/job_m6_oracle_cert` (C-oracle + Kokkos-Serial paired short runs) ✅
+- Modify: `docs/REFERENCE_RUNS.md` (record the oracle switch) ✅
 
-- [ ] rebuild the C oracle fresh: `fesom2_port_zstar` @ `df8b9a8`, clean tree, CMake
-      release build; record commit + flags (its `build/fesom_port` exists — rebuild anyway)
-- [ ] run C oracle at DEFAULT config (linfs+KPP+EVP, CORE2 dist_8, 8r, dt=1800, 20 steps,
-      snap_every=10) on SLURM; run current Kokkos-Serial (`m5.24-tdma-scaling` binary)
-      with identical CLI
-- [ ] `diff_snap.py` C-oracle vs Kokkos-Serial → must be ALL-FIELDS BIT-IDENTICAL;
-      this certifies the zstar-tree C binary as the new oracle (their `z0/t0/m1_byteident`
-      gates make drift unlikely; if diff → STOP, bisect the C tree history, do not proceed)
-- [ ] save the fresh Kokkos-Serial snapshot dir as the M6 knob-OFF baseline
-      (`/work/ab0995/a270088/port2/m6_baseline_serial/`)
-- [ ] confirm `bc_index_nod2D_fld` is host-only today (`fesom_ice.cpp:232-241` populates
-      host, no `sync_device()`; std-EVP uses `coastal` instead) — the device push is
-      Task 2.1's explicit action, NOT a verify (Serial masks a stale device mirror)
+- [x] rebuild the C oracle fresh: `fesom2_port_zstar` @ `df8b9a8`, CMake Release into
+      `build-m6oracle/` (non-destructive — the pre-existing `build/` predates `75406d3`
+      and is left intact). Flags: `-O3 -DNDEBUG`, mpicc/openmpi-4.1.2, gcc-11.
+      Both trees' `env.sh` are byte-identical.
+- [x] run C oracle at DEFAULT config (linfs+KPP+EVP, CORE2 dist_8, 8r, dt=1800, 20 steps,
+      snap_every=10) on SLURM; run Kokkos-Serial (freshly rebuilt at HEAD) same CLI.
+      Both legs `OMPI_MCA_btl_vader_single_copy_mechanism=none` (L18: the vader CMA gather
+      is deterministic WITHIN a build but not ACROSS builds — and this is exactly a
+      cross-build comparison).
+- [x] `diff_snap.py` C-oracle vs Kokkos-Serial → **ALL FIELDS BIT-IDENTICAL** (3 snapshots,
+      27 vars; the printed step diagnostics match digit-for-digit too). SLURM 26210028.
+      **The zstar-tree C binary is certified as the M6 oracle.**
+- [x] M6 knob-OFF baseline saved → `/work/ab0995/a270088/port2/m6_baseline_serial/`
+      (+ `PROVENANCE.md` recording binary/commit/config/MPI knob/**mesh level-sums**)
+- [x] confirmed `bc_index_nod2D_fld` is HOST-ONLY (`fesom_ice.cpp:229-241`; no
+      `sync_device()` and no `.d()` read anywhere in the tree).
+      ⚠️ **Sharper than the plan assumed — see the Task 2.1 note below: a bare
+      `sync_device()` there is a silent NO-OP.**
 
-### Task 0.2: Phase 0 — reference inventory + vector-frame decision
+**➕ DISCOVERED — the `/pool` mesh changed under us (blocker, resolved):**
+A regression gate added to the cert job (Kokkos-Serial vs the standing `serref_m522_saved`
+oracle) failed at **step 0** on `nlevels`/`nlevels_nod2D` — static topology fields that
+cannot change unless the mesh does. Root cause: `/pool/.../core2/nlvls.out`+`elvls.out`
+were **replaced on 2026-07-03** (2 nodes / 4 elems, Ross Sea shelf ≈154°W/77°S, all
+shallower; sum(nlevels_nod2D) 3 832 750 → 3 832 745). The port reads those files directly,
+so it is a real bathymetry change, and **every archived C/Fortran/Kokkos reference predates
+it**. Resolution (user decision): a **private mesh copy** at
+**`/work/ab0995/a270088/port2/mesh/core2`** with the pre-2026-07-03 levels restored from the
+in-place `*.20260528_regenerated` backups (July-3 version kept as `*.20260703_pool`; `/pool`
+untouched). Proof it is the right bathymetry: with it, gate 2 passes — a fresh Kokkos-Serial
+run is **bit-identical to `serref_m522_saved`** (2026-05-31). **ALL M6 jobs must use
+`MESH=/work/ab0995/a270088/port2/mesh/core2`.** See `$MESH/MESH_PROVENANCE.md` and the
+warning block at the top of `docs/REFERENCE_RUNS.md`.
+
+### Task 0.2: Phase 0 — reference inventory + vector-frame decision ✅ DONE (2026-07-12)
 
 **Files:**
-- Modify: `docs/REFERENCE_RUNS.md` (M6 reference table)
+- Modify: `docs/REFERENCE_RUNS.md` (M6 reference table) ✅
+- Create: `scripts/fesom_frame.py` (r2g rotation) + `scripts/m32_climate_compare.py` rework ✅
+- Create: `jobs/m6_namelists/{tke,mevp,zstar}/` ✅
 
-- [ ] read all four PROVENANCE.md files (tke, mevp, zstar reference namelists + the
-      `job_all3_1yr` config in the C tree); confirm each archived /work ref matches its
-      provenance (spot-check nc files openable, right length/config)
-- [ ] determine the vector frame of each existing C-port output (`c_tke_2yr`,
-      `c_mevp_2yr`, `c_zstar_2yr`, `c_all3_1yr`) from provenance/commit dates vs `75406d3`
-- [ ] decide + record per climate leg: reuse existing C output (scalar fields + frame-safe
-      handling) vs regenerate with `FESOM_IO_VECTOR_FRAME=rotated`; default = regenerate
-      the C comparator legs we compare vectors against (cheap CPU SLURM, C binary)
-- [ ] copy the three reference namelist sets into
-      `/home/a/a270088/port_kokkos/jobs/m6_namelists/{tke,mevp,zstar}/` with provenance
-      headers (the Kokkos jobs consume CLI + env, but the namelists document the target
-      configs and drive the C comparator legs)
-- [ ] consolidate per-feature VERIFIED constant tables into this plan before coding
-      (KPP-plan precedent): the TKE constant block (from `fesom_cvmix_tke.c` +
-      reference namelists), mEVP `alpha_evp`/`beta_evp` + subcycle count at whichEVP=1,
-      zstar values (table already in Technical Details) — each re-confirmed against the
-      archived reference namelists
-- [ ] update `docs/REFERENCE_RUNS.md` with the M6 reference table (paths above)
+- [x] read all four PROVENANCE.md files; all archived /work refs verified present and
+      openable at the right shape (12 months × 126858 nodes) — `c_tke_2yr`,
+      `c_mevp_2yr`, `c_zstar_2yr`, `c_all3_1yr`, `fortran_linfs_tke`, `fortran_mevp_2yr`,
+      `fortran_all3`, `fortran_linfs_2yr_b`. Every feature config re-confirmed single-knob
+      (`mix_scheme='cvmix_TKE'` / `which_ALE='zstar'` / `whichEVP=1`).
+      ⚠️ `/scratch/a/a270088/fortran_kpp_5yr_fix` (the old default Fortran anchor in
+      `REFERENCE_RUNS.md`) has been **PURGED down to restart files** — its output `.nc` are
+      gone. Use the purge-safe `/work/.../zstar/fortran_linfs_2yr_b` instead (same
+      linfs+KPP config, and its binary POST-dates the `2682a9fb` sbc cold-start rotation fix).
+- [x] vector frame of every C-port output determined — and **verified empirically**, not
+      just inferred from commit dates (each rotated against its Fortran twin; r2g must
+      improve a rotated leg and degrade a geo leg):
+      **ROTATED** (pre-`75406d3`): `c_tke_2yr`, `c_zstar_2yr`, `c_zstar_tke_*`, `kpp_5yr_fix`.
+      **GEO** (≥`75406d3`): `c_mevp_2yr`, `c_mevp_5yr`, `c_evp_2yr`, `c_all3_1yr`.
+      Table lives in `scripts/fesom_frame.py:frame_of_c_output()`.
+- [x] **DECISION — script-side rotation, NO C-leg regeneration.** This overrides the plan's
+      stated default ("regenerate"), because the two reasons to regenerate both evaporated:
+      (a) the mesh problem is fixed at the source by the private mesh (Task 0.1), and
+      (b) the **Fortran anchors are geographic and can never be re-run** — so a script-side
+      r2g is REQUIRED for every leg regardless. Once it exists it covers all four C legs at
+      zero marginal cost. Equivalence is not assumed: the C campaign gated its in-model
+      rotation against this exact offline transform at 7e-15 (job 25524763), and the
+      transform is verified here as an isometry to 1e-16.
+      Implemented in `scripts/fesom_frame.py`; wired into `scripts/m32_climate_compare.py`
+      via `--cref-frame {geo,rotated}`. Policy: **everything rotated → geographic, then
+      compare** (scalars are frame-free). Saves ~4 C CPU runs.
+- [x] copied the three reference namelist sets → `jobs/m6_namelists/{tke,mevp,zstar}/`
+      (all 10 namelists each + the upstream `PROVENANCE.md` + a README)
+- [x] per-feature VERIFIED constant tables consolidated below (each C source value
+      re-confirmed against the archived namelist — all match)
+
+**➕ DISCOVERED — the "known F↔C ice-edge budget" (uice ≈0.92) is a FRAME ARTIFACT, not physics.**
+`m32_climate_compare.py` compared `uice` but never `vice`, and applied no rotation — so it
+was comparing the port's ROTATED components against Fortran's GEOGRAPHIC ones. The rotation
+is an isometry, so |speed|/extent/volume looked perfect while the components decorrelated:
+a plausible-looking wrong answer. Measured on the M5.23 CUDA 1-yr run vs Fortran linfs+KPP,
+everything else held fixed:
+
+| | as-written | after r2g |
+|---|---|---|
+| `uice` corr vs Fortran | 0.9187 | **0.9997** |
+| `vice` corr vs Fortran | 0.4266 | **0.9998** |
+
+0.9187 reproduces the recorded 0.919 exactly. Cross-checked on the C side too:
+`c_tke_2yr` vs `fortran_linfs_tke` goes 0.9187 → **1.0000**. So the port reproduces
+Fortran's ice velocity essentially perfectly; there is no ice-edge budget to explain.
+Fixed in `scripts/m32_climate_compare.py` (rotation + `vice` added to `FIELDS`).
+**Consequence for M6: the Fortran anchors are first-class, not caveated secondaries** — the
+plan's "vector fields vs Fortran need … or scalar-only restriction" caveat is retired.
+Corrected verdict table in `docs/REFERENCE_RUNS.md`; memory + `GPU_FIDELITY.md` updated.
+
+#### VERIFIED constant tables (C source ⇄ archived namelist — all confirmed)
+
+**TKE** — `fesom_tke.c:227-241` ⇄ `jobs/m6_namelists/tke/namelist.cvmix` `&param_tke`:
+
+| C arg | value | namelist key | note |
+|---|---|---|---|
+| `c_k` | 0.1 | `tke_c_k` | |
+| `c_eps` | 0.7 | `tke_c_eps` | |
+| `cd` | **3.75** | `tke_cd` | ⚠️ NAMELIST value — the module default 1.0 LOSES |
+| `alpha_tke` | 30.0 | `tke_alpha` | |
+| `mxl_min` | 1.0e-8 | `tke_mxl_min` | |
+| `kappaM_min` | 0.0 | `tke_kappaM_min` | |
+| `kappaM_max` | 100.0 | `tke_kappaM_max` | |
+| `tke_mxl_choice` | 2 | `tke_mxl_choice` | Blanke & Delecluse (only option) |
+| `use_ubound_dirichlet` | 0 | — | module default F |
+| `use_lbound_dirichlet` | 0 | — | module default F |
+| `only_tke` | 1 | `tke_only` | |
+| `l_lc` | 0 | `tke_dolangmuir` | |
+| `clc` | 0.3 | — | module default; gate-only |
+| `tke_min` | 1.0e-6 | `tke_min` | |
+| `tke_surf_min` | 1.0e-4 | `tke_surf_min` | |
+
+Plus the bit-fidelity landmines to transcribe verbatim: `TKE_C66 = 6.6` as a **plain double**
+(the `-r8` rule), `TKE_POW32(x) = pow(x, 1.5)`, `TKE_MIN2/MAX2` as compare-select ternaries.
+Port the C's **gate-only abort** too (`fesom_tke.c:246-253`): fail loudly if
+`only_tke`/`l_lc`/either dirichlet/`mxl_choice != 2` ever deviate from the ported path.
+
+**mEVP** — `fesom_ice.c:73-95` ⇄ `jobs/m6_namelists/mevp/namelist.ice`:
+
+| param | value | note |
+|---|---|---|
+| `whichEVP` | 1 | `FESOM_WHICH_EVP=1`; 0=std EVP default; anything else → abort |
+| `alpha_evp` | 250.0 | set UNCONDITIONALLY in C (`fesom_ice.c:91`) |
+| `beta_evp` | 250.0 | set UNCONDITIONALLY in C (`fesom_ice.c:92`) |
+| `evp_rheol_steps` | 120 | same subcycle count as std EVP |
+| `Pstar` | 30000.0 | |
+| `ellipse` | 2.0 | |
+| `c_pressure` | 20.0 | |
+| `delta_min` | 1.0e-11 | |
+| `Cd_oce_ice` | 0.0055 | |
+| `ice_ave_steps` | 1 | ⇒ `ice_dt` = ocean dt = 1800 s ⇒ **`rdt` = FULL step** (trap 1) |
+| `theta_io` | 0.0 | present in the namelist but **NOT read** by the mEVP path (trap 3) |
+
+**zstar** — archived namelists + the C plan's verified table:
+
+| param | value | note |
+|---|---|---|
+| `which_ALE` | `'zstar'` | the one knob |
+| `which_pgf` | `'shchepetkin'` | NOT in namelist.oce → module default |
+| `use_virt_salt` | `.false.` | **DERIVED** from which_ALE ⇒ `is_nonlinfs = 1.0` |
+| `use_floatice` | `.false.` | ⇒ `use_pice = 0` |
+| `use_partial_cell` | `.false.` | |
+| `i_vert_diff` | `.true.` | implicit TDMA carries the surface BCs |
+| `use_wsplit` | `.false.` | (wsplit-ON is out of scope) |
+| `use_ssh_se_subcycl` | `.false.` | ⇒ CG path |
+| `opt_visc` | 7 | as in the linfs pair |
+| `alpha` / `theta` | module defaults | not in namelist.dyn |
 
 ### Task 1.1: M6.1 — three-way mixing dispatch + TKE state
 
@@ -333,9 +445,15 @@ test). Every task ends with its gate rung; a task is not done until its gate pas
 
 - [ ] transcribe the C ice_types additions exactly (which arrays, sizes, zero-init)
 - [ ] dispatch reads `FESOM_WHICH_EVP` once, static-cached, same strings/errors as C
-- [ ] push `bc_index_nod2D_fld` to device once after host population (it is HOST-ONLY
-      today, `fesom_ice.cpp:232-241` — Serial would mask a stale device mirror and waste
-      a CUDA-gate cycle) and wire the device read for the mEVP node-solve det
+- [ ] push `bc_index_nod2D_fld` to device after host population and wire the device read
+      for the mEVP node-solve det. ⚠️ **It must be `modify_host(); sync_device();` — a bare
+      `sync_device()` is a SILENT NO-OP.** Verified in Task 0.1: `Field::alloc`
+      (`fesom_field.hpp:61-65`) tags the field `Auth::Synced` with **both spaces zeroed**,
+      and `fesom_ice.cpp:229-241` then fills the mask **through the raw host pointer**,
+      which never sets the dirty tag (L14). So today the device mirror is *all zeros* AND
+      tagged clean → `dv_.sync_device()` sees `need_sync_device()==false` and copies
+      nothing. Under CUDA the mEVP node-solve det would be multiplied by an all-zero
+      `bc_index` (catastrophic, and invisible on Serial where host==device).
 - [ ] knob-OFF byte gate (ice.cpp touched) → bit-identical
 - [ ] `gpu_fidelity_gate.sh` knob-OFF still PASSES
 
@@ -636,8 +754,17 @@ test). Every task ends with its gate rung; a task is not done until its gate pas
 
 ## Technical Details
 
+- **MESH (campaign-wide, non-negotiable)**: `MESH=/work/ab0995/a270088/port2/mesh/core2`
+  — the M6 private copy, NOT `/pool`. `/pool`'s `nlvls.out`/`elvls.out` were replaced on
+  2026-07-03 and are NOT the bathymetry any archived reference was run on (Task 0.1).
+  Expected level-sums: `sum(nlvls)=3832750`, `sum(elvls)=7366752`.
 - **Bit-id standard run**: CORE2 dist_8, 8 ranks, dt=1800, 20 steps, snap_every=10,
-  `diff_snap.py` zero tolerance (pattern: `jobs/job_core2_serial_m523fN`).
+  `OMPI_MCA_btl_vader_single_copy_mechanism=none` (L18 — required for any comparison
+  across two different binaries), `diff_snap.py` zero tolerance (pattern:
+  `jobs/job_m6_oracle_cert`). Knob-OFF baseline:
+  `/work/ab0995/a270088/port2/m6_baseline_serial/`.
+- **C oracle binary**: `/home/a/a270088/port2/fesom2_port_zstar/build-m6oracle/fesom_port`
+  (fresh Release build @ `df8b9a8`; the tree's own `build/` predates `75406d3` — do not use it).
 - **Climate run**: `job_m32_cuda_core2` derivative, `M32_NSTEPS=17280` (1 yr),
   `SNAP_EVERY=1440` (monthly), 2 nodes / 8×A100, `m32_climate_compare.py`.
 - **Scatter pattern**: all new elem→node and edge→CSR accumulations use element/edge-order

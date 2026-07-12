@@ -33,24 +33,56 @@ ICE_FIELDS = {"a_ice", "m_ice", "m_snow", "uice", "vice"}  # need NaN→0 BEFORE
 # (73.5% of nodes on CORE2). WITHOUT the per-month NaN→0, the Fortran annual nanmean drops ice-free months
 # while the port's mean includes the zeros → a SPURIOUS uice-vs-Fortran decorrelation (the marginal-ice
 # artifact) that hit ONLY the Fortran comparison (C/Kokkos share the 0-convention). It deflated uice-vs-
-# Fortran to 0.850; with the fix it is 0.919 (ice-covered-nodes-only gives 0.913 — same ballpark). The
-# residual ~0.91 is a REAL (modest) C-port-vs-Fortran ice-velocity/EVP difference, faithfully reproduced
-# by the port (uice-vs-C-port = 0.99978). The earlier "0.85" in docs/GPU_FIDELITY §M5.13–§M5.15 was this
-# artifact-deflated number — read it as ~0.92.
-FIELDS = ("sst", "sss", "ssh", "a_ice", "m_ice", "uice")   # surface climate + ice drift; missing ones skip
+# Fortran to 0.850; with the fix it read 0.919.
+# ⚠️ CORRECTION 2026-07-12 (M6 Task 0.2): that residual 0.919 was previously written up here as "a REAL
+# (modest) C-port-vs-Fortran ice-velocity/EVP difference". IT IS NOT. It was the VECTOR-FRAME mismatch
+# (see below): with the r2g rotation applied, uice-vs-Fortran is 0.9997 and vice-vs-Fortran is 0.9998.
+# The port reproduces Fortran's ice velocity essentially perfectly; there is no ice-edge budget. The
+# "~0.92" quoted in docs/GPU_FIDELITY §M5.13–§M5.15 is superseded — read it as ~1.0.
+FIELDS = ("sst", "sss", "ssh", "a_ice", "m_ice", "uice", "vice")   # surface climate + ice drift
+# ⚠️ vice ADDED 2026-07-12 (M6 Task 0.2). It was never compared — which is exactly why the
+# VECTOR-FRAME mismatch below went unnoticed for the whole M5 campaign: uice degraded to a
+# plausible-looking 0.92, but vice was at 0.43 and nobody was looking at it.
 
-def surf_annual(path, var):
+# ---- VECTOR FRAME (M6 Task 0.2, 2026-07-12) --------------------------------------------
+# The port writes (u,v)/(uice,vice) in the model's native ROTATED frame. Fortran ALWAYS
+# writes geographic (io_meandata rotates); the C port writes geographic from commit 75406d3
+# on, rotated before it. Comparing across frames is an isometry, so |speed|/extent/volume
+# look perfect while the COMPONENTS decorrelate — a silent, plausible-looking wrong answer.
+# Everything rotated is now brought to GEOGRAPHIC before comparison (scalars are frame-free).
+# Measured impact on the M5.23 CUDA 1-yr run vs the Fortran linfs+KPP reference:
+#     uice  0.9187 -> 0.9997      vice  0.4266 -> 0.9998
+# The 0.919 was on record here as the "known F<->C ice-edge budget". It was not physics.
+from fesom_frame import Rotator, VECTOR_PAIRS, DEFAULT_MESH   # noqa: E402
+
+def surf_annual(path, var, months=False):
     """Annual mean of surface field. For ice fields, nan_to_num per month BEFORE the temporal
     mean (Fortran masks open water as NaN, C writes 0 — without the per-month nan->0 the
     temporal nanmean drops open-water months at marginal-ice nodes and spuriously inflates
-    the Fortran mean → fake CUDA-vs-Fortran bias). See feedback-ice-mask-averaging memory."""
+    the Fortran mean → fake CUDA-vs-Fortran bias). See feedback-ice-mask-averaging memory.
+    months=True returns the (12, nod2D) monthly stack instead (needed to rotate vector pairs
+    before averaging — rotation is linear, so either order works, but the nan->0 must come
+    first either way)."""
     d = nc.Dataset(path); a = d.variables[var]
     x = np.asarray(a[:, 0, :]) if a.ndim == 3 else np.asarray(a[:])   # (t,nz,n)->surf or (t,n)
     d.close()
     x = np.where(np.abs(x) < 1e30, x, np.nan)
     if var in ICE_FIELDS:
         x = np.nan_to_num(x, nan=0.0)
-    return np.nanmean(x, axis=0)                       # annual mean per node
+    return x if months else np.nanmean(x, axis=0)      # annual mean per node
+
+def load_field(dir_, var, yr, suffix, frame, rot):
+    """Annual-mean surface field, rotated to GEOGRAPHIC if it is half of a vector pair and
+    the source writes the rotated frame. Scalars are returned untouched."""
+    partner = VECTOR_PAIRS.get(var) or next((k for k, v in VECTOR_PAIRS.items() if v == var), None)
+    if partner is None or frame == "geo":
+        return surf_annual(f"{dir_}/{var}.fesom.{yr}.{suffix}", var)
+    a = surf_annual(f"{dir_}/{var}.fesom.{yr}.{suffix}", var, months=True)
+    b = surf_annual(f"{dir_}/{partner}.fesom.{yr}.{suffix}", partner, months=True)
+    u, v = (a, b) if var in VECTOR_PAIRS else (b, a)    # (u,v) order
+    ug, vg = rot.r2g(u, v)
+    out = ug if var in VECTOR_PAIRS else vg
+    return np.nanmean(out, axis=0)
 
 def stats(a, b):
     g = np.isfinite(a) & np.isfinite(b)
@@ -68,10 +100,24 @@ ap.add_argument("--cref", default=CREF_DEFAULT,
                 help=f"C-port reference dir (default {CREF_DEFAULT} = C-port KPP, γ=0.5)")
 ap.add_argument("--fref", default=FORT_DEFAULT,
                 help=f"Fortran reference dir (default {FORT_DEFAULT} = Fortran KPP)")
+ap.add_argument("--cref-frame", choices=("geo", "rotated"), default="rotated",
+                help="vector frame of the C reference's (u,v)/(uice,vice). C outputs from "
+                     "commit 75406d3 (2026-06-11 20:37) on are 'geo'; older ones 'rotated'. "
+                     "Default 'rotated' matches the KPP ref. See scripts/fesom_frame.py.")
+ap.add_argument("--mesh", default=DEFAULT_MESH,
+                help=f"mesh dir for the r2g rotation (default {DEFAULT_MESH})")
 args = ap.parse_args()
 
+rot = Rotator(args.mesh)
+# Fortran is ALWAYS geographic; the Kokkos port is ALWAYS rotated (it has no frame knob).
+FRAME = {"Fortran": "geo", "C-port": args.cref_frame}
+KK_FRAME = "rotated"
+
 print(f"M3.2 climate validation — backend={args.label}  dir={args.backend_dir}")
-print(f"  Fortran ref: {args.fref}\n  C-port ref:  {args.cref}")
+print(f"  Fortran ref: {args.fref}  (vectors: geo)")
+print(f"  C-port ref:  {args.cref}  (vectors: {args.cref_frame})")
+print(f"  backend vectors: {KK_FRAME}; mesh {args.mesh}")
+print("  Vector pairs are rotated to GEOGRAPHIC before comparison (scripts/fesom_frame.py).")
 print("  PASS = corr~1, bias/RMS bounded & non-growing; backend-vs-C (the scatter drift) <= C-vs-Fortran.\n")
 
 for ref_name, ref_dir, ref_suffix in (("Fortran", args.fref, "nc"), ("C-port", args.cref, "monthly.nc")):
@@ -81,8 +127,8 @@ for ref_name, ref_dir, ref_suffix in (("Fortran", args.fref, "nc"), ("C-port", a
     for var in FIELDS:
         for yr in args.years:
             try:
-                kk = surf_annual(f"{args.backend_dir}/{var}.fesom.{yr}.monthly.nc", var)
-                rf = surf_annual(f"{ref_dir}/{var}.fesom.{yr}.{ref_suffix}", var)
+                kk = load_field(args.backend_dir, var, yr, "monthly.nc", KK_FRAME, rot)
+                rf = load_field(ref_dir, var, yr, ref_suffix, FRAME[ref_name], rot)
             except Exception as e:
                 print(f"  {var} {yr}: skip ({type(e).__name__}: {e})"); continue
             s = stats(kk, rf)

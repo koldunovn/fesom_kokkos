@@ -853,9 +853,36 @@ C/Kokkos port writes 0 (73.5 % of CORE2 nodes), so the Fortran annual `nanmean` 
 port's mean kept the zeros → a spurious decorrelation hitting ONLY the Fortran comparison (C/Kokkos share the
 0-convention → `uice`-vs-C was always a clean 0.99978). **Fixed** (`uice`/`vice` added to `ICE_FIELDS` in
 `m32_climate_compare.py`): `uice`-vs-Fortran = **0.919** (ice-covered-nodes-only = 0.913 — same ballpark; `|d|max`
-0.228→0.136). The residual ~0.91 is a **real but modest** C-port-vs-Fortran ice-velocity (EVP) difference — NOT a
-Kokkos/GPU artifact (the port matches the C twin at 0.99978). This correction does not change any M5.x perf/fidelity
+0.228→0.136). ~~The residual ~0.91 is a **real but modest** C-port-vs-Fortran ice-velocity (EVP) difference~~ — see
+the SECOND correction below; that attribution was wrong. This correction does not change any M5.x perf/fidelity
 verdict (those rest on backend-vs-C + M5.16≡M5.15); it just relabels the Fortran `uice` number.
+
+⚠️⚠️ **`uice`-vs-Fortran, SECOND AND FINAL CORRECTION — VECTOR FRAME (2026-07-12, M6 Task 0.2):** the residual
+**0.919 is not a physics budget at all. It is a rotated-vs-geographic VECTOR-FRAME mismatch in the comparator.**
+FESOM computes on a rotated grid (CORE2 Euler 50/15/−90); Fortran's `io_meandata` rotates `(uice,vice)`/`(u,v)` to
+geographic at output (`do_rotation`), the Kokkos port writes them **as stored (rotated)**, and
+`m32_climate_compare.py` compared them raw. Measured on the M5.23 CUDA 1-yr run vs the Fortran linfs+KPP reference,
+everything else held fixed:
+
+| | as-written | after r2g |
+|---|---|---|
+| `uice` corr vs Fortran | 0.9187 | **0.9997** |
+| `vice` corr vs Fortran | 0.4266 | **0.9998** |
+
+Cross-checked purely on the C side (no Kokkos involved): `c_tke_2yr` (rotated) vs `fortran_linfs_tke` (geo) goes
+0.9187 → **1.0000**. **So every "uice ≈ 0.92 / 0.85 = the known C↔F ice-drift budget" statement in §M5.13–§M5.16
+and §M5.23 of this document is SUPERSEDED — read it as ~1.0. There is no ice-drift budget.** The port reproduces
+Fortran's ice velocity essentially perfectly.
+
+Why it survived so long: the rotation is an **isometry**, so `|speed|`, ice extent and ice volume all look perfect
+while only the components decorrelate — and the comparator checked `uice` but never `vice` (0.43 would have been
+noticed immediately). The tell was there all along: `uice`-vs-C-port was 0.9998 while `uice`-vs-Fortran was 0.92,
+and the C port is bit-identical to Serial Kokkos — so the gap had to be in the *comparison*, not the port.
+
+Fixed in `scripts/fesom_frame.py` (the `vector_r2g` port + a per-output frame table) wired into
+`scripts/m32_climate_compare.py` (`--cref-frame {geo,rotated}`; `vice` added to `FIELDS`). Regenerated verdict table:
+`docs/REFERENCE_RUNS.md`. Lesson **L74**. As before, **no M5.x perf verdict changes** — they all rest on
+backend-vs-C, which was same-frame and always sound.
 
 ## §M5.17 — Lever B (MPI comms) MEASURED FIRST → the `MPI_Waitall` is 79 % LOAD-IMBALANCE, NOT recoverable comm
 
