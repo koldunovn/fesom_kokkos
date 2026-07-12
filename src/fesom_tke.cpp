@@ -107,6 +107,24 @@ const char *fesom_tke_dump_dir(void)
 }
 
 /*===========================================================================
+ * Task 1.2 scaffold: force instantiation of BOTH column-core specialisations so the
+ * template body is fully type-checked at this commit. Never called; Task 1.3's driver
+ * instantiates the core for real (and only a device call site exercises the nvcc DEVICE
+ * compile — a host call like this one does not). Delete when the driver lands.
+ *===========================================================================*/
+[[maybe_unused]] static void fesom_tke_core_typecheck(void)
+{
+    real_t col[TKE_NL_MAX + 1] = {0.0};
+    fesom_cvmix_tke_diag d{};
+    fesom_cvmix_integrate_tke<false>(1, 1800.0, 1030.0, 9.81, col, col, col, col, col,
+                                     col, col, col, col, 0.0, 0.0, 0.0,
+                                     col, col, col, nullptr);
+    fesom_cvmix_integrate_tke<true> (1, 1800.0, 1030.0, 9.81, col, col, col, col, col,
+                                     col, col, col, col, 0.0, 0.0, 0.0,
+                                     col, col, col, &d);
+}
+
+/*===========================================================================
  * Driver — Task 1.3 wires the body. Abort until then, so selecting TKE fails
  * loudly instead of silently running with no vertical mixing (the C staged it
  * the same way: "Abort stub until Phase T2 wires the body").

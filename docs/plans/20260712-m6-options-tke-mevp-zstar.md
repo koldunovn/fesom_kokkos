@@ -353,19 +353,45 @@ the C, where the params live in `fesom_cvmix_tke.h` and `fesom_tke_alloc` calls
 runtime abort on an unported option additionally becomes a **compile-time `static_assert`** —
 strictly stronger; the runtime check is kept too.
 
-### Task 1.2: M6.1 — cvmix-TKE column core as device function
+### Task 1.2: M6.1 — cvmix-TKE column core as device function ✅ DONE (2026-07-12)
 
 **Files:**
-- Create: `src/fesom_cvmix_tke.hpp` (header-only KOKKOS_INLINE_FUNCTION column core)
+- Create: `src/fesom_cvmix_tke.hpp` (header-only KOKKOS_INLINE_FUNCTION column core) ✅
+- Create: `tests/tke_core_twin/` (➕ the column-core twin gate — see below) ✅
 
-- [ ] transcribe `fesom_cvmix_tke.c` into a device-callable column function; per-thread
-      scratch capped `TKE_NL_MAX=128` (KPP/TDMA pattern)
-- [ ] port the landmine list VERBATIM: `TKE_C66=6.6` as plain double (the `-r8` rule),
-      `TKE_POW32(x)=pow(x,1.5)`, tridiag via reciprocal (`fxa=1/m; cp=c*fxa` — NOT `c/m`),
-      compare-select ternary min/max, exact evaluation order
-- [ ] keep the C's dead-argument drops and branch eliminations exactly (its header
-      documents the verified list)
-- [ ] compile check both backends; no gate yet (dead code until Task 1.3 wires it)
+- [x] `integrate_tke` (:415-987) + `solve_tridiag` transcribed as `KOKKOS_INLINE_FUNCTION`s;
+      per-thread scratch capped at `TKE_NL_MAX = 128` (== `FESOM_MAX_LEVELS`).
+- [x] landmines ported VERBATIM: `TKE_C66 = 6.6` as a plain double (the `-r8` rule),
+      `tke_pow32(x) = Kokkos::pow(x, 1.5)` (a pow call, NOT `x*sqrt(x)`), tridiag via
+      **reciprocal** (`fxa = 1.0/m; cp = c*fxa`, never `c/m`), compare-select min/max,
+      exact evaluation order.
+- [x] the C's dead-argument drops (`old_KappaM`/`old_KappaH`/`handle_old_vals`/`max_nlev`/
+      `i`/`j`/`tstep_count`) and gate-only branch eliminations (IDEMIX, Langmuir, both
+      Dirichlet BCs) kept exactly; `bottom_fric` kept in the signature though unread;
+      `iw_diss` read UNCONDITIONALLY (:898) so the driver must pass a REAL zero column.
+- [x] both backends compile clean.
+
+**➕ COLUMN-CORE TWIN GATE (not in the original plan — added as cheap insurance):**
+`tests/tke_core_twin/` builds the **C oracle's own `integrate_tke`** and the Kokkos
+transcription into one binary and runs both over 4000 identical synthetic columns —
+randomised over plausible ranges plus the edge cases the ocean actually produces (negative
+`Nsqr`/unstable columns, zero shear, cold-start zero TKE, zero surface forcing, 2-level
+columns). **Result: 2,358,224 values compared (tke_new, KappaM, KappaH + all 13 diag slabs),
+ZERO mismatches — BIT-IDENTICAL.** Worth the 20 minutes: it isolates the ~250 lines of column
+math from the driver, so if Task 1.5's full-model bit-id fails, the bug is *provably* in the
+driver (column assembly / halos / Av-Kv wiring) and most of the search space is already gone.
+Re-runnable any time: `bash tests/tke_core_twin/run.sh`.
+
+**Design note — `WITH_DIAG` template parameter.** The 13 budget slabs are pure OUTPUTS
+(nothing in `tke_new`/`KappaM_out`/`KappaH_out` reads them back), so the core is templated on
+`WITH_DIAG` and the copy-out sits behind `if constexpr`. With diag off (the default, and the
+bit-id gate config) the compiler proves all 13 `[129]`-double locals dead and eliminates them,
+cutting the per-thread frame from ~33 KB to ~20 KB on CUDA. The COMPUTATION is still written
+unconditionally, exactly as the C writes it — this is dead-code elimination of unused outputs,
+not a reordering, so numerics and evaluation order are untouched (and the twin gate above runs
+with `WITH_DIAG=true`, so the diag path is verified too). ⚠️ Even at ~20 KB/thread this is
+2× the M5.24 TDMA kernels' frame (L72), so expect local-memory pressure on CUDA — note it at
+Task 1.6's perf sanity, do NOT pre-optimise.
 
 ### Task 1.3: M6.1 — TKE driver kernel, halos, step wiring
 
