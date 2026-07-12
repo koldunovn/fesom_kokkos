@@ -1501,62 +1501,58 @@ knobs compose, bit-identically on Serial and climate-close on CUDA.**
 
 ---
 
-## §M6.5 — the PER-RANK PROXY: zstar's cost at scale (farc, 2026-07-13)
+## §M6.5 — the PER-RANK PROXY: what zstar actually costs at scale (farc + dars, 2026-07-13)
 
-**The question.** Every M6 timing was CORE2 @ 8 ranks = 15.9k 2D-verts/rank — a COMPUTE-bound point
-where every knob delta sat inside a 5.6% noise floor. That says nothing about production. Per M5.22
-the bottleneck flips with PER-RANK LOAD, and zstar adds a restored `hnode_new` **NOD3D halo every
-step** (the rail M5.20 deleted as a linfs-only optimisation). A comm-bound step is what punishes
-that. **Predicted: a real cost, growing as verts/rank falls.**
+**The question.** Every M6 timing was CORE2 @ 8 ranks = 15.9k 2D-verts/rank — a compute-bound point
+where every knob delta sat inside a 5.6% noise floor. zstar adds a restored `hnode_new` **NOD3D halo
+every step** (the rail M5.20 deleted as a linfs-only optimisation), and a comm-bound step is what
+punishes that. Predicted: a real cost, growing as verts/rank falls.
 
-**The proxy.** farc (638,387 nodes), both points from ONE 2-node allocation so they share hardware.
-3 configs × 2 reps, INTERLEAVED (`d z a d z a`); rep-to-rep spread IS the error bar.
+**Measured** — 3 configs × 2 reps, INTERLEAVED (`d z a d z a`); rep spread 0.10–0.44% (20× tighter
+than CORE2's cross-job noise), so these deltas are resolved:
 
-| point | ranks | verts/rank | vs NG5@16N (115.6k) | default | zstar | all3 |
-|---|---|---|---|---|---|---|
-| A | 4 (1 node) | 159,596 | 1.38× | 0.3074 | 0.3108 (**+1.11%**) | 0.2942 (**−4.31%**) |
-| B | 8 (2 nodes) | 79,798 | 0.69× | 0.2424 | 0.2436 (**+0.47%**) | 0.2347 (**−3.18%**) |
+| point | verts/rank | topology | default | **zstar** | **all3** |
+|---|---|---|---|---|---|
+| farc A | 159,596 | 4 ranks, **1 node — NO NETWORK** | 0.3074 | **+1.11%** | **−4.31%** |
+| farc B | 79,798 | 8 ranks, 2 nodes | 0.2424 | **+0.47%** | **−3.18%** |
+| **dars** | **98,760** | **32 ranks, 8 nodes — real fabric** | 0.3140 | **+1.34%** | **−4.47%** |
 
-Rep spread 0.13–0.39% — **20× tighter than CORE2's cross-job noise**, so these deltas are resolved.
+### What is SOLID
 
-### ⚠️ THE PREDICTION WAS WRONG — and wrong in the good direction
+1. **zstar costs +0.5% to +1.4%, everywhere measured** — two meshes, three per-rank loads, including
+   a genuinely distributed 8-node run. **It never gets large.** That is the decision-relevant fact.
+2. **The all-3 config is 3–4.5% FASTER than the default**, confirmed on both meshes. TKE + mEVP are
+   cheaper than KPP + std-EVP by more than zstar costs. (CORE2 hinted at this — mEVP −4.7% — but
+   could not resolve it against its own noise, so the claim was correctly withheld then.)
+3. The **kernel-visible** part of zstar's cost is per-rank compute, identical in shape on both meshes:
+   Shchepetkin PGF (net, replaces the linfs PGF), the zstar thickness commit, and `vert_vel_zstar`.
+   The GM phase row moves +0.0017 s on dars but **every one of its 14 leaf kernels is unchanged
+   (Δ = +0.0000)** — that row is a wall-clock phase timer absorbing wait, not GM compute.
 
-zstar's cost **SHRINKS** as verts/rank falls (+1.11% → +0.47%), and the ABSOLUTE cost falls with it
-(0.0034 → 0.0012 s/step) as the per-rank domain halves. **A latency-bound halo cost would be FLAT
-in absolute terms** (one extra message per step, independent of local size) and its share would
-GROW. It did the opposite. That is the signature of a **per-rank COMPUTE cost**, not a comm cost.
+### ⚠️ What is NOT established — two claims RETRACTED
 
-**Direct confirmation from the step profile** (point A, default vs zstar):
+An earlier revision of this section claimed *"the halo is exonerated — 6% of zstar's cost"* and
+*"zstar gets relatively cheaper as you decompose; ≈ +0.7% at NG5@16N."* **Both were overconfident.**
 
-| | default | zstar | Δ |
-|---|---|---|---|
-| halo pack/unpack calls per step | 513.9 | 515.4 | **+1.5** ← the exchange IS there |
-| halo pack+unpack time | 0.0148 s | 0.0150 s | **+0.0002 s** |
-| halo share of step | 5.58% | 5.59% | +0.01 pp |
+- **`fesom_halo_pack`/`unpack` measure the GPU pack/unpack KERNELS. They do NOT include the MPI
+  transfer or the `Waitall` latency** — that is wall-clock time which lands in whatever phase timer
+  brackets it. So "+0.0002 s of halo" was only ever the *kernel* cost, never the halo's true cost.
+- **farc point A is 4 ranks on ONE node — there is essentially no network there.** Reading a
+  communication cost off a single-node run is invalid, and it is what produced the flattering trend.
+- On dars — the only real distributed point — the leaf kernels account for **+0.0027 s of the
+  measured +0.0042 s. The missing +0.0015 s (36%) is wall-clock time no kernel explains**, and one
+  extra MPI exchange per step is the obvious candidate. It is not proven, but it is not excluded.
+- The "shrinks with decomposition" trend does not survive the second mesh: dars at 98.8k/rank costs
+  **more** (+1.34%) than farc did at 159.6k/rank (+1.11%).
 
-**The extra NOD3D exchange exists and costs 0.0002 s — 6% of zstar's +0.0034 s.** Per-kernel
-attribution (leaves only; the `2_pgf`/`12_ale`/`13c` rows are parent timers and would double-count):
+**Bottom line: the SIZE of zstar's cost is nailed down (≤1.4%, small); the MECHANISM is not.**
+The mechanism is interesting but not decision-changing — and **do not "optimise away" the
+`hnode_new` rail on the strength of a kernel timer**: M6.3's bit-identity depends on it.
 
-| item | Δ s/step | share |
-|---|---|---|
-| Shchepetkin PGF (net: +0.0021 new − 0.0010 linfs PGF removed) | +0.0011 | 32% |
-| zstar thickness commit (net of the linfs commits it replaces) | +0.0010 | 29% |
-| `fesom_ale_vert_vel_zstar` | +0.0010 | 29% |
-| stiffness rebuild (`fesom_update_stiff_mat_ale`) | +0.0002 | 6% |
-| **the extra NOD3D halo** | **+0.0002** | **6%** |
-| **sum** | **+0.0034** | **= the measured delta exactly** |
+**To actually settle the mechanism** (if it ever matters): scan rank counts *within one mesh, all
+multi-node* (dars dist_16 / dist_32 / dist_64 = 197k / 98.8k / 49.4k per rank, 4 / 8 / 16 nodes) so
+the network is present throughout and only per-rank load varies — and instrument the MPI wait
+directly rather than inferring it from kernel timers.
 
-**Conclusion: zstar is SAFE at scale.** 94% of its cost is per-rank compute, so as you decompose
-further the step becomes comm-dominated while zstar's addition shrinks with the local domain — it
-gets *relatively cheaper*. Interpolating to NG5@16N (115.6k/rank): **≈ +0.7%**. The halo I was
-worried about is noise. **Do not "optimise" the hnode_new rail away — it is 0.0002 s and it is
-required for correctness (it is what M6.3's bit-identity depends on).**
-
-**Bonus, and resolved this time: the all-3 config is 3–4% FASTER than the default** (−4.31% / −3.18%,
-far outside the error bar). TKE + mEVP are cheaper than KPP + std-EVP by more than zstar costs. The
-CORE2 gate hinted at this (mEVP −4.7%) but could not resolve it against its noise floor.
-
-⚠️ Proxy caveat: faithful for HALO and per-rank compute (what was tested). NOT faithful for **CG
-iteration count** — conditioning is a property of the real mesh, and `7_ssh` moved −0.0014 s under
-zstar here. Read s/step out of this, not SYPD. dars @ 8N (98.8k/rank, 5× bigger mesh) is queued as
-an independent confirmation.
+⚠️ Proxy caveat: faithful for halo + per-rank compute. NOT faithful for **CG iteration count**
+(conditioning belongs to the real mesh). Read s/step out of this, not SYPD.
