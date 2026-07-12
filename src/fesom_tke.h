@@ -96,6 +96,14 @@ typedef struct fesom_tke {
     fesom::Field forc_normstress_fld, forc_botfrict_fld, forc_rhosurf_fld;
     fesom::Field Tbpr_fld, Tspr_fld, Tdif_fld, Tdis_fld, Twin_fld, Tiwf_fld, Tbck_fld,
                  Ttot_fld, Lmix_fld, Pr_fld, dummy1_fld, dummy2_fld, dummy3_fld;
+
+    /* Port of the C's file-static `s_zero_col` (fesom_tke.c:48): a [TKE_NL_MAX+1] array of
+     * zeros passed as alpha_c / E_iw / iw_diss / tke_plc. The first three are gate-only, but
+     * ⚠️ **iw_diss is read UNCONDITIONALLY** by the core (:898, tke_Tiwf = iw_diss), so this
+     * must be a REAL zero array, never a null pointer. It is never written — so, unlike
+     * bc_index_nod2D, its zeroed device mirror from Field::alloc is exactly right and needs
+     * no modify_host()/sync_device(). */
+    fesom::Field zero_col_fld;
 } fesom_tke;
 
 /*

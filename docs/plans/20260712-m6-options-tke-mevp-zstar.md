@@ -393,52 +393,86 @@ with `WITH_DIAG=true`, so the diag path is verified too). ⚠️ Even at ~20 KB/
 2× the M5.24 TDMA kernels' frame (L72), so expect local-memory pressure on CUDA — note it at
 Task 1.6's perf sanity, do NOT pre-optimise.
 
-### Task 1.3: M6.1 — TKE driver kernel, halos, step wiring
+### Task 1.3: M6.1 — TKE driver kernel, halos, step wiring ✅ DONE (2026-07-12)
 
 **Files:**
-- Modify: `src/fesom_tke.cpp` (driver kernel `fesom_tke_mixing_kk`)
-- Modify: `src/fesom_step.cpp` (TKE branch calls driver; shared post-mo_convect halos
-  unchanged at `:436-437`)
+- Modify: `src/fesom_tke.cpp` (driver kernel `fesom_tke_mixing_kk`) ✅
+- Modify: `src/fesom_step.cpp` (TKE branch calls the driver; shared post-mo_convect halos
+  unchanged) ✅
 
-- [ ] transcribe the `calc_cvmix_tke` driver: column `parallel_for` over OWNED nodes only
-      (gen:296,311 — do NOT extend to halo); build per-column inputs; call the core;
-      write `tke`, node-`Av`, `Kv`
-- [ ] surface forcing (`forc_tke_surf` from stress) transcribed exactly, incl. its
-      `pow(x,1.5)`
-- [ ] fused `tke_Kv`+`tke_Av` node halo via `fesom_halo_field2` BEFORE the Kv copy /
-      node→elem average (C invariant; `tke` itself NEVER exchanged)
-- [ ] node→elem Av average `parallel_for` over OWNED elements only (gen:500); elem-Av halo
-      comes from the existing shared `:437` exchange — verify ordering matches C's step
-- [ ] knob-OFF byte gate (step.cpp touched) → bit-identical vs baseline
+- [x] `calc_cvmix_tke` transcribed: one thread per OWNED node (`RangePolicy(0, myDim_nod2D)`
+      — NOT extended to the halo, gen:296/311); per-column `vshear2`/`bvfreq2`/`dz_trr`/
+      `tke_old` built in per-thread scratch; the core writes `tke`/`tke_Av`/`tke_Kv`
+      STRAIGHT into the global slabs at the column offset, as the C does. Entity-outer/
+      level-inner (D19) → no cross-entity write → Serial == the C loop order.
+- [x] surface forcing = `|stress_node_surf| / rho0` (gen:330, the NODAL variant; the
+      element-interpolation one is commented out in the Fortran). The `pow(x,1.5)` lives in
+      the CORE (`cd·forc^1.5/dzt[0]`), already ported in Task 1.2.
+- [x] fused `tke_Kv`+`tke_Av` NOD3D halo via `fesom_halo_field2` before the Kv copy and the
+      node→elem average. Safe because the only statement between the C's two exchanges is
+      the Kv copy, which never touches `tke_Av`. `tke` itself is NEVER exchanged.
+- [x] node→elem Av mean over OWNED elements, interior levels only (gen:500-502), after
+      `Av = 0` over the FULL extent (gen:499). It is a per-element GATHER (reads its 3
+      vertices, writes only its own rows) → race-free, no atomics, bit-identical on Serial
+      AND CUDA. The elem-Av halo still comes from the shared post-mo_convect ELEM3D
+      exchange, exactly as for KPP/PP.
+- [x] `s_zero_col` ported as a `zero_col` Field (⚠️ `iw_diss` is read unconditionally, so it
+      must be a REAL zero array). Never written → its zeroed device mirror from
+      `Field::alloc` is correct with no sync rail (contrast `bc_index_nod2D`, Task 2.1).
+- [x] **knob-OFF byte gate: ALL FIELDS BIT-IDENTICAL** (SLURM 26210325).
 
-### Task 1.4: M6.1 — snapshot + verify-key + output extension
+⚠️ **Z vs Z_3d_n (hand-off to Task 3.6).** The C driver reads `mesh->Z_3d_n` for the shear
+and `dz_trr`. Under linfs `Z_3d_n[nz][n] == Z[nz]` (C: `fesom_eos.c:118`; only zstar's
+`fesom_ale.c:239` makes it live), and this port already uses that identity everywhere
+(`fesom_eos.cpp:184`, `fesom_pp.cpp:151`). The TKE driver therefore reads the static `Z`,
+with an explicit marker at both sites. **Task 3.6 MUST re-point them to the live `Z_3d_n`** —
+until then TKE is correct for linfs only, which is exactly the M6.1 config.
+
+⚠️ **nvcc gotcha (worth remembering):** an extended `__host__ __device__` lambda **cannot
+first-capture a variable inside an `if constexpr` block**. The 13 diag views appear nowhere
+else in the column lambda, so `if constexpr (WITH_DIAG)` failed to compile under CUDA. Fixed
+by using a plain `if (WITH_DIAG)` — the condition is still a compile-time constant, so the
+branch (and the dead `.data()` reads) folds away identically, but the capture is nvcc-legal.
+`if constexpr` inside the core is fine — that is a normal function, not an extended lambda.
+
+### Task 1.4: M6.1 — snapshot + output extension ✅ DONE (2026-07-12) — a VERIFIED NO-OP
+
+- [x] checked what the C oracle writes at TKE config. **The answer is: nothing extra.**
+      - Its SNAPSHOT writer emits **no** TKE fields (`grep tke` over
+        `fesom_io_write_snapshot` is empty) — the snapshot variable set is identical to the
+        default config's.
+      - Its DEFAULT MONTHLY table (`fesom_default_monthly_table`, 17 vars) has **no** TKE
+        entry either. The `tke` / `tke_T*` / `tke_Lmix` / `tke_Pr` resolvers exist only as
+        **opt-in io.config stream vars**.
+- [x] therefore, "mirror the C EXACTLY" ⇒ **add nothing.** No snapshot sites, no
+      `sync_host`, no monthly table row, no NVARS bump. Shared IO code is untouched, so no
+      byte gate is needed for this task.
+- [x] consequence (good news): **Task 1.5's `diff_snap.py` gate works with no IO changes at
+      all**, and it is a STRONGER test than the plan assumed — it compares T/S/u/v/w/eta/
+      **Kv**/**Av**/density/ice, i.e. TKE's effect on the whole model, not just its own
+      arrays. The column math is separately proven by `tests/tke_core_twin/`.
+- [x] deliberate NON-port: the C's opt-in TKE stream vars. The Kokkos port's stream system
+      has no arbitrary-var registry (io.config selects the CADENCE of the 17 table vars, it
+      does not add vars), so exposing `tke` would mean building that registry. No gate needs
+      it; `Kv`/`Av` — which is what TKE actually changes — are already in the table and are
+      compared by every gate. Recorded as a known gap, not a silent one.
+
+### Task 1.5: M6.1 — knob-ON Serial bit-id vs C oracle ✅ **PASS, FIRST TRY** (2026-07-12)
 
 **Files:**
-- Modify: `src/fesom_io.cpp` (snapshot 4 sites × {tke, tke_Kv, tke_Av}; monthly table if C
-  outputs tke)
-- Modify: `src/fesom_main.cpp` (`sync_host()` for new fields pre-snapshot, `:1342-1346`)
-- Modify: `src/fesom_io.h` (`struct fesom_state` additions)
+- Create: `jobs/job_m6_tke_serial_bitid` ✅
 
-- [ ] check what the C oracle writes in snapshots + monthly at TKE config (its io.c diff);
-      mirror EXACTLY — snapshot field set must match the C oracle's for `diff_snap.py`
-- [ ] add tke/tke_Kv/tke_Av at the 4 snapshot sites + sync_host; fields written only when
-      knob=TKE if that is what C does (match C)
-- [ ] if C has monthly `tke` output: add resolver + table row + bump NVARS
-- [ ] knob-OFF byte gate (io.cpp touched) → bit-identical vs baseline
-- [ ] knob-ON smoke: 1-step Serial run writes snapshots with the new fields, openable
-
-### Task 1.5: M6.1 — knob-ON Serial bit-id vs C oracle
-
-**Files:**
-- Create: `jobs/job_m6_tke_serial_bitid` (paired C-oracle + Kokkos-Serial legs, TKE config)
-
-- [ ] run C oracle with `FESOM_MIX_SCHEME=TKE` (8r, dist_8, dt=1800, 20 steps, snap 10);
-      run Kokkos-Serial identically
-- [ ] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL (incl. tke fields)
-- [ ] on mismatch: bisect via the C dump/replay rails
-      (`/work/.../tke/cdump_v2`, `replay/`, C `job_tke_t2_*` patterns); throwaway host
-      twin only if a single kernel resists
-- [ ] record PASS (fields, worst-case) in GPU_FIDELITY §M6.1 draft notes
+- [x] paired 8r / dist_8 / dt=1800 / 20-step / snap10 runs on the private mesh, C oracle and
+      Kokkos-Serial both with `FESOM_MIX_SCHEME=TKE` (SLURM 26210340).
+- [x] `diff_snap.py` → **ALL FIELDS BIT-IDENTICAL** (3 snapshots × 27 vars). The printed step
+      diagnostics match digit-for-digit too.
+- [x] TKE is unambiguously LIVE, not a silent fall-through to KPP: at step 20 the same run
+      reports **Kv = 1.80e+01 / Av = 1.59e+01** under TKE vs **1.63e+00 / 6.96e-01** under
+      KPP — an order of magnitude apart. (The Task-1.1 reachability smoke proved the dispatch
+      independently.)
+- [x] no bisection needed. Perf note: Serial TKE = 2.22 s/step vs KPP 2.53 s/step — TKE is
+      *cheaper* than KPP on the host (its column core is a single pass; KPP's boundary-layer
+      algorithm is multi-pass).
 
 ### Task 1.6: M6.1 — knob-ON CUDA gate + sync-log
 
