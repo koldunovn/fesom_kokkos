@@ -220,11 +220,14 @@ rank count** you run (generated with `fesom_ini.x`).
 
 ## Physics included
 
-- **Ocean**: linfs ALE, JM-EOS, hydrostatic PGF, AB2 Coriolis, FCT tracer advection,
-  `opt_visc=5` backscatter, **KPP** (default) and PP vertical mixing + convective adjustment,
-  parallel-CG SSH solver, JRA55 forcing with NCAR bulk formulae, SSS restoring + runoff.
-- **Sea ice**: EVP dynamics (`whichEVP=0`), thermodynamics with freezing T-clamp, ice-ocean
-  coupling (ocean2ice / oce_fluxes / oce_fluxes_mom), FCT advection of `a_ice / m_ice / m_snow`.
+- **Ocean**: **linfs** (default) or **zstar** ALE vertical coordinate, JM-EOS, hydrostatic PGF
+  (Shchepetkin density-Jacobian under zstar), AB2 Coriolis, FCT tracer advection,
+  `opt_visc=5` backscatter, **KPP** (default) / PP / **CVMix classical TKE** vertical mixing +
+  convective adjustment, parallel-CG SSH solver, JRA55 forcing with NCAR bulk formulae,
+  SSS restoring + runoff.
+- **Sea ice**: **standard EVP** (default) or **modified EVP (mEVP)** dynamics, thermodynamics with
+  freezing T-clamp, ice-ocean coupling (ocean2ice / oce_fluxes / oce_fluxes_mom), FCT advection of
+  `a_ice / m_ice / m_snow`.
 - **GM/Redi**: Ferrari et al. (2010) bolus velocity + isoneutral Redi diffusion, ODM95 slope
   tapering, `scaling_GMzexp` vertical scaling. Master off-switch `FESOM_NO_GMREDI=1` makes the
   binary byte-identical to the pre-GM state.
@@ -235,6 +238,19 @@ rank count** you run (generated with `fesom_ini.x`).
 ## Environment knobs
 
 All read once at first use unless noted.
+
+**Physics options (M6).** Each defaults OFF; with every knob unset the binary is byte-identical
+to the pre-M6 model, and each was ported strictly faithfully to the C reference — all three are
+**bit-identical to the C oracle on Serial, individually and all three at once**:
+
+| knob | values | default | what it selects |
+|---|---|---|---|
+| `FESOM_MIX_SCHEME` | `KPP` \| `PP` \| `TKE` (= `cvmix_TKE`) | `KPP` | ocean vertical mixing (TKE = CVMix classical, Gaspar 1990) |
+| `FESOM_WHICH_EVP` | `0` \| `1` | `0` | sea-ice rheology (`1` = modified EVP, α=β=250) |
+| `FESOM_ALE` | `linfs` \| `zstar` | `linfs` | vertical coordinate (`zstar` = moving levels + Shchepetkin PGF + real freshwater fluxes) |
+
+An unrecognised value **aborts loudly** rather than silently falling back. Every knob is
+perf-neutral (0.264–0.276 s/step on CORE2, 8×A100 — within noise of the default 0.266).
 
 **Physics master switches:** `FESOM_NO_GMREDI`, `FESOM_NO_ICE_DYN`, `FESOM_NO_ICE_ADV`,
 `FESOM_NO_ICE_THERMO` — each skips its subsystem (the GMREDI one is the byte-identity gate).
