@@ -549,28 +549,92 @@ swallowed. Both knob states re-checked: **PASS**.
 - [ ] commit series (src / jobs / docs split as usual); tag `m6.1-tke`; push
 - [ ] verify knob-OFF gate one final time at the tag
 
-### Task 2.1: M6.2 — whichEVP dispatch + mEVP state
+### Task 2.1: M6.2 — whichEVP dispatch + mEVP state ✅ DONE (2026-07-12)
 
 **Files:**
-- Modify: `src/fesom_ice_types.h` (add `uice_aux/vice_aux` + mEVP scratch per C's
-  `fesom_ice_types.h` diff; Fields for each)
-- Modify: `src/fesom_ice.cpp` (dispatch: mirror C `fesom_ice.c:73-90` semantics — unset/0
-  std EVP, 1 → mEVP, else abort)
-- Create: `src/fesom_ice_maevp.h` (decl)
+- Modify: `src/fesom_ice_types.h` (`uice_aux`/`vice_aux` + `alpha_evp`/`beta_evp` + the 5
+  mEVP scratch arrays) ✅
+- Modify: `src/fesom_ice.cpp` (dispatch + conditional alloc + the `bc_index` device push) ✅
+- Create: `src/fesom_ice_maevp.h` (decl + **the 13-point trap list**) ✅
 
-- [ ] transcribe the C ice_types additions exactly (which arrays, sizes, zero-init)
-- [ ] dispatch reads `FESOM_WHICH_EVP` once, static-cached, same strings/errors as C
-- [ ] push `bc_index_nod2D_fld` to device after host population and wire the device read
-      for the mEVP node-solve det. ⚠️ **It must be `modify_host(); sync_device();` — a bare
-      `sync_device()` is a SILENT NO-OP.** Verified in Task 0.1: `Field::alloc`
-      (`fesom_field.hpp:61-65`) tags the field `Auth::Synced` with **both spaces zeroed**,
-      and `fesom_ice.cpp:229-241` then fills the mask **through the raw host pointer**,
-      which never sets the dirty tag (L14). So today the device mirror is *all zeros* AND
-      tagged clean → `dv_.sync_device()` sees `need_sync_device()==false` and copies
-      nothing. Under CUDA the mEVP node-solve det would be multiplied by an all-zero
-      `bc_index` (catastrophic, and invisible on Serial where host==device).
-- [ ] knob-OFF byte gate (ice.cpp touched) → bit-identical
-- [ ] `gpu_fidelity_gate.sh` knob-OFF still PASSES
+- [x] ice_types additions transcribed: `uice_aux`/`vice_aux` `[myDim+eDim]`;
+      `mevp_inv_thickness`/`mevp_mass`/`mevp_ice_nod` `[myDim_nod2D]`;
+      `mevp_pressure_fac`/`mevp_ice_el` `[myDim_elem2D]`. **Allocated ONLY when
+      `whichEVP==1`** (the Fortran allocates them only for `whichEVP != 0`; the C mirrors
+      that) — so the default path allocates nothing new. `alpha_evp`/`beta_evp` = 250.0 set
+      **unconditionally**, as the C does. Kept deliberately SEPARATE from std-EVP's
+      `ice_strength`/`inv_areamass`/`inv_mass` — sharing them is precisely how the two
+      rheologies' asymmetries would get "tidied" into each other.
+- [x] dispatch reads `FESOM_WHICH_EVP` once at init (it gates the allocations), `strtol` with
+      a full-string check, same errors as C: unset|`0` → std EVP, `1` → mEVP, anything else →
+      `MPI_Abort`. **Verified both ways** (SLURM 26210655): `=1` allocates and reaches the
+      mEVP branch; `=2` (aEVP) is rejected loudly at init.
+- [x] `bc_index_nod2D_fld` pushed to device with **`modify_host(); sync_device();`** — the
+      trap identified in Task 0.1. A bare `sync_device()` would have been a silent no-op
+      (`Field::alloc` tags it `Auth::Synced` with both spaces zeroed; the mask is written
+      through the RAW host pointer, which never dirties the tag), leaving an ALL-ZERO
+      `bc_index` on device → a zeroed mEVP determinant at every node under CUDA, and totally
+      invisible on Serial.
+- [x] knob-OFF byte gate → **ALL FIELDS BIT-IDENTICAL** (SLURM 26210621). Both backends build.
+
+### Task 2.2: M6.2 — mEVP device kernels (EVPdynamics_m) ✅ DONE (2026-07-12)
+
+**Files:**
+- Create: `src/fesom_ice_maevp.cpp` ✅
+- Modify: `CMakeLists.txt` ✅; `src/fesom_main.cpp` (`fesom_ice_maevp_free`) ✅
+
+- [x] `fesom_ice_evp_dynamics_m_kk` transcribed: aux init (full extent) → ssh2rhs → node
+      precompute → element precompute → the 120-substep loop (stress kernel → node solve →
+      edge BC → fused halo → rhs re-zero) → final copy. Structure mirrors the std-EVP device
+      kernel; every VALUE and BRANCH comes from the C mEVP.
+- [x] all 13 traps ported and each one annotated at its site (the list lives in
+      `src/fesom_ice_maevp.h`): full-`ice_dt` `rdt` with the drag carrying it; **no 0.5** in
+      `pressure_fac`; no `theta_io`; `mean-msum>0.01` element mask / `a_ice>=0.01` node mask;
+      non-ice nodes SKIPPED (velocity retained), not zeroed; `uice_old/vice_old` untouched;
+      sigma NOT zeroed on entry; `bc_index_nod2D` multiplying the node-solve det (redundant
+      with the edge-BC loop — both ported); additive `delta_min`.
+- [x] elem→node assembly via element-order `Kokkos::atomic_add` (D22) — including the
+      **UNGUARDED** ssh2rhs writes (trap 6) and the **GUARDED** stress2rhs writes, the
+      asymmetry preserved.
+- [x] per-substep fused `fesom_halo_field2(uice_aux, vice_aux, NOD2D)`; owned-only rhs
+      zeroing kept after the exchange, as C.
+- [x] final owned+eDim copy with NO extra exchange (trap 8).
+- [x] edge BC expressed as the equivalent per-node coastal mask — **identical node set**
+      (same `myList_edge2D[ed] > edge2D_in` criterion, both endpoints), all writes are 0 ⇒
+      idempotent ⇒ race-free. Deliberately duplicated from `evp_coastal_mask` rather than
+      shared, to keep the two rheology TUs independent.
+- [x] knob-OFF byte gate → BIT-IDENTICAL; both backends build.
+
+⚠️ **A file-scope `Kokkos::View` is destructed AFTER `Kokkos::finalize()` → Kokkos aborts.**
+The coastal mask is cached in a static View, and the first mEVP run completed all 20 steps,
+wrote every snapshot, printed its timing — **and then exited 134**. The fix is
+`fesom_ice_maevp_free()` called from `fesom_main.cpp` next to `fesom_ice_evp_free()`, which
+exists for exactly this reason (M5.8). Symptom to recognise: a clean run that aborts at exit.
+
+### Task 2.3: M6.2 — snapshot keys + dump rail ✅ DONE (2026-07-12) — NO-OP + a deliberate skip
+
+- [x] snapshot set at mEVP config: **unchanged**. `diff_snap.py` compared the C oracle and
+      Kokkos-Serial with no "vars only in pre/post" — the field sets already match, so
+      `sigma*`/`uice_aux` are not snapshot fields on either side. No IO changes.
+- [x] **the per-substep dump rail was NOT ported — a deliberate decision, not an oversight.**
+      The plan pre-authorised it as bisection insurance ("mEVP is NR-optimised with three
+      routines inlined and carries the densest fidelity-trap list of the campaign, so the
+      bisection rail is expected to be needed"). It was not: **Task 2.4's bit-id passed on the
+      first run.** Building an elaborate dump rail with nothing to bisect is speculative work.
+      If a future change ever breaks mEVP, the C oracle's own dump rail is still right there
+      (`FESOM_EVP_DUMP_DIR` on `build-m6oracle/fesom_port`) together with the archived
+      `/work/.../mevp/cdump_16r` — nothing has been lost.
+
+### Task 2.4: M6.2 — knob-ON Serial bit-id vs C oracle ✅ **PASS, FIRST TRY** (2026-07-12)
+
+**Files:**
+- Create: `jobs/job_m6_mevp_serial_bitid` ✅
+
+- [x] paired 8r/20-step/snap10 runs on the private mesh, C oracle and Kokkos-Serial both with
+      `FESOM_WHICH_EVP=1` (SLURM 26210724).
+- [x] `diff_snap.py` → **ALL FIELDS BIT-IDENTICAL**, both legs exit 0. The step diagnostics
+      match digit-for-digit.
+- [x] no bisection needed — all 13 traps landed correctly on the first transcription.
 
 ### Task 2.2: M6.2 — mEVP device kernels (EVPdynamics_m)
 

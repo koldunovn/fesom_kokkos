@@ -4,6 +4,7 @@
 #include "fesom_dyn.h"
 #include "fesom_ice_coupling.h"
 #include "fesom_ice_evp.h"
+#include "fesom_ice_maevp.h"
 #include "fesom_ice_fct.h"
 #include "fesom_ice_thermo.h"
 #include "fesom_forcing.h"   // M4.3d-a: forcing->{runoff,Ch_atm_oce,Ce_atm_oce}_fld IN-rail push
@@ -90,7 +91,30 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->theta_io        = 0.0;
     ice->cd_oce_ice      = 5.5e-3;
     ice->ice_free_slip   = 0;
-    ice->whichEVP        = 0;       /* hard 0; dispatcher (Phase D4) aborts otherwise */
+
+    /* M6.2 — EVP flavour knob, transcribed from the C (fesom_ice.c:73-90). Numeric env
+     * (the FESOM_DIAG_GID atoi precedent), parsed at init because it gates the conditional
+     * allocations below: unset/"0" -> standard EVP (default), "1" -> mEVP; anything else
+     * aborts — aEVP (2) and garbage are NOT ported. strtol with a full-string check, so a
+     * typo fails loudly instead of silently selecting std EVP. */
+    {
+        const char *we = getenv("FESOM_WHICH_EVP");
+        int which = 0;
+        if (we && *we) {
+            char *end = nullptr;
+            long v = strtol(we, &end, 10);
+            int ok = (end != we && *end == '\0' && (v == 0 || v == 1));
+            if (!ok) {
+                fprintf(stderr, "fesom_ice: FESOM_WHICH_EVP='%s' -> whichEVP not ported "
+                                "(0=EVP default, 1=mEVP; aEVP/2 unported)\n", we);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            which = (int)v;
+        }
+        ice->whichEVP = which;
+    }
+    ice->alpha_evp       = 250.0;   /* mEVP stability constants — set unconditionally, as the C */
+    ice->beta_evp        = 250.0;   /* does (namelist.ice == MOD_ICE.F90:198 module default).    */
     ice->ice_ave_steps   = 1;
     ice->ice_dt          = 0.0;     /* set in fesom_ice_setup */
     ice->Tevp_inv        = 0.0;     /* set in fesom_ice_setup */
@@ -164,7 +188,25 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->h_ice_fld.alloc("ice.h_ice", n);                     ice->h_ice           = ice->h_ice_fld.h();
     ice->h_snow_fld.alloc("ice.h_snow", n);                   ice->h_snow          = ice->h_snow_fld.h();
 
-    /* whichEVP != 0 aux fields intentionally NOT allocated (see header). */
+    /* --- mEVP (whichEVP==1) aux + scratch. Allocated ONLY when selected, mirroring the C
+     * (fesom_ice.c) and the Fortran (which allocates these only for whichEVP != 0). Under the
+     * default (std EVP) nothing here is touched, so the knob-OFF byte gate is unaffected. */
+    if (ice->whichEVP == 1) {
+        const size_t nn = (size_t)mesh->myDim_nod2D;
+        const size_t ne = (size_t)mesh->myDim_elem2D;
+        ice->uice_aux_fld.alloc("ice.uice_aux", n);  ice->uice_aux = ice->uice_aux_fld.h();
+        ice->vice_aux_fld.alloc("ice.vice_aux", n);  ice->vice_aux = ice->vice_aux_fld.h();
+        ice->work.mevp_inv_thickness_fld.alloc("ice.mevp_inv_thickness", nn);
+        ice->work.mevp_mass_fld.alloc          ("ice.mevp_mass",          nn);
+        ice->work.mevp_ice_nod_fld.alloc       ("ice.mevp_ice_nod",       nn);
+        ice->work.mevp_pressure_fac_fld.alloc  ("ice.mevp_pressure_fac",  ne);
+        ice->work.mevp_ice_el_fld.alloc        ("ice.mevp_ice_el",        ne);
+        ice->work.mevp_inv_thickness = ice->work.mevp_inv_thickness_fld.h();
+        ice->work.mevp_mass          = ice->work.mevp_mass_fld.h();
+        ice->work.mevp_ice_nod       = ice->work.mevp_ice_nod_fld.h();
+        ice->work.mevp_pressure_fac  = ice->work.mevp_pressure_fac_fld.h();
+        ice->work.mevp_ice_el        = ice->work.mevp_ice_el_fld.h();
+    }
 
     /* --- surface ocean state (T_ICE:140-142, ice_init:758-767) --- */
     ice->srfoce_u_fld.alloc("ice.srfoce_u", n);               ice->srfoce_u    = ice->srfoce_u_fld.h();
@@ -239,6 +281,20 @@ void fesom_ice_init(fesom_ice           *ice,
             mesh->bc_index_nod2D[n1] = 0.0;
             mesh->bc_index_nod2D[n2] = 0.0;
         }
+
+        /* M6.2 — push to the DEVICE. Until now bc_index_nod2D was host-only (std EVP uses
+         * `coastal` instead), but the mEVP node solve multiplies its determinant by it
+         * (:814, trap 9), on the device.
+         *
+         * ⚠️ IT MUST BE modify_host() THEN sync_device(). A bare sync_device() here would be
+         * a SILENT NO-OP: Field::alloc tags the field Auth::Synced with BOTH spaces zeroed,
+         * and the mask above is written through the RAW HOST POINTER, which never sets the
+         * dirty bit (L14). So the DualView still believes host and device agree — it would
+         * copy nothing, and the device would keep an ALL-ZERO bc_index. Under CUDA that
+         * zeroes the mEVP determinant at every node (catastrophic); under Serial host==device
+         * so it is completely invisible. This is the one line where Serial cannot protect us. */
+        mesh->bc_index_nod2D_fld.modify_host();
+        mesh->bc_index_nod2D_fld.sync_device();
     }
 }
 
@@ -490,8 +546,31 @@ void fesom_ice_step(int                            step,
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
             if (s_verify_evp) fesom_ice_evp_verify(ice, partit, mesh, step, eu, ev, e11, e12, e22);
+        } else if (ice->whichEVP == 1) {
+            /* mEVP (M6.2, FESOM_WHICH_EVP=1). Same IN/OUT rail as std EVP — it reads and writes
+             * exactly the same host-produced state (a/m/ms, srfoce_*, stress_atmice_*, uice/vice,
+             * sigma11/12/22) — but the rheology itself is a different routine with deliberately
+             * different constants and branches (see fesom_ice_maevp.cpp's trap list; do NOT
+             * normalise it against the std-EVP kernel above). sigma11/12/22 PERSIST across calls
+             * in mEVP (never zeroed on entry, trap 12), which is why they are on the IN rail. */
+            ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+            ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+            ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+            ice->srfoce_u_fld.modify_host();   ice->srfoce_u_fld.sync_device();
+            ice->srfoce_v_fld.modify_host();   ice->srfoce_v_fld.sync_device();
+            ice->srfoce_ssh_fld.modify_host(); ice->srfoce_ssh_fld.sync_device();
+            ice->stress_atmice_x_fld.modify_host(); ice->stress_atmice_x_fld.sync_device();
+            ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
+            ice->uice_fld.modify_host();    ice->uice_fld.sync_device();
+            ice->vice_fld.modify_host();    ice->vice_fld.sync_device();
+            ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
+            ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
+            ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
+            fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
+            ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+            ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
         } else {
-            fprintf(stderr, "fesom_ice: whichEVP=%d not supported (only standard EVP=0)\n",
+            fprintf(stderr, "fesom_ice: whichEVP=%d not supported (0=EVP, 1=mEVP)\n",
                     ice->whichEVP);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }

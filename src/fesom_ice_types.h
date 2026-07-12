@@ -77,6 +77,25 @@ typedef struct fesom_ice_work {
     real_t *inv_areamass;
     real_t *inv_mass;
 
+    /* --- mEVP-only per-call scratch (M6.2; the Fortran's automatic arrays in EVPdynamics_m,
+     * heap-persistent here exactly as in the C). ALLOCATED ONLY WHEN whichEVP==1.
+     *   mevp_inv_thickness [myDim_nod2D]   1/max(ice thickness, 9.0)   (:635 limiter)
+     *   mevp_mass          [myDim_nod2D]   M / ((1+M²)·area)  — the verbatim regularisation
+     *   mevp_ice_nod       [myDim_nod2D]   node mask, a_ice >= 0.01
+     *   mevp_pressure_fac  [myDim_elem2D]  det2·pstar·msum·exp(-c_pressure·(1-asum))
+     *                                      ⚠️ NO 0.5 here — the 0.5 lives in the sigma11/22
+     *                                      updates only (mEVP trap 2). Do NOT normalise this
+     *                                      against std-EVP's ice_strength.
+     *   mevp_ice_el        [myDim_elem2D]  element mask, mean(m_ice) > 0.01  (trap 4)
+     * These are NOT shared with the std-EVP path (which uses ice_strength / inv_areamass /
+     * inv_mass with different definitions) — keeping them separate is what stops the two
+     * rheologies' asymmetries from being "tidied" into each other. */
+    real_t *mevp_inv_thickness;
+    real_t *mevp_mass;
+    int    *mevp_ice_nod;
+    real_t *mevp_pressure_fac;
+    int    *mevp_ice_el;
+
     /* M1.4: Field owners; the raw ptrs above are non-owning aliases = field.h() (D12).
      * fct_massmatrix is alloc'd lazily in fesom_ice_mass_matrix_fill (sized stiff->nnz),
      * the others in fesom_ice_init. */
@@ -85,6 +104,8 @@ typedef struct fesom_ice_work {
     fesom::Field sigma11_fld, sigma12_fld, sigma22_fld;
     fesom::Field eps11_fld, eps12_fld, eps22_fld;
     fesom::Field ice_strength_fld, inv_areamass_fld, inv_mass_fld;
+    fesom::Field mevp_inv_thickness_fld, mevp_mass_fld, mevp_pressure_fac_fld;
+    fesom::IntField mevp_ice_nod_fld, mevp_ice_el_fld;
 } fesom_ice_work;
 
 /*
@@ -211,8 +232,22 @@ typedef struct fesom_ice {
     real_t cd_oce_ice;       /* 5.5e-3 ocean-ice drag coefficient   */
     int    ice_free_slip;    /* 0     */
 
-    /* --- whichEVP locked at 0; aux/alpha_evp/beta_evp arrays not allocated --- */
-    int    whichEVP;         /* MUST be 0; dispatcher aborts otherwise */
+    /* --- EVP flavour (M6.2). FESOM_WHICH_EVP: unset|0 -> standard EVP (default),
+     *     1 -> mEVP (fesom_ice_maevp.cpp). Anything else aborts: aEVP (2) is not ported. --- */
+    int    whichEVP;         /* 0 = std EVP (default), 1 = mEVP */
+    real_t alpha_evp;        /* 250.0 — mEVP stability constant. Set UNCONDITIONALLY, as the C
+                              * does (fesom_ice.c:91): it is a MOD_ICE.F90 module default and the
+                              * reference namelist.ice repeats it, so there is no over-default trap. */
+    real_t beta_evp;         /* 250.0 — ditto (fesom_ice.c:92) */
+
+    /* mEVP auxiliary velocity (ice_maEVP.F90 u_ice_aux/v_ice_aux), [myDim+eDim].
+     * ALLOCATED ONLY WHEN whichEVP==1 — the Fortran allocates them only for whichEVP != 0, and
+     * the C mirrors that. The mEVP iteration writes these and copies them back into uice/vice at
+     * the very end (trap 8: the final copy spans myDim+eDim with NO extra exchange, because the
+     * aux halo is already current from the last substep's exchange). */
+    real_t *uice_aux;        /* [myDim+eDim] */
+    real_t *vice_aux;        /* [myDim+eDim] */
+    fesom::Field uice_aux_fld, vice_aux_fld;
 
     /* --- timestep --- */
     int    ice_ave_steps;    /* 1 — ice timestep = ice_ave_steps * ocean step */
