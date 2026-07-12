@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH --job-name=m6_all3_bitid
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/all3bitid.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/all3bitid.%j.err
+#
+# M6.4 Task 4.1 — THE COMBINED TWIN. All three knobs ON at once:
+#     FESOM_MIX_SCHEME=TKE   +   FESOM_WHICH_EVP=1   +   FESOM_ALE=zstar
+#
+# Each knob is individually BIT-IDENTICAL to the C oracle (M6.1/M6.2/M6.3). This gate asks the
+# only question those three cannot: do they still compose? Combination is where a port breaks
+# even when every part is right --
+#   * TKE reads the vertical geometry that zstar now MOVES (Z_3d_n / hnode) -- the Z7 bug class
+#     (L78) that cost M6.3 lives exactly here, and TKE's own Z_3d_n reads were only ever exercised
+#     under linfs, where Z_3d_n == Z. This leg is the FIRST time TKE sees a geometry that moves.
+#   * mEVP + zstar share the ice<->ocean freshwater/stress coupling.
+#   * All three touch the same forcing struct in one step.
+#
+# Paired runs, same node, same private mesh, same CLI, all three knobs on BOTH legs:
+#   A) C oracle       fesom2_port_zstar @ df8b9a8   (build-m6oracle, certified Task 0.1)
+#   B) Kokkos-Serial  port_kokkos @ HEAD
+# diff_snap.py must report ALL FIELDS BIT-IDENTICAL.
+#
+# On mismatch: bisect with jobs/job_m6_zstar_dump's rail (FESOM_ALE_DUMP_DIR, 6 gid-keyed tags,
+# read by the C's scripts/ale_dump_diff.py) -- and FIRST re-grep every Z_3d_n/zbar_3d_n read in
+# fesom_tke.cpp against the C, because that is the one file whose live-geometry reads no gate has
+# ever exercised. (fesom_tke.cpp was AUDITED clean during the Z7 sweep: device kernel uses Z3d at
+# lines 201/216. But audited != exercised.)
+#
+# L18: CMA off on both legs (cross-build MPI_Gatherv determinism).
+
+set -u
+C_REPO=/home/a/a270088/port2/fesom2_port_zstar
+K_REPO=/home/a/a270088/port_kokkos
+C_BIN=$C_REPO/build-m6oracle/fesom_port
+K_BIN=$K_REPO/build-serial/fesom_port
+
+MESH=/work/ab0995/a270088/port2/mesh/core2      # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800; NSTEPS=20; SNAP=10; YEAR=1958
+
+BASE=/work/ab0995/a270088/port2/m6/all3_bitid
+OUT_C=$BASE/c_all3; OUT_K=$BASE/kk_all3
+rm -rf "$OUT_C" "$OUT_K"; mkdir -p "$OUT_C" "$OUT_K"
+
+# ---- ALL THREE KNOBS ----
+export FESOM_MIX_SCHEME=TKE
+export FESOM_WHICH_EVP=1
+export FESOM_ALE=zstar
+unset FESOM_ALE_DUMP_DIR
+
+echo "=============== LEG A: C oracle, TKE + mEVP + zstar ==============="
+source /sw/etc/profile.levante
+source "$C_REPO/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+ulimit -s 204800
+( cd "$C_REPO" && git rev-parse HEAD ) > "$OUT_C/SHA.txt"
+srun -l "$C_BIN" "$MESH" "$OUT_C" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT_C/run.log" 2> "$OUT_C/run.err"
+echo "leg A exit: $?"; tail -2 "$OUT_C/run.log"
+
+echo
+echo "=============== LEG B: Kokkos-Serial, TKE + mEVP + zstar ==============="
+source "$K_REPO/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+( cd "$K_REPO" && git rev-parse HEAD ) > "$OUT_K/SHA.txt"
+srun -l "$K_BIN" "$MESH" "$OUT_K" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT_K/run.log" 2> "$OUT_K/run.err"
+echo "leg B exit: $?"; tail -2 "$OUT_K/run.log"
+echo "--- all 3 knobs actually selected on leg B? ---"
+grep -iE "TKE mixing selected|mEVP|zstar" "$OUT_K/run.log" | head -3
+
+echo
+echo "=========== GATE: C oracle vs Kokkos-Serial, ALL THREE KNOBS ON ==========="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$K_REPO/scripts/diff_snap.py" "$OUT_C" "$OUT_K"
+RC=$?
+echo "diff_snap rc=$RC"
+if [ "$RC" -eq 0 ]; then
+    echo "=== M6.4 COMBINED TWIN BIT-ID PASS — the three knobs COMPOSE ==="
+else
+    echo "=== M6.4 COMBINED TWIN FAIL — the knobs interact. Re-grep fesom_tke.cpp's live-geometry"
+    echo "    reads first (TKE has never seen a MOVING geometry), then bisect with job_m6_zstar_dump ==="
+fi
+exit $RC

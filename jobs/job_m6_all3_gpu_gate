@@ -1,0 +1,84 @@
+#!/bin/bash
+#SBATCH --job-name=m6_all3_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/all3gpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/all3gpu.%j.err
+#
+# M6.4 Task 4.2 — CUDA fidelity gate for the COMBINED TWIN (TKE + mEVP + zstar).
+#
+#   knob-OFF : CUDA (default)  vs m6_baseline_serial        -> the campaign-long invariant
+#   knob-ON  : CUDA (all 3)    vs m6/all3_bitid/kk_all3     -> the Serial oracle from Task 4.1,
+#                                                              itself BIT-IDENTICAL to the C oracle
+#
+# ⚠️ EXPECT Av/Kv TO SIT NEAR THE CEILING, exactly as the zstar-only gate did (§M6.3): under zstar
+# KPP's boundary-layer index kbl is an INTEGER decision reading the LIVE geometry, which carries
+# CUDA's atomic-scatter noise, so a 1-ULP shift flips kbl on a single column and Kv there jumps by
+# O(mixed-layer minus background diffusivity). On the zstar leg that produced max|d| = 9.9e-02
+# against a 1e-01 ceiling -- driven by ONE node out of 5,962,326.
+#
+# ⚠️⚠️ TKE replaces KPP here, so the kbl mechanism is GONE -- but TKE has its own clamps
+# (prandtl = max(1,min(10,6.6*Ri)), the mixing-length floors) which flip the same way (L75).
+# gpu_fidelity_check.py gates on COHERENCE (OUTLIER_TOL=32), not on max|d|.
+# **CHECK THE COUNT BEFORE BELIEVING A FAIL**: a clamp flip is 1-2 entries; a stale halo or a
+# missing device-halo rail is DOMAIN-WIDE (thousands to millions). They are not close.
+#
+# ⚠️ source ONLY env_cuda.sh (L77).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2       # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+BASE=/work/ab0995/a270088/port2/m6/all3_gpu
+OFF=$BASE/cuda_default; ON=$BASE/cuda_all3
+rm -rf "$OFF" "$ON"; mkdir -p "$OFF" "$ON"
+
+SREF_OFF=/work/ab0995/a270088/port2/m6_baseline_serial
+SREF_ON=/work/ab0995/a270088/port2/m6/all3_bitid/kk_all3
+
+RC=0
+
+echo "################ LEG 1: CUDA, knob-OFF (default: linfs + KPP + std EVP) ################"
+unset FESOM_MIX_SCHEME FESOM_ALE FESOM_WHICH_EVP
+export FESOM_STEP_PROFILE=1
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OFF" 1800 20 10 "$PHC" 1958 > "$OFF/log" 2>&1
+echo "leg 1 exit=$?"
+grep -m1 "loop timing" "$OFF/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_OFF" "$OFF" || RC=1
+
+echo
+echo "################ LEG 2: CUDA, ALL THREE KNOBS (TKE + mEVP + zstar) ################"
+export FESOM_MIX_SCHEME=TKE
+export FESOM_WHICH_EVP=1
+export FESOM_ALE=zstar
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$ON" 1800 20 10 "$PHC" 1958 > "$ON/log" 2>&1
+echo "leg 2 exit=$?"
+echo "--- all 3 knobs actually selected? ---"
+grep -iE "TKE mixing selected|mEVP|zstar" "$ON/log" | head -3
+grep -m1 "loop timing" "$ON/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_ON" "$ON" || RC=1
+
+echo
+echo "################ perf sanity (same job, same nodes, same day) ################"
+printf "  knob-OFF (linfs+KPP+EVP): %s\n" "$(grep -m1 'loop timing' "$OFF/log" | sed 's/.*= //')"
+printf "  knob-ON  (TKE+mEVP+zstar): %s\n" "$(grep -m1 'loop timing' "$ON/log"  | sed 's/.*= //')"
+
+echo
+if [ "$RC" -eq 0 ]; then
+    echo "=== M6.4 CUDA GATE PASS (both knob states within the climate-close floor) ==="
+else
+    echo "=== M6.4 CUDA GATE FAIL — CHECK THE OUTLIER COUNT (L75) before assuming a real bug ==="
+fi
+exit $RC
