@@ -928,23 +928,23 @@ often runs the host one.**
 **Files:**
 - Create: `jobs/job_m6_zstar_serial_bitid`
 
-- [ ] paired 8r/20-step/snap10: C oracle `FESOM_ALE=zstar` vs Kokkos-Serial same
-- [ ] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL (incl. thickness/geometry fields)
-- [ ] on mismatch: the C `fesom_ale_dump` dual-dump harness + `/work/.../zstar/z2_cdump`,
+- [x] paired 8r/20-step/snap10: C oracle `FESOM_ALE=zstar` vs Kokkos-Serial same
+- [x] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL (incl. thickness/geometry fields)
+- [x] on mismatch: the C `fesom_ale_dump` dual-dump harness + `/work/.../zstar/z2_cdump`,
       `fdump` (+ `fdump_k2`) rails; bisect phase-by-phase (Z-ladder order)
-- [ ] record PASS in GPU_FIDELITY §M6.3 draft
+- [x] record PASS in GPU_FIDELITY §M6.3 draft
 
 ### Task 3.8: M6.3 — knob-ON CUDA gate + sync-log
 
 **Files:**
 - Create: `jobs/job_m6_zstar_gpu_gate`
 
-- [ ] CUDA-vs-Serial gate at zstar config
-- [ ] synclog: the thickness/geometry chain stays device-resident — no new per-step
+- [x] CUDA-vs-Serial gate at zstar config
+- [x] synclog: the thickness/geometry chain stays device-resident — no new per-step
       round-trippers (hnode_new/Z_3d_n/zbar_3d_n/dhe must NOT ping-pong)
-- [ ] s/step noted vs same-day linfs run (zstar adds stiffness update + thickness
+- [x] s/step noted vs same-day linfs run (zstar adds stiffness update + thickness
       kernels + 2 halos — note the cost, no optimization)
-- [ ] knob-OFF `gpu_fidelity_gate.sh` re-run PASSES
+- [x] knob-OFF `gpu_fidelity_gate.sh` re-run PASSES
 
 ### Task 3.9: M6.3 — 1-yr climate close (zstar+KPP+EVP)
 
@@ -972,20 +972,20 @@ often runs the host one.**
 **Files:**
 - Create: `jobs/job_m6_all3_serial_bitid`
 
-- [ ] paired 8r/20-step/snap10: C oracle with ALL THREE knobs
+- [x] paired 8r/20-step/snap10: C oracle with ALL THREE knobs
       (`FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1`) vs Kokkos-Serial same
-- [ ] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL — the composition proof; expected zero
+- [x] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL — the composition proof; expected zero
       new code (faithful transcription pre-composes: TKE reads live geometry, mEVP's
       levitating ssh2rhs branch covers zstar)
-- [ ] any composition mismatch → bisect by knob-pair (zstar+TKE, zstar+mEVP, TKE+mEVP)
+- [x] any composition mismatch → bisect by knob-pair (zstar+TKE, zstar+mEVP, TKE+mEVP)
 
 ### Task 4.2: M6.4 — triple-config CUDA gate
 
 **Files:**
 - Create: `jobs/job_m6_all3_gpu_gate`
 
-- [ ] CUDA-vs-Serial gate at the triple config + synclog spot-check
-- [ ] knob-OFF `gpu_fidelity_gate.sh` PASSES (campaign-long invariant holds)
+- [x] CUDA-vs-Serial gate at the triple config + synclog spot-check
+- [x] knob-OFF `gpu_fidelity_gate.sh` PASSES (campaign-long invariant holds)
 
 ### Task 4.3: M6.4 — the combined climate twin (1 yr)
 

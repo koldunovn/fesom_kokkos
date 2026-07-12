@@ -1405,3 +1405,39 @@ column and Kv there jumps by O(mixed-layer minus background diffusivity). This i
 clamp-flip mechanism, not a staleness bug — a stale halo is domain-wide (millions of entries), this
 is 1. **Check the COUNT, not the max.** Expect this gate to stay marginal on Av/Kv; that is
 physics, and raising the ceiling to hide it would blind the gate to a real regression.
+
+---
+
+## §M6.4 — the COMBINED TWIN (TKE + mEVP + zstar, all three knobs at once)
+
+| gate | result |
+|---|---|
+| knob-OFF byte gate | ALL FIELDS BIT-IDENTICAL |
+| **triple-knob Serial vs C oracle @`df8b9a8`** | **ALL FIELDS BIT-IDENTICAL** — the three knobs COMPOSE |
+| CUDA gate, both knob states | PASS |
+| 1-yr CORE2 CUDA climate | (Task 4.3, running) |
+
+The composition proof is the question the three individual milestones cannot answer. The sharpest
+risk was **TKE reading the vertical geometry that zstar MOVES**: TKE's `Z_3d_n` reads had only ever
+been exercised under linfs, where `Z_3d_n == Z` by construction, so this is the FIRST time TKE sees
+a geometry that actually moves — precisely the Z7 bug class (L78) that cost M6.3. It held.
+
+**CUDA gate, 20 steps, CORE2 8×A100** (all 3 knobs vs the Task-4.1 Serial oracle):
+
+| field | max\|Δ\| | ceiling | entries > 1e-4 |
+|---|---|---|---|
+| Kv | 9.989e-02 | 1e-01 | **1** of 5,962,326 |
+| Av | 9.894e-02 | 1e-01 | **4** of 11,498,973 |
+| T | 5.753e-05 | 1e-02 | **0** |
+| S | 2.920e-05 | 1e-02 | **0** |
+| uice | 2.762e-04 | 5e-02 | 57 of 126,858 |
+
+The ocean is **essentially bit-clean on CUDA** at the triple config (T/S have ZERO entries above
+1e-4). `Kv`/`Av` sit at ~99% of the ceiling, but the max is **one node** (Kv) and four (Av) — the
+L75 clamp/index-flip mechanism, not staleness (a stale halo is domain-wide: thousands to millions
+of entries; these are 1 and 4). The coherence criterion (`OUTLIER_TOL=32`) handles this correctly:
+even if the max crossed the ceiling, count 1 ≤ 32 would not fail the gate. **The gate is robust
+here, not lucky — but read the COUNT, never the max.**
+
+Perf, same job / same nodes / same day: knob-OFF 0.2715 s/step, all-3 0.2756 s/step (+1.5%).
+Every option knob in M6 is perf-neutral.

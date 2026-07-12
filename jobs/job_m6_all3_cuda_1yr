@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH --job-name=m6_all3_1yr
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/all31yr.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/all31yr.%j.err
+#
+# M6.4 Task 4.3 — the 1-yr CORE2 CLIMATE CLOSE for the COMBINED TWIN (TKE + mEVP + zstar, CUDA).
+#
+#   C-port   /work/ab0995/a270088/port/mevp/c_all3_1yr    year 1958  (vectors: GEO)
+#   Fortran  /work/ab0995/a270088/port/mevp/fortran_all3  year 1958  (vectors: geo, always)
+#
+# EXPECTED (the C-vs-Fortran BASELINE for this same 3-knob config, measured on the refs above):
+#     sst 1.00000  sss 1.00000  ssh 1.00000  a_ice 1.00000  m_ice 0.99998
+#     uice 0.96234  vice 0.94727
+# ⚠️ uice/vice ~0.95 is mEVP's OWN reproducibility floor -- mEVP is a fixed-point iteration
+# (alpha=beta=250) that is only approximately converged, so ice velocity does not reproduce to
+# 1e-5 across independent implementations. zstar alone scores uice 0.99999 on the same metric.
+# JUDGE AGAINST THE BASELINE ABOVE, not against a remembered figure from another scheme -- that
+# is exactly how the fictitious "F<->C ice-edge budget" was born (L74, L79).
+#
+# ⚠️ source ONLY env_cuda.sh (L77).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${M6_NSTEPS:-17280}     # 1 model year @ dt=1800
+SNAP_EVERY=1440
+YEAR=1958
+export FESOM_PRINT_EVERY=1000
+
+# ---- ALL THREE KNOBS ----
+export FESOM_MIX_SCHEME=TKE
+export FESOM_WHICH_EVP=1
+export FESOM_ALE=zstar
+unset FESOM_ALE_DUMP_DIR
+
+OUT=/work/ab0995/a270088/port2/m6/all3_cuda_1yr
+mkdir -p "$OUT"
+echo "=== M6.4 CUDA 1-yr CORE2, TKE+mEVP+zstar (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+echo "--- all 3 knobs actually selected? ---"
+grep -iE "TKE mixing selected|mEVP|zstar" "$OUT/run.log" | head -3
+echo "--- last step (sanity: T/S bounded, no runaway) ---"
+grep -E " it=" "$OUT/run.log" | tail -1
+echo "--- blowup / nan check ---"
+grep -icE "nan|blowup|inf" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo
+echo "############ CLIMATE COMPARE (vectors rotated to GEOGRAPHIC on both sides) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" "$OUT" \
+      --label "CUDA-all3" --years 1958 \
+      --cref /work/ab0995/a270088/port/mevp/c_all3_1yr    --cref-frame geo \
+      --fref /work/ab0995/a270088/port/mevp/fortran_all3
+
+echo
+echo "############ BASELINE for reference: C-all3 vs Fortran-all3 (same 3-knob config) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" /work/ab0995/a270088/port/mevp/c_all3_1yr \
+      --label "C-all3" --years 1958 --backend-frame geo \
+      --cref /work/ab0995/a270088/port/mevp/c_all3_1yr    --cref-frame geo \
+      --fref /work/ab0995/a270088/port/mevp/fortran_all3 2>&1 | sed -n '/vs Fortran/,/vs C-port/p'
+exit $EC
