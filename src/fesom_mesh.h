@@ -55,6 +55,22 @@ typedef struct fesom_mesh {
     int    *ulevels;           /* [elem2D]  upper level per cell (=1 without cavities) */
     real_t *zbar;              /* [nl]      interface depths, negative downward */
     real_t *Z;                 /* [nl-1]    mid-layer depths = 0.5*(zbar[nz]+zbar[nz+1]) */
+    /* M6.3 (zstar): per-node MID-LAYER depths. Under linfs this is constant and equal to the
+     * static Z[nz] for every node (which is why the port has been reading Z directly all along
+     * — fesom_eos.cpp:184, fesom_pp.cpp:151, fesom_tke.cpp). Under zstar it becomes LIVE: the
+     * thickness commit rewrites it every step from the new hnode. Fortran mesh%Z_3d_n.
+     * The Fortran array is (nl-1, N); here it is padded to stride nl (last slot unused). */
+    real_t *Z_3d_n;            /* [nod2D * nl]  per-node mid-layer depths */
+    /* M6.3 (zstar): the per-element SSH increment mean(hbar - hbar_old), filled by
+     * compute_hbar_ale and consumed by the CUMULATIVE stiffness update on the NEXT step.
+     * Zero at cold start, so step 1's stiffness update is a no-op. Fortran mesh%dhe. */
+    real_t *dhe;               /* [elem2D] */
+    /* M6.3 (zstar): nominal bottom-layer thickness, from the UNPERTURBED zbar spacing. The
+     * bottom layer never stretches — it keeps this value in both init_thickness and the commit
+     * (Fortran init_bottom_node_thickness / init_bottom_elem_thickness, full-cell branch).
+     * Static: computed once from zbar + nlevels, never updated. */
+    real_t *bottom_node_thickness;  /* [myDim+eDim nodes] */
+    real_t *bottom_elem_thickness;  /* [elem_size]        */
     real_t *zbar_3d_n;         /* [nod2D * nl]  per-node interface depths.
                                   In our linfs/no-cavity/no-partial-cell config this
                                   collapses to zbar[nz] for valid levels and 0 elsewhere
@@ -141,6 +157,10 @@ typedef struct fesom_mesh {
     fesom::Field    elem_center_x_fld, elem_center_y_fld;
     fesom::Field    edge_dxdy_fld, edge_cross_dxdy_fld, gradient_sca_fld;
     fesom::Field    mesh_resolution_fld, zbar_3d_n_fld;
+    /* M6.3 (zstar). Z_3d_n and dhe go LIVE under zstar (rewritten per step on the DEVICE by the
+     * thickness commit / hbar computation); bottom_* stay static (set once, pushed once). */
+    fesom::Field    Z_3d_n_fld, dhe_fld;
+    fesom::Field    bottom_node_thickness_fld, bottom_elem_thickness_fld;
     fesom::Field    hnode_fld, hnode_new_fld, helem_fld, hbar_fld, hbar_old_fld;
 
     /* Wave 2 — the connectivity/coordinate arrays read on rank 0 and then

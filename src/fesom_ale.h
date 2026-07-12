@@ -88,4 +88,42 @@ void fesom_ale_compute_cflz_verify(const struct fesom_mesh *mesh,
 void fesom_ale_compute_wvel_split_verify(const struct fesom_mesh *mesh,
                                          struct fesom_dyn *dyn, int step_n);
 
+
+/*===========================================================================================
+ * M6.3 — zstar vertical coordinate (FESOM_ALE=zstar). Default stays linfs; with the knob off
+ * NOTHING below runs and the linfs path is byte-for-byte unchanged.
+ *
+ * Read-once, cached: mirrors the C's fesom_ale_mode_init (fesom_ale.c:18-33).
+ *   FESOM_ALE unset | "linfs"  -> linfs (default)
+ *   FESOM_ALE = "zstar"        -> zstar
+ *   anything else              -> abort (zlevel and the local-zstar fallback are NOT ported —
+ *                                 no reference run exercises them)
+ *
+ * `fesom_ale_is_zstar()` is the single query used by every zstar branch; `fesom_is_nonlinfs()`
+ * is the DERIVED scalar the Fortran computes in oce_setup_step.F90 (zstar => use_virt_salt=F
+ * and is_nonlinfs=1.0). Under linfs is_nonlinfs = 0.0, which is what makes every non-linfs
+ * term drop out identically.
+ *===========================================================================================*/
+void   fesom_ale_mode_init(void);   /* call once at startup, before any ALE branch */
+int    fesom_ale_is_zstar(void);
+int    fesom_ale_use_virt_salt(void);
+real_t fesom_is_nonlinfs(void);
+
+/* zstar thickness INIT (oce_ale.F90:1134-1218; C fesom_ale_init_thickness_zstar).
+ * Distributes hbar linearly over the stretched part of each column, keeps nominal spacing on
+ * the bottom-intersecting levels, pins the bottom layer to bottom_node_thickness, builds helem
+ * + dhe, sets hnode_new = hnode, and exchanges helem. Cold start: hbar = 0, so this reduces to
+ * the nominal geometry — but the SHAPE must be right, because it is the same code that runs on
+ * a restart. */
+void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
+                                    struct fesom_dyn    *dyn,
+                                    struct fesom_partit *partit);
+
+/* zstar thickness COMMIT (oce_ale.F90:1382-1440; C fesom_ale_update_thickness_zstar).
+ * Per step, over myDim+eDim (it READS the hnode_new halo, exchanged at the end of vert_vel):
+ * bottom->top hnode = hnode_new, and REWRITE zbar_3d_n / Z_3d_n from it; then the element helem
+ * mean over owned elements; then exchange_elem(helem). This is where the geometry goes LIVE. */
+void fesom_ale_update_thickness_zstar_kk(struct fesom_mesh   *mesh,
+                                         struct fesom_partit *partit);
+
 #endif /* FESOM_ALE_H */

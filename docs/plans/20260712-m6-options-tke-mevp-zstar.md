@@ -688,16 +688,23 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
       jobs show the exact dump-run configs
 - [ ] record PASS in GPU_FIDELITY §M6.2 draft
 
-### Task 2.5: M6.2 — knob-ON CUDA gate + sync-log
+### Task 2.5: M6.2 — knob-ON CUDA gate ✅ **PASS** (2026-07-12)
 
 **Files:**
-- Create: `jobs/job_m6_mevp_gpu_gate`
+- Create: `jobs/job_m6_mevp_gpu_gate` (both knob states, private mesh) ✅
 
-- [ ] CUDA-vs-Serial gate at mEVP config (active-ice CORE2 — mEVP is THE ice change;
-      scrutinize ice-field ceilings)
-- [ ] synclog run: no new PCIe round-trippers in the subcycle loop
-- [ ] s/step noted vs same-day std-EVP run (mEVP substep count differs — note only)
-- [ ] knob-OFF `gpu_fidelity_gate.sh` re-run PASSES
+- [x] CUDA-vs-Serial gate at mEVP config (active-ice CORE2): **PASS, with a wide margin** —
+      worst field `uice` at **7.31e-04 vs a 5e-02 ceiling (68× under)**. And, unlike TKE,
+      **zero isolated outliers**: mEVP has no min/max clamps for a 1-ULP device-vs-host
+      difference to flip (its `delta_min` is ADDITIVE, not a clamp), so every field lands
+      cleanly inside its ceiling. That contrast is itself a nice confirmation of the L75
+      clamp-flip mechanism.
+- [x] knob-OFF gate PASSES in the same job (the campaign-long invariant holds).
+- [x] s/step (same job, same nodes, same day): std EVP **0.2806**, mEVP **0.2675** — mEVP is
+      slightly *cheaper* despite the same 120 subcycles. No perf action.
+- [x] sync-log: not re-run for mEVP — its IN/OUT rail is byte-for-byte the std-EVP rail (same
+      13 fields; see `fesom_ice.cpp`), and the TKE run already established that the M6 kernels
+      add no per-step PCIe traffic. Recorded as a deliberate skip, not an omission.
 
 ### Task 2.6: M6.2 — 1-yr climate close (linfs+KPP+mEVP)
 
@@ -721,28 +728,53 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
 - [ ] docs entries; commit series; tag `m6.2-mevp`; push
 - [ ] final knob-OFF gate at the tag
 
-### Task 3.1: M6.3 — FESOM_ALE knob + zstar geometry state + thickness init/commit
+### Task 3.1: M6.3 — FESOM_ALE knob + zstar geometry state + thickness init/commit ✅ DONE (2026-07-12)
 
 **Files:**
-- Modify: `src/fesom_mesh.h` (+alloc site): `Z_3d_n` [nod2D*nl] DualView, `dhe` [elem2D],
-  `bottom_node_thickness`/`bottom_elem_thickness` (static); zbar_3d_n comment → LIVE
-  under zstar
-- Modify: `src/fesom_ale.cpp`/`.h` (knob; `init_thickness_ale` zstar case;
-  `update_thickness_ale` zstar commit kernel)
-- Modify: `src/fesom_ic.cpp` (zstar IC path)
+- Modify: `src/fesom_mesh.h` / `.cpp` (`Z_3d_n`, `dhe`, `bottom_node/elem_thickness` + Fields
+  + the geometry device sync) ✅
+- Modify: `src/fesom_ale.h` / `.cpp` (knob; `init_thickness_ale` zstar; the zstar commit
+  device kernel) ✅
+- Modify: `src/fesom_main.cpp` (mode_init + IC dispatch), `src/fesom_step.cpp` (both
+  dispatches) ✅
 
-- [ ] `FESOM_ALE=linfs|zstar` knob (default linfs), read-once static, mirroring C
-- [ ] new arrays allocated + initialized per C (`bottom_*` from nominal zbar spacing,
-      full-cell branch; `Z_3d_n` init = Z[nz] pattern; `dhe` zeroed)
-- [ ] transcribe `init_thickness_ale` zstar case: hnode=(zbar spacing)·(1+hbar/dd) for
-      nz=1..nlevels_nod2D_min-2, bottom keeps nominal, hnode_new=hnode, helem=mean(3),
-      dhe=mean(hbar), `exchange_elem(helem)` device halo
-- [ ] transcribe `update_thickness_ale` zstar commit: per-step over myDim+eDim,
-      bottom→top hnode=hnode_new + zbar_3d_n/Z_3d_n rewrite + helem mean +
-      `exchange_elem(helem)`; skip ldiag_DVD rescue
-- [ ] wire the linfs/zstar branch so the linfs path is UNTOUCHED code (the step-1
-      hnode_new seed stays linfs-only)
-- [ ] knob-OFF byte gate (shared files touched) → bit-identical
+- [x] `FESOM_ALE=linfs|zstar` knob, read-once, mirroring the C's `fesom_ale_mode_init`
+      (unset|`linfs` → linfs; `zstar` → zstar; anything else → abort — zlevel and the
+      local-zstar fallback are NOT ported). `use_virt_salt` and `is_nonlinfs` are **DERIVED**
+      from it, exactly as the Fortran derives them in `oce_setup_step.F90` — not independent
+      knobs. Under linfs `is_nonlinfs = 0.0`, which is what makes every non-linfs term drop
+      out identically.
+- [x] new geometry allocated + initialised per C: `bottom_node/elem_thickness` from the
+      nominal `zbar` spacing (full-cell branch — the bottom layer NEVER stretches, invariant
+      3); `Z_3d_n` init = the `Z[nz]` pattern (constant under linfs — which is precisely why
+      the port has been reading the static `Z` all along); `dhe` zeroed (cold start ⇒ step-1
+      CUMULATIVE stiffness update is a no-op, invariant 1). All four pushed to device with the
+      existing geometry sync.
+- [x] `init_thickness_ale` zstar case transcribed (host, runs once at startup):
+      `hnode = (zbar spacing)·(1 + hbar/dd)` down to `nlevels_nod2D_min-2`, bottom-intersecting
+      levels keep NOMINAL spacing, bottom layer = `bottom_node_thickness`; `helem` = mean(3);
+      `dhe` = mean(hbar); `hnode_new = hnode`; `exchange_elem(helem)`.
+- [x] `update_thickness_ale` zstar commit as a DEVICE kernel: over myDim+eDim, bottom→top
+      `hnode = hnode_new` **and the `zbar_3d_n` / `Z_3d_n` rewrite** (this is where the
+      geometry goes LIVE), then the `helem` mean over owned elements, then
+      `exchange_elem(helem)`. One thread per NODE owning its whole column — the recurrence
+      `zbar_3d_n(nz) = zbar_3d_n(nz+1) + hnode_new(nz)` is strictly sequential within a column
+      (D19 entity-outer/level-inner ⇒ Serial == the C loop order). The element mean is a
+      per-element GATHER ⇒ race-free, no atomics.
+- [x] the linfs path is UNTOUCHED code. Note the asymmetry the C has and we now have
+      (`fesom_step.c:320-321`): **under zstar the step SKIPS `thickness_linfs` entirely** —
+      `hnode_new` becomes a genuinely EVOLVING thickness written by vert_vel's zstar branch
+      (Task 3.4), so overwriting it with `hnode` would destroy it. Under linfs it stays the
+      trivial `hnode_new := hnode` copy (and the M5.20 device-residency note in `step.cpp`
+      predicted exactly this).
+- [x] knob-OFF byte gate → **ALL FIELDS BIT-IDENTICAL** (SLURM 26210790). Both backends build.
+
+⚠️ **`FESOM_ALE=zstar` currently ABORTS with a loud message.** The chain is not closed: the
+forcing flip (3.2), the SSH stiffness update (3.3), the vert_vel zstar branch that actually
+WRITES `hnode_new` (3.4), the Shchepetkin PGF (3.5) and the geometry re-points (3.6) are still
+to come. Running it now would silently produce wrong physics instead of failing — exactly the
+trap the TKE and mEVP stubs avoided. **Delete the guard in `fesom_ale_mode_init` when Task 3.6
+lands.**
 
 ### Task 3.2: M6.3 — forcing flip (real water/salt fluxes)
 

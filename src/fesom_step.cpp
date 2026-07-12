@@ -738,8 +738,12 @@ int fesom_timestep(int                          step_n,
      *  ZSTAR (future): hnode_new becomes a genuinely evolving thickness — if it is then computed or read
      *  on the HOST, RESTORE the matching sync_device/sync_host here + at substeps 1 & 13 (grep "M5.20:
      *  hnode_new"). The device-residency is an optimization for linfs, NOT a coordinate-agnostic invariant. */
-    /* M5.13f: hnode device-resident from last step's commit - no re-push; thickness reads it on device. */
-    fesom_ale_thickness_linfs_kk(mesh);
+    /* M5.13f: hnode device-resident from last step's commit - no re-push; thickness reads it on device.
+     * M6.3: SKIPPED under zstar (C fesom_step.c:320-321). Under zstar hnode_new is a genuinely
+     * EVOLVING thickness written by vert_vel_ale's zstar branch (Task 3.4) -- overwriting it with
+     * hnode here would destroy it. Under linfs it stays the trivial hnode_new := hnode copy. */
+    if (!fesom_ale_is_zstar())
+        fesom_ale_thickness_linfs_kk(mesh);
     /* M5.20: hnode_new stays DEVICE-resident — the sync_host was a PLACEBO (259 MB/step D2H): the only
      * host readers are the verify-only C-twins (tracer/GM/ale), which on Serial read host==device. The
      * production tracer adv/diff/GM kernels read hnode_new on device. NOT a snapshot output (no pre-I/O
@@ -1019,6 +1023,12 @@ int fesom_timestep(int                          step_n,
      *  device copy is still current (sync_device is a no-op). OUT: sync_host(hnode, helem) before
      *  the halos; both EVOLVING → feed next step's substep-1 EOS + substep-6 TDMA. */
     mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
+    /* M6.3 (C fesom_step.c:484-489): zstar commits thickness AND rewrites the live geometry
+     * (zbar_3d_n / Z_3d_n) from hnode_new, over myDim+eDim -- reading the hnode_new HALO that
+     * vert_vel_ale exchanged (invariant 4). linfs keeps the v1.0 flat copy + explicit exchanges. */
+    if (fesom_ale_is_zstar()) {
+        fesom_ale_update_thickness_zstar_kk(mesh, p);
+    } else
     fesom_ale_commit_thickness_kk(mesh);
     if (s_verify_ale) fesom_ale_commit_verify(mesh, step_n);
     /* M5.13f: hnode/helem device-halo'd below (evolving mesh stays device-resident across the step

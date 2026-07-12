@@ -613,6 +613,72 @@ static void compute_zbar_3d_n(fesom_mesh *m)
     }
 }
 
+/*--- M6.3 (zstar): Z_3d_n — per-node MID-layer depths ------------------------
+ * Fortran mesh_auxiliary_arrays (oce_ale.F90, after init_bottom_*_thickness). With nzmin=1
+ * (no cavity) and full cells every branch reduces to Z_3d_n(nz,n) = Z(nz) for nz = 1..nzmax-1,
+ * 0 beyond. The Fortran array is (nl-1, N); here it is padded to stride nl (last slot unused).
+ * CONSTANT under linfs — which is exactly why the port has always read the static Z instead.
+ * Rewritten per step by the zstar thickness commit.
+ */
+static void compute_Z_3d_n(fesom_mesh *m)
+{
+    int N  = m->myDim_nod2D + m->eDim_nod2D;
+    int nl = m->nl;
+    m->Z_3d_n_fld.alloc("Z_3d_n", (size_t)N * (size_t)nl);   // zero-init (levels >= nlevels stay 0)
+    m->Z_3d_n = m->Z_3d_n_fld.h();
+    FESOM_CHECK(m->Z_3d_n, "Z_3d_n: out of memory");
+
+    for (int n = 0; n < N; ++n) {
+        int nzmax = m->nlevels_nod2D[n];   /* 1-based count */
+        for (int nz = 0; nz < nzmax - 1; ++nz) {
+            m->Z_3d_n[(size_t)n * nl + nz] = m->Z[nz];
+        }
+    }
+}
+
+/*--- M6.3 (zstar): bottom_node/elem_thickness + dhe --------------------------
+ * Full-cell branch of init_bottom_node_thickness (oce_ale.F90:798-804) and
+ * init_bottom_elem_thickness (:686-692):
+ *   bottom_node_thickness(n) = zbar(nln-1) - zbar(nln),  nln = nlevels_nod2D(n)
+ *   bottom_elem_thickness(e) = zbar(nle-1) - zbar(nle),  nle = nlevels(e)
+ * The Fortran fills myDim then exchanges; the values are deterministic from static mesh data,
+ * so filling the full local extent is identical (and needs no halo exchange).
+ *
+ * The bottom layer NEVER stretches under zstar — both init_thickness and the per-step commit
+ * pin hnode(nzmax)/helem(nzmax) back to these values. That is invariant 3 (bottom protection).
+ *
+ * dhe is zeroed here: at cold start hbar == hbar_old == 0, so the step-1 CUMULATIVE stiffness
+ * update is a no-op (invariant 1).
+ */
+static void compute_bottom_thickness(fesom_mesh *m)
+{
+    int N = m->myDim_nod2D + m->eDim_nod2D;
+    int E = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
+
+    m->bottom_node_thickness_fld.alloc("bottom_node_thickness", (size_t)N);
+    m->bottom_elem_thickness_fld.alloc("bottom_elem_thickness", (size_t)E);
+    m->dhe_fld.alloc("dhe", (size_t)m->myDim_elem2D + (size_t)m->eDim_elem2D
+                              + (size_t)m->eXDim_elem2D);
+    m->bottom_node_thickness = m->bottom_node_thickness_fld.h();
+    m->bottom_elem_thickness = m->bottom_elem_thickness_fld.h();
+    m->dhe                   = m->dhe_fld.h();
+    FESOM_CHECK(m->bottom_node_thickness && m->bottom_elem_thickness && m->dhe,
+                "bottom thickness / dhe: out of memory");
+
+    for (int n = 0; n < N; ++n) {
+        int nln = m->nlevels_nod2D[n];     /* 1-based count */
+        if (nln >= 2)
+            m->bottom_node_thickness[n] = m->zbar[nln - 2] - m->zbar[nln - 1];
+    }
+    for (int e = 0; e < E; ++e) {
+        int nle = m->nlevels[e];           /* 1-based count; guard the eXDim tail where
+                                              nlevels may be unset */
+        if (nle >= 2)
+            m->bottom_elem_thickness[e] = m->zbar[nle - 2] - m->zbar[nle - 1];
+    }
+    /* dhe stays 0 (Field::alloc zero-inits) — the cold-start value. */
+}
+
 /*--- elem_area, area, areasvol ---------------------------------------------
  * Mirror of oce_mesh.F90:2202-2315. Sequence:
  *   ay = cos(mean lat over the 3 vertices)             [cellwise constant]
@@ -1229,6 +1295,10 @@ static void mesh_sync_geometry_device(fesom_mesh *m)
     FESOM_MESH_SYNC_DEV(m->gradient_sca_fld);
     FESOM_MESH_SYNC_DEV(m->mesh_resolution_fld);
     FESOM_MESH_SYNC_DEV(m->zbar_3d_n_fld);
+    FESOM_MESH_SYNC_DEV(m->Z_3d_n_fld);                // M6.3: live under zstar
+    FESOM_MESH_SYNC_DEV(m->dhe_fld);                   // M6.3: live under zstar
+    FESOM_MESH_SYNC_DEV(m->bottom_node_thickness_fld); // M6.3: static
+    FESOM_MESH_SYNC_DEV(m->bottom_elem_thickness_fld); // M6.3: static
     // Wave 2 — connectivity/coordinates (set once by read_* + scatter_mesh + orient_cw, all done
     // before this point; e.g. elem_nodes is post-orient here).
     FESOM_MESH_SYNC_DEV(m->coord_nod2D_fld);
@@ -1287,6 +1357,8 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
     /* GM/Redi mesh prerequisites — needs areasvol + elem_area + nlevels. */
     compute_mesh_resolution(m, partit);
     compute_zbar_3d_n(m);
+    compute_Z_3d_n(m);            // M6.3 (zstar): per-node mid-layer depths (== static Z under linfs)
+    compute_bottom_thickness(m);  // M6.3 (zstar): nominal bottom thickness + dhe (zeroed)
 
     /* ocean_area: local sum (computed in compute_node_areas) → MPI_Allreduce. */
     if (partit->npes > 1) {

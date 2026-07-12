@@ -2,11 +2,15 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
+#include "fesom_halo.h"
+#include "fesom_halo_device.hpp"
 
 #include <Kokkos_Core.hpp>   // M2.5: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <vector>            // M2.5: FESOM_KK_VERIFY snapshot buffers (host-only diagnostic)
 #include <string>
 #include <algorithm>
@@ -661,4 +665,217 @@ void fesom_ale_commit_verify(struct fesom_mesh *mesh, int step_n)
     std::printf("[FESOM_KK_VERIFY=ale] step %d backend=%s  max|Δ|: hnode=%.3e helem=%.3e\n",
                 step_n, std::string(Kokkos::DefaultExecutionSpace::name()).c_str(),d_hnode, d_helem);
     fesom_ale_verify_report_(step_n, "commit", std::max(d_hnode, d_helem));
+}
+
+/*===========================================================================================
+ * M6.3 — zstar vertical coordinate. Everything below is inert under the default (linfs).
+ *===========================================================================================*/
+
+/* Read-once mode switch — literal port of the C's fesom_ale_mode_init (fesom_ale.c:18-33). */
+static int    s_ale_zstar     = 0;
+static int    s_use_virt_salt = 1;
+static real_t s_is_nonlinfs   = 0.0;
+
+void fesom_ale_mode_init(void)
+{
+    const char *e = getenv("FESOM_ALE");
+    if (!e || !e[0] || strcmp(e, "linfs") == 0) {
+        s_ale_zstar = 0;
+    } else if (strcmp(e, "zstar") == 0) {
+        s_ale_zstar = 1;
+    } else {
+        /* zlevel + the local-zstar fallback are NOT ported (no reference run exercises them) —
+         * a gate-only abort, exactly as the C does. */
+        fprintf(stderr, "FESOM_ALE=%s not supported (linfs|zstar)\n", e);
+        exit(1);
+    }
+    /* DERIVED in the Fortran (oce_setup_step.F90) from which_ALE — not independent knobs:
+     * zstar => use_virt_salt = .false. and is_nonlinfs = 1.0. Under linfs is_nonlinfs = 0.0,
+     * which is exactly what makes every non-linfs term drop out identically. */
+    s_use_virt_salt = s_ale_zstar ? 0 : 1;
+    s_is_nonlinfs   = s_ale_zstar ? 1.0 : 0.0;
+
+    /* ⚠️ TEMPORARY (M6.3 in progress). Task 3.1 lands the geometry state + the thickness
+     * init/commit, but the zstar chain is not yet closed: the forcing flip (3.2), the SSH
+     * stiffness update (3.3), the vert_vel zstar branch that actually WRITES hnode_new (3.4),
+     * the Shchepetkin PGF (3.5) and the geometry re-points (3.6) are still to come. Running
+     * zstar now would silently produce wrong physics rather than fail — which is exactly the
+     * trap the TKE and mEVP stubs avoided. Delete this block when Task 3.6 lands. */
+    if (s_ale_zstar) {
+        fprintf(stderr,
+                "FESOM_ALE=zstar is NOT USABLE at this commit: the M6.3 chain is incomplete "
+                "(Task 3.1 of 3.1-3.6 landed — geometry + thickness only; the forcing flip, "
+                "stiffness update, vert_vel zstar branch, Shchepetkin PGF and geometry "
+                "re-points are missing). Refusing to run rather than produce wrong physics.\n");
+        exit(1);
+    }
+}
+
+int    fesom_ale_is_zstar(void)      { return s_ale_zstar; }
+int    fesom_ale_use_virt_salt(void) { return s_use_virt_salt; }
+real_t fesom_is_nonlinfs(void)       { return s_is_nonlinfs; }
+
+/*--- zstar thickness INIT (oce_ale.F90:1134-1218) -------------------------------------------
+ * Host-side: it runs ONCE at startup, before any device kernel, and its inputs (zbar, hbar,
+ * nlevels*) are all host-current there. The Fields it writes (hnode, hnode_new, helem, dhe) are
+ * pushed to the device by the caller's existing geometry sync.
+ */
+void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
+                                    struct fesom_dyn    *dyn,
+                                    struct fesom_partit *partit)
+{
+    const int    nl    = mesh->nl;
+    const int    N     = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
+    const real_t dt    = (real_t)FESOM_PHASE1_DT;
+
+    /* Mode-shared pre-block (oce_ale.F90:1002-1007). All zeros at cold start (hbar = hbar_old
+     * = 0); ported literally for shape fidelity (it is the same code on a restart). */
+    for (int n = 0; n < N; ++n) {
+        int ul = mesh->ulevels_nod2D[n] - 1;
+        dyn->ssh_rhs_old[n] = (mesh->hbar[n] - mesh->hbar_old[n])
+                            * mesh->areasvol[FESOM_NODE3D(n, ul, nl)] / dt;
+    }
+    for (int n = 0; n < N; ++n)
+        dyn->eta_n[n] = alpha * mesh->hbar_old[n] + (1.0 - alpha) * mesh->hbar[n];
+
+    /* zstar node thicknesses (:1134-1172). 1-based Fortran bounds annotated. */
+    for (int n = 0; n < N; ++n) {
+        int nzmin_f = mesh->ulevels_nod2D[n];        /* 1-based top level    */
+        int nzmax_f = mesh->nlevels_nod2D[n] - 1;    /* 1-based bottom layer */
+        int min_f   = mesh->nlevels_nod2D_min[n];    /* K_v-, 1-based        */
+
+        if (nzmin_f == 1) {
+            /* depth anomaly down to the last level whose scalar prism does NOT intersect the
+             * bottom: dd = zbar(1) - zbar(min-1)  (invariant 3: bottom protection) */
+            const real_t dd = mesh->zbar[0] - mesh->zbar[min_f - 2];
+
+            /* distribute hbar linearly: Fortran nz = 1 .. min-2 */
+            for (int nz = 0; nz <= min_f - 3; ++nz)
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] =
+                    (mesh->zbar[nz] - mesh->zbar[nz + 1]) * (1.0 + mesh->hbar[n] / dd);
+            /* bottom-intersecting levels keep NOMINAL spacing: Fortran nz = min-1 .. nzmax-1 */
+            for (int nz = min_f - 2; nz <= nzmax_f - 2; ++nz)
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] = mesh->zbar[nz] - mesh->zbar[nz + 1];
+        } else {
+            /* cavity arm (unreachable in our meshes): fixed geometry */
+            for (int nz = nzmin_f - 1; nz <= nzmax_f - 2; ++nz)
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] =
+                      mesh->zbar_3d_n[FESOM_NODE3D(n, nz,     nl)]
+                    - mesh->zbar_3d_n[FESOM_NODE3D(n, nz + 1, nl)];
+        }
+        /* bottom layer: Fortran hnode(nzmax) = bottom_node_thickness */
+        mesh->hnode[FESOM_NODE3D(n, nzmax_f - 1, nl)] = mesh->bottom_node_thickness[n];
+    }
+
+    /* zstar element thicknesses + dhe (:1176-1206). Owned elements only, then exchange.
+     * Reads hnode at halo nodes (filled above, full local extent). */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        int nzmin_f = mesh->ulevels[e];
+        int nzmax_f = mesh->nlevels[e] - 1;
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+
+        if (nzmin_f == 1) {
+            mesh->dhe[e] = (mesh->hbar[n0] + mesh->hbar[n1] + mesh->hbar[n2]) / 3.0;
+            mesh->helem[FESOM_ELEM3D(e, 0, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, 0, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, 0, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, 0, nl)]) / 3.0;
+        } else {
+            /* cavity arm (unreachable): the Fortran zeroes the WHOLE dhe array here and pins the
+             * top helem to the cavity surface depth. No cavities here — keep the guard, make the
+             * body fatal if it is ever hit (exactly as the C does). */
+            fprintf(stderr, "init_thickness_zstar: cavity element %d (ulevels=%d) not supported\n",
+                    e, nzmin_f);
+            exit(1);
+        }
+        /* Fortran nz = nzmin+1 .. nzmax-1  (2..nlevels-2) */
+        for (int nz = 1; nz <= nzmax_f - 2; ++nz)
+            mesh->helem[FESOM_ELEM3D(e, nz, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, nz, nl)]) / 3.0;
+        /* bottom layer: Fortran helem(nzmax) = bottom_elem_thickness */
+        mesh->helem[FESOM_ELEM3D(e, nzmax_f - 1, nl)] = mesh->bottom_elem_thickness[e];
+    }
+
+    /* hnode_new = hnode (:1217) — only the variable part is updated later. */
+    memcpy(mesh->hnode_new, mesh->hnode, (size_t)N * (size_t)nl * sizeof(real_t));
+
+    /* exchange_elem(helem) (:1218) */
+    if (partit && partit->npes > 1)
+        fesom_exchange_elem3D(mesh->helem, nl, partit);
+}
+
+/*--- zstar thickness COMMIT — DEVICE (oce_ale.F90:1382-1440) --------------------------------
+ * This is where the geometry goes LIVE: hnode := hnode_new, and zbar_3d_n / Z_3d_n are rebuilt
+ * from it bottom->top. Runs over myDim+eDim and READS the hnode_new halo, which vert_vel_ale
+ * exchanged (invariant 4 — this is the M5.20 hnode_new rail, restored under zstar).
+ *
+ * Per-node: a strictly sequential bottom->top recurrence within each column (zbar_3d_n(nz)
+ * depends on zbar_3d_n(nz+1)), so one thread per NODE owning its whole column — the D19
+ * entity-outer/level-inner shape. No cross-entity write => Serial == the C loop order.
+ * The element helem mean is a per-element GATHER => race-free, no atomics.
+ */
+void fesom_ale_update_thickness_zstar_kk(struct fesom_mesh   *mesh,
+                                         struct fesom_partit *partit)
+{
+    const int nl = mesh->nl;
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int Eo = mesh->myDim_elem2D;
+
+    auto hnode     = mesh->hnode_fld.d();
+    auto hnode_new = mesh->hnode_new_fld.d();
+    auto helem     = mesh->helem_fld.d();
+    auto zbar3d    = mesh->zbar_3d_n_fld.d();
+    auto Z3d       = mesh->Z_3d_n_fld.d();
+    auto ulev_n    = mesh->ulevels_nod2D_fld.d();
+    auto nlev_min  = mesh->nlevels_nod2D_min_fld.d();
+    auto ulev_e    = mesh->ulevels_fld.d();
+    auto nlev_e    = mesh->nlevels_fld.d();
+    auto elnod     = mesh->elem_nodes_fld.d();
+
+    /* node commit, bottom->top (:1382-1416), myDim+eDim */
+    Kokkos::parallel_for("ale_zstar_commit_node", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            const int nzmin_f = ulev_n(n);
+            if (nzmin_f > 1) return;                       /* cavity guard */
+            const int top_f = nlev_min(n) - 2;             /* 1-based commit top */
+            for (int nzf = top_f; nzf >= nzmin_f; --nzf) {
+                const int nz = nzf - 1;                    /* 0-based layer */
+                const size_t k  = FESOM_NODE3D(n, nz,     nl);
+                const size_t k1 = FESOM_NODE3D(n, nz + 1, nl);
+                hnode(k)  = hnode_new(k);
+                zbar3d(k) = zbar3d(k1) + hnode_new(k);
+                Z3d(k)    = zbar3d(k1) + hnode_new(k) / 2.0;
+            }
+        });
+    mesh->hnode_fld.modify_device();
+    mesh->zbar_3d_n_fld.modify_device();
+    mesh->Z_3d_n_fld.modify_device();
+
+    /* element mean thickness (:1421-1434): Fortran nz = 1 .. nlevels(elem)-2; the bottom helem
+     * keeps bottom_elem_thickness (never rewritten here). */
+    Kokkos::parallel_for("ale_zstar_commit_elem", Kokkos::RangePolicy<>(0, Eo),
+        KOKKOS_LAMBDA(const int e) {
+            const int nzmin_f = ulev_e(e);
+            if (nzmin_f > 1) return;                       /* cavity guard */
+            const int nzmax_f = nlev_e(e) - 1;
+            const int n0 = elnod(3*e + 0);
+            const int n1 = elnod(3*e + 1);
+            const int n2 = elnod(3*e + 2);
+            for (int nzf = nzmin_f; nzf <= nzmax_f - 1; ++nzf) {
+                const int nz = nzf - 1;
+                helem(FESOM_ELEM3D(e, nz, nl)) =
+                    (hnode(FESOM_NODE3D(n0, nz, nl)) +
+                     hnode(FESOM_NODE3D(n1, nz, nl)) +
+                     hnode(FESOM_NODE3D(n2, nz, nl))) / 3.0;
+            }
+        });
+    mesh->helem_fld.modify_device();
+
+    /* exchange_elem(helem) (:1440) */
+    fesom_halo_field(mesh->helem_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
 }

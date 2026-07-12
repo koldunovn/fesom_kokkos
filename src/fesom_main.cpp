@@ -342,6 +342,7 @@ int main(int argc, char **argv)
 
     fesom_mesh mesh;
     fesom_mesh_init(&mesh);
+    fesom_ale_mode_init();   // M6.3: read FESOM_ALE once; must precede every ALE branch
     /* Rank 0 reads global mesh files; others fill via Bcast then extract
      * their slice using partit->myList_*. For npes==1 this is identity. */
     /* But we need partit->myDim_* etc set first. For npes>1 it's populated
@@ -470,8 +471,15 @@ int main(int argc, char **argv)
            "approx 3D bytes=%.1f MiB\n",
            dyn.AB_order, tracers.num_tracers, (double)bytes / (1024.0 * 1024.0));
 
-    /* Phase 1 step 3: initial conditions. */
-    fesom_ic_thickness(&mesh, &mesh, &dyn);
+    /* Phase 1 step 3: initial conditions.
+     * M6.3 thickness-init dispatch (C fesom_main.c:399-402): linfs keeps the v1.0
+     * fesom_ic_thickness; zstar runs the literal init_thickness_ale port. At cold start
+     * (hbar = 0) they agree to <=1 ulp on helem (the mean-of-3 formula) -- exactly as the
+     * Fortran does; the SHAPE matters because it is the same code on a restart. */
+    if (fesom_ale_is_zstar())
+        fesom_ale_init_thickness_zstar(&mesh, &dyn, &mpi);
+    else
+        fesom_ic_thickness(&mesh, &mesh, &dyn);
     fesom_ic_tracers_constant(&mesh, &tracers, 10.0, 35.0);
     /* (Phase 2 T blob is added below, AFTER the IC/rest-state sanity tests so
        those still see the unperturbed constant field.) */
@@ -562,7 +570,8 @@ int main(int argc, char **argv)
                "(must be ≈ 0; ~1e-18 is normal)\n", (double)pgmax);
     }
 
-    /* Phase 1 step 6: linfs ALE thickness + vertical velocity. */
+    /* Phase 1 step 6: linfs ALE thickness + vertical velocity. (Sanity block; linfs-only by
+     * construction -- the zstar chain never reaches it.) */
     fesom_ale_thickness_linfs(&mesh);
     fesom_ale_vert_vel_linfs(&mesh, &dyn, /* gm_on */ 0);
 
