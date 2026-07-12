@@ -1,0 +1,76 @@
+#!/bin/bash
+#SBATCH --job-name=m6_tke_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/tkegpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/tkegpu.%j.err
+#
+# M6.1 Task 1.6 — CUDA fidelity gate, BOTH knob states, on the M6 private mesh.
+#
+# Two CUDA legs, each diffed against its own Serial oracle (both oracles are already
+# certified bit-identical to the C oracle, so Serial IS ground truth):
+#
+#   knob-OFF : CUDA (default) vs m6_baseline_serial          -> the campaign-long invariant
+#   knob-ON  : CUDA (TKE)     vs m6/tke_bitid/kk_tke         -> the new physics on the GPU
+#
+# PASS = the documented CUDA climate-close floor (~1e-3 T / ~1e-4 Kv from atomic-scatter
+# non-determinism, D22). A staleness/correctness regression saturates to ~1e-1..1e0, which
+# scripts/gpu_fidelity_check.py separates cleanly.
+#
+# ⚠️ CUDA-aware MPI needs openmpi/4.1.5-nvhpc (env_cuda.sh) — the env.sh openmpi/4.1.2 is
+# --without-cuda and SEGFAULTs on device pointers.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2       # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+BASE=/work/ab0995/a270088/port2/m6/tke_gpu
+OFF=$BASE/cuda_default; ON=$BASE/cuda_tke
+rm -rf "$OFF" "$ON"; mkdir -p "$OFF" "$ON"
+
+SREF_OFF=/work/ab0995/a270088/port2/m6_baseline_serial
+SREF_ON=/work/ab0995/a270088/port2/m6/tke_bitid/kk_tke
+
+RC=0
+
+echo "################ LEG 1: CUDA, knob-OFF (default: linfs + KPP + std EVP) ################"
+unset FESOM_MIX_SCHEME FESOM_ALE FESOM_WHICH_EVP
+export FESOM_STEP_PROFILE=1
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OFF" 1800 20 10 "$PHC" 1958 > "$OFF/log" 2>&1
+echo "leg 1 exit=$?"
+grep -m1 "loop timing" "$OFF/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_OFF" "$OFF" || RC=1
+
+echo
+echo "################ LEG 2: CUDA, knob-ON (FESOM_MIX_SCHEME=TKE) ################"
+export FESOM_MIX_SCHEME=TKE
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$ON" 1800 20 10 "$PHC" 1958 > "$ON/log" 2>&1
+echo "leg 2 exit=$?"
+grep -m1 "TKE mixing selected" "$ON/log" || echo "  !! TKE NOT SELECTED"
+grep -m1 "loop timing" "$ON/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_ON" "$ON" || RC=1
+
+echo
+echo "################ perf sanity (same job, same nodes, same day) ################"
+printf "  knob-OFF (KPP): %s\n" "$(grep -m1 'loop timing' "$OFF/log" | sed 's/.*= //')"
+printf "  knob-ON  (TKE): %s\n" "$(grep -m1 'loop timing' "$ON/log"  | sed 's/.*= //')"
+
+echo
+if [ "$RC" -eq 0 ]; then
+    echo "=== M6.1 CUDA GATE PASS (both knob states within the climate-close floor) ==="
+else
+    echo "=== M6.1 CUDA GATE FAIL ==="
+fi
+exit $RC

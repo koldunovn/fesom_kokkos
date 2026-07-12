@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=m6_tke_1yr
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=06:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/tke1yr.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/tke1yr.%j.err
+#
+# M6.1 Task 1.7 — the 1-yr CORE2 CLIMATE CLOSE at linfs + TKE (CUDA).
+#
+# 1 model year (17280 steps @ dt=1800) on 8 A100 / 2 gpu nodes, monthly means. Compared with
+# scripts/m32_climate_compare.py against:
+#   C-port   /work/ab0995/a270088/port/tke/c_tke_2yr        year 1958   (vectors: ROTATED,
+#            SHA 8260deae -- pre-75406d3, so --cref-frame rotated)
+#   Fortran  /work/ab0995/a270088/port/tke/fortran_linfs_tke year 1958  (vectors: geo, always)
+#
+# Both references were produced on the 2026-05-28 bathymetry -- which is exactly what the M6
+# private mesh carries. Do NOT point this at /pool (see MESH_PROVENANCE.md).
+#
+# ⚠️ source ONLY env_cuda.sh. env.sh EXPORTS a non-CUDA UCX_TLS that survives a module swap
+# and makes UCX pack DEVICE pointers through a host transport -> segfault in ucp_dt_pack.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2        # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${M6_NSTEPS:-17280}     # 1 model year @ dt=1800
+SNAP_EVERY=1440                # monthly (the .monthly.nc means are written regardless)
+YEAR=1958
+export FESOM_PRINT_EVERY=1000
+export FESOM_MIX_SCHEME=TKE    # <-- THE KNOB
+
+OUT=/work/ab0995/a270088/port2/m6/tke_cuda_1yr
+mkdir -p "$OUT"
+echo "=== M6.1 CUDA 1-yr CORE2, linfs+TKE (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+grep -m1 "TKE mixing selected" "$OUT/run.log" || echo "  !! TKE NOT SELECTED"
+echo "--- last step (sanity: T/S bounded, no runaway) ---"
+grep -E " it=" "$OUT/run.log" | tail -1
+echo "--- blowup / nan check ---"
+grep -icE "nan|blowup|inf" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo
+echo "############ CLIMATE COMPARE (vectors rotated to GEOGRAPHIC on both sides) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" "$OUT" \
+      --label "CUDA-TKE" --years 1958 \
+      --cref /work/ab0995/a270088/port/tke/c_tke_2yr        --cref-frame rotated \
+      --fref /work/ab0995/a270088/port/tke/fortran_linfs_tke
+exit $EC
