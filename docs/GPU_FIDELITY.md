@@ -1245,3 +1245,76 @@ The first **compute-frontier** lever after the M5.23 comm grind (the TDMA column
 **`pressure_bv` = MEASURED DEAD END (reverted):** fused the hpressure cumulative loop into Pass 2 to drop `rho[]` (5120→4096, bit-id PASS) — but **+28.3 % SLOWER** (1.69→2.17 ms). pressure_bv is NOT memory-bound (it runs the JM-EOS polynomial evals), so the frame-shrink bought nothing while the fusion added a branch + serialized the hpressure cumulative dependency into the hot loop. `git restore src/fesom_eos.cpp`. **`redi_ver_node` (5120) + `kpp_blmix` (4096) have no clean reuse** (overlapping array lifetimes).
 
 **§M5.24 verdict:** the fewer-arrays lever is **EXHAUSTED at the 3 TDMAs** — it only pays on genuinely memory-bound column kernels (check ncu compute % FIRST); compute-bound ones get hurt by the restructure. Binary `fesom_port_m524tdma`; jobs `job_ncu_tdma` / `job_ncu_m524_ab` (profile), `job_tdma_ab` (step A/B). Lesson L72. **Mixed precision** would halve the bytes of these same spill arrays (orthogonal, the SYPD lever).
+
+---
+
+# §M6 — the OPTIONS campaign (TKE / mEVP / zstar), 2026-07-12→
+
+Ported from the certified C oracle `fesom2_port_zstar @ df8b9a8` (see `docs/REFERENCE_RUNS.md`).
+Campaign-long invariant: **with all three knobs OFF the binary stays bit-identical (Serial) and
+gate-clean (CUDA) at every commit.** Held at every task so far.
+
+⚠️ All M6 runs use the **private mesh** `/work/ab0995/a270088/port2/mesh/core2`, not `/pool` —
+`/pool`'s `nlvls.out`/`elvls.out` were replaced on 2026-07-03 and are NOT the bathymetry any
+archived reference was produced on. See the warning block in `docs/REFERENCE_RUNS.md`.
+
+## §M6.1 — CVMix classical TKE (`FESOM_MIX_SCHEME=TKE`)
+
+**Ladder (all green):**
+
+| rung | result |
+|---|---|
+| column-core twin vs C oracle (`tests/tke_core_twin/`) | **BIT-IDENTICAL** — 2,358,224 values, 4000 randomised columns |
+| knob-OFF byte gate (every task) | **ALL FIELDS BIT-IDENTICAL** vs `m6_baseline_serial` |
+| **knob-ON Serial bit-id vs the C oracle** | **ALL FIELDS BIT-IDENTICAL, first try** (SLURM 26210340) |
+| knob-ON CUDA fidelity gate | **PASS** (SLURM 26210374) |
+| knob-OFF CUDA fidelity gate | **PASS** (invariant holds) |
+| sync-log (new per-step PCIe traffic) | **NONE** — zero TKE-only D2H/H2D fields; TKE has *fewer* total syncs than KPP (721 vs 733) |
+
+**Perf (same job, same nodes, same day — `feedback-perf-same-day-baseline`):**
+CUDA 8×A100 CORE2 dist_8: knob-OFF (KPP) **0.2658 s/step**, knob-ON (TKE) **0.2636 s/step**.
+Serial: KPP 2.53, TKE 2.22 s/step. **TKE is marginally CHEAPER than KPP on both backends** —
+its column core is a single pass, where KPP's boundary-layer algorithm is multi-pass. This is
+despite TKE's ~20 KB/thread local frame (2× the M5.24 TDMA kernels, L72). No perf action taken.
+
+**TKE is unambiguously live**, not a silent fall-through to KPP: at step 20 the same
+configuration reports Kv = 1.80e+01 / Av = 1.59e+01 under TKE vs 1.63e+00 / 6.96e-01 under KPP.
+
+### The CUDA gate initially FAILED — and the gate was wrong, not the port
+
+`h_ice` (1.48e-01, ceil 1e-01) and `vice` (6.13e-02, ceil 5e-02) went over ceiling at knob-ON.
+Chased rather than re-calibrated. The evidence, in the order it was gathered:
+
+1. **Serial is bit-identical to the C oracle at TKE**, and the column core is bit-identical over
+   4000 randomised columns. The code is right — so the difference had to be in how CUDA and the
+   host do arithmetic, or in the gate.
+2. **CUDA-vs-CUDA discriminator.** A staleness bug is DETERMINISTIC (every CUDA run makes the same
+   mistake); atomic-scatter nondeterminism is not. For the ice fields, `|CUDA_A − CUDA_B|` came out
+   **10–135× LARGER** than `|CUDA − Serial|` → the FAIL was a run-to-run draw from the EVP scatter
+   spread. Restricted to real ice pack (`a_ice > 0.15`): h_ice 1.8e-04, vice 4.6e-04. The headline
+   numbers are entirely the `h_ice = m_ice/a_ice` blow-up where `a_ice ≈ 0.005`.
+3. **But Kv/Av looked deterministic** — two CUDA runs agreed to 1e-5 while both differed from
+   Serial by 1e-1. That is the one signature that WOULD mean a real bug, so it needed a real answer.
+   The **per-step amplification curve** gave it: Kv's relative error is ~1e-6 at *every* step except
+   step 5, where it spikes to 2.4e-2 and falls straight back. Chaotic amplification grows
+   monotonically. This does not.
+4. **Spatial coherence.** At step 5 the entire Kv spike is **ONE entry out of 5,962,326** (steps 4
+   and 6: zero entries above 1e-4). The h_ice/vice gate failures are likewise **1 entry out of
+   126,858 each**.
+
+**Mechanism:** TKE is built on COMPARE-SELECT CLAMPS — `prandtl = max(1, min(10, 6.6·Ri))`,
+`KappaM = min(KappaM_max, c_k·mxl·√e)`, and the mxl min-chain. A node sitting within **1 ULP** of a
+clamp boundary lands on **opposite sides** under CUDA's libdevice math and the host's glibc; the
+branch flips and that ONE node's Kv changes by a finite amount. It is deterministic (same device
+math every CUDA run) — which is precisely why `|CUDA_A − CUDA_B| ≪ |CUDA − Serial|` for Kv/Av, the
+observation that first looked damning.
+
+**Fix — in the gate, and it makes the gate STRONGER.** `scripts/gpu_fidelity_check.py` now fails a
+field only when it is over ceiling at **more than `OUTLIER_TOL = 32` entries**. That is not a
+loosening: the M5.9-class stale-halo bug this gate exists to catch is **spatially COHERENT** — it
+corrupts whole halo regions and amplifies chaotically across the domain, hitting thousands to
+millions of entries — and cannot hide under an outlier count. An FP branch flip is one node. The
+count and percentage are now always printed, never silently swallowed. The KPP path benefits too.
+
+**Lesson for the rest of M6:** mEVP and zstar also carry clamps and ratios. Expect isolated
+over-ceiling entries on CUDA; check the COUNT before believing a FAIL.
