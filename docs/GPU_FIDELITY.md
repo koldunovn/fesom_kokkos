@@ -1381,7 +1381,7 @@ baseline before reading a correlation as a verdict (L79; baselines in `docs/REFE
 | knob-ON Serial vs C oracle @`df8b9a8` | **ALL FIELDS BIT-IDENTICAL** (after the Z7 fix, L78) |
 | ALE dump, 6 tags × 3 steps, gid-keyed | 0 SIGNAL lines — every tag exactly 0 |
 | CUDA gate, both knob states | PASS |
-| 1-yr CORE2 CUDA climate | (Task 3.9, running) |
+| 1-yr CORE2 CUDA climate | **PASS — every field ≥ 0.99974 vs BOTH anchors** |
 
 **The Z7 bug (L78).** The bit-id first failed with snapshots 0+1 EXACTLY clean and step 2
 diverging — the signature of a missed **live-geometry re-point**: at cold start `hbar==0`, so
@@ -1415,7 +1415,7 @@ physics, and raising the ceiling to hide it would blind the gate to a real regre
 | knob-OFF byte gate | ALL FIELDS BIT-IDENTICAL |
 | **triple-knob Serial vs C oracle @`df8b9a8`** | **ALL FIELDS BIT-IDENTICAL** — the three knobs COMPOSE |
 | CUDA gate, both knob states | PASS |
-| 1-yr CORE2 CUDA climate | (Task 4.3, running) |
+| 1-yr CORE2 CUDA climate | **PASS** (see below) |
 
 The composition proof is the question the three individual milestones cannot answer. The sharpest
 risk was **TKE reading the vertical geometry that zstar MOVES**: TKE's `Z_3d_n` reads had only ever
@@ -1441,3 +1441,32 @@ here, not lucky — but read the COUNT, never the max.**
 
 Perf, same job / same nodes / same day: knob-OFF 0.2715 s/step, all-3 0.2756 s/step (+1.5%).
 Every option knob in M6 is perf-neutral.
+
+### M6.3 zstar — 1-yr CORE2 CUDA climate (year 1958, vectors rotated to geographic)
+
+| | sst | sss | ssh | a_ice | m_ice | uice | vice |
+|---|---|---|---|---|---|---|---|
+| CUDA-zstar vs Fortran | 1.00000 | 0.99996 | 1.00000 | 0.99997 | 0.99997 | 0.99974 | 0.99976 |
+| CUDA-zstar vs C-port | 1.00000 | 0.99996 | 1.00000 | 0.99997 | 0.99999 | 0.99974 | 0.99976 |
+| *BASELINE: C vs Fortran* | *1.00000* | *1.00000* | *1.00000* | *1.00000* | *0.99998* | *0.99999* | *0.99999* |
+
+**Every field ≥ 0.99974 against BOTH anchors**, and CUDA-vs-Fortran is indistinguishable from
+CUDA-vs-C-port — the signature of a faithful port. `uice`/`vice` land exactly where the baseline
+predicts (the C↔Fortran floor is 0.99999; CUDA gives back ~2.5e-04 to D22 scatter noise). zstar
+keeps std EVP, which is why the ice velocity reproduces here and does *not* under mEVP (L79).
+**M6.3 COMPLETE.**
+
+### M6.4 combined twin — 1-yr CORE2 CUDA climate (year 1958)
+
+| | sst | sss | ssh | a_ice | m_ice | uice | vice |
+|---|---|---|---|---|---|---|---|
+| CUDA-all3 vs Fortran | 1.00000 | 0.99997 | 1.00000 | 0.99997 | 0.99996 | 0.94290 | 0.91703 |
+| CUDA-all3 vs C-port | 1.00000 | 0.99997 | 1.00000 | 0.99997 | 0.99998 | 0.94576 | 0.92755 |
+| *BASELINE: C vs Fortran* | *1.00000* | *1.00000* | *1.00000* | *1.00000* | *0.99998* | ***0.96234*** | ***0.94727*** |
+
+Every mass/scalar field ≥ 0.99996 against BOTH anchors. `uice`/`vice` sit ~0.02 under the
+**all-3 config's own C↔Fortran baseline** — the *identical* offset mEVP-alone showed against *its*
+baseline (0.933 vs 0.954). The mEVP rheology sets the ice-velocity floor in the combined config
+too, and the residual is D22 scatter noise amplified by mEVP's fixed-point iteration. Ran the full
+17280 steps: T[-2.02, 31.32], S[3.89, 41.06], no drift, no runaway. **M6.4 COMPLETE — the three
+knobs compose, bit-identically on Serial and climate-close on CUDA.**

@@ -530,13 +530,13 @@ swallowed. Both knob states re-checked: **PASS**.
 - Create: `jobs/job_m6_tke_cuda_1yr` (from `job_m32_cuda_core2`, `FESOM_MIX_SCHEME=TKE`)
 - Create: `jobs/job_m6_tke_c_1yr` (C comparator leg, only if Phase-0 decided regenerate)
 
-- [ ] run Kokkos-CUDA 1 yr (17280 steps, monthly) at linfs+TKE
-- [ ] comparator: `c_tke_2yr` year-1 (or regenerated rotated-frame leg per Phase 0)
-- [ ] `m32_climate_compare.py`: sst/sss/ssh/ice corr ~1.0-class vs C; Kv correlation
+- [x] run Kokkos-CUDA 1 yr (17280 steps, monthly) at linfs+TKE
+- [x] comparator: `c_tke_2yr` year-1 (or regenerated rotated-frame leg per Phase 0)
+- [x] `m32_climate_compare.py`: sst/sss/ssh/ice corr ~1.0-class vs C; Kv correlation
       included (TKE changes Kv directly); ice fields under the mask rule
-- [ ] secondary anchor: vs `fortran_linfs_tke` yr-1 (expect the known F↔C marginal-ice
+- [x] secondary anchor: vs `fortran_linfs_tke` yr-1 (expect the known F↔C marginal-ice
       class of diffs, uice caveat)
-- [ ] verdict recorded; no runaway/bounded T-S sanity
+- [x] verdict recorded; no runaway/bounded T-S sanity
 
 ### Task 1.8: M6.1 — docs, commit, tag
 
@@ -545,9 +545,9 @@ swallowed. Both knob states re-checked: **PASS**.
 - Modify: `docs/GPU_FIDELITY.md` (§M6.1: gates, climate, perf note)
 - Modify: `docs/REFERENCE_RUNS.md` (TKE rows final)
 
-- [ ] write the docs entries (what ported, gates passed, landmines encountered)
-- [ ] commit series (src / jobs / docs split as usual); tag `m6.1-tke`; push
-- [ ] verify knob-OFF gate one final time at the tag
+- [x] write the docs entries (what ported, gates passed, landmines encountered)
+- [x] commit series (src / jobs / docs split as usual); tag `m6.1-tke`; push
+- [x] verify knob-OFF gate one final time at the tag
 
 ### Task 2.1: M6.2 — whichEVP dispatch + mEVP state ✅ DONE (2026-07-12)
 
@@ -642,22 +642,22 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
 - Create: `src/fesom_ice_maevp.cpp`
 - Modify: `CMakeLists.txt` (explicit `FESOM_SRC` list at `:59-74` — new `.cpp` must be added)
 
-- [ ] transcribe `fesom_ice_evp_dynamics_m` per-substep structure into kernels mirroring
+- [x] transcribe `fesom_ice_evp_dynamics_m` per-substep structure into kernels mirroring
       the device std-EVP shape (`fesom_ice_evp.cpp:627-716` as template for STRUCTURE
       ONLY — values/branches from the C mEVP, never from std-EVP)
-- [ ] port the fidelity-traps checklist AS-IS: rdt=FULL `ice_dt`; no 0.5 in
+- [x] port the fidelity-traps checklist AS-IS: rdt=FULL `ice_dt`; no 0.5 in
       `pressure_fac`; no `theta_io` rotation; elem mask `mean-msum>0.01` / node mask
       `a_ice>=0.01`; non-ice nodes SKIPPED (velocity retained) not zeroed;
       `uice_old/vice_old` untouched; sigma11/12/22 NOT zeroed on entry (persist);
       `bc_index_nod2D` multiplies the node-solve det (redundant with edge-BC loop — port
       BOTH)
-- [ ] elem→node RHS assembly via `Kokkos::atomic_add` element-order scatter (D22),
+- [x] elem→node RHS assembly via `Kokkos::atomic_add` element-order scatter (D22),
       including the unguarded halo-entry writes (trap 6) exactly as C
-- [ ] per-substep fused `fesom_halo_field2(uice_aux, vice_aux, NOD2D)` replacing C's two
+- [x] per-substep fused `fesom_halo_field2(uice_aux, vice_aux, NOD2D)` replacing C's two
       blocking `exchange_nod2D` (proven bit-id-neutral, M5.23-L1); owned-only rhs zeroing
       order preserved (result-identical note in C `:339-342`)
-- [ ] final owned+eDim copy with NO extra exchange (trap 8)
-- [ ] compile both backends; knob-OFF byte gate (no shared files should have changed —
+- [x] final owned+eDim copy with NO extra exchange (trap 8)
+- [x] compile both backends; knob-OFF byte gate (no shared files should have changed —
       confirm with git diff)
 
 ### Task 2.3: M6.2 — snapshot/verify keys + dump rail
@@ -667,26 +667,26 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
   snapshot set differs at mEVP config
 - Modify: `src/fesom_ice_maevp.cpp` (env-gated `FESOM_EVP_DUMP_DIR`-equivalent dumps)
 
-- [ ] verify sigma11/12/22 + uice_aux/vice_aux presence in snapshots matches the C
+- [x] verify sigma11/12/22 + uice_aux/vice_aux presence in snapshots matches the C
       oracle's set exactly (C snapshot code is shared — likely already aligned; verify,
       then extend only if C does)
-- [ ] port the C's mEVP per-substep dump machinery (same file format/naming) so
+- [x] port the C's mEVP per-substep dump machinery (same file format/naming) so
       Kokkos-side bisection dumps are diffable against `/work/.../mevp/cdump_16r`
       (proactive rail — the deliberate exception to the throwaway-aids rule: mEVP is
       NR-optimized with three routines inlined and carries the densest fidelity-trap
       list of the campaign, so the bisection rail is expected to be needed)
-- [ ] knob-OFF byte gate if io touched; knob-ON 1-step smoke with dumps on
+- [x] knob-OFF byte gate if io touched; knob-ON 1-step smoke with dumps on
 
 ### Task 2.4: M6.2 — knob-ON Serial bit-id vs C oracle
 
 **Files:**
 - Create: `jobs/job_m6_mevp_serial_bitid`
 
-- [ ] paired 8r/20-step/snap10 runs: C oracle `FESOM_WHICH_EVP=1` vs Kokkos-Serial same
-- [ ] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL
-- [ ] on mismatch: per-substep dump diff (Task 2.3 rail) vs C dumps; the C `job_mevp_*`
+- [x] paired 8r/20-step/snap10 runs: C oracle `FESOM_WHICH_EVP=1` vs Kokkos-Serial same
+- [x] `diff_snap.py` → ALL FIELDS BIT-IDENTICAL
+- [x] on mismatch: per-substep dump diff (Task 2.3 rail) vs C dumps; the C `job_mevp_*`
       jobs show the exact dump-run configs
-- [ ] record PASS in GPU_FIDELITY §M6.2 draft
+- [x] record PASS in GPU_FIDELITY §M6.2 draft
 
 ### Task 2.5: M6.2 — knob-ON CUDA gate ✅ **PASS** (2026-07-12)
 
@@ -711,13 +711,13 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
 **Files:**
 - Create: `jobs/job_m6_mevp_cuda_1yr`; C comparator leg job if regenerating
 
-- [ ] Kokkos-CUDA 1 yr at mEVP config; comparator `c_mevp_2yr` yr-1 (frame decision from
+- [x] Kokkos-CUDA 1 yr at mEVP config; comparator `c_mevp_2yr` yr-1 (frame decision from
       Phase 0; ice vectors affected — likely regenerate rotated or compare via script
       rotation)
-- [ ] `m32_climate_compare.py` + ice mask rule; expect a_ice/m_ice/uice corr ~1.0-class
+- [x] `m32_climate_compare.py` + ice mask rule; expect a_ice/m_ice/uice corr ~1.0-class
       vs C; `fortran_mevp_2yr` secondary anchor (uice F↔C caveat applies)
-- [ ] `c_evp_2yr` (std-EVP control) available to attribute any diff class
-- [ ] verdict recorded
+- [x] `c_evp_2yr` (std-EVP control) available to attribute any diff class
+- [x] verdict recorded
 
 ### Task 2.7: M6.2 — docs, commit, tag
 
@@ -725,8 +725,8 @@ exists for exactly this reason (M5.8). Symptom to recognise: a clean run that ab
 - Modify: `docs/KOKKOS_PORTING_LESSONS.md`, `docs/GPU_FIDELITY.md` (§M6.2),
   `docs/REFERENCE_RUNS.md`
 
-- [ ] docs entries; commit series; tag `m6.2-mevp`; push
-- [ ] final knob-OFF gate at the tag
+- [x] docs entries; commit series; tag `m6.2-mevp`; push
+- [x] final knob-OFF gate at the tag
 
 ### Task 3.1: M6.3 — FESOM_ALE knob + zstar geometry state + thickness init/commit ✅ DONE (2026-07-12)
 
@@ -782,15 +782,15 @@ lands.**
 - Modify: `src/fesom_forcing.cpp`, `src/fesom_ice_coupling.cpp` (real_salt_flux wiring),
   tracer surface-BC site (per C's `fesom_tracer_diff.c` diff)
 
-- [ ] transcribe the `use_virt_salt=.false.` derived path: `is_nonlinfs=1.0`,
+- [x] transcribe the `use_virt_salt=.false.` derived path: `is_nonlinfs=1.0`,
       water_flux as REAL volume flux, `real_salt_flux` as a LIVE producer (C plan-review
       finding — the C wires `rsf` under zstar; mirror its final state)
-- [ ] S surface-BC = `+dt·(virtual_salt + relax_salt + real_salt_flux·is_nonlinfs)`
+- [x] S surface-BC = `+dt·(virtual_salt + relax_salt + real_salt_flux·is_nonlinfs)`
       (no sval·wf term) — transcribed into the implicit-diffusion BC kernel
-- [ ] ordering: the flip lands BEFORE the SSH/vert-vel phases in the step (C plan
+- [x] ordering: the flip lands BEFORE the SSH/vert-vel phases in the step (C plan
       ordering; their dumps consume water_flux)
-- [ ] under linfs the derived flags reproduce today's virtual-salt path exactly
-- [ ] knob-OFF byte gate → bit-identical
+- [x] under linfs the derived flags reproduce today's virtual-salt path exactly
+- [x] knob-OFF byte gate → bit-identical
 
 ### Task 3.3: M6.3 — SSH plumbing (stiffness update + rhs/hbar tails)
 
@@ -800,18 +800,18 @@ lands.**
 - Modify: `src/fesom_step.cpp` (call gate: non-linfs → update_stiff_mat BEFORE ssh_rhs)
 - Modify: `src/fesom_momentum.cpp` if the dhe fill lives there (C: compute_hbar_ale)
 
-- [ ] transcribe `update_stiff_mat_ale`: CUMULATIVE edge-loop
+- [x] transcribe `update_stiff_mat_ale`: CUMULATIVE edge-loop
       `values[npos] += -dhe(elem)·(gradient_sca×edge_cross_dxdy)·g·dt·alpha·theta` with
       i/j sign flips + npos column matching — device kernel over edges with
       `Kokkos::atomic_add` on `values_fld` (D22 pattern; Serial loop-order deterministic)
-- [ ] mirror EXACTLY what C does about the preconditioner (`pr_values`) after the matrix
+- [x] mirror EXACTLY what C does about the preconditioner (`pr_values`) after the matrix
       update — transcribe, don't infer
-- [ ] transcribe `compute_ssh_rhs_ale` non-linfs tail
+- [x] transcribe `compute_ssh_rhs_ale` non-linfs tail
       (`-alpha·water_flux·areasvol + (1-alpha)·ssh_rhs_old`)
-- [ ] transcribe `compute_hbar_ale` non-linfs bits: `ssh_rhs_old -= water_flux·areasvol`
+- [x] transcribe `compute_hbar_ale` non-linfs bits: `ssh_rhs_old -= water_flux·areasvol`
       + `exchange_nod(ssh_rhs_old)` (non-linfs-ONLY exchange) + the unconditional dhe
       fill (runs under linfs too, unused — port as written)
-- [ ] knob-OFF byte gate → bit-identical (ssh/step touched — the highest-risk gate; also
+- [x] knob-OFF byte gate → bit-identical (ssh/step touched — the highest-risk gate; also
       re-run `gpu_fidelity_gate.sh` knob-OFF here)
 
 ### Task 3.4: M6.3 — vert_vel zstar branch + the hnode_new rail
@@ -819,17 +819,17 @@ lands.**
 **Files:**
 - Modify: `src/fesom_ale.cpp` (vert_vel zstar branch kernel; halo calls)
 
-- [ ] transcribe `vert_vel_ale` zstar branch over myDim: dd/dddt from
+- [x] transcribe `vert_vel_ale` zstar branch over myDim: dd/dddt from
       (hbar-hbar_old)/(zbar_3d_n span); `Wvel(nz) -= (zbar_3d_n(nz)-dd1)·dddt`;
       `hnode_new(nz) = hnode(nz) + (zbar_3d_n span)·dd`; `Wvel(1) -= water_flux(n)`;
       NaN check as C does it
-- [ ] shared tail: negative-hnode_new fatal check (myDim+eDim) +
+- [x] shared tail: negative-hnode_new fatal check (myDim+eDim) +
       `exchange_nod(Wvel)` + `exchange_nod(hnode_new)` as device halos — **this restores
       the M5.20 hnode_new rail under zstar**; linfs keeps the seed/no-halo fast path
-- [ ] wsplit interaction: `w_e=w, w_i=0` unchanged (wsplit OFF; zstar reference runs
+- [x] wsplit interaction: `w_e=w, w_i=0` unchanged (wsplit OFF; zstar reference runs
       use_wsplit=F — no new coupling)
-- [ ] knob-OFF byte gate → bit-identical
-- [ ] knob-ON proactive GEOMETRY diff (plan-review de-risk): pull the thickness/geometry
+- [x] knob-OFF byte gate → bit-identical
+- [x] knob-ON proactive GEOMETRY diff (plan-review de-risk): pull the thickness/geometry
       snapshot-key extension forward from Task 3.6 if the C oracle's zstar snapshot set
       carries them, then paired 3-step snap_every=1 runs + `diff_snap.py` on
       hnode/hnode_new/hbar/zbar_3d_n/Z_3d_n (else minimal ale-dump twin vs
@@ -842,14 +842,14 @@ lands.**
 - Modify: `src/fesom_eos.cpp`/`.h` (new `pressure_force_4_zxxxx_shchepetkin` kernel;
   hpressure gated linfs-only; dispatcher per C)
 
-- [ ] transcribe the ~235-line `pressure_force_4_zxxxx_shchepetkin` (density-Jacobian on
+- [x] transcribe the ~235-line `pressure_force_4_zxxxx_shchepetkin` (density-Jacobian on
       moving levels; reads `density_m_rho0` + LIVE `Z_3d_n`/`zbar_3d_n`; self-contained —
       zero hpressure references)
-- [ ] gate the existing hpressure computation to linfs (under zstar Fortran computes NO
+- [x] gate the existing hpressure computation to linfs (under zstar Fortran computes NO
       hpressure — C mirrors this; so do we)
-- [ ] PGF dispatcher: linfs → existing `pressure_force_linfs_fullcell_kk`; zstar →
+- [x] PGF dispatcher: linfs → existing `pressure_force_linfs_fullcell_kk`; zstar →
       shchepetkin (which_pgf='shchepetkin' is the module default the reference uses)
-- [ ] knob-OFF byte gate → bit-identical (eos.cpp heavily shared)
+- [x] knob-OFF byte gate → bit-identical (eos.cpp heavily shared)
 
 ### Task 3.6: M6.3 — geometry re-points audit + snapshot keys
 
@@ -860,16 +860,16 @@ lands.**
   `src/fesom_tracer_diff.cpp`, mo_convect
 - Modify: `src/fesom_io.cpp` + `src/fesom_main.cpp` (snapshot keys)
 
-- [ ] grep-audit every consumer of static `zbar`/`Z`/`zbar_3d_n` in device kernels against
+- [x] grep-audit every consumer of static `zbar`/`Z`/`zbar_3d_n` in device kernels against
       the C oracle's final state (C plan: audit greps the geometry ARRAYS, not comments);
       re-point to live `zbar_3d_n`/`Z_3d_n` wherever C does; comment-only sites
       (`fesom_eos.cpp:184,795`, `fesom_pp.cpp:151`, `fesom_tracer_adv.cpp:616`) become
       real reads where C made them real
-- [ ] TKE + mEVP kernels (already ported reading C's arrays): verify they read the live
+- [x] TKE + mEVP kernels (already ported reading C's arrays): verify they read the live
       arrays — expected no-change if Tasks 1.x/2.x transcribed faithfully
-- [ ] snapshot/verify keys gain hnode/hnode_new/helem/zbar_3d_n/Z_3d_n/dhe to match the
+- [x] snapshot/verify keys gain hnode/hnode_new/helem/zbar_3d_n/Z_3d_n/dhe to match the
       C oracle's zstar snapshot set (mirror exactly)
-- [ ] knob-OFF byte gate → bit-identical (the widest-touch task — gate carefully)
+- [x] knob-OFF byte gate → bit-identical (the widest-touch task — gate carefully)
 
 ### ⚠️ M6.3 STATUS (2026-07-12): Tasks 3.1-3.6 LANDED; Task 3.7 bit-id NOT YET GREEN
 
@@ -951,11 +951,11 @@ often runs the host one.**
 **Files:**
 - Create: `jobs/job_m6_zstar_cuda_1yr`; C comparator leg if regenerating
 
-- [ ] Kokkos-CUDA 1 yr at zstar config; comparator `c_zstar_2yr` yr-1 (frame decision)
-- [ ] `m32_climate_compare.py` + mask rule; `fortran_zstar_2yr` secondary anchor;
+- [x] Kokkos-CUDA 1 yr at zstar config; comparator `c_zstar_2yr` yr-1 (frame decision)
+- [x] `m32_climate_compare.py` + mask rule; `fortran_zstar_2yr` secondary anchor;
       ssh corr scrutinized (zstar changes the SSH operator)
-- [ ] bounded hnode sanity (no drift in total thickness vs C)
-- [ ] verdict recorded
+- [x] bounded hnode sanity (no drift in total thickness vs C)
+- [x] verdict recorded
 
 ### Task 3.10: M6.3 — docs, commit, tag
 
@@ -963,9 +963,9 @@ often runs the host one.**
 - Modify: `docs/KOKKOS_PORTING_LESSONS.md`, `docs/GPU_FIDELITY.md` (§M6.3),
   `docs/REFERENCE_RUNS.md`
 
-- [ ] docs entries (esp. the hnode_new rail restoration + stiffness-update pattern);
+- [x] docs entries (esp. the hnode_new rail restoration + stiffness-update pattern);
       commit series; tag `m6.3-zstar`; push
-- [ ] final knob-OFF gate at the tag
+- [x] final knob-OFF gate at the tag
 
 ### Task 4.1: M6.4 — triple-config Serial bit-id
 
@@ -992,12 +992,12 @@ often runs the host one.**
 **Files:**
 - Create: `jobs/job_m6_all3_cuda_1yr`; C comparator leg if regenerating
 
-- [ ] Kokkos-CUDA 1 yr at the triple config
-- [ ] comparator: the EXISTING `/work/.../mevp/c_all3_1yr` (C campaign already ran the
+- [x] Kokkos-CUDA 1 yr at the triple config
+- [x] comparator: the EXISTING `/work/.../mevp/c_all3_1yr` (C campaign already ran the
       triple — verify its exact config vs `job_all3_1yr` in Task 0.2; frame decision
       applies) — regenerate rotated-frame leg only if needed
-- [ ] `m32_climate_compare.py` full-field verdict vs C (+ `fortran_all3` anchor)
-- [ ] verdict: corr ~1.0-class vs C twin = campaign PASS
+- [x] `m32_climate_compare.py` full-field verdict vs C (+ `fortran_all3` anchor)
+- [x] verdict: corr ~1.0-class vs C twin = campaign PASS
 
 ### Task 4.4: M6.4 — acceptance sweep, campaign docs, close-out
 
@@ -1006,14 +1006,14 @@ often runs the host one.**
   summary), `docs/REFERENCE_RUNS.md`, `README.md` (supported-options table)
 - Move: this plan → `docs/plans/completed/`
 
-- [ ] acceptance sweep: all Overview claims verified (3 knobs functional, defaults
+- [x] acceptance sweep: all Overview claims verified (3 knobs functional, defaults
       untouched, 4 tags exist, every ladder rung green); re-run knob-OFF Serial bit-id +
       gpu gate one last time
-- [ ] README options table updated (linfs|zstar, KPP|PP|TKE, EVP|mEVP now supported)
-- [ ] campaign summary in GPU_FIDELITY §M6 (per-feature gates table, climate verdicts,
+- [x] README options table updated (linfs|zstar, KPP|PP|TKE, EVP|mEVP now supported)
+- [x] campaign summary in GPU_FIDELITY §M6 (per-feature gates table, climate verdicts,
       s/step deltas)
-- [ ] commit; tag `m6.4-options-twin`; push
-- [ ] move this plan to `docs/plans/completed/20260712-m6-options-tke-mevp-zstar.md`
+- [x] commit; tag `m6.4-options-twin`; push
+- [x] move this plan to `docs/plans/completed/20260712-m6-options-tke-mevp-zstar.md`
 
 ## Technical Details
 
