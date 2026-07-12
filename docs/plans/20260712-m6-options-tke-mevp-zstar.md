@@ -871,6 +871,58 @@ lands.**
       C oracle's zstar snapshot set (mirror exactly)
 - [ ] knob-OFF byte gate → bit-identical (the widest-touch task — gate carefully)
 
+### ⚠️ M6.3 STATUS (2026-07-12): Tasks 3.1-3.6 LANDED; Task 3.7 bit-id NOT YET GREEN
+
+Tasks 3.1-3.6 are implemented and every knob-OFF byte gate is **BIT-IDENTICAL** (26210790,
+26210976, 26211023, 26211072, 26211110, 26211132). Both backends build. The zstar abort guard
+is removed. But the knob-ON Serial bit-id (Task 3.7) is **not yet passing**, and the failure is
+sharply localised:
+
+**BISECT (paired 3-step, snap_every=1, SLURM 26211151):**
+
+| | step 0 | step 1 | step 2 |
+|---|---|---|---|
+| every field | **0** | **0** | diverges |
+| `eta_n` | 0 | 0 | 1.93e-13, at **97.76% of ALL nodes**, every entry < 1e-6 |
+| `density` / `pgf` / `bvfreq` | 0 | 0 | **0** |
+| `Kv` | 0 | 0 | 8.90e-05 (0.61% of entries) |
+| `T` / `u` | 0 | 0 | 1.71e-04 / 3.50e-04 |
+
+**What this proves:**
+- Steps 0 and 1 are EXACTLY bit-identical (not "small" — zero). So `init_thickness_zstar`, the
+  Shchepetkin PGF, the geometry commit, `vert_vel`, the forcing flip and the step-1 stiffness
+  update (a no-op at `dhe==0`) are all CORRECT.
+- At step 2 `density`/`pgf`/`bvfreq` are still exactly 0 ⇒ the LIVE GEOMETRY
+  (`Z_3d_n`, `helem`, `hnode`, and their halos) is correct after the first commit.
+- `Kv`/`Av` are computed at substep 3, BEFORE the momentum/CG ⇒ the error enters **before KPP in
+  step 2**, which RULES OUT the stiffness update (substep 6b) as the root.
+- `eta_n` shifting uniformly at ~1e-13 across 97.76% of nodes is the signature of a **GLOBAL
+  SCALAR off by one ULP**, added everywhere; the per-node magnitude scales with `areasvol(n)`,
+  which is exactly why the other 2.24% round back to zero.
+- The printed per-step diagnostics MATCH digit-for-digit at steps 1-3 (`wf`, `vs=0` — virtual
+  salt correctly off, `rs=3.49e-05` — real_salt_flux live, `hp=0` — hpressure correctly gated).
+
+**Prime suspect: `net` in the zstar freshwater global-balancing reduction (Task 3.2).** It is the
+only global scalar the zstar path introduces, and `water_flux(n) += net` reaches every node.
+`integrate_nod_2D_kk` itself is shared with `relax_salt` and is byte-proven under linfs, so the
+ULP seed is in `flux`'s INPUTS — and `evaporation` / `ice_sublimation` are precisely the two new
+`therm_ice` outputs that **no gate has ever compared** (the `FESOM_KK_VERIFY=icethermo` gate
+checks 9 outputs, not these; and under linfs they are dead stores, so the byte gate cannot see
+them either).
+
+**Next step:** dump `water_flux` / `evaporation` / `ice_sublimation` at step 1 from both trees and
+diff. The C oracle already has the rail (`FESOM_ALE_DUMP_DIR`, `forcing` tag, gid-keyed rows); the
+Kokkos side needs a matching ~25-line env-gated dump. Compare against
+`/work/ab0995/a270088/port/zstar/fdump`.
+
+⚠️ Also fixed en route (found by this same gate at snapshot 0): the port has **TWO** hpressure
+implementations (a host twin and a device kernel) where the C has one. Gating only the device
+kernel left the STARTUP hpressure live under zstar, feeding `pressure_force_linfs_fullcell` a
+value the C never computes — `pgf_x`/`pgf_y` differed from the oracle before a single timestep
+ran. Both are gated now; snapshot 0 is bit-identical. **Lesson: when the port has a host twin AND
+a device kernel of the same routine, a physics gate must be applied to BOTH — the startup path
+often runs the host one.**
+
 ### Task 3.7: M6.3 — knob-ON Serial bit-id vs C oracle (zstar)
 
 **Files:**
