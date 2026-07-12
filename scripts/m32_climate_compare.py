@@ -106,12 +106,17 @@ ap.add_argument("--cref-frame", choices=("geo", "rotated"), default="rotated",
                      "Default 'rotated' matches the KPP ref. See scripts/fesom_frame.py.")
 ap.add_argument("--mesh", default=DEFAULT_MESH,
                 help=f"mesh dir for the r2g rotation (default {DEFAULT_MESH})")
+ap.add_argument("--backend-frame", choices=("geo", "rotated"), default="rotated",
+                help="vector frame of the BACKEND dir. The Kokkos port is always 'rotated' (no "
+                     "frame knob), which is the default. Set 'geo' to feed a C-port run in as the "
+                     "backend -- that is how you measure the C-vs-Fortran BASELINE for a scheme, "
+                     "which is what a backend-vs-C number has to be judged against.")
 args = ap.parse_args()
 
 rot = Rotator(args.mesh)
 # Fortran is ALWAYS geographic; the Kokkos port is ALWAYS rotated (it has no frame knob).
 FRAME = {"Fortran": "geo", "C-port": args.cref_frame}
-KK_FRAME = "rotated"
+KK_FRAME = args.backend_frame
 
 print(f"M3.2 climate validation — backend={args.label}  dir={args.backend_dir}")
 print(f"  Fortran ref: {args.fref}  (vectors: geo)")

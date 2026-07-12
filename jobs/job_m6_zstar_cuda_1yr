@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH --job-name=m6_zstar_1yr
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/zstar1yr.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/zstar1yr.%j.err
+#
+# M6.3 Task 3.9 — the 1-yr CORE2 CLIMATE CLOSE at zstar + KPP + std EVP (CUDA).
+#
+# 1 model year (17280 steps @ dt=1800) on 8 A100 / 2 gpu nodes, monthly means. Compared with
+# scripts/m32_climate_compare.py against:
+#   C-port   /work/ab0995/a270088/port/zstar/c_zstar_2yr        year 1958  (vectors: ROTATED)
+#   Fortran  /work/ab0995/a270088/port/zstar/fortran_zstar_2yr  year 1958  (vectors: geo, always)
+#
+# EXPECTED (the C-vs-Fortran BASELINE for this same scheme, measured on the two refs above):
+#     sst 1.00000  sss 1.00000  ssh 1.00000  a_ice 1.00000  m_ice 0.99998
+#     uice 0.99999  vice 0.99999
+# So this leg should land at ~0.999+ on EVERY field. ⚠️ Judge the numbers against THAT baseline,
+# not against a remembered figure from another scheme: mEVP's uice floor is 0.954 because mEVP
+# REPLACES the ice rheology, whereas zstar keeps std EVP and reproduces uice at ~1.0. Reading one
+# scheme's floor onto another is exactly how the fictitious "F<->C ice-edge budget" was born (L74).
+#
+# Both references were produced on the 2026-05-28 bathymetry -- which is what the M6 private mesh
+# carries. Do NOT point this at /pool (see MESH_PROVENANCE.md).
+#
+# ⚠️ source ONLY env_cuda.sh (L77).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2        # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${M6_NSTEPS:-17280}     # 1 model year @ dt=1800
+SNAP_EVERY=1440                # monthly
+YEAR=1958
+export FESOM_PRINT_EVERY=1000
+export FESOM_ALE=zstar         # <-- THE KNOB
+unset FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_ALE_DUMP_DIR
+
+OUT=/work/ab0995/a270088/port2/m6/zstar_cuda_1yr
+mkdir -p "$OUT"
+echo "=== M6.3 CUDA 1-yr CORE2, zstar+KPP+EVP (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
+srun -l "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+grep -m1 -i "zstar" "$OUT/run.log" || echo "  !! ZSTAR NOT SELECTED — check the FESOM_ALE parse"
+echo "--- last step (sanity: T/S bounded, no runaway) ---"
+grep -E " it=" "$OUT/run.log" | tail -1
+echo "--- blowup / nan check ---"
+grep -icE "nan|blowup|inf" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo
+echo "############ CLIMATE COMPARE (vectors rotated to GEOGRAPHIC on both sides) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" "$OUT" \
+      --label "CUDA-zstar" --years 1958 \
+      --cref /work/ab0995/a270088/port/zstar/c_zstar_2yr        --cref-frame rotated \
+      --fref /work/ab0995/a270088/port/zstar/fortran_zstar_2yr
+
+echo
+echo "############ BASELINE for reference: C-zstar vs Fortran-zstar (same scheme) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" /work/ab0995/a270088/port/zstar/c_zstar_2yr \
+      --label "C-zstar" --years 1958 --backend-frame rotated \
+      --cref /work/ab0995/a270088/port/zstar/c_zstar_2yr        --cref-frame rotated \
+      --fref /work/ab0995/a270088/port/zstar/fortran_zstar_2yr 2>&1 | sed -n '/vs Fortran/,/vs C-port/p'
+exit $EC

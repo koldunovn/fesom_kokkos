@@ -1,0 +1,84 @@
+#!/bin/bash
+#SBATCH --job-name=m6_zstar_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/zstargpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/zstargpu.%j.err
+#
+# M6.3 Task 3.8 — CUDA fidelity gate, BOTH knob states, on the M6 private mesh.
+#
+# Two CUDA legs, each diffed against its own Serial oracle (both oracles are certified
+# bit-identical to the C oracle @df8b9a8, so Serial IS ground truth):
+#
+#   knob-OFF : CUDA (default)    vs m6_baseline_serial            -> the campaign-long invariant
+#   knob-ON  : CUDA (FESOM_ALE=zstar) vs m6/zstar_bitid/kk_zstar  -> the new coordinate on the GPU
+#
+# ⚠️ zstar is the FIRST knob that puts the mesh GEOMETRY in motion on the device:
+# hnode/helem/zbar_3d_n/Z_3d_n are rewritten every step by the thickness commit, and hnode_new
+# now carries a real halo (the rail M5.20 removed as a linfs-only optimisation, restored in
+# Task 3.4). So this gate is testing MORE than the other two knobs did -- a missing device halo
+# or a stale-host geometry read shows up here and NOWHERE else.
+#
+# PASS = the documented CUDA climate-close floor (~1e-3 T / ~1e-4 Kv from atomic-scatter
+# non-determinism, D22). ⚠️ L75: gpu_fidelity_check.py gates on COHERENCE (OUTLIER_TOL=32), not
+# on max|d| -- zstar's thickness floors are compare-selects that can flip on ONE node under a
+# 1-ULP host-vs-device difference. CHECK THE COUNT before believing a FAIL: a real staleness bug
+# is domain-wide (thousands of entries), a clamp flip is 1-2.
+#
+# ⚠️ CUDA-aware MPI needs openmpi/4.1.5-nvhpc (env_cuda.sh) — the env.sh openmpi/4.1.2 is
+# --without-cuda and SEGFAULTs on device pointers. NEVER source both envs in one script (L77).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2       # the M6 private mesh -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+BASE=/work/ab0995/a270088/port2/m6/zstar_gpu
+OFF=$BASE/cuda_default; ON=$BASE/cuda_zstar
+rm -rf "$OFF" "$ON"; mkdir -p "$OFF" "$ON"
+
+SREF_OFF=/work/ab0995/a270088/port2/m6_baseline_serial
+SREF_ON=/work/ab0995/a270088/port2/m6/zstar_bitid/kk_zstar
+
+RC=0
+
+echo "################ LEG 1: CUDA, knob-OFF (default: linfs + KPP + std EVP) ################"
+unset FESOM_MIX_SCHEME FESOM_ALE FESOM_WHICH_EVP
+export FESOM_STEP_PROFILE=1
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OFF" 1800 20 10 "$PHC" 1958 > "$OFF/log" 2>&1
+echo "leg 1 exit=$?"
+grep -m1 "loop timing" "$OFF/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_OFF" "$OFF" || RC=1
+
+echo
+echo "################ LEG 2: CUDA, knob-ON (FESOM_ALE=zstar) ################"
+export FESOM_ALE=zstar
+srun "$ROOT/build-cuda/fesom_port" "$MESH" "$ON" 1800 20 10 "$PHC" 1958 > "$ON/log" 2>&1
+echo "leg 2 exit=$?"
+grep -qi "zstar" "$ON/log" || echo "  !! ZSTAR NOT SELECTED — check the FESOM_ALE parse"
+grep -m1 "loop timing" "$ON/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_ON" "$ON" || RC=1
+
+echo
+echo "################ perf sanity (same job, same nodes, same day) ################"
+printf "  knob-OFF (linfs): %s\n" "$(grep -m1 'loop timing' "$OFF/log" | sed 's/.*= //')"
+printf "  knob-ON  (zstar): %s\n" "$(grep -m1 'loop timing' "$ON/log"  | sed 's/.*= //')"
+
+echo
+if [ "$RC" -eq 0 ]; then
+    echo "=== M6.3 CUDA GATE PASS (both knob states within the climate-close floor) ==="
+else
+    echo "=== M6.3 CUDA GATE FAIL — check the OUTLIER COUNT (L75) before assuming a real bug ==="
+fi
+exit $RC

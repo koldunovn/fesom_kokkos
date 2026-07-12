@@ -1341,3 +1341,67 @@ rotated to geographic on both sides (`scripts/fesom_frame.py`).
 CUDA-vs-C-port — the signature of a faithful port. T/S bounded, no runaway. Note `uice`/`vice`
 are only this clean because the vector frame is now handled (L74); the old comparator would have
 reported 0.92 / 0.43 for the same run. **M6.1 COMPLETE.**
+
+---
+
+## §M6.2 — modified EVP sea-ice rheology (`FESOM_WHICH_EVP=1`)
+
+| gate | result |
+|---|---|
+| knob-OFF byte gate | ALL FIELDS BIT-IDENTICAL |
+| knob-ON Serial vs C oracle @`df8b9a8` | **ALL FIELDS BIT-IDENTICAL** (1st try) |
+| CUDA gate, both knob states | PASS (68× under ceiling, 0 outliers) |
+| 1-yr CORE2 CUDA climate | PASS — see below |
+
+1-yr CORE2 (CUDA, 8×A100), year 1958, vectors rotated to geographic on both sides:
+
+| | sst | sss | ssh | a_ice | m_ice | uice | vice |
+|---|---|---|---|---|---|---|---|
+| CUDA-mEVP vs Fortran | 1.00000 | 0.99996 | 1.00000 | 0.99997 | 0.99996 | 0.93330 | 0.91322 |
+| CUDA-mEVP vs C-port | 1.00000 | 0.99996 | 1.00000 | 0.99997 | 0.99998 | 0.94444 | — |
+| **BASELINE: C-port vs Fortran** | 1.00000 | 1.00000 | 1.00000 | 0.99999 | 0.99998 | **0.95438** | **0.93908** |
+
+⚠️ **`uice`/`vice` ≈ 0.93 is NOT a port defect — it is mEVP's own reproducibility floor.** The
+certified C oracle, deterministic and running the identical scheme, only reaches 0.954/0.939
+against Fortran; mEVP is a fixed-point iteration (α=β=250) that is only approximately converged,
+so ice velocity does not reproduce to 1e-5 across independent implementations. TKE and zstar keep
+std EVP and score ~1.0 on the same field. Our CUDA sits ~0.02 below the floor = D22 atomic-scatter
+noise amplified by the iteration. Every mass/scalar field is ≥0.9999, and **Kokkos-Serial mEVP is
+BIT-IDENTICAL to the C oracle**, so the port is provably exact. Always measure the same-scheme
+baseline before reading a correlation as a verdict (L79; baselines in `docs/REFERENCE_RUNS.md`).
+**M6.2 COMPLETE.**
+
+---
+
+## §M6.3 — zstar vertical coordinate (`FESOM_ALE=zstar`)
+
+| gate | result |
+|---|---|
+| knob-OFF byte gate | ALL FIELDS BIT-IDENTICAL |
+| knob-ON Serial vs C oracle @`df8b9a8` | **ALL FIELDS BIT-IDENTICAL** (after the Z7 fix, L78) |
+| ALE dump, 6 tags × 3 steps, gid-keyed | 0 SIGNAL lines — every tag exactly 0 |
+| CUDA gate, both knob states | PASS |
+| 1-yr CORE2 CUDA climate | (Task 3.9, running) |
+
+**The Z7 bug (L78).** The bit-id first failed with snapshots 0+1 EXACTLY clean and step 2
+diverging — the signature of a missed **live-geometry re-point**: at cold start `hbar==0`, so
+`Z_3d_n == Z` BITWISE, and a static-`Z` read is invisible until the surface actually moves. One
+live line (`fesom_kpp.cpp:937`, the device `delhat`) plus 7 host twins. `delhat` drives the KPP
+boundary-layer shape function → Kv/Av → u/v via the implicit vertical viscosity → ssh_rhs → eta_n.
+
+**CUDA gate, 20 steps, CORE2 8×A100** — `Av`/`Kv` deserve a note:
+
+| field | knob-OFF (linfs) | knob-ON (zstar) | ceiling | over 1e-2 (zstar) |
+|---|---|---|---|---|
+| Av | 3.314e-05 | 9.869e-02 | 1e-01 | **2** of 11,498,973 |
+| Kv | 9.223e-05 | 9.537e-02 | 1e-01 | **1** of 5,962,326 |
+| T | 1.147e-03 | 1.419e-03 | 1e-02 | 0 |
+| S | 4.483e-04 | 5.378e-04 | 1e-02 | 0 |
+
+`Av`/`Kv` jump ~3000× under zstar and land at 98.7% of the ceiling — but the max is driven by
+**ONE node**. Under zstar KPP's boundary-layer index `kbl` is an *integer* decision that now reads
+the LIVE geometry, which carries CUDA's atomic-scatter noise; a 1-ULP shift flips `kbl` on a single
+column and Kv there jumps by O(mixed-layer minus background diffusivity). This is the L75
+clamp-flip mechanism, not a staleness bug — a stale halo is domain-wide (millions of entries), this
+is 1. **Check the COUNT, not the max.** Expect this gate to stay marginal on Av/Kv; that is
+physics, and raising the ceiling to hide it would blind the gate to a real regression.

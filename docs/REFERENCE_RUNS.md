@@ -209,6 +209,29 @@ Reference namelists (all 10 per feature) + upstream provenance are vendored in
 `jobs/m6_namelists/{tke,mevp,zstar}/`; every feature config is a verified **single-knob** clone
 of the linfs+KPP baseline.
 
+### ⚠️ The C-vs-Fortran BASELINE per scheme — read this BEFORE judging any backend-vs-C number
+
+**Every scheme has its own reproducibility floor.** A correlation is not a verdict until you know
+what the floor is; reading one scheme's floor onto another is exactly how the fictitious
+"F↔C ice-edge budget" was born (L74). Measured 2026-07-12, year 1958, on the reference dirs above
+(free — no HPC allocation, the refs already exist):
+
+```
+scripts/m32_climate_compare.py <C-ref-dir> --label C-<scheme> --years 1958 \
+        --backend-frame <the C ref's frame> --fref <Fortran-ref-dir> --cref <C-ref-dir> --cref-frame <same>
+```
+
+| scheme | what it changes | sst | ssh | a_ice | m_ice | **uice** | **vice** |
+|---|---|---|---|---|---|---|---|
+| **zstar** | vertical coordinate only | 1.00000 | 1.00000 | 1.00000 | 0.99998 | **0.99999** | **0.99999** |
+| **mEVP** | **the ice rheology itself** | 1.00000 | 1.00000 | 0.99999 | 0.99998 | **0.95438** | **0.93908** |
+
+**mEVP's ice velocity genuinely does not reproduce to better than ~0.95 across two independent
+implementations** — it is a fixed-point iteration (α=β=250 pseudo-steps) that is only approximately
+converged, so tiny differences amplify. TKE and zstar leave std EVP alone and reproduce `uice` at
+~1.0. So `uice ≈ 0.93` on a CUDA-mEVP leg is **the scheme's floor plus D22 scatter noise, not a
+port defect** — and the proof is that Kokkos-Serial mEVP is BIT-IDENTICAL to the C oracle. See L79.
+
 ⚠️ `/scratch/a/a270088/fortran_kpp_5yr_fix` — the Fortran-KPP anchor named at the top of this
 document — has been **purged down to restart files**; its output `.nc` are gone. Use
 `/work/.../zstar/fortran_linfs_2yr_b` instead (same linfs+KPP config, purge-safe, and its
