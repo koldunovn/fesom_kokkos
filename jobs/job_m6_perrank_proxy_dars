@@ -1,0 +1,127 @@
+#!/bin/bash
+#SBATCH --job-name=m6_proxy_dars
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=8
+#SBATCH --ntasks=32
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/proxydars.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/proxydars.%j.err
+#
+# M6 PER-RANK PROXY — does the zstar knob cost anything in the COMM-BOUND regime?
+#
+# WHY THIS JOB EXISTS. Every M6 perf number is CORE2 @ 8 ranks = ~15.9k 2D-verts/rank, where the
+# step is compute-bound and every knob delta landed INSIDE the 5.6% noise floor. That says nothing
+# about production. Per M5.22 the bottleneck FLIPS with PER-RANK LOAD, not mesh size:
+#   NG5 @ 4N  (16 ranks) = 462k verts/rank -> COMPUTE-bound
+#   NG5 @ 16N (64 ranks) = 116k verts/rank -> COMM-bound (halo Waitall dominates)
+# and zstar adds exactly the cost a comm-bound step punishes: the restored `hnode_new` NOD3D halo,
+# a full nl-level exchange EVERY step (the rail M5.20 deleted as a linfs-only optimisation), plus a
+# per-step stiffness-matrix rebuild.
+#
+# THE PROXY (user's method — avoids a hard-to-get 16-node GPU alloc):
+#   dars = 3,160,340 nodes @ 32 ranks (8 nodes x 4 A100) = 98,761 verts/rank
+#   vs the NG5@16N target of 115,631 verts/rank  -> within 15%. Same regime.
+# Faithful for HALO cost (what we are testing). NOT faithful for CG iteration count (conditioning
+# is a property of the actual mesh), so read s/step, not SYPD, out of this.
+#
+# DESIGN. 3 configs x 2 reps, INTERLEAVED (d z a d z a) rather than blocked (d d z z a a): if a
+# node warms up or a neighbour job lands mid-run, a blocked design would confound that drift with
+# the config. Interleaving + 2 reps separates them. All legs are in ONE job on the SAME nodes --
+# the only way to compare timings on Levante (cross-job noise is 5.6%, larger than what we measure).
+# Then 2 profile legs (default, zstar) to ATTRIBUTE any delta to the halo instead of guessing.
+#
+# dt=180: dars is CFL-unstable at dt=240 from a cold PHC start (SCALING_M524.md). snap_every=-1
+# (no I/O in the timing window).
+#
+# ⚠️ zstar has NEVER been run outside CORE2. If it blows up cold on dars, that is itself a finding
+# -- the sanity block below prints T/S bounds and greps for NaN on every leg. Do not report a
+# timing from a leg that went unstable.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"          # L77: NEVER also source env.sh
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars    # perf only -- no bit-comparison, /pool is fine
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=180
+NSTEPS=45            # internal timer excludes 5 warmup -> 40 timed steps
+OUT=/work/ab0995/a270088/port2/m6/proxy_dars
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+NOD2D=$(head -1 "$MESH/nod2d.out")
+echo "=== M6 PER-RANK PROXY on dars ==="
+echo "  nodes=$SLURM_NNODES  ranks=$NPES (dist_$NPES)  dt=$DT  nsteps=$NSTEPS"
+echo "  mesh nod2D=$NOD2D  ->  $((NOD2D / NPES)) 2D-verts/rank"
+echo "  (NG5@16N target = 115,631 verts/rank; CORE2@8 = 15,857 -- what M6 actually measured)"
+echo "  nodes: $SLURM_JOB_NODELIST"
+echo
+
+# ---- config setter -------------------------------------------------------------
+setcfg() {
+  unset FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_ALE FESOM_STEP_PROFILE
+  case "$1" in
+    default) : ;;                                                     # linfs + KPP + std EVP
+    zstar)   export FESOM_ALE=zstar ;;                                # THE SUSPECT
+    all3)    export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar ;;
+  esac
+}
+
+run() {   # run <cfg> <tag> [profile]
+  setcfg "$1"
+  [ "${3:-}" = "profile" ] && export FESOM_STEP_PROFILE=1
+  local L="$OUT/log_$2.txt"
+  srun "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" $DT $NSTEPS -1 "$PHC" 1958 > "$L" 2>&1
+  local rc=$?
+  local t; t=$(grep -h 'loop timing' "$L" | tail -1 | sed 's/.*-> *//')
+  local nan; nan=$(grep -ciE "nan|blowup" "$L" || true)
+  printf "  %-16s rc=%-2s  %-22s  nan/blowup-hits=%s\n" "$2" "$rc" "${t:-NO TIMING}" "$nan"
+}
+
+echo "######## 6 CLEAN TIMING LEGS — INTERLEAVED (default, zstar, all3) x2 ########"
+run default d_rep1
+run zstar   z_rep1
+run all3    a_rep1
+run default d_rep2
+run zstar   z_rep2
+run all3    a_rep2
+
+echo
+echo "######## T/S SANITY — a leg that went unstable has a meaningless timing ########"
+for t in d_rep1 z_rep1 a_rep1 d_rep2 z_rep2 a_rep2; do
+  printf "  %-8s %s\n" "$t" "$(grep -E ' it=' "$OUT/log_$t.txt" | tail -1 | grep -o 'T\[[^]]*\] S\[[^]]*\]' || echo '(no step line)')"
+done
+
+echo
+echo "######## 2 PROFILE LEGS — attribute any delta to the HALO, do not guess ########"
+run default d_prof profile
+run zstar   z_prof profile
+
+echo
+echo "=== top step-profile entries: DEFAULT ==="
+grep "fesom_prof" "$OUT/log_d_prof.txt" | sort -k3 -rn -t'%' 2>/dev/null | head -14
+echo
+echo "=== top step-profile entries: ZSTAR ==="
+grep "fesom_prof" "$OUT/log_z_prof.txt" | sort -k3 -rn -t'%' 2>/dev/null | head -14
+echo
+echo "=== halo/exchange lines, DEFAULT vs ZSTAR (the hnode_new NOD3D rail is the suspect) ==="
+echo "--- default:"; grep -iE "fesom_prof.*(halo|exch|waitall)" "$OUT/log_d_prof.txt" | head -10
+echo "--- zstar:";   grep -iE "fesom_prof.*(halo|exch|waitall)" "$OUT/log_z_prof.txt" | head -10
+
+echo
+echo "=== SUMMARY (read the two reps as the error bar; a delta smaller than |rep1-rep2| is NOT resolved) ==="
+for c in d z a; do
+  r1=$(grep -h 'loop timing' "$OUT/log_${c}_rep1.txt" | tail -1 | grep -oE '[0-9.]+ s/step')
+  r2=$(grep -h 'loop timing' "$OUT/log_${c}_rep2.txt" | tail -1 | grep -oE '[0-9.]+ s/step')
+  case $c in d) n=default;; z) n=zstar;; a) n=all3;; esac
+  printf "  %-8s rep1=%-14s rep2=%-14s\n" "$n" "${r1:-?}" "${r2:-?}"
+done

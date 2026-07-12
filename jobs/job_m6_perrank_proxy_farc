@@ -1,0 +1,127 @@
+#!/bin/bash
+#SBATCH --job-name=m6_proxy_farc
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m6/proxyfarc.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m6/proxyfarc.%j.err
+#
+# M6 PER-RANK PROXY on farc — does the zstar knob cost anything in the COMM-BOUND regime?
+#
+# Companion to jobs/job_m6_perrank_proxy_dars (8 nodes, queued ~10 h). Same question, cheaper
+# allocation, and it BRACKETS the target instead of hitting one point:
+#
+#   regime is set by 2D-VERTS/RANK, not mesh size (M5.22).  NG5@16N = 115,631/rank = COMM-bound.
+#     farc 1N (4 ranks)  = 159,596/rank   1.38x target   <-- above
+#     farc 2N (8 ranks)  =  79,798/rank   0.69x target   <-- below
+#     dars 8N (32 ranks) =  98,761/rank   0.85x target   (the queued job)
+#   vs what M6 ACTUALLY measured: CORE2 @ 8 ranks = 15,857/rank = COMPUTE-bound, where an extra
+#   halo is free and every knob delta landed inside the 5.6% noise floor.
+#
+# THE SUSPECT: zstar adds the restored `hnode_new` NOD3D halo -- a full nl-level exchange EVERY
+# step (the rail M5.20 deleted as a linfs-only optimisation) -- plus a per-step stiffness rebuild.
+# A comm-bound step is exactly what punishes that. If the cost is real it should GROW as verts/rank
+# FALLS (1N -> 2N), because the halo:interior ratio grows. That TREND is the actual evidence --
+# a single point could be anything.
+#
+# BOTH per-rank points come from ONE 2-node allocation (srun -N1 vs -N2) so they share hardware.
+# Within each: 3 configs x 2 reps, INTERLEAVED (d z a d z a), never blocked -- a blocked design
+# would confound mid-job drift (node warm-up, neighbour job) with the config. The rep-to-rep spread
+# IS the error bar: a delta smaller than |rep1-rep2| is NOT resolved and must not be reported as one.
+#
+# dt=900 (farc production dt, SCALING_M524.md). snap_every=-1 (no I/O inside the timing window).
+#
+# ⚠️ zstar has NEVER run outside CORE2. Every leg prints T/S bounds + greps NaN; a leg that went
+# unstable has a MEANINGLESS timing and must be thrown out, not quietly reported.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_cuda.sh"          # L77: NEVER also source env.sh
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc   # perf only -- no bit-comparison, /pool is fine
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=900
+NSTEPS=45            # internal timer excludes 5 warmup -> 40 timed steps
+OUT=/work/ab0995/a270088/port2/m6/proxy_farc
+rm -rf "$OUT"; mkdir -p "$OUT"
+
+NOD2D=$(head -1 "$MESH/nod2d.out")
+echo "=== M6 PER-RANK PROXY on farc (nod2D=$NOD2D) ==="
+echo "  nodes: $SLURM_JOB_NODELIST   dt=$DT  nsteps=$NSTEPS"
+echo "  point A: -N1 -n4  -> $((NOD2D/4)) verts/rank  (1.38x the NG5@16N target)"
+echo "  point B: -N2 -n8  -> $((NOD2D/8)) verts/rank  (0.69x the NG5@16N target)"
+echo "  [NG5@16N = 115631/rank = comm-bound;  CORE2@8 = 15857/rank = what M6 measured]"
+echo
+
+setcfg() {
+  unset FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_ALE FESOM_STEP_PROFILE
+  case "$1" in
+    default) : ;;                                                   # linfs + KPP + std EVP
+    zstar)   export FESOM_ALE=zstar ;;                              # THE SUSPECT
+    all3)    export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar ;;
+  esac
+}
+
+# run <cfg> <nnodes> <ntasks> <tag> [profile]
+run() {
+  setcfg "$1"
+  [ "${5:-}" = "profile" ] && export FESOM_STEP_PROFILE=1
+  local L="$OUT/log_$4.txt"
+  srun -N"$2" -n"$3" --ntasks-per-node=4 --gres=gpu:4 \
+       "$ROOT/build-cuda/fesom_port" "$MESH" "$OUT" $DT $NSTEPS -1 "$PHC" 1958 > "$L" 2>&1
+  local rc=$?
+  local t; t=$(grep -h 'loop timing' "$L" | tail -1 | sed 's/.*-> *//')
+  local nan; nan=$(grep -ciE "nan|blowup" "$L" || true)
+  printf "  %-14s rc=%-2s  %-22s  nan/blowup-hits=%s\n" "$4" "$rc" "${t:-NO TIMING}" "$nan"
+}
+
+for P in A B; do
+  if [ "$P" = A ]; then NN=1; NT=4; VPR=$((NOD2D/4)); else NN=2; NT=8; VPR=$((NOD2D/8)); fi
+  echo "######## POINT $P — ${NN} node(s), ${NT} ranks, ${VPR} verts/rank — INTERLEAVED d z a d z a ########"
+  run default "$NN" "$NT" "${P}_d_rep1"
+  run zstar   "$NN" "$NT" "${P}_z_rep1"
+  run all3    "$NN" "$NT" "${P}_a_rep1"
+  run default "$NN" "$NT" "${P}_d_rep2"
+  run zstar   "$NN" "$NT" "${P}_z_rep2"
+  run all3    "$NN" "$NT" "${P}_a_rep2"
+  echo "  --- T/S sanity (an unstable leg's timing is meaningless) ---"
+  for c in d z a; do for r in rep1 rep2; do
+    printf "    %-12s %s\n" "${P}_${c}_${r}" \
+      "$(grep -E ' it=' "$OUT/log_${P}_${c}_${r}.txt" | tail -1 | grep -o 'T\[[^]]*\] S\[[^]]*\]' || echo '(no step line)')"
+  done; done
+  echo "  --- profile legs (attribute any delta to the HALO, do not guess) ---"
+  run default "$NN" "$NT" "${P}_d_prof" profile
+  run zstar   "$NN" "$NT" "${P}_z_prof" profile
+  echo
+done
+
+echo "############################ SUMMARY ############################"
+echo "read the two reps as the error bar; a delta smaller than |rep1-rep2| is NOT resolved"
+echo
+for P in A B; do
+  if [ "$P" = A ]; then VPR=$((NOD2D/4)); NN=1; else VPR=$((NOD2D/8)); NN=2; fi
+  echo "POINT $P — ${NN} node(s), ${VPR} verts/rank"
+  printf "  %-8s %-12s %-12s\n" cfg rep1 rep2
+  for c in d z a; do
+    case $c in d) n=default;; z) n=zstar;; a) n=all3;; esac
+    r1=$(grep -h 'loop timing' "$OUT/log_${P}_${c}_rep1.txt" 2>/dev/null | tail -1 | grep -oE '[0-9.]+(?= s/step)' -P)
+    r2=$(grep -h 'loop timing' "$OUT/log_${P}_${c}_rep2.txt" 2>/dev/null | tail -1 | grep -oE '[0-9.]+(?= s/step)' -P)
+    printf "  %-8s %-12s %-12s\n" "$n" "${r1:-?}" "${r2:-?}"
+  done
+  echo
+done
+
+echo "=== halo/exchange profile lines, DEFAULT vs ZSTAR, at each point ==="
+for P in A B; do
+  echo "--- point $P default:"; grep -iE "fesom_prof.*(halo|exch|waitall)" "$OUT/log_${P}_d_prof.txt" 2>/dev/null | head -8
+  echo "--- point $P zstar:";   grep -iE "fesom_prof.*(halo|exch|waitall)" "$OUT/log_${P}_z_prof.txt" 2>/dev/null | head -8
+done
