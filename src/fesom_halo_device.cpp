@@ -16,6 +16,7 @@
  * path; it is CUDA-only).
  */
 #include "fesom_halo_device.hpp"
+#include "fesom_speed.hpp"   // M7: FESOM_SPEED_* levers (NOFENCE2, SYNCSTATS)
 
 #include <cstdlib>   // getenv
 #include <cstdio>    // M5.17 halo-mpi-prof report
@@ -117,6 +118,57 @@ void fesom_halo_mpi_report(int timed_steps, fesom_partit *p)
     fflush(stdout);
 }
 
+/* ======================================================================= *
+ * M7 Task 0.3/1.1 — FESOM_SPEED_SYNCSTATS: per-step device-sync counters.
+ *
+ * Counts what the nsys stall budget measures, from inside the model, so a lever's
+ * effect on the SYNC COUNT is visible without re-tracing: exchanges + fields moved
+ * by kind, pack/unpack launches, and the three fence classes (pre-MPI pack fence,
+ * post-unpack fence executed, post-unpack fence SKIPPED by NOFENCE2, realloc guard).
+ *
+ * Gated + cached -> zero production cost. Defined in the always-compiled section so
+ * the report links on Serial builds too (where the device halo never runs and every
+ * counter stays 0).
+ * ======================================================================= */
+static long s_ss_exch[5]     = {0, 0, 0, 0, 0};   // exchange calls, by kind
+static long s_ss_fields[5]   = {0, 0, 0, 0, 0};   // fields moved, by kind (deviceN adds nf)
+static long s_ss_fence_pre   = 0;                 // pre-MPI pack fences (MANDATORY)
+static long s_ss_fence_post  = 0;                 // post-unpack fences EXECUTED
+static long s_ss_fence_skip  = 0;                 // post-unpack fences SKIPPED (NOFENCE2)
+static long s_ss_fence_grow  = 0;                 // realloc-guard fences (warmup only)
+static long s_ss_pack        = 0;                 // pack kernel launches
+static long s_ss_unpack      = 0;                 // unpack kernel launches
+
+static inline bool syncstats_on()
+{
+    static int c = -1;
+    return fesom_speed_on("SYNCSTATS", &c);
+}
+
+void fesom_halo_syncstats_report(int timed_steps, fesom_partit *p)
+{
+    if (!p || timed_steps <= 0 || !syncstats_on()) return;   // ALL ranks evaluate identically
+    long exch = 0, flds = 0;
+    for (int k = 0; k < 5; ++k) { exch += s_ss_exch[k]; flds += s_ss_fields[k]; }
+    double loc[8] = { (double)exch, (double)flds, (double)s_ss_pack, (double)s_ss_unpack,
+                      (double)s_ss_fence_pre, (double)s_ss_fence_post,
+                      (double)s_ss_fence_skip, (double)s_ss_fence_grow };
+    double vsum[8], vmax[8];
+    MPI_Reduce(loc, vsum, 8, MPI_DOUBLE, MPI_SUM, 0, p->MPI_COMM_FESOM);
+    MPI_Reduce(loc, vmax, 8, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+    if (p->mype != 0) return;
+    /* Counters run from program start, so normalise by the WHOLE run, not the timed window:
+     * per-step here means "per step of the whole loop", close enough to rank the levers. */
+    const double inv = 1.0 / ((double)p->npes * (double)timed_steps);
+    printf("[halo-syncstats] steps=%d ranks=%d (per step, rank-mean)\n", timed_steps, p->npes);
+    printf("[halo-syncstats]   exchanges %.1f  fields %.1f  pack %.1f  unpack %.1f\n",
+           vsum[0]*inv, vsum[1]*inv, vsum[2]*inv, vsum[3]*inv);
+    printf("[halo-syncstats]   FENCES: pre-MPI %.1f (mandatory)  post-unpack %.1f  "
+           "SKIPPED %.1f (NOFENCE2)  realloc-guard %.1f\n",
+           vsum[4]*inv, vsum[5]*inv, vsum[6]*inv, vsum[7]*inv);
+    fflush(stdout);
+}
+
 #ifndef KOKKOS_ENABLE_CUDA
 void fesom_halo_device_free() { /* no device Views on host backends */ }
 #else  // ====================== CUDA device path ===========================
@@ -181,10 +233,79 @@ void build_lists(DevHaloScratch &s, fesom_com_struct *cs)
     s.built = true;
 }
 
+/* ======================================================================= *
+ * M7 Task 1.1 — FESOM_SPEED_NOFENCE2: remove the POST-UNPACK halo fence.
+ *
+ * The exchange is  PACK -> fence[A] -> MPI -> UNPACK -> fence[B] -> modify_device().
+ * fence[A] (:251/:344/:439) MUST STAY: MPI reads the device send buffer from a
+ * host-posted call, which is not ordered against the Kokkos stream.
+ * fence[B] (:286/:377/:475) is what this lever drops. Audit, 2026-07-14, all three
+ * exchange paths (device / device2 / deviceN):
+ *
+ *  1. CONSUMERS. Every consumer of the unpacked halo is a Kokkos kernel on the DEFAULT
+ *     execution space = one CUDA stream. Kernels on a stream run in issue order, so the
+ *     unpack is already ordered before every downstream device reader. fence[B] only ever
+ *     ordered device work against a HOST reader.
+ *
+ *  2. HOST READERS. There are none mid-step. Every host read of a Field goes through
+ *     Field::sync_host() -> DualView::sync_host() -> Kokkos::deep_copy, and a deep_copy
+ *     with no execution-space argument fences the default space itself. A raw host read of
+ *     a device-authoritative Field is trapped by -DFESOM_KK_SYNCCHECK. src/ contains no
+ *     cudaMemcpyAsync. f.modify_device() is host-side bookkeeping only.
+ *
+ *  3. BUFFER REUSE — the one that actually bites. A LATER exchange's MPI_Irecv writes
+ *     s.recv_d, the same buffer THIS exchange's unpack kernel is reading, and MPI's device
+ *     writes are not ordered against the Kokkos stream. What saves us is that fence[A] is
+ *     UNCONDITIONAL: it sits OUTSIDE the `if (send_count > 0)` guard in all three paths, so
+ *     every MPI_Irecv into recv_d is preceded, in its own function, by a full device fence
+ *     that drains the previous unpack. The early-return paths post no MPI, so they cannot
+ *     break it either. (The next exchange's PACK also overwrites s.send_d, but a pack is a
+ *     kernel on the same stream as the unpack — stream order already covers that.)
+ *
+ *     INVARIANT — keep it true or this lever becomes a data race:
+ *       every MPI_Irecv on a device buffer is preceded by an unconditional Kokkos::fence()
+ *       in the same function.
+ *
+ *  4. REALLOC — see grow() below.
+ *
+ *  ⚠️ Premise 1 is FALSE the instant anything runs on a second stream. Task 4.1 (ICELAG)
+ *  does exactly that: re-audit and re-run compute-sanitizer racecheck before landing it.
+ * ======================================================================= */
+inline bool halo_nofence2()
+{
+    static int c = -1;
+    return fesom_speed_on("NOFENCE2", &c);
+}
+
+inline void halo_fence_post_unpack()
+{
+    if (halo_nofence2()) { if (syncstats_on()) ++s_ss_fence_skip; return; }
+    Kokkos::fence();
+    if (syncstats_on()) ++s_ss_fence_post;
+}
+
+inline void halo_fence_pre_mpi()
+{
+    Kokkos::fence();   // MANDATORY — see (3) above. Never gate this.
+    if (syncstats_on()) ++s_ss_fence_pre;
+}
+
 inline void grow(Kokkos::View<double*> &v, size_t need, const char *label)
 {
-    if (v.extent(0) < need)
+    if (v.extent(0) < need) {
+        /* Audit item (4). With fence[B] gone, a PREVIOUS exchange's unpack kernel may still
+         * be reading this very buffer when the assignment below drops its last reference and
+         * frees it. Whether that is safe depends on which allocator Kokkos picked: plain
+         * cudaFree synchronises the device, but this build uses the ASYNC pool
+         * (cudaMallocAsync/cudaFreeAsync both appear in the nsys trace), whose free is only
+         * stream-ordered. That happens to be safe today — same stream — but it is exactly the
+         * "true today, silent tomorrow" reasoning L67 warns about. Don't depend on allocator
+         * internals: fence explicitly. Realloc branch only, and the buffers hit their
+         * high-water mark during warmup (379 reallocs in a whole 35-step NG5 run), so this
+         * costs nothing in steady state. */
+        if (halo_nofence2()) { Kokkos::fence(); if (syncstats_on()) ++s_ss_fence_grow; }
         v = Kokkos::View<double*>(std::string(label), need);
+    }
 }
 
 } // namespace
@@ -222,6 +343,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     build_lists(s, cs);
 
     const int    stride     = n_levels * n_components;
+    if (syncstats_on()) { ++s_ss_exch[(int)kind]; s_ss_fields[(int)kind] += 1; }
     const int    send_count = cs->sptr[cs->sPEnum] - cs->sptr[0];
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
@@ -241,6 +363,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
 
     // PACK: gather slist-indexed entries into the send buffer (slist order).
     if (send_count > 0) {
+        if (syncstats_on()) ++s_ss_pack;
         Kokkos::parallel_for("fesom_halo_pack", Kokkos::RangePolicy<>(0, send_count),
             KOKKOS_LAMBDA(const int g) {
                 const long src = bo + (long)(slist(g) - 1) * st;
@@ -248,7 +371,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                 for (int c = 0; c < st; ++c) send(dst + c) = field(src + c);
             });
     }
-    Kokkos::fence();   // PACK must complete before MPI reads the device send buffer
+    halo_fence_pre_mpi();   // MANDATORY: PACK must complete before MPI reads the device send buffer
 
     // MPI — identical loop structure to the host fesom_halo_exchange, but the
     // buffers are DEVICE pointers (GPU-aware MPI). Same tag / PE order / counts.
@@ -276,6 +399,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     // UNPACK: scatter the recv buffer into the halo slots (race-free — each
     // rlist entry is a distinct halo node, so no atomics).
     if (recv_count > 0) {
+        if (syncstats_on()) ++s_ss_unpack;
         Kokkos::parallel_for("fesom_halo_unpack", Kokkos::RangePolicy<>(0, recv_count),
             KOKKOS_LAMBDA(const int g) {
                 const long dst = bo + (long)(rlist(g) - 1) * st;
@@ -283,7 +407,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                 for (int c = 0; c < st; ++c) field(dst + c) = recv(src + c);
             });
     }
-    Kokkos::fence();   // halo writes visible before the next device reader
+    halo_fence_post_unpack();   // M7 NOFENCE2 target
 
     f.modify_device();   // device authoritative: owned (unchanged) + halo (new)
 }
@@ -312,6 +436,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
 
     const int    fstride    = n_levels * n_components;   // per-field per-node block
     const int    stride     = 2 * fstride;               // co-packed: [f0 | f1] per halo node
+    if (syncstats_on()) { ++s_ss_exch[(int)kind]; s_ss_fields[(int)kind] += 2; }
     const int    send_count = cs->sptr[cs->sPEnum] - cs->sptr[0];
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
@@ -333,6 +458,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
 
     // PACK: gather both fields' owned entries into one interleaved-per-node send buffer.
     if (send_count > 0) {
+        if (syncstats_on()) ++s_ss_pack;
         Kokkos::parallel_for("fesom_halo_pack2", Kokkos::RangePolicy<>(0, send_count),
             KOKKOS_LAMBDA(const int g) {
                 const long src = bo + (long)(slist(g) - 1) * fs;   // per-field stride into each field
@@ -341,7 +467,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
                 for (int c = 0; c < fs; ++c) send(dst + fs + c) = field1(src + c);
             });
     }
-    Kokkos::fence();
+    halo_fence_pre_mpi();   // MANDATORY (see the NOFENCE2 audit, item 3)
 
     const int tag    = 2000 + (int)kind;   // same tag family; a fused msg is symmetric on both ranks
     const int needed = cs->rPEnum + cs->sPEnum;
@@ -366,6 +492,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
 
     // UNPACK: scatter each field's half of the per-node block back (race-free, no atomics).
     if (recv_count > 0) {
+        if (syncstats_on()) ++s_ss_unpack;
         Kokkos::parallel_for("fesom_halo_unpack2", Kokkos::RangePolicy<>(0, recv_count),
             KOKKOS_LAMBDA(const int g) {
                 const long dst = bo + (long)(rlist(g) - 1) * fs;
@@ -374,7 +501,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
                 for (int c = 0; c < fs; ++c) field1(dst + c) = recv(src + fs + c);
             });
     }
-    Kokkos::fence();
+    halo_fence_post_unpack();   // M7 NOFENCE2 target
 
     f0.modify_device();
     f1.modify_device();
@@ -406,6 +533,7 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
 
     const int    fstride    = n_levels * n_components;   // per-field per-node block
     const int    stride     = nf * fstride;              // co-packed: [f0|f1|…|f(nf-1)] per halo node
+    if (syncstats_on()) { ++s_ss_exch[(int)kind]; s_ss_fields[(int)kind] += nf; }
     const int    send_count = cs->sptr[cs->sPEnum] - cs->sptr[0];
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
@@ -428,7 +556,8 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
         for (int i = 0; i < nf; ++i) {
             auto      fi   = fields[i]->d();
             const int slot = i * fs;
-            Kokkos::parallel_for("fesom_halo_packN", Kokkos::RangePolicy<>(0, send_count),
+            if (syncstats_on()) ++s_ss_pack;
+        Kokkos::parallel_for("fesom_halo_packN", Kokkos::RangePolicy<>(0, send_count),
                 KOKKOS_LAMBDA(const int g) {
                     const long src = bo + (long)(slist(g) - 1) * fs;
                     const long dst = (long)g * st + slot;
@@ -436,7 +565,7 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
                 });
         }
     }
-    Kokkos::fence();
+    halo_fence_pre_mpi();   // MANDATORY (see the NOFENCE2 audit, item 3)
 
     const int tag    = 2000 + (int)kind;
     const int needed = cs->rPEnum + cs->sPEnum;
@@ -464,7 +593,8 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
         for (int i = 0; i < nf; ++i) {
             auto      fi   = fields[i]->d();
             const int slot = i * fs;
-            Kokkos::parallel_for("fesom_halo_unpackN", Kokkos::RangePolicy<>(0, recv_count),
+            if (syncstats_on()) ++s_ss_unpack;
+        Kokkos::parallel_for("fesom_halo_unpackN", Kokkos::RangePolicy<>(0, recv_count),
                 KOKKOS_LAMBDA(const int g) {
                     const long dst = bo + (long)(rlist(g) - 1) * fs;
                     const long src = (long)g * st + slot;
@@ -472,7 +602,7 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
                 });
         }
     }
-    Kokkos::fence();
+    halo_fence_post_unpack();   // M7 NOFENCE2 target
 
     for (int i = 0; i < nf; ++i) fields[i]->modify_device();
 }

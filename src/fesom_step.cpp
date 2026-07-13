@@ -5,6 +5,7 @@
  */
 #include <cmath>   /* sqrt used in the FESOM_DIAG_SPREAD block */
 #include "fesom_step.h"
+#include "fesom_speed.hpp"   // M7 Task 1.0: FESOM_SPEED_ICEFLUXDEV
 #include "fesom_ale.h"
 #include "fesom_ale_dump.h"   // M6.3 bisect rail (FESOM_ALE_DUMP_DIR) — mirrors the C oracle
 #include "fesom_aux.h"
@@ -400,7 +401,13 @@ int fesom_timestep(int                          step_n,
         /* forcing is a const input to the step; the sync_device is a pure coherence op (moves
          * host→device, no logical mutation) → const_cast is safe and localized here. */
         auto *fnc = const_cast<struct fesom_forcing *>(forcing);
-        fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+        /* M7 Task 1.0 (ICEFLUXDEV): when oce_fluxes_mom ran on the DEVICE, the host copy is
+         * STALE and this push would clobber the device result. Skip it — the kernel already
+         * called modify_device(). Knob OFF: unchanged legacy rail. */
+        static int s_ifd_a = -1;
+        if (!fesom_speed_on("ICEFLUXDEV", &s_ifd_a)) {
+            fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+        }
         fnc->heat_flux_fld.modify_host();        fnc->heat_flux_fld.sync_device();
         fnc->water_flux_fld.modify_host();       fnc->water_flux_fld.sync_device();
         /* M5.20: sw_3d push REMOVED — sw_3d is now computed on the DEVICE by fesom_cal_shortwave_rad_kk
@@ -433,7 +440,13 @@ int fesom_timestep(int                          step_n,
          * step, so the const_cast is a pure host→device copy with no logical mutation
          * (D21, same as the KPP branch above). Task 1.3 owns the rest of the rail. */
         auto *fnc = const_cast<struct fesom_forcing *>(forcing);
-        fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+        /* M7 Task 1.0 (ICEFLUXDEV): when oce_fluxes_mom ran on the DEVICE, the host copy is
+         * STALE and this push would clobber the device result. Skip it — the kernel already
+         * called modify_device(). Knob OFF: unchanged legacy rail. */
+        static int s_ifd_a = -1;
+        if (!fesom_speed_on("ICEFLUXDEV", &s_ifd_a)) {
+            fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
+        }
 
         fesom_tke_mixing_kk(ctx->tke, aux, forcing, dyn, mesh, p);
     } else {
@@ -560,7 +573,13 @@ int fesom_timestep(int                          step_n,
     /* M5.7b: Av is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
     /* M5.13f: helem device-resident from last step's commit - no re-push; impl_vert_visc reads it on device. */
     {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
-        fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();   }
+        /* M7 Task 1.0 (ICEFLUXDEV): when oce_fluxes_mom ran on the DEVICE, the host copy is
+         * STALE and this push would clobber the device result. Skip it — the kernel already
+         * called modify_device(). Knob OFF: unchanged legacy rail. */
+        static int s_ifd_c = -1;
+        if (!fesom_speed_on("ICEFLUXDEV", &s_ifd_c)) {
+            fnc->stress_surf_fld.modify_host(); fnc->stress_surf_fld.sync_device();
+        }   }
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */

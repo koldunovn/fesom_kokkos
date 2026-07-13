@@ -7,6 +7,7 @@
 #include "fesom_kpp.h"     /* [forcing-diff dig] reuse the KPP dump harness for the iceforce dump */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"   // M7 Task 1.0: FESOM_SPEED_ICEFLUXDEV
 #include "fesom_sss_runoff.h"
 #include "fesom_tracers.h"
 #include "fesom_types.h"
@@ -509,12 +510,122 @@ static double fesom_get_icf(int n, int c, void *u)
  * the per-element loop reads stress_node_surf at owned-element vertices
  * (myDim or eDim) against fresh values.
  */
+/* ======================================================================= *
+ * M7 Task 1.0 — FESOM_SPEED_ICEFLUXDEV: the DEVICE twin of the two loops below.
+ *
+ * WHY. The nsys stall budget (docs/GPU_SPEED_M7.md) found that 32% of the NG5@4N step is
+ * single-threaded host C++, and 26.2% of it — 333 ms/step — is THIS function. It is the
+ * biggest single lever in the M7 campaign, worth more than every other Tier-1 item combined.
+ * M5.22 measured it as "coupling 21.4%" (PROFILE_M522.md:53) and never attributed it; the
+ * M5.16 note at fesom_bulk.cpp:600 flagged "making forcing fully device-resident … is a
+ * measured follow-on" — this is that follow-on, now measured.
+ *
+ * It is also a RATIO bug, which is why it matters more on GPU than the wall-clock alone says:
+ * host code runs on 4 threads on a GPU node (4 ranks = 4 GPUs) but on 128 ranks on a CPU
+ * node. That ~32x parallelism deficit is paid by the GPU side of the ratio and not the CPU
+ * side, and it grows with the mesh.
+ *
+ * Every array here is ALREADY device-resident — a_ice/uice/vice come from the device ice step,
+ * srfoce_u/v from the device ocean2ice gather, stress_node_surf from the device
+ * fesom_bulk_compute_kk, and stress_surf is consumed by device kernels (impl_vert_visc,
+ * fesom_momentum.cpp:846). So the legacy path is a full DtoH -> host loop -> HtoD round trip
+ * across an otherwise device-resident pipeline.
+ *
+ * BIT-IDENTICAL. Same arithmetic, same operand order, no atomics, no reductions, no
+ * reassociation. Kernel A is per-node and each thread touches only its own slots (it reads
+ * sns(2n) and writes sns(2n) — no cross-thread dependency). Kernel B is per-element and reads
+ * the sns that A wrote: a SEPARATE kernel on the same stream, so stream order already
+ * serialises it — no fence, no atomics (each element writes only its own two slots). The
+ * cavity guards and the a > 0.001 branch are preserved verbatim.
+ *
+ * AUTHORITY (the Z7 trap — a partial sweep here is worse than none). Marking these fields
+ * device-authoritative is not enough: THREE sites in fesom_step.cpp do
+ * `modify_host(); sync_device()` on them, which would push the STALE host copy over the
+ * device result we just computed. They are gated on the same knob:
+ *     fesom_step.cpp:403  stress_node_surf (KPP branch)
+ *     fesom_step.cpp:436  stress_node_surf (TKE branch)
+ *     fesom_step.cpp:563  stress_surf
+ * Verified there is no other HOST reader of stress_node_surf (KPP/TKE read it on the device)
+ * and no other host writer of stress_surf.
+ * ======================================================================= */
+static void fesom_ice_oce_fluxes_mom_kk(fesom_ice            *ice,
+                                        struct fesom_mesh    *mesh,
+                                        struct fesom_forcing *forcing)
+{
+    const int    N      = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    Eown   = mesh->myDim_elem2D;
+    const real_t rho_cd = (real_t)FESOM_DENSITY_0 * ice->cd_oce_ice;
+
+    auto u_ice  = ice->uice_fld.d();
+    auto v_ice  = ice->vice_fld.d();
+    auto u_w    = ice->srfoce_u_fld.d();
+    auto v_w    = ice->srfoce_v_fld.d();
+    auto a_ice  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    auto sicx   = ice->stress_iceoce_x_fld.d();
+    auto sicy   = ice->stress_iceoce_y_fld.d();
+    auto sns    = forcing->stress_node_surf_fld.d();
+    auto ss     = forcing->stress_surf_fld.d();
+    auto ulev_n = mesh->ulevels_nod2D_fld.d();
+    auto ulev_e = mesh->ulevels_fld.d();
+    auto elnod  = mesh->elem_nodes_fld.d();
+
+    /* Kernel A — per-node (Fortran 105-122), literal twin of the host loop. */
+    Kokkos::parallel_for("ice_oce_fluxes_mom_node", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int n) {
+            if (ulev_n(n) > 1) return;                       /* cavity */
+            const real_t a    = a_ice(n);
+            const real_t atmx = sns(2*n + 0);                /* atmoce snapshot */
+            const real_t atmy = sns(2*n + 1);
+            real_t sx, sy;
+            if (a > 0.001) {
+                const real_t du  = u_ice(n) - u_w(n);
+                const real_t dv  = v_ice(n) - v_w(n);
+                const real_t aux = Kokkos::sqrt(du*du + dv*dv) * rho_cd;
+                sx = aux * du;
+                sy = aux * dv;
+            } else {
+                sx = 0.0;
+                sy = 0.0;
+            }
+            sicx(n) = sx;
+            sicy(n) = sy;
+            sns(2*n + 0) = sx * a + atmx * (1.0 - a);
+            sns(2*n + 1) = sy * a + atmy * (1.0 - a);
+        });
+
+    /* Kernel B — per-element (Fortran 127-143). Reads the sns kernel A just wrote; same
+     * stream, so it is already ordered after A. Bound is myDim_elem2D only, as in the host
+     * loop (impl_vert_visc also reads only myDim). */
+    Kokkos::parallel_for("ice_oce_fluxes_mom_elem", Kokkos::RangePolicy<>(0, Eown),
+        KOKKOS_LAMBDA(const int e) {
+            if (ulev_e(e) > 1) return;                       /* cavity */
+            const int v0 = elnod(3*e + 0);
+            const int v1 = elnod(3*e + 1);
+            const int v2 = elnod(3*e + 2);
+            ss(2*e + 0) = (sns(2*v0 + 0) + sns(2*v1 + 0) + sns(2*v2 + 0)) / 3.0;
+            ss(2*e + 1) = (sns(2*v0 + 1) + sns(2*v1 + 1) + sns(2*v2 + 1)) / 3.0;
+        });
+
+    ice->stress_iceoce_x_fld.modify_device();
+    ice->stress_iceoce_y_fld.modify_device();
+    forcing->stress_node_surf_fld.modify_device();
+    forcing->stress_surf_fld.modify_device();
+}
+
 void fesom_ice_oce_fluxes_mom(fesom_ice              *ice,
                               struct fesom_partit    *partit,
                               struct fesom_mesh      *mesh,
                               struct fesom_forcing   *forcing)
 {
     (void)partit;  /* No halo exchange needed; see header. */
+
+    /* M7 Task 1.0 — the device twin. Knob OFF (default) keeps the legacy host loop below,
+     * byte-for-byte. */
+    static int s_icefluxdev = -1;
+    if (fesom_speed_on("ICEFLUXDEV", &s_icefluxdev)) {
+        fesom_ice_oce_fluxes_mom_kk(ice, mesh, forcing);
+        return;
+    }
 
     const int N      = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int Eown   = mesh->myDim_elem2D;

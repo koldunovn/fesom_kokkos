@@ -80,4 +80,9 @@ void fesom_halo_prof_waitall(int n_reqs, MPI_Request *reqs);
 void fesom_halo_prof_bytes(double bytes);
 void fesom_halo_mpi_report(int timed_steps, fesom_partit *p);
 
+/* M7 Task 0.3: FESOM_SPEED_SYNCSTATS — per-step device-sync counters (exchanges,
+ * pack/unpack launches, fences by class incl. the ones NOFENCE2 skipped). COLLECTIVE:
+ * every rank must call it. No-op unless the knob is set. */
+void fesom_halo_syncstats_report(int timed_steps, fesom_partit *p);
+
 #endif /* FESOM_HALO_H */
