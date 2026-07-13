@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=m7_gate_ser
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/gate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/gate.%j.err
+#
+# M7 KNOB-OFF BYTE GATE — the campaign-long invariant (plan Task 0.1+).
+#
+# Every M7 lever ships behind FESOM_SPEED_<NAME>; with ALL knobs unset the
+# build-m7serial binary must stay bit-for-bit identical to the certified M6
+# baseline. Same config as jobs/job_m6_gate_serial (which produced the
+# baseline): private mesh, CORE2 dist_8, 8 ranks, dt=1800, 20 steps,
+# snap_every=10, year 1958, vader single-copy off (L18).
+#
+# Usage: sbatch jobs/job_m7_gate_serial            (tag defaults to job id)
+#        M7_TAG=t11_fct2 sbatch jobs/job_m7_gate_serial
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+
+# The private mesh — NOT /pool (whose core2 nlvls/elvls were swapped 2026-07-03, L73).
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASELINE=/work/ab0995/a270088/port2/m6_baseline_serial
+
+# ALL knobs OFF — M6 physics knobs AND every M7 speed knob.
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+
+TAG=${M7_TAG:-$SLURM_JOB_ID}
+OUT=/work/ab0995/a270088/port2/m7/gate_$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+( cd "$ROOT" && git rev-parse HEAD ) > "$OUT/SHA.txt"
+
+echo "=== M7 knob-OFF byte gate — tag=$TAG  HEAD=$(cd "$ROOT" && git rev-parse --short HEAD) ==="
+srun -l "$ROOT/build-m7serial/fesom_port" "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+tail -2 "$OUT/run.log"
+
+echo
+echo "=== diff_snap.py vs the certified M6 baseline (zero tolerance, all fields) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASELINE" "$OUT"
+RC=$?
+echo "diff_snap rc=$RC"
+if [ "$RC" -eq 0 ]; then
+    echo "=== KNOB-OFF GATE PASS — the default path is untouched ==="
+else
+    echo "=== KNOB-OFF GATE FAIL — the change perturbed the default path. Do not commit. ==="
+fi
+exit $RC
