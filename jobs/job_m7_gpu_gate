@@ -1,0 +1,83 @@
+#!/bin/bash
+#SBATCH --job-name=m7_gpu_gate
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/gpugate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/gpugate.%j.err
+#
+# M7 CUDA FIDELITY GATE — the per-lever correctness gate (plan Testing Strategy 1c).
+#
+# CORE2 dist_8 on the PRIVATE mesh, CUDA, diffed against the certified Serial byte
+# baseline (m6_baseline_serial, which is bit-identical to the C oracle @df8b9a8 ->
+# Serial IS ground truth). Unlike the M6 knob gates, an M7 speed lever does NOT
+# change the physics, so the reference stays m6_baseline_serial for EVERY lever
+# state -- knob-ON output must land inside the same CUDA climate-close floor.
+#
+# PASS = the documented CUDA climate-close floor (~1e-3 T / ~1e-4 Kv from
+# atomic-scatter non-determinism, D22).
+# ⚠️ L75: gpu_fidelity_check.py gates on COHERENCE (OUTLIER_TOL=32), not max|d|.
+# CHECK THE OUTLIER COUNT before believing a FAIL -- a real staleness bug is
+# domain-wide (thousands of entries), a 1-ULP clamp flip is 1-2 entries.
+#
+# ⚠️ CUDA-aware MPI needs openmpi/4.1.5-nvhpc (env_cuda.sh); the env.sh openmpi/4.1.2
+# is --without-cuda and SEGFAULTs on device pointers. NEVER source both (L77).
+#
+# Usage:
+#   M7_TAG=t00_baseline sbatch jobs/job_m7_gpu_gate
+#   M7_TAG=t11_nofence2 KNOBS="FESOM_SPEED_NOFENCE2=1" sbatch jobs/job_m7_gpu_gate
+#   BIN=/work/ab0995/a270088/port2/m7/bin/row0/fesom_port_cuda sbatch jobs/job_m7_gpu_gate
+#
+# env: M7_TAG (output tag), KNOBS (semicolon-separated VAR=VAL), BIN (binary path;
+#      defaults to the live build-m7cuda).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+# The private mesh — NOT /pool (whose core2 nlvls/elvls were swapped 2026-07-03, L73).
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+SREF=/work/ab0995/a270088/port2/m6_baseline_serial
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+
+# M6 physics knobs OFF; start from a clean M7 knob slate, then apply KNOBS.
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+
+TAG=${M7_TAG:-$SLURM_JOB_ID}
+OUT=/work/ab0995/a270088/port2/m7/gpugate_$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+m7_provenance "$OUT" "$FESOM"
+
+echo "=== M7 CUDA fidelity gate — tag=$TAG ==="   # provenance printed by m7_provenance above
+echo "binary: $FESOM"
+echo "knobs:  ${KNOBS:-none}"
+env | grep '^FESOM_SPEED' | sed 's/^/  /' || true
+echo "ref:    $SREF"
+
+srun "$FESOM" "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "run rc=$?"
+grep -m1 'loop timing' "$OUT/run.log" || true
+
+echo
+echo "=== gpu_fidelity_check.py: CUDA vs the certified Serial baseline ==="
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF" "$OUT"
+RC=$?
+echo "fidelity rc=$RC"
+if [ "$RC" -eq 0 ]; then
+    echo "=== M7 CUDA FIDELITY GATE PASS (tag=$TAG, knobs=${KNOBS:-none}) ==="
+else
+    echo "=== M7 CUDA FIDELITY GATE FAIL — check the OUTLIER COUNT (L75) before assuming a real bug ==="
+fi
+exit $RC

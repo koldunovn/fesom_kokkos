@@ -1,0 +1,151 @@
+#!/bin/bash
+#SBATCH --job-name=m7ncu10
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=03:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/ncu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/ncu.%j.err
+#
+# M7 Task 0.4 — ncu roofline of the top-10 kernels (76% of the GPU-kernel budget).
+#
+# np=1 on the PRIVATE CORE2 mesh (dist_1, L73). -p gpu, NOT gpu-devel: gpu-devel's
+# limit is 30 min (verified with sinfo) and an ncu replay sweep overruns it.
+#
+# SELF-CALIBRATING launch window. The M5 templates hardcoded --launch-skip 650,
+# a value tuned for a DIFFERENT mesh and regex; if such a skip overshoots the run
+# ncu profiles ZERO kernels and the job "succeeds" with an empty report. So phase 1
+# runs a cheap nsys trace (no replay), counts the actual matches/step, and phase 2
+# derives a skip that lands the profiled launches in the LAST few steps (steady
+# state: at step 1-3 uv~0 and the flux limiters short-circuit, which would make the
+# roofline unrepresentative).
+#
+# Targeted --metrics, not --set full: full replays every kernel ~10x for sections we
+# do not need. This set answers exactly the plan's questions -- achieved DRAM GB/s
+# (vs the A100's ~1.9 TB/s), SM util, occupancy, local-memory (register-spill)
+# traffic, and sectors/request (the coalescing number).
+#
+# env: BIN (binary; default build-m7cuda), TAG.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+# NOT setting FESOM_STEP_PROFILE: its per-phase Kokkos::fence pairs inflate ncu replay.
+
+MESH=/work/ab0995/a270088/port2/mesh/core2      # private mesh (L73), dist_1
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:-ncu_top10}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+# The top-10 kernels by step share, MEASURED from the NG5@4N nsys trace (m7/nsys_ng5_4n),
+# + pressure_bv (EOS) and fer_solve_gamma (the 3rd TDMA) for the Task-2.3 spill question.
+#
+# ⚠️ These are C++ SYMBOL names, not Kokkos labels. PROFILE_M522 lists kernels by their
+# Kokkos runtime label ("fct_eud_fill", "gm_redi_ver_node", "ale_vvel_scatter") — the string
+# passed to parallel_for(). ncu and nsys never see that string; they see the mangled C++
+# symbol of the enclosing function ("fesom_tracer_advect_one_fct_kk"). A label-based regex
+# matches almost nothing and ncu still exits 0 with a near-empty report — which is exactly
+# what happened on the first attempt (28 matches over 14 steps, 2 of 10 kernels profiled).
+KREGEX='fesom_tracer_advect_one_fct_kk|fesom_ale_vert_vel_linfs_kk|fesom_diff_ver_part_redi_expl_kk|diff_ver_part_impl_ale_kk|fesom_momentum_adv_scalar_kk|fesom_diff_part_hor_redi_kk|fesom_visc_filt_bidiff_kk|fesom_smooth_nod3D_kk|kpp_ri_iwmix_kk|fesom_impl_vert_visc_kk|fesom_pressure_bv_kk|fesom_fer_solve_gamma_kk'
+NSTEPS=${NSTEPS:-14}
+DT=1800
+
+echo "=== M7 Task 0.4 ncu top-10 — CORE2 dist_1, np=1, dt=$DT, $NSTEPS steps ==="
+echo "binary: $FESOM   md5: $(md5sum "$FESOM" | cut -d' ' -f1)"
+echo "regex:  $KREGEX"
+echo "node:   $SLURM_JOB_NODELIST"; nvidia-smi -L | head -1
+
+############################################################################
+# Phase 1 — cheap nsys trace (no replay) to COUNT matches/step.
+############################################################################
+echo
+echo "--- phase 1: nsys counting pass (no replay) ---"
+srun nsys profile -t cuda -o "$OUT/count" --force-overwrite=true --sample=none \
+     "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$OUT/count.log" 2>&1
+echo "nsys rc=$?"
+nsys stats --report cuda_gpu_trace --format csv "$OUT/count.nsys-rep" > "$OUT/trace.csv" 2>"$OUT/trace.err"
+
+MATCHES=$(grep -cE "$KREGEX" "$OUT/trace.csv" || true)
+if [ "${MATCHES:-0}" -lt 10 ]; then
+    echo "FATAL: only $MATCHES regex matches in the kernel trace — the regex does not match the"
+    echo "       demangled kernel names. Top kernel names actually seen:"
+    tail -n +2 "$OUT/trace.csv" | awk -F'","' '{print $NF}' | sort | uniq -c | sort -rn | head -25
+    exit 3
+fi
+PER_STEP=$(( (MATCHES + NSTEPS - 1) / NSTEPS ))
+# Profile the last 2 steps: skip everything up to step (NSTEPS-2).
+NCU_SKIP=$(( PER_STEP * (NSTEPS - 2) ))
+NCU_COUNT=$(( PER_STEP * 2 ))
+echo "matches=$MATCHES over $NSTEPS steps -> ~$PER_STEP/step"
+echo "=> --launch-skip $NCU_SKIP --launch-count $NCU_COUNT  (profiles steps $((NSTEPS-2))..$NSTEPS = steady state)"
+
+############################################################################
+# Phase 2 — ncu with targeted metrics.
+############################################################################
+# .per_second rollups rather than raw .sum for the bandwidth numbers: they come out of
+# ncu already normalised, so the roofline does not depend on guessing the duration unit.
+# Ideal sectors/request for FP64 is 8.0 (a 32-thread warp x 8 B = 256 B = 8 x 32 B
+# sectors); 32.0 is the fully-scattered worst case. That ratio IS the coalescing number.
+M_DUR='gpu__time_duration.sum'
+M_DRAM='dram__bytes.sum,dram__bytes.sum.per_second,dram__throughput.avg.pct_of_peak_sustained_elapsed'
+M_SOL='sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed'
+M_OCC='sm__warps_active.avg.pct_of_peak_sustained_active,launch__registers_per_thread'
+M_SPILL='l1tex__t_bytes_pipe_lsu_mem_local_op_ld.sum,l1tex__t_bytes_pipe_lsu_mem_local_op_st.sum'
+M_COAL='l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio,l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_st.ratio'
+METRICS="$M_DUR,$M_DRAM,$M_SOL,$M_OCC,$M_SPILL,$M_COAL"
+
+run_ncu() {   # run_ncu <extra-args...>
+    srun ncu --kernel-name-base demangled \
+             --kernel-name "regex:$KREGEX" \
+             --launch-skip "$NCU_SKIP" --launch-count "$NCU_COUNT" \
+             --target-processes application-only \
+             "$@" \
+             -o "$OUT/top10" -f \
+         "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$OUT/ncu.log" 2>&1
+    echo "  ncu rc=$?"
+    # BOTH pages. --page raw is wide (one column per metric) but carries NO units, and ncu
+    # normalises values (dram__bytes.sum.per_second comes back in Gbyte/second, not byte/s) —
+    # reading it unit-blind silently turns 700 GB/s into "0.0". --page details is long and
+    # includes a "Metric Unit" column, so the analyser can scale correctly. Prefer details.
+    ncu -i "$OUT/top10.ncu-rep" --csv --page raw     > "$OUT/top10.csv"     2>"$OUT/top10.csv.err"
+    ncu -i "$OUT/top10.ncu-rep" --csv --page details > "$OUT/top10_det.csv" 2>"$OUT/top10_det.csv.err"
+    wc -l < "$OUT/top10.csv" 2>/dev/null || echo 0
+}
+
+echo
+echo "--- phase 2: ncu targeted metrics ---"
+ROWS=$(run_ncu --metrics "$METRICS" | tail -1)
+echo "top10.csv rows: $ROWS"
+# A bad metric name makes ncu bail and profile NOTHING — and the job would still exit 0.
+# Fall back to --set basic (SOL + occupancy + duration, always valid) so an overnight
+# slot is never wasted; the spill/sector columns are then simply absent from the table.
+if [ "${ROWS:-0}" -lt 5 ]; then
+    echo "!! targeted metrics produced no rows — ncu said:"
+    grep -iE 'error|not (found|supported)|invalid' "$OUT/ncu.log" | head -5
+    echo "!! retrying with --set basic"
+    ROWS=$(run_ncu --set basic | tail -1)
+    echo "top10.csv rows (basic): $ROWS"
+fi
+
+# Register-spill truth comes from the BINARY, not from ncu: cuobjdump reports the exact
+# per-thread stack frame of every kernel, for free and with no GPU.
+SPILL="$OUT/resource_usage.txt"
+cuobjdump --dump-resource-usage "$FESOM" > "$SPILL" 2>/dev/null && echo "cuobjdump: $(wc -l < "$SPILL") lines"
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DET="$OUT/top10_det.csv"; [ -s "$DET" ] || DET="$OUT/top10.csv"
+"$PY" "$ROOT/scripts/m7_roofline.py" "$DET" --spill "$SPILL" | tee "$OUT/roofline.txt"
+
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true
+echo "=== done: $OUT ==="
