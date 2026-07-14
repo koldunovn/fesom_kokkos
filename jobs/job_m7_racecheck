@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=m7race
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/race.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/race.%j.err
+#
+# M7 — compute-sanitizer racecheck. MANDATORY for any fence/sync removal (plan 1.1) and for
+# any coloring build (2.1/2.2).
+#
+# WHY it is not optional for NOFENCE2. The fidelity gate compares against a Serial oracle and
+# passes if the fields agree to ~1e-3. A lost update from a genuine data race is usually far
+# SMALLER than that on any single step -- it perturbs a handful of halo nodes, drifts slowly,
+# and shows up as a "climate difference" months later. racecheck finds the race itself, not its
+# consequences. L67 poison-reasoning covers the ordering argument; this covers the code.
+#
+# CORE2 dist_2 (private mesh, L73), 3 steps -- compute-sanitizer serialises kernels and is
+# ~10-100x slower, so the run must be tiny. Race detection does not need many steps: the halo
+# exchange fires hundreds of times per step.
+#
+# env: KNOBS (required — the knob state under test), BIN, TAG.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:-race}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+IFS=';' read -ra KV <<< "${KNOBS:?KNOBS required — the knob state under test}"
+for kv in "${KV[@]}"; do export "$kv"; done
+
+echo "=== M7 racecheck — CORE2 dist_2, 3 steps ==="
+echo "knobs:"; env | grep '^FESOM_SPEED' | sed 's/^/  /'
+echo "binary: $FESOM"
+
+srun compute-sanitizer --tool racecheck --racecheck-detect-level analysis \
+     --print-limit 40 --error-exitcode 9 \
+     "$FESOM" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 > "$OUT/race.log" 2>&1
+RC=$?
+echo "compute-sanitizer rc=$RC"
+echo
+grep -E 'RACECHECK SUMMARY|hazard|ERROR|WARN' "$OUT/race.log" | head -40
+echo
+if [ "$RC" -eq 0 ] && grep -q "RACECHECK SUMMARY: 0 hazards displayed" "$OUT/race.log"; then
+    echo "=== RACECHECK CLEAN (knobs: $KNOBS) ==="
+    exit 0
+else
+    echo "=== RACECHECK FOUND HAZARDS — do NOT land this lever. Full log: $OUT/race.log ==="
+    exit 1
+fi
