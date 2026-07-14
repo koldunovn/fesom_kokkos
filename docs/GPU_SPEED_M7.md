@@ -326,7 +326,9 @@ Gates still to run: racecheck, knob-OFF byte gate, FORCE_SERIAL byte proof, CUDA
 | 26235597 | CUDA fidelity gate | `ICEFLUXDEV=1` | **PASS** (deltas in the same band as the un-levered baseline, as a bit-identical lever requires) |
 | 26235598 | CUDA fidelity gate | `NOFENCE2=1` | **PASS** |
 | 26235599 | CUDA fidelity gate | both | **PASS** |
-| 26235643/4/5 | compute-sanitizer (memcheck ×2, racecheck), baseline-differential | both | queued |
+| 26235643 | **compute-sanitizer memcheck**, baseline-differential | `NOFENCE2=1` | **CLEAN** — 4 errors knob-OFF, 4 knob-ON (identical). All 4 are the benign `CUDA_ERROR_INVALID_CONTEXT` on `cuCtxGetDevice` (UCX/CUDA-aware-MPI probing the context from a non-CUDA thread under the sanitizer). **ZERO Invalid read / Invalid write / use-after-free** — precisely what the `grow()` hazard would have produced had the explicit realloc fence been missing. |
+| 26235644 | memcheck, baseline-differential | both | **CLEAN** (same result) |
+| 26235645 | racecheck (completeness only — see below) | both | queued |
 | 26235600/1/2 | same-alloc A/B (NG5@4N ×2, dars@8N) | — | queued — **the payoff numbers** |
 
 ⚠️ **A racecheck lesson, learned the hard way.** The plan said "racecheck the fence removal". The
