@@ -8,6 +8,7 @@
  * can be opened together via `xarray.open_mfdataset(...)`.
  */
 #include "fesom_io.h"
+#include "fesom_speed.hpp"   // M7 Task 1.0b: FESOM_SPEED_IOACC
 #include <type_traits>
 #include "fesom_aux.h"
 #include "fesom_constants.h"
@@ -815,6 +816,70 @@ static void resolve_density_dev(const fesom_state *s, real_t *out_dev, size_t n)
     Kokkos::parallel_for("io_acc_density", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
 
+/* ---------------------------------------------------------------------- *
+ * M7 Task 1.0b — FESOM_SPEED_IOACC. Six output vars still had NO device
+ * accumulator (nullptr in the table below): ssh + the five ice vars. They fell
+ * back to the HOST resolvers above, and under io.config.daily_monthly each runs
+ * at BOTH cadences — 12 host loops/step over ~466 k nodes/rank at NG5@4N, which
+ * the M7 stall budget measured at 54.7 ms/step (4.3% of the step).
+ *
+ * Every source field is already device-resident (eta_n from the device CG solve;
+ * a_ice/m_ice/m_snow from the device ice step; uice/vice from the device EVP), so
+ * these are pure M5.14-pattern twins. Bit-identical: a per-element time-sum, no
+ * reduction, no reassociation (Serial device == host).
+ * ---------------------------------------------------------------------- */
+static void resolve_ssh_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->dyn->eta_n_fld.d();
+    Kokkos::parallel_for("io_acc_ssh", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_a_ice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->ice->data[FESOM_ICE_AICE].values_fld.d();
+    Kokkos::parallel_for("io_acc_a_ice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_m_ice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->ice->data[FESOM_ICE_MICE].values_fld.d();
+    Kokkos::parallel_for("io_acc_m_ice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_m_snow_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    Kokkos::parallel_for("io_acc_m_snow", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_uice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->ice->uice_fld.d();
+    Kokkos::parallel_for("io_acc_uice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+static void resolve_vice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+{
+    io_acc_dev_t out(out_dev, n);
+    auto src = s->ice->vice_fld.d();
+    Kokkos::parallel_for("io_acc_vice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+}
+
+/* Knob gate. The table below now names the six new dev twins unconditionally, so with the
+ * knob OFF we null them back out at init and the legacy HOST resolvers run — keeping the
+ * default path byte-identical, as the campaign requires. */
+static void m7_io_gate_dev_resolvers(fesom_var_desc_t *vars, int nvars)
+{
+    static int k = -1;
+    if (fesom_speed_on("IOACC", &k)) return;      /* lever ON: keep the new device twins */
+    for (int v = 0; v < nvars; ++v) {
+        if (vars[v].dev_resolve == resolve_ssh_dev    || vars[v].dev_resolve == resolve_a_ice_dev  ||
+            vars[v].dev_resolve == resolve_m_ice_dev  || vars[v].dev_resolve == resolve_m_snow_dev ||
+            vars[v].dev_resolve == resolve_uice_dev   || vars[v].dev_resolve == resolve_vice_dev)
+            vars[v].dev_resolve = nullptr;        /* legacy host resolver */
+    }
+}
+
 /* Default monthly variable table. Lifetime = run.
  * If sea ice isn't initialised, callers should pass nvars = 12 instead
  * of FESOM_DEFAULT_MONTHLY_NVARS to skip the trailing 5 ice entries. */
@@ -826,7 +891,7 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
      * ssh stays host (eta_n is host); ice fields stay host (host-synced post-ice-step). */
     { "temp",    "potential temperature",          "degC",   FESOM_VAR_3D_NODE_MID,   resolve_temp,    resolve_temp_dev   },
     { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt,    resolve_salt_dev   },
-    { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh,     nullptr            },
+    { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh,     resolve_ssh_dev            },
     { "sst",     "sea surface temperature",        "degC",   FESOM_VAR_2D_NODE,       resolve_sst,     resolve_sst_dev    },
     { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss,     resolve_sss_dev    },
     { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u,       resolve_u_dev      },
@@ -842,11 +907,11 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
     { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density, resolve_density_dev },
     { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq,  resolve_bvfreq_dev },
     /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
-    { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice,   nullptr            },
-    { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice,   nullptr            },
-    { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow,  nullptr            },
-    { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice,    nullptr            },
-    { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice,    nullptr            },
+    { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice,   resolve_a_ice_dev            },
+    { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice,   resolve_m_ice_dev            },
+    { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow,  resolve_m_snow_dev            },
+    { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice,    resolve_uice_dev            },
+    { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice,    resolve_vice_dev            },
 };
 
 /* ====================================================================== */
@@ -935,6 +1000,8 @@ void fesom_io_init(fesom_io_t                  *io,
             io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
         }
     }
+    for (int p = 0; p < 5; ++p)
+        if (io->owned_nvars[p] > 0) m7_io_gate_dev_resolvers(io->owned_vars[p], io->owned_nvars[p]);
     if (have_cfg) fesom_io_config_free(&cfg);
 
     /* Init each cadence's stream. Empty cadences stay inactive. */
