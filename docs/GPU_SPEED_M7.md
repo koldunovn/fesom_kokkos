@@ -919,3 +919,17 @@ the 866.2 ms step — but ROTCACHE had already taken 19.7 ms of it. Forcing now 
 - **NG5@4N: 866.2 → ~809 ms/step = −6.6% marginal → ratio ~5.67×** (NOT 5.78×).
 - **NG5@16N: −4.8% → SYPD ≈ 2.01** — **Stage 2 is right at the line, not comfortably past it.**
 - 🔴 **~0% = DEAD KNOB (L80), not a null lever.** Check the `FORCEDEV` announce line first.
+
+### D.1 gates — ALL PASS (the CUDA gate is the one that mattered)
+
+| gate | job | verdict |
+|---|---|---|
+| knob-OFF byte gate | 26249149 | ✅ rc=0 — default path untouched |
+| FORCE_SERIAL byte proof (`FORCEDEV=1`) | 26249150 | ✅ rc=0, announce fired — the device kernel ran on Serial and was **bit-identical** |
+| **CUDA fidelity, `FORCEDEV=1`** | 26249151 | ✅ **PASS** (worst 9.892e-03) — **the only gate that can see the rail bug** |
+| **CUDA fidelity, FLAT+ROTCACHE+FORCEDEV** | 26249152 | ✅ **PASS** (worst 4.456e-03) |
+
+The all-knobs run scoring *lower* than FORCEDEV-alone confirms these are run-to-run atomics noise at
+the CUDA floor, not a systematic D.1 effect.
+
+**A/B (job 26249153) still queued at session end — see `docs/plans/20260714-m7-HANDOFF-D1.md` §1.**

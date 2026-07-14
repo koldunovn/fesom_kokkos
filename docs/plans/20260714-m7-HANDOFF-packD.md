@@ -1,3 +1,8 @@
+> # ⛔ SUPERSEDED (2026-07-14 16:05) — **read `docs/plans/20260714-m7-HANDOFF-D1.md` instead.**
+> Its §0/§0b/§3 are DONE: package A closed (tags `m7.2-packA`, `m7.2b-rotcache`), the A/Bs landed
+> (NG5@4N −5.37%, ratio **5.29×**), and **D.1 is implemented and gated GREEN** (`8875ba9`).
+> Still true and still binding: **§0c** (the ladder re-ranking + L84) and **§5** (standing rules).
+
 # M7 HANDOFF — package A is CLOSED; the FORCING is the prize. Next: D.1.
 
 *Written 2026-07-14 (Opus session 4). Supersedes `20260714-m7-HANDOFF-packA.md`, whose work queue is
