@@ -25,25 +25,43 @@ series settles by ~step 30 (the residual is the CG spin-up, 86 → 72 iters — 
 > given a physical story. Two gap censuses show the 25-step and 300-step GPU-idle budgets are
 > **identical** (93.6 vs 94.1 ms/step). **RETRACTED.** → L88.
 
-### ⭐ THE RATIO, RE-MEASURED ON A MATCHED PAIR (2026-07-15) — this is the only honest row
+### ⭐⭐ THE RATIO, RE-MEASURED ON MATCHED PAIRS (2026-07-15) — these are the only honest rows
 
-| | s/step | binary | job |
-|---|--:|---|---|
-| **NG5@4N GPU** (`FESOM_SPEED=1`, 300 steps, min of 2) | **0.7239** | `h5` CUDA `0d39d8a2` | 26255936 |
-| **NG5@4N CPU** (Serial, dist_512, 300 steps, min of 2: 4.5785/4.5875) | **4.5785** | `h5` Serial `950ee0f9` | 26256684 |
-| **⭐ RATIO** | **6.32×** | | |
+| after | NG5@4N GPU | NG5@4N CPU | **ratio** | binaries | jobs |
+|---|--:|--:|--:|---|---|
+| through the `getcoeffld` fix | 0.7239 | 4.5785 | **6.32×** | `h5` CUDA `0d39d8a2` / Serial `950ee0f9` | 26255936 / 26256684 |
+| **⭐ + H.3 `BULKTAIL`** | **0.7058** | **4.5785** | **⭐ 6.49×** | **`h8` CUDA `7dab6c5a`** / Serial `ef6bdec4` | **26257716** / 26256684 |
 
-Same day · same 300-step protocol · both post-`getcoeffld`-fix · **both pinned with `BIN=`** (the two jobs
-recorded *different git HEADs* at submit time and still ran the identical frozen binaries — `BIN=` is what
-ran, the build tree is irrelevant).
+All legs **300 steps**, min of 2 reps, same day, **all pinned with `BIN=`**. Rep spreads: GPU 0.07 %,
+CPU 0.20 %. *(The CPU column is unchanged because every `FESOM_SPEED_*` lever is CUDA-only — the knobs
+resolve OFF on a Serial build. `h5` and `h8` Serial are the same model.)*
+
+**`BIN=` pinning proved itself here:** the two `h5` anchors recorded **different git HEADs** at submit time
+and still ran the *identical* frozen binaries. **`BIN=` is what runs; the build tree is irrelevant.**
+
+**BULKTAIL's own cross-check — it removes a FIXED cost, and the numbers say so:**
+
+| protocol | baseline | with BULKTAIL | Δ | Δ % |
+|---|--:|--:|--:|--:|
+| 35-step A/B (26256973) | 0.7437 | 0.7256 | **−18.1 ms** | −2.43 % |
+| 300-step anchors | 0.7239 | 0.7058 | **−18.1 ms** | −2.50 % |
+
+**Identical in absolute terms at both protocols** — exactly what a lever that deletes a fixed block of
+host work (7 rails + a dead host loop) must do, and *not* what a cold-start artifact would do. Only the
+percentage moves, because the denominator shrank. The pre-registration for the 300-step anchor was
+**~0.706 s/step**; it came in at **0.7058**.
+
+> **A note on the derivation I refused to make.** I explicitly declined to compute this ratio by
+> multiplying the 35-step −2.43 % into the 300-step anchor, and said "measure it." Had I derived it, I
+> would have got 0.7063 — **within 0.07 % of the measured 0.7058.** The model was right.
+> **That is not a reason to have skipped the measurement; it is what the measurement is FOR.** You do not
+> get to know a model is right until you check it, and the check cost four minutes of backfilled GPU time.
+> *(The last time this campaign trusted an arithmetic ratio instead of measuring one, it had to be
+> retracted — see below.)*
 
 **Superseded, kept so they cannot quietly return:** 5.84× (35-step, contaminated) · 6.17× (35-step,
 post-fix) · and a retracted "5.83× / 6.2×" that **mixed a long-run GPU number with a 35-step CPU anchor**.
 **You cannot mix protocols and get an honest ratio.**
-
-**Not yet in that 6.32×: H.3 BULKTAIL (−2.43 %, landed).** Its 300-step anchor is job 26257072.
-**Do NOT multiply the 35-step −2.43 % into the 300-step anchor to "get" ~6.5× — that is the exact
-protocol-mixing error that had to be retracted once already. Measure it.**
 
 **CG correction for SYPD:** the projection uses **×1.03, calibrated on 90 iters/step** — a cold-start
 transient. The settled value is **~72** (last-50 mean 71.9; even the 300-step *mean* of 76.9 still carries

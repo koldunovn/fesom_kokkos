@@ -9,10 +9,28 @@ BEFORE the A/B job was submitted, and the retractions were written BEFORE the le
 
 | | |
 |---|---|
-| **THE RATIO, RE-MEASURED** | **NG5@4N: GPU 0.7239 s/step vs CPU 4.5785 s/step ⇒ 6.32×**  |
+| **⭐⭐ THE RATIO, RE-MEASURED** | **NG5@4N: GPU 0.7058 vs CPU 4.5785 s/step ⇒ 6.49×** *(6.32× without BULKTAIL)* |
 | **§3.2's "~22 ms unattributed"** | ❌ **RETRACTED. It never existed.** |
-| **H.3 BULKTAIL** | pool re-sized **~1 % → 2.2 %** by measurement; it is **the single largest gap in the step** |
-| **New bug found** | 🔴 `ICERAILS` + `mEVP` **clobbers `srfoce_u/v/ssh`** — pre-existing, in the landed `a96e299` |
+| **H.3 BULKTAIL** | pool re-sized **~1 % → 2.2 %** by measurement; delivered **−2.43 %**. The single largest gap in the step. |
+| **New bug found** | 🔴 `ICERAILS` + `mEVP` **clobbered the ice AND the ocean** (`h_ice` off by **1.94 m**) — pre-existing, in the landed `a96e299`. Fixed, proven, options matrix now GREEN. |
+
+### The final ratio table (all 300-step, min of 2, same day, all `BIN=`-pinned)
+
+| after | GPU | CPU | **ratio** | binary | jobs |
+|---|--:|--:|--:|---|---|
+| through the `getcoeffld` fix | 0.7239 | 4.5785 | 6.32× | `h5` | 26255936 / 26256684 |
+| **⭐ + H.3 `BULKTAIL`** | **0.7058** | **4.5785** | **⭐ 6.49×** | **`h8`** | **26257716** / 26256684 |
+
+**BULKTAIL removed −18.1 ms/step at BOTH protocols** (35-step: 0.7437→0.7256; 300-step: 0.7239→0.7058) —
+**identical in absolute terms**, which is exactly what a lever that deletes a fixed block of host work
+must do, and *not* what a cold-start artifact would do. Only the % moves (−2.43 → −2.50) as the
+denominator shrinks. **Pre-registered 0.706; measured 0.7058.**
+
+> **On the derivation I refused to make.** I declined to compute the BULKTAIL-inclusive ratio by
+> multiplying the 35-step −2.43 % into the 300-step anchor, and said *measure it*. Had I derived it I
+> would have got **0.7063** — within **0.07 %** of the measured **0.7058**. **The model was right. That is
+> not a reason to have skipped the measurement; it is what the measurement is FOR.** You do not get to
+> know a model is right until you check it, and the check cost four minutes of backfilled GPU time.
 
 ---
 
