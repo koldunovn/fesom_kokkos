@@ -750,6 +750,38 @@ loop — including for the degenerate `nzmax == nzmin+1` column, whose stale-car
 kernel reproduces verbatim (the interior kernel never touched those slots either). Launch order
 1→2→3→4 is load-bearing, exactly as D20's 1→2 was.
 
+### A/B — NG5@4N, 4 legs, ONE allocation (job 26244262; min of 2 reps)
+
+| leg | s/step | vs Tier-1 | ms/step |
+|---|--:|--:|--:|
+| `t1` (Tier-1) | 0.9154 | — | reference (reproduces the 0.9145 Tier-1 anchor to **0.1%**) |
+| `flat` (+`FLAT`) | 0.8873 | **−3.07%** | −28.1 |
+| `rot` (+`ROTCACHE`) | 0.8957 | **−2.15%** | −19.7 |
+| **`both`** | **0.8662** | **−5.37%** | **−49.2** |
+
+Additivity: the two marginals sum to −5.22% vs −5.37% measured → disjoint code paths, as designed
+(the small excess is second-order: less host time ⇒ less GPU idle).
+
+**L80 announce armor — both knobs fired, and only where they should:** `t1` 0/0 · `flat` 3/0 ·
+`rot` 0/1 · `both` 3/1 (FLAT announces once per TU: io/kpp/ale). Neither is a dead knob.
+
+**Ratio, both sides measured the SAME DAY** (CPU anchor 4.5853, job 26244994 — no cross-day noise):
+**5.01× → 5.29× at NG5@4N.**
+
+#### 🔴 Both levers under-shot the predicted payoff. In both cases the PREDICTION was wrong, not the lever.
+
+- **`ROTCACHE` −19.7 ms vs a predicted ~37 ms.** The estimate counted the sampler's `sincos` (23.5 ms)
+  **and** `fesom_vector_g2r` self (13.8 ms) as the removable pool. **Only the `sincos` is removable** —
+  ROTCACHE keeps the 3×3 matrix arithmetic inside `g2r` and merely feeds it trig from a table. The
+  correct pool is `23.5 − ~4` (the new 30 MB/step of table loads) ≈ **−20 ms**. Measured **−19.7 ms**.
+  **The arithmetic closes exactly once the attribution is right.**
+  → *Rule: when sizing a lever off a profile, count only the work the lever REMOVES, not the whole
+  function it lives in. The `g2r self` samples are the arithmetic that survives.*
+- **`FLAT` −28.1 ms = 53% of the 52.6 ms pool.** This is the **predicted ceiling, not a shortfall**:
+  `uv`/`uvnode` are stride-2 interleaved (`FESOM_ELEMVEC`), so even a perfectly flat access pattern is
+  **~50% sector-efficient by construction** (handoff trap #3). Roughly half the pool is unreachable
+  without a layout flip — which the RE-SCOPE demoted on measured grounds. 53% is the right answer.
+
 ### Gates — ALL PASS
 
 | gate | job | verdict |
