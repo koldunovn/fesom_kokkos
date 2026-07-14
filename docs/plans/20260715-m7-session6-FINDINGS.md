@@ -9,7 +9,7 @@ BEFORE the A/B job was submitted, and the retractions were written BEFORE the le
 
 | | |
 |---|---|
-| **THE RATIO, RE-MEASURED** | **NG5@4N: GPU 0.7239 s/step vs CPU 4.5785 s/step ⇒ 6.33×** *(provisional — CPU min-of-2 pending)* |
+| **THE RATIO, RE-MEASURED** | **NG5@4N: GPU 0.7239 s/step vs CPU 4.5785 s/step ⇒ 6.32×**  |
 | **§3.2's "~22 ms unattributed"** | ❌ **RETRACTED. It never existed.** |
 | **H.3 BULKTAIL** | pool re-sized **~1 % → 2.2 %** by measurement; it is **the single largest gap in the step** |
 | **New bug found** | 🔴 `ICERAILS` + `mEVP` **clobbers `srfoce_u/v/ssh`** — pre-existing, in the landed `a96e299` |
@@ -81,15 +81,16 @@ node-for-node (4 GPU nodes × 4 ranks vs 4 CPU nodes × 128 ranks), same day:
 
 | | s/step | job |
 |---|--:|---|
-| **GPU** (CUDA `0d39d8a2`, `FESOM_SPEED=1`) | **0.7239** (min of 2: 0.7247 / 0.7239) | 26255936 |
-| **CPU** (Serial `950ee0f9`, dist_512) | **4.5785** (rep A; min-of-2 in flight) | 26256684 |
-| **RATIO** | **6.33×** *(provisional)* | |
+| **GPU** (CUDA `0d39d8a2`, `FESOM_SPEED=1`) | **0.7239** (min of 2: 0.7247 / 0.7239 — 0.11 % spread) | 26255936 |
+| **CPU** (Serial `950ee0f9`, dist_512) | **4.5785** (min of 2: 4.5785 / 4.5875 — 0.20 % spread) | 26256684 |
+| **RATIO** | **6.32×** (4.5785 / 0.7239 = 6.3248) | |
 
-*(The first CPU job timed out after one rep at 4.6519 — 1.6 % slower than the requeued rep. Run-to-run
-CPU spread is real; the min-of-2 is why this is still marked provisional.)*
+*(The FIRST CPU job timed out after one rep at **4.6519** — **1.6 % slower** than the requeued job's min.
+That 1.6 % is BETWEEN-ALLOCATION spread; WITHIN an allocation the reps agree to 0.2 %. This is exactly
+why the protocol is min-of-2 **inside one allocation**, and why a single rep is not a measurement.)*
 
 **Superseded numbers, kept so they cannot quietly return:** 5.84× (35-step, contaminated), 6.17×
-(35-step, post-fix), and the retracted "5.83× / 6.2×" which mixed protocols. **6.33× is the first
+(35-step, post-fix), and the retracted "5.83× / 6.2×" which mixed protocols. **6.32× is the first
 number in this campaign measured on a matched, pinned, both-post-fix, cold-start-free pair.**
 
 **CG correction, re-derived:** the SYPD projection used **×1.03 calibrated on 90 iters/step**. The
@@ -133,6 +134,36 @@ of `fesom_bulk.cpp:629-635` appear **in source order, with exactly the right siz
 **16.4 ms / 743.5 ms (the 35-step A/B baseline) = −2.21 %.**
 
 ### ⇒ **PRE-REGISTERED: −2.2 %** · floor **−1.9 %** · ceiling **−2.4 %**
+
+### ✅ **MEASURED: −2.43 %** — HIT (job 26256973, same allocation, same binary `h6`, min of 2)
+
+| leg | rep a | rep b | min |
+|---|--:|--:|--:|
+| `base` (`FESOM_SPEED=1;BULKTAIL=0`) | 0.7437 | 0.7449 | **0.7437** |
+| `bulktail` (`FESOM_SPEED=1`) | 0.7256 | 0.7264 | **0.7256** |
+| | | | **−2.43 %** |
+
+**Predicted 16.4 ms removed; measured 18.1 ms. I under-predicted by 1.7 ms (10 %) — own it.** The most
+likely reason is the entanglement the stall budget warns about: removing a host block does not only
+return its own time, it also lets the host **run ahead**, so some downstream *launch gap* is recovered
+too. Sizing from the gap is therefore a **floor**, not a ceiling — which is the opposite of sizing from
+a host timer (L87), and worth knowing.
+
+**Two controls, both clean:**
+- **L80 announce armor:** `FESOM_SPEED_BULKTAIL = ON` appears exactly **once** in the lever leg and
+  **zero** times in the base leg. The knob fired.
+- **The base leg on `h6` reproduces `h5`** (0.7437 vs 0.7435, 0.03 % apart): the binary change is
+  provably **inert** with the knob off. That is the knob-OFF byte gate, confirmed in wall time.
+
+**Scoreboard for the sizing method** — every lever sized from the **gap census** has met or beaten its
+pre-registration; the one sized from a **host timer** missed by 3×:
+
+| lever | sized from | pre-registered | measured | |
+|---|---|--:|--:|---|
+| D.1 FORCEDEV | a host timer (FPROF) | −6.6 % | **−2.16 %** | ❌ missed by 3× |
+| H.1 FLUXDEV | measured per-copy PCIe | −1.1 % | **−1.45 %** | ✅ beat |
+| H.2 ICERAILS | the gap census | −4.1 % | **−6.03 %** | ✅ beat |
+| **H.3 BULKTAIL** | **the gap census** | **−2.2 %** | **−2.43 %** | ✅ **beat** |
 
 **Why the plan under-sized it by 2×:** it costed the *rails* (30 MB ⇒ ~1 %) and never noticed that a
 **dead 930k-element host interpolation loop sits in the same gap and costs another ~8 ms**. Both

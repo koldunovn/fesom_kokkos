@@ -4,6 +4,53 @@
 
 ---
 
+## 🔴🔴 THE PROTOCOL CHANGED (2026-07-15). READ THIS BEFORE QUOTING ANY RATIO BELOW.
+
+**Every ratio row further down was measured on the 35-STEP protocol, and the 35-step protocol was
+CONTAMINATED.** `getcoeffld` rebuilt the JRA interpolation coefficients **8× per step, every step**, for
+the first 30–60 steps of every run (the model starts before the first JRA record; the "no extrapolation
+back in time" clamp never released). **Every benchmark in this campaign was 35 steps.** Fixed
+bit-identically in `7f64be1`.
+
+**The artifact is ASYMMETRIC** — `getcoeffld` is host code over `myDim_nod2D`, and the GPU config carries
+**463 k nodes/rank** against the CPU's **14.5 k** (4 ranks/node vs 128). It cost the GPU **5.7 %** of its
+step and the CPU **0.03 %** of its. **So it under-reported the ratio**, and the older rows are all low.
+
+**⇒ THE PROTOCOL IS NOW 300 STEPS, and it is clean.** Proven, not assumed: two matched nsys traces show
+the 300-step run's *reported* loop timing sits within ~3 ms of its own steady state, and the per-step
+series settles by ~step 30 (the residual is the CG spin-up, 86 → 72 iters — physics, not a bug).
+
+> **🔴 The "~22 ms of unattributed cold start" that earlier handoffs chased DOES NOT EXIST.** It was
+> **model error**: a *measured* 72.6 ms delta minus a *modelled* `getcoeffld` cost, with the remainder
+> given a physical story. Two gap censuses show the 25-step and 300-step GPU-idle budgets are
+> **identical** (93.6 vs 94.1 ms/step). **RETRACTED.** → L88.
+
+### ⭐ THE RATIO, RE-MEASURED ON A MATCHED PAIR (2026-07-15) — this is the only honest row
+
+| | s/step | binary | job |
+|---|--:|---|---|
+| **NG5@4N GPU** (`FESOM_SPEED=1`, 300 steps, min of 2) | **0.7239** | `h5` CUDA `0d39d8a2` | 26255936 |
+| **NG5@4N CPU** (Serial, dist_512, 300 steps, min of 2: 4.5785/4.5875) | **4.5785** | `h5` Serial `950ee0f9` | 26256684 |
+| **⭐ RATIO** | **6.32×** | | |
+
+Same day · same 300-step protocol · both post-`getcoeffld`-fix · **both pinned with `BIN=`** (the two jobs
+recorded *different git HEADs* at submit time and still ran the identical frozen binaries — `BIN=` is what
+ran, the build tree is irrelevant).
+
+**Superseded, kept so they cannot quietly return:** 5.84× (35-step, contaminated) · 6.17× (35-step,
+post-fix) · and a retracted "5.83× / 6.2×" that **mixed a long-run GPU number with a 35-step CPU anchor**.
+**You cannot mix protocols and get an honest ratio.**
+
+**Not yet in that 6.32×: H.3 BULKTAIL (−2.43 %, landed).** Its 300-step anchor is job 26257072.
+**Do NOT multiply the 35-step −2.43 % into the 300-step anchor to "get" ~6.5× — that is the exact
+protocol-mixing error that had to be retracted once already. Measure it.**
+
+**CG correction for SYPD:** the projection uses **×1.03, calibrated on 90 iters/step** — a cold-start
+transient. The settled value is **~72** (last-50 mean 71.9; even the 300-step *mean* of 76.9 still carries
+the ramp). The old correction is **pessimistic**; re-derive it from 72.
+
+---
+
 ## ✅ THE ANSWER: the ~25% WAS the dead host `sw_3d`. A dead knob hid it.
 
 **`FESOM_SPEED_SWSKIP` collapses the coupling phase 327 ms → 12 ms and cuts the step 25.5%.**
@@ -106,6 +153,14 @@ Skipping it is **bit-identical by construction** and proven by the FORCE_SERIAL 
 - **A/B rule:** same-day, same-allocation, both legs in one job (`KNOBS` env on `job_m7_scale_gpu`); 35 steps, 2 reps, min; dt180; ±10% inter-allocation noise makes anything else meaningless.
 
 ## Ratio ledger
+
+> ## 🔴 EVERY ROW IN THIS TABLE IS ON THE CONTAMINATED 35-STEP PROTOCOL — SEE THE TOP OF THIS FILE.
+> They are kept for provenance (the *marginal* A/B percentages in them are still sound — the
+> `getcoeffld` artifact sits in BOTH legs and only inflates the denominator, understating each lever by
+> ~5 % of itself). **But the RATIO column is systematically LOW and must not be quoted.**
+> **The live ratio is the matched 300-step pair at the top of this file: `6.32×` at NG5@4N.**
+> The standard set (NG5@4N/8N/16N + dars@8N, GPU **and** CPU) still needs re-running on the 300-step
+> protocol against the current best binary.
 
 Baseline anchors are re-measured same-day (row 0), not inherited from `SCALING_M524.md`.
 Binaries frozen at `/work/ab0995/a270088/port2/m7/bin/row0/` (md5 `02c8a0d1…` cuda / `267c9a6a…` serial)
