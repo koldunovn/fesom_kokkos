@@ -416,6 +416,20 @@ judging the number (L79). `FESOM_SPEED=1` adds *nothing* on the zstar path.
 `zbar_3d_n` all along — and nobody noticed, precisely because its output was dead. `SWSKIP` deletes
 the latent stale read along with the wasted work.)*
 
+### ✅ compute-sanitizer on the combined `FESOM_SPEED=1` config (job 26238798)
+
+Baseline-differential (same tool, knobs OFF then ON — only the difference is attributable):
+
+| leg | benign `cuCtxGetDevice` artefact | **real: Invalid read / write / use-after-free** |
+|---|--:|--:|
+| knobs OFF | 8 | **0** |
+| `FESOM_SPEED=1` | 8 | **0** |
+
+**Zero invalid memory accesses in either leg** — which is precisely the class `NOFENCE2`'s `grow()`
+hazard would have produced had the explicit realloc fence been missing. The only findings are the
+known-benign `CUDA_ERROR_INVALID_CONTEXT` on `cuCtxGetDevice` (UCX/CUDA-aware-MPI probing the context
+from a non-CUDA thread under the sanitizer), present identically with the knobs off.
+
 ## Knob registry
 
 ⚠️ **Every knob here is verified LIVE on the CUDA build** (preprocessor check, all five TUs). `SWSKIP`
