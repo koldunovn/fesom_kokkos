@@ -356,14 +356,19 @@ share of the 38.1 ms launch gap. Spin alone (13.6 ms) is the **floor**; spin+gap
 
 ## Knob registry
 
+⚠️ **Every knob here is verified LIVE on the CUDA build** (preprocessor check, all five TUs). `SWSKIP`
+and `IOACC` once resolved silently to OFF there — see L80 above. Since the fix, each lever also
+**announces itself on rank 0** and shouts if requested-but-OFF.
+
 | knob | lever | class | status |
 |---|---|---|---|
 | `FESOM_SPEED` | master switch (all blessed levers) | — | scaffolded |
 | `FESOM_SPEED_FORCE_SERIAL` | dev-only: allow levers on Serial (byte proofs) | — | scaffolded |
 | `FESOM_SPEED_SYNCSTATS` | per-step sync/fence counters (diagnostic) | — | ✅ implemented (0.3/1.1) |
-| `FESOM_SPEED_NOFENCE2` | drop post-unpack halo fence | bit-id | ✅ implemented, gates pending (1.1) |
+| **`FESOM_SPEED_SWSKIP`** | **skip the DEAD host `sw_3d` (the device twin rebuilds it in full)** | **bit-id** | ✅ **LANDED — A/B −26.47%.** All gates PASS incl. the FORCE_SERIAL byte proof (1.2) |
 | `FESOM_SPEED_ICEFLUXDEV` | port `ice_oce_fluxes_mom` to device | bit-id | ✅ landed, all gates PASS. **A/B −0.72%** — real but small |
-| **`FESOM_SPEED_SWSKIP`** | **skip the DEAD host `sw_3d` (the device twin rebuilds it in full)** | **bit-id** | **implemented (1.2) — THE ~25% lever; gates + A/B queued** |
+| `FESOM_SPEED_NOFENCE2` | drop post-unpack halo fence | bit-id | ✅ landed, all gates PASS + memcheck-clean. **~−0.8%** (1.1) |
+| `FESOM_SPEED_IOACC` | 6 host I/O mean accumulators → device (`ssh`,`a_ice`,`m_ice`,`m_snow`,`uice`,`vice`) | bit-id | ✅ implemented, byte gate + FORCE_SERIAL proof PASS. A/B pending (1.0b) |
 | `FESOM_SPEED_CGSLIM` | CG iteration-body slimming | bit-id | pending (1.2) |
 | `FESOM_SPEED_FCT2` | FCT T+S tracer batching | bit-id | pending (1.3) |
 | `FESOM_SPEED_EVPCOMPACT` | EVP active-set compaction | bit-id | pending (1.4) |
