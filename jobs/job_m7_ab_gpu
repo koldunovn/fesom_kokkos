@@ -1,0 +1,80 @@
+#!/bin/bash
+#SBATCH --job-name=m7ab
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/ab.%j.err
+#
+# M7 same-allocation A/B — the ONLY honest way to attribute a lever's speed.
+#
+# Inter-allocation noise on Levante is ~±10% (node mix + contention), which is larger than most
+# levers. So BOTH legs run back-to-back in ONE allocation, on the SAME nodes, with the SAME
+# binary — only the knob differs. Report min-of-2-reps per leg (job_dars_l3_ab pattern).
+#
+# env: MESH, DT, NSTEPS(35), TAG, KNOBS (the ON leg's knobs), BIN (default build-m7cuda).
+# Submit: sbatch -N4 --ntasks=16 --export=ALL,MESH=$NG5,DT=180,TAG=ab_icefluxdev,\
+#           KNOBS="FESOM_SPEED_ICEFLUXDEV=1" jobs/job_m7_ab_gpu
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+clear_knobs() { while read -r v; do unset "$v"; done \
+                  < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p'); }
+
+run() {  # run <leg> <rep>
+    srun "$FESOM" "$MESH" "$OUT" "${DT:?DT required}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+        > "$OUT/log_$1_$2.txt" 2>&1
+    grep 'loop timing' "$OUT/log_$1_$2.txt" | tail -1 \
+        | sed -E 's/.*-> +([0-9.]+) s\/step/\1/'
+}
+
+echo "=== M7 A/B  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=$DT ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+echo "ON-leg knobs: ${KNOBS:?KNOBS required}"
+
+echo "--- leg A: knobs OFF (baseline) ---"
+clear_knobs
+a1=$(run off a); a2=$(run off b)
+echo "  off: $a1  $a2"
+
+echo "--- leg B: knobs ON ---"
+clear_knobs
+IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done
+env | grep '^FESOM_SPEED' | sed 's/^/  /'
+b1=$(run on a); b2=$(run on b)
+echo "  on : $b1  $b2"
+
+/work/ab0995/a270088/mambaforge/envs/nereus/bin/python - "$a1" "$a2" "$b1" "$b2" "$TAG" "$KNOBS" <<'PY'
+import sys
+a = min(float(sys.argv[1]), float(sys.argv[2]))
+b = min(float(sys.argv[3]), float(sys.argv[4]))
+print("\n" + "=" * 72)
+print(f"A/B RESULT — {sys.argv[5]}   knobs: {sys.argv[6]}")
+print("=" * 72)
+print(f"  knob-OFF : {a:.4f} s/step   (min of 2)")
+print(f"  knob-ON  : {b:.4f} s/step   (min of 2)")
+d = 100.0 * (b - a) / a
+print(f"  delta    : {d:+.2f} %   {'FASTER' if d < 0 else 'SLOWER'}")
+print("  (same allocation, same nodes, same binary — only the knob differs)")
+print("=" * 72)
+PY
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true

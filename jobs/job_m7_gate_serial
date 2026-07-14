@@ -36,6 +36,15 @@ unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
 unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
 
+# KNOBS (optional) — this same job doubles as the FORCE_SERIAL BYTE PROOF for any lever that
+# CLAIMS bit-identity: run the levered code path on the Serial backend and require diff_snap
+# rc=0 against the certified baseline. That is a far stronger statement than any statistical
+# gate — it proves the lever is pure re-execution, not merely close.
+#   M7_TAG=t10_proof KNOBS="FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_ICEFLUXDEV=1" sbatch ...
+# ⚠️ Only levers whose kernel source is BACKEND-IDENTICAL can be proven this way. NOFENCE2
+# cannot: the device halo path is inside #ifdef KOKKOS_ENABLE_CUDA, so Serial never runs it.
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
 TAG=${M7_TAG:-$SLURM_JOB_ID}
 OUT=/work/ab0995/a270088/port2/m7/gate_$TAG
 rm -rf "$OUT"; mkdir -p "$OUT"
