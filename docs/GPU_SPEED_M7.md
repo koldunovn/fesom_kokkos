@@ -564,3 +564,41 @@ runaway, no NaN.
 **Identical to the un-levered baseline, to five decimal places** — which is what must happen:
 `SWSKIP`/`ICEFLUXDEV`/`IOACC` each carry a passing FORCE_SERIAL byte proof and `NOFENCE2` changes no
 arithmetic. **The speed came from deleting dead work, not from trading accuracy.**
+
+---
+
+## Post-Tier-1 MEASURED budget (jobs 26242512 + 26242513) → the 2026-07-14 re-scope
+
+Both `FESOM_SPEED=1` on the frozen Tier-1 binary `788844b3`. Knobs verified live three ways
+(SYNCSTATS `post-unpack 0.0 / SKIPPED 437.3`; the device I/O resolvers visible in the GPU trace;
+step time reproduces the Tier-1 A/B). Raw: `m7/nsys_t1_ng5_4n/stall_budget.txt`, `m7/stepprof_t1/run.log`.
+
+**NG5@4N, 913.5 ms/step.** Phase view (26242513, phase-timer overhead ~5%): **ocean 71.9%
+(693.7 ms) · sea-ice 13.4% (129.7 ms) · forcing 10.1% (97.1 ms) · coupling 0.3%** (SWSKIP killed it).
+
+| pool | ms/step | % |
+|---|--:|--:|
+| GPU kernels | 591.8 | 64.8 |
+| memcpy (MPI staging + forcing HtoD) | 89.8 | 9.8 |
+| MPI wait + Isend/Irecv call time | 138.1 | 15.1 |
+| launch gap + other CUDA API | 46.5 | 5.1 |
+| fence spin | 18.1 | 2.0 |
+| host segment (unnamed → hostprof 26243196) | 66.9 | 7.3 |
+
+Comm machinery detail: 437.3 exchanges/step → 1955.7 Isends (32.3 ms of CALL time alone), 3636
+MPI-internal device syncs, Waitall 72.1 ms. CG = 351 launches + 179 reduces/step for ~22.6 ms GPU.
+
+**Top kernels (ms/step):** FCT pipeline **181.8** (56 launches; two monsters 18.9+17.0 ms ×2/step) ·
+`ale_vert_vel` 44.1 (scatter ≈29.5, cumsum 7.9, divide 6.7) · `redi_expl` 40.7 · `impl_ale` TDMA
+32.6 · `momentum_adv` ~25 · `hor_redi` 22.9 · **`resolve_u/v_dev` 21.7** (column-loop I/O
+accumulators, ~20× the streaming floor) · `visc_filt` 19.6 · `smooth` 17.8 · `kpp_ri_iwmix` 17.0 ·
+`impl_vert_visc` TDMA 13.3 · `compute_vel_nodes` 12.8 · `pressure_bv` 11.3 · `fer_solve_gamma` 9.4 ·
+`wvel_split` 7.2.
+
+**Consequence — the plan is re-scoped into packages A–F** (see the plan's RE-SCOPE section for the
+full ladder + the 8× arithmetic): A flatten column-loops + hostprof + UCX config · B FCT2/Redi
+batching + scatter store+gather · C TDMA/spill · D forcing→device · E CG1R/EVPWIDE/CGPOLY ·
+F ICELAG **(user-approved as EXPERIMENT 2026-07-14)**. Central estimate without F ≈ 7.0–7.5×, with
+F ≈ 8×+. **Layout big-bet DEMOTED** (the #1 kernel is already at 59% of DRAM peak — a flip helps
+only the ~130–150 ms column-serial class that A/C fix per-kernel). User decisions: start package A;
+ICELAG experiment green-lit; **no push**.

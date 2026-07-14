@@ -1,5 +1,10 @@
 # M7 HANDOFF — next session (Tier 1 is DONE; where the remaining headroom actually is)
 
+> ⚠️ **PARTIALLY SUPERSEDED (2026-07-14, later the same day):** §3 (strategy) and §4 (first
+> actions) are replaced by the measured re-scope — read **`20260714-m7-HANDOFF-packA.md`** and the
+> plan's RE-SCOPE section instead. §1 (L80/L81 lessons), §5 (machinery) and §6 (standing rules)
+> remain fully binding.
+
 *Written 2026-07-14 at the close of the Tier-1 session. Milestone tag: **`m7.1-stage1`** (annotated,
 `db36776`) — read `git show m7.1-stage1` for the full record. Campaign log + ledger:
 `docs/GPU_SPEED_M7.md`. Plan of record: `docs/plans/20260714-m7-speed-fp64.md`.*

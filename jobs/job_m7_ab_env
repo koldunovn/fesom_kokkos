@@ -1,0 +1,106 @@
+#!/bin/bash
+#SBATCH --job-name=m7abenv
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/abenv.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/abenv.%j.err
+#
+# M7 same-allocation ENV A/B — like job_m7_ab_gpu, but the legs differ by ARBITRARY env
+# (UCX / OMPI transport config), not by a code knob. Package-A Task A.3: the comm machinery
+# at NG5@4N is 89.8 ms staging memcpy + 32.3 ms in MPI_Isend + 3636 MPI-internal device
+# syncs/step (stall budget, job 26242512) — all of it transport-layer, none of it our code.
+#
+# Up to 4 legs via LEG1..LEG4, each "label::k1=v1;k2=v2". Every leg runs in a SUBSHELL so its
+# env dies with it; 2 reps each, min reported. Leg 1 is the reference. A short UCX_LOG_LEVEL
+# diag run at the end records which transports/rndv scheme UCX actually picked.
+#
+# ⚠️ A winning config is NOT adoptable from timing alone: it must pass the CUDA fidelity gate
+# (jobs/job_m7_gpu_gate with the same env) before it goes into the job headers/README.
+#
+# Submit example (frozen Tier-1 binary, NG5@4N):
+#   sbatch -N4 --ntasks=16 --export=ALL,MESH=$NG5,DT=180,TAG=abenv_ucx,\
+#     BIN=/work/ab0995/a270088/port2/m7/bin/tier1/fesom_port_cuda,\
+#     LEG1="ref::FESOM_SPEED=1",LEG2="getz::FESOM_SPEED=1;UCX_RNDV_SCHEME=get_zcopy" \
+#     jobs/job_m7_ab_env
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+echo "=== M7 ENV A/B  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?DT required} ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+
+run_leg() {  # run_leg <label> <envspec>  -> writes $OUT/result_<label>
+    local label=$1 spec=$2
+    (
+        while read -r v; do unset "$v"; done \
+            < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+        if [ -n "$spec" ]; then
+            IFS=';' read -ra KV <<< "$spec"
+            for kv in "${KV[@]}"; do export "$kv"; echo "    env: $kv"; done
+        fi
+        for rep in a b; do
+            srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+                > "$OUT/log_${label}_${rep}.txt" 2>&1
+        done
+    )
+    local r1 r2
+    r1=$(grep 'loop timing' "$OUT/log_${label}_a.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+    r2=$(grep 'loop timing' "$OUT/log_${label}_b.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+    echo "  $label: ${r1:-FAIL}  ${r2:-FAIL}"
+    echo "${r1:-inf} ${r2:-inf}" > "$OUT/result_$label"
+}
+
+LABELS=()
+for i in 1 2 3 4; do
+    var="LEG$i"; spec="${!var:-}"
+    [ -z "$spec" ] && continue
+    label="${spec%%::*}"; envs="${spec#*::}"
+    echo "--- leg $label ---"
+    run_leg "$label" "$envs"
+    LABELS+=("$label")
+done
+
+echo
+echo "########################## ENV A/B RESULT — $TAG ##########################"
+ref=""
+for label in "${LABELS[@]}"; do
+    read -r r1 r2 < "$OUT/result_$label"
+    m=$(awk -v a="$r1" -v b="$r2" 'BEGIN{print (a<b)?a:b}')
+    if [ -z "$ref" ]; then ref=$m; echo "  $label : $m s/step  (reference)"
+    else awk -v m="$m" -v r="$ref" -v l="$label" \
+        'BEGIN{printf "  %s : %s s/step  (%+.2f%% vs ref)\n", l, m, 100*(m-r)/r}'
+    fi
+done
+echo "  (same allocation, same nodes, same binary — only the env differs; min of 2 reps)"
+echo "###########################################################################"
+
+# Diag: which transports / rndv scheme did UCX actually use? 3 steps, info logging.
+echo; echo "--- UCX transport diag (3 steps, UCX_LOG_LEVEL=info) ---"
+(
+    export FESOM_SPEED=1 UCX_LOG_LEVEL=info
+    srun "$FESOM" "$MESH" "$OUT" "$DT" 3 -1 "$PHC" 1958 > "$OUT/log_ucxdiag.txt" 2>&1 || true
+)
+grep -iE 'rndv|zcopy|gdr|cuda_?copy|rc_mlx|dc_mlx|self/|tag_send' "$OUT/log_ucxdiag.txt" \
+    | sort | uniq -c | sort -rn | head -25
+
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true
+echo "=== done: $OUT ==="
