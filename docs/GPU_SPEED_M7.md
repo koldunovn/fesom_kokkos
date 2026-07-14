@@ -24,8 +24,11 @@ by re-execution, not by argument). They are worth keeping. **They are not the he
 
 ### What is solidly established (do not re-derive)
 
-- **32.0% of the NG5@4N step is host time**: GPU idle, no traced CUDA call, no traced MPI call.
-  Uniform across steps (mean 464.7 ms, **stdev 1.5%**), so not I/O or forcing reads.
+- **The host segment is REAL, confirmed two independent ways.** (a) GPU-idle time attributed to no
+  traced call: **408.2 ms/step (32.0%)**. (b) A completely separate computation — raw wall time in
+  which the host is inside NO traced CUDA call and NO MPI call, regardless of GPU state:
+  **437.3 ms/step (34.3%)**. Uniform across steps (stdev **1.5%**), so not I/O or forcing reads.
+  Single-threaded: nsys sees ALL CUDA API and ALL MPI on one tid.
 - The trace is trustworthy: traced step **1274.6 ms** vs untraced baseline **1279.6 ms** (0.4%);
   kernel share **46.6%** reproduces PROFILE_M522's 46%; dars@8N reproduces its 28%.
 - **Fences are NOT the problem** (spin 1.4%); launch gaps 3.0%. The plan's Tier-1A premise is dead.
