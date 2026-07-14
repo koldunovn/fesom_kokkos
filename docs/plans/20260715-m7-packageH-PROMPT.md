@@ -62,8 +62,8 @@ A/B. And a knob-OFF byte gate must be green at every commit.)*
 | job | what | PRE-REGISTERED |
 |---|---|---|
 | **26248860** | **NG5@16N 4-leg scan** (`t1`/`flat`/`rot`/`both`), pinned `m7/bin/packa` | 🔴 **THE LADDER TEST — it decides packages B and C.** `FLAT` near **−2.0 %** ⇒ the L84(b) comm-decay story is WRONG and **B/C go back on top**. Near **−0.9 %** ⇒ it stands. `ROTCACHE` −1.4 % either way. ⚠️ The **NG5@8N** scan already weakened the decay story (at 8N the ordering does NOT invert: FLAT −2.55 % still beats ROT −2.23 %), so the dars@8N inversion is at least partly a **mesh** artifact. **Either way it does not touch package H, which is host-class.** |
-| **26255934** | 25-step step-profile, `h5`, `FESOM_SPEED=1;ICERAILS=0` (matches h2's 25-step run: loop **0.8778 s/step**, `force:getcoeffld` **49.3 ms @ 8.0 calls/step**) | `force:getcoeffld` **stays 8.0 calls/step** (the broken caller-guard still CALLS it; it now returns after a binarysearch) but **49.3 → <1 ms/step**; **loop 0.8778 → ~0.829** (−49 ms). |
-| **26255935** | same-alloc A/B on `h5`: `NOCOEFCACHE=1` (old, broken) vs default (fixed) | **−45 ms, −5.7 %.** *(45 not 49: at 35 steps, 4 of the 8 JRA fields escape the clamp at step 30 of the 30 timed steps.)* |
+| ~~26255934~~ | 25-step step-profile, `h5` | ✅ **HARVESTED — HIT.** loop **0.8778 → 0.8297** (pre-reg ~0.829). `force:getcoeffld` + `force:jra55_read` **vanished from the profile** (below the 0.45 % print cutoff; were 5.62 % / 5.76 %). **CONTROL: CG stayed at 90.3 iters/step and 1.134 s — identical. The fix was surgical.** |
+| ~~26255935~~ | same-alloc A/B on `h5`: `NOCOEFCACHE=1` vs default | ✅ **HARVESTED.** `nocache` 0.7852 (reproduces ICERAILS' 0.7857 to 0.06 %) → `cache` **0.7435 = −5.31 % (41.7 ms)**. Pre-reg −5.7 % (45 ms) — **I over-predicted by 7 %; own it.** |
 | **26255936** | **GPU anchor @300 steps**, `h5`, `FESOM_SPEED=1`, unprofiled, **pinned** | — (this IS the measurement) |
 | **26255937** | **CPU anchor @300 steps**, serial `h5`, dist_512, **pinned** | — (this IS the measurement) |
 | **26256274** | **nsys GAP CENSUS, 300 steps**, `h5`, `NSYS_TRACE=cuda,mpi NSYS_SAMPLE=none` | names the last **~22 ms** (see §3.2) |
@@ -125,7 +125,14 @@ a MEASUREMENT bug — and an ASYMMETRIC one.** `getcoeffld` is HOST code over `m
 | NG5@16N GPU | 116 k | 11 ms | ~0.32 s | 3.5 % |
 | NG5 **CPU** (any) | 3.6–14.5 k | 0.4–1.4 ms | 1.2–4.6 s | **0.03 %** |
 
-**Arithmetic says the ratio should go ~5.84× → ~6.2× at 4N. TREAT THAT AS A HYPOTHESIS.** *(I already
+**✅ MEASURED (26255935): the 35-step ratio moved 5.83× → 6.17×, i.e. ×1.057. I pre-registered ×1.06
+→ 6.19×: a HIT, which also validates the scaling model behind it (artifact ∝ nodes/rank; the GPU at
+463 k/rank paid ~150× what the CPU paid at 14.5 k/rank — L84).**
+
+🔴 **BUT 6.17× IS THE 35-STEP NUMBER, NOT THE FINAL ONE.** The protocol still carries **~31 ms** the
+guard fix does not touch — the **CG spin-up (8.7 ms; the post-fix profile still shows 90.3 iters/step)**
+plus **~22 ms still unattributed** (§3.2). That is ~4 % of the GPU step, and the CPU's share is unknown.
+**Original arithmetic, now superseded, kept for the record: ~5.84× → ~6.2×.** *(I already
 quoted "5.83× / 6.2×" once and had to retract it — it mixed a long-run GPU number with a 35-step CPU
 anchor. **You cannot mix protocols and get an honest ratio.**)*
 🔴 **Jobs 26255936 + 26255937 are the MATCHED, PINNED, BOTH-POST-FIX pair. Harvest both, then re-derive.**
