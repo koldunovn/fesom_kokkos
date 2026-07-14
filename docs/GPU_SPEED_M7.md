@@ -51,23 +51,30 @@ Baseline anchors are re-measured same-day (row 0), not inherited from `SCALING_M
 Binaries frozen at `/work/ab0995/a270088/port2/m7/bin/row0/` (md5 `02c8a0d1…` cuda / `267c9a6a…` serial)
 so later jobs can be pinned to certified-source code while the build tree moves.
 
-| after | NG5@4N GPU | NG5@4N CPU | ratio | NG5@8N GPU | NG5@8N CPU | ratio | NG5@16N GPU | NG5@16N CPU | ratio | dars@8N GPU | dars@8N CPU | ratio | dars@2N GPU |
+| after | NG5@4N GPU | NG5@4N CPU | **ratio** | NG5@8N GPU | NG5@8N CPU | **ratio** | NG5@16N GPU | NG5@16N CPU | **ratio** | dars@8N GPU | dars@8N CPU | **ratio** | dars@2N GPU |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| M5.24 (ref, 2026-05-31) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
-| **row 0: m7 baseline** (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | *queued* | **1.2188** | — | **0.3180** | **0.8563** | **2.69** | **0.8177** |
+| M5.24 (ref, 2026-05-31 — historical, NOT the anchor) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
+| **row 0: m7 baseline** ✅ COMPLETE (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | **0.4487** | **1.2188** | **2.72** | **0.3178** | **0.8563** | **2.69** | **0.8177** |
 
-**The gap to close: 3.60× → ≥5.0× at 4N.** NG5@4N reproduces M5.24 (3.61×) exactly, so the
-Δ-anchor is sound. NG5@8N came in at **3.20×** vs M5.24's 2.91× — a difference outside the noise
-band, which is precisely why the same-day rule exists: **row 0, not M5.24, is the baseline every
-lever is measured against.** The NG5@16N CPU leg (1.2188) is the same-day Stage-2 anchor the plan
-review asked for; its GPU partner is still queued (the gpu partition is saturated).
-Harvest: `grep -h 'loop timing' /work/ab0995/a270088/port2/m7/base_*/log_rep_*.txt`.
+**The gap to close: 3.60× → ≥5.0× at 4N (Stage 1); flatten the 2.72× at 16N (Stage 2).**
 
-**Task 1.0 in context (a PROJECTION, not a measurement — the A/B is queued):** if the lever
-recovered the full 333.6 ms it would take NG5@4N from 1.2796 → ~0.95 s/step, i.e. **3.60× → ~4.9×**
-— essentially the whole Stage-1 target from one bit-identical lever. Read that as an upper bound:
-the honest lower bound is M5.22's independently-measured coupling phase (21.4% → ~4.6×). Either way
-it dwarfs every other Tier-1 item, and the A/B settles it.
+NG5@4N reproduces M5.24's 3.61× exactly, so the Δ-anchor is sound. But **8N and 16N both came in
+BETTER than the historical numbers** (3.20× vs 2.91×; 2.72× vs 2.51×) — differences well outside
+run-to-run noise. That is exactly why the same-day rule exists: **row 0, not `SCALING_M524.md`, is
+what every lever is measured against.** The 16N legs are the same-day Stage-2 anchor the plan review
+asked for. Harvest: `grep -h 'loop timing' /work/ab0995/a270088/port2/m7/base_*/log_rep_*.txt`.
+
+**Task 1.0 in context — a PROJECTION, not a measurement (the A/B is the arbiter):**
+
+| | now | −25% host loop | ratio | SYPD@dt240 |
+|---|--:|--:|--:|--:|
+| NG5@4N | 1.2796 | ~0.96 | **3.60× → ~4.8×** | — |
+| NG5@16N | 0.4487 | ~0.34 | **2.72× → ~3.6×** | **1.42 → ~1.9** |
+
+At 4N that is essentially the whole Stage-1 target from one bit-identical lever. At 16N it takes
+SYPD@dt240 from 1.42 to **~1.9 — within reach of the ~2 SYPD the campaign was chartered to find**,
+in pure FP64, without the mixed precision the user banned. The 25% is justified at BOTH scales: the
+dars@8N (16N-class) trace independently shows the host segment is still **24.7%** there.
 
 SYPD@dt240 = 0.657 / (s/step at dt180) × (1/1.03 CG correction) for NG5.
 
