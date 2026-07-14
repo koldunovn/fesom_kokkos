@@ -5,6 +5,18 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
+# 🔴🔴 L94 — THE LEVANTE `gpu` PARTITION IS HETEROGENEOUS. THIS LINE IS LOAD-BEARING.
+#   l40xxx (cell09) = a100_40  — HBM2,  1555 GB/s
+#   l50xxx (cell13) = a100_80  — HBM2e, 1935 GB/s     (~25% more bandwidth)
+# FESOM's step is 74.6% memory-bound kernels, and in an MPI job THE SLOWEST RANK SETS THE PACE
+# (every step ends in a halo exchange). So ONE a100_40 node in a 4-node allocation drags the
+# WHOLE JOB. Measured, same binary, same config, 300 steps:
+#       pure a100_80        0.7058 s/step
+#       3x a100_80 + 1x a100_40   0.7298 s/step   = +3.4%, from the hardware alone
+# That is larger than most levers in this campaign. An unconstrained anchor is not a measurement.
+# ⚠️ An A/B is IMMUNE (both legs run on the SAME nodes, so the hardware cancels). An ABSOLUTE
+#    ANCHOR IS NOT. This job does both, so it pins.
+#SBATCH --constraint=a100_80
 #SBATCH --time=01:30:00
 #SBATCH -o /work/ab0995/a270088/port2/m7/abenv.%j.out
 #SBATCH -e /work/ab0995/a270088/port2/m7/abenv.%j.err

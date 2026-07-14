@@ -1015,4 +1015,49 @@ still being wrong.** Fixing the range is cheaper than fixing the credibility.
 
 ---
 
+### L94 — THE LEVANTE `gpu` PARTITION IS HETEROGENEOUS. Pin `-C a100_80`, or your anchor is not a measurement. (M7, 2026-07-15)
+
+| node range | feature | GPU | HBM bandwidth |
+|---|---|---|---|
+| `l40xxx` (cell09) | `a100_40` | A100 **40 GB** | HBM2, **1555 GB/s** |
+| `l50xxx` (cell13) | `a100_80` | A100 **80 GB** | HBM2e, **1935 GB/s** (~**25 %** more) |
+
+FESOM's step is **74.6 % memory-bound kernels**, and in an MPI job **the slowest rank sets the pace**
+(every step ends in a halo exchange). So **ONE `a100_40` node in a 4-node allocation drags the WHOLE
+JOB.** Measured, *same binary, same config, same day, 300 steps*:
+
+| allocation | s/step |
+|---|--:|
+| pure `a100_80` | **0.7058** |
+| 3× `a100_80` + **1× `a100_40`** | **0.7298** |
+| | **+3.4 %, from the hardware alone** |
+
+**That is larger than most levers in this campaign.** An unconstrained GPU anchor is not a measurement.
+
+**How it nearly cost a landed lever.** H.7's 300-step anchor came back at 0.7298 against the previous
+anchor's 0.7058 — i.e. **"H.7 makes the model 3.4 % SLOWER"** — while its own same-allocation A/B said
+**−4.21 %**. I did not publish the regression, because:
+
+> 🔴 **WHEN AN ABSOLUTE ANCHOR CONTRADICTS A CONTROLLED A/B, SUSPECT THE ANCHOR.**
+> An **A/B is IMMUNE** to node heterogeneity — both legs run on the **same nodes**, so the hardware
+> cancels. An **ABSOLUTE ANCHOR HAS NO SUCH PROTECTION.** The A/B is the robust instrument; the anchor
+> is the fragile one. That asymmetry is *why* this campaign compares levers by same-allocation A/B.
+
+The chain that caught it: the **L80 announce check passed** (`FESOM_SPEED_SMOOTHSCRATCH = ON`, binary md5
+correct) — so the lever *had* fired, which meant the contradiction could not be a dead knob, which forced
+me to look at **`nodes:`** in the job output. `l40369`. `sinfo -N -n l40369 -o "%f"` → `a100_40`.
+**Two minutes.**
+
+**Fixed at source:** `jobs/job_m7_ab_env` now carries `#SBATCH --constraint=a100_80`. **Audit your
+existing numbers before trusting them** — `grep "^nodes:" abenv.*.out` and check every one. *(Ours: the
+`6.49×` ratio and both levers' A/Bs were all on pure `a100_80`. Exactly one number — the h9 anchor — was
+contaminated, and it was never published.)*
+
+**The general rule, beyond Levante:** on any heterogeneous partition, a **cross-allocation absolute
+comparison is a hardware lottery**. Constrain the hardware, or measure only *differences within one
+allocation*. `feedback-perf-same-day-baseline` said "~5 % cluster noise, re-measure same-day" — **it was
+right, and this is the mechanism behind it.**
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*
