@@ -20,10 +20,14 @@
 #     host fesom_cal_shortwave_rad (dead sw_3d) -> skipped (SWSKIP) -> A/B -0.01%
 # Both levers are correct, gated and bit-identical. Neither is the cost.
 #
-# `-t cuda,mpi` cannot see inside host code by construction. `--sample=cpu` can: it takes
+# `-t cuda,mpi` cannot see inside host code by construction. CPU sampling can: it takes
 # periodic CPU samples WITH CALL STACKS, so the answer comes out as a function name instead of
 # a hypothesis. `-t osrt` additionally catches time in syscalls (file I/O, page faults, futex),
 # which a pure compute profile would miss.
+#
+# ⚠️ FLAG TRAP (cost one job): --sample and --cpuctxsw take 'process-tree'|'system-wide'|'none'.
+# NOT 'cpu', NOT 'process'. nsys rejects the first bad one, kills the run (rc=143), writes NO
+# report -- and the batch job still exits 0.
 #
 # Sampling perturbs, so this is a DIAGNOSTIC run, not a timing run — read the SHAPE (which
 # function has the samples), not the wall clock.
@@ -50,7 +54,7 @@ cat > "$OUT/wrap.sh" <<WRAP
 F=$FESOM
 if [ "\${SLURM_PROCID:-0}" = "0" ]; then
   exec nsys profile -t cuda,mpi,osrt -o "$OUT/hostprof" --force-overwrite=true \\
-       --sample=cpu --sampling-period=1000000 --cpuctxsw=process --backtrace=dwarf \\
+       --sample=process-tree --backtrace=dwarf --cpuctxsw=process-tree \\
        "\$F" "\$@"
 else exec "\$F" "\$@"; fi
 WRAP
@@ -60,6 +64,14 @@ echo "=== M7 host CPU-sampling profile — NG5 dist_16, ${NSTEPS:-20} steps ==="
 echo "knobs: ${KNOBS:-none}"
 srun "$OUT/wrap.sh" "$MESH" "$OUT" 180 "${NSTEPS:-20}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
 echo "rc=$?"; grep -m1 'loop timing' "$OUT/run.log" || true
+
+# Fail LOUDLY if nsys wrote nothing. The first attempt died on a bad flag, produced no report,
+# and the batch job still exited 0 — that is how an overnight slot gets silently wasted.
+if [ ! -s "$OUT/hostprof.nsys-rep" ]; then
+    echo "!! FATAL: nsys produced NO report. Its complaint was:"
+    grep -iE "illegal|invalid|error|unrecognized|not supported" "$OUT/run.log" | sort -u | head -5
+    exit 3
+fi
 
 echo
 echo "############ WHERE THE HOST TIME ACTUALLY IS ############"
