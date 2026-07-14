@@ -820,3 +820,57 @@ constructing the story that fits it (L80, L81). dars@8N has **98.5 k nodes/rank*
 cost does *not* scale with nodes/rank, the per-rank-amplification story is **wrong**, and the
 "host code is structurally amplified 32× on the GPU config" conclusion — which is currently steering
 the whole campaign toward D.1 — must be revisited.
+
+### dars@8N — RESULT (job 26245783), scored against the prediction above
+
+| leg | s/step | vs Tier-1 |
+|---|--:|--:|
+| `t1` | 0.2625 | — |
+| `flat` | 0.2598 | **−1.03%** (−2.70 ms) |
+| `rot` | 0.2577 | **−1.83%** (−4.80 ms) |
+| **`both`** | **0.2549** | **−2.90%** |
+
+Announce armor: `t1` 0/0 · `flat` 3/0 · `rot` 0/1 · `both` 3/1. Both knobs live.
+
+#### ✅ L84 SURVIVED FALSIFICATION — the host-cost scaling law holds
+
+| lever | predicted | measured | verdict |
+|---|--:|--:|---|
+| `ROTCACHE` (host) | 4.19 ms | **4.80 ms** (1.15×) | **tracks per-rank size** (×0.244 vs the ×0.213 yardstick) |
+| `FLAT` (GPU kernel) | 5.98 ms | **2.70 ms** (0.45×) | **decayed 2.2× FASTER than per-rank size** |
+
+The rival hypothesis — "host cost does *not* scale with nodes/rank" — predicted ROTCACHE ≈ 19.7 ms
+= **7.5%** of the dars step. Measured: **1.83%**. The test discriminated decisively. **L84 stands:
+serial host work scales with nodes/rank, so the GPU config (4 ranks/node) is structurally penalised
+vs the CPU config (128 ranks/node).**
+
+#### 🔴 THE UNPREDICTED FINDING, and it outranks both levers
+
+**I predicted FLAT would hold up BETTER than linear. It held up 2.2× WORSE.** And the ordering
+*inverts* between the two scale points:
+
+| | NG5@4N (compute-bound) | dars@8N (comm-bound) |
+|---|--:|--:|
+| `FLAT` (GPU **kernel** lever) | **−3.07%** | −1.03% |
+| `ROTCACHE` (**host** lever) | −2.15% | **−1.83%** |
+
+**Mechanism:** in a comm-bound step, GPU-kernel time you free up is partly absorbed by MPI wait the
+GPU was doing anyway — but **host** time you free up is on the critical path regardless of what the
+GPU is waiting for. So **kernel levers decay in the comm-bound regime; host levers do not.**
+
+**Why this is a campaign-level warning:** dars@8N is **98.5 k nodes/rank ≈ NG5@16N's 115 k** — by the
+per-rank-proxy method it *is* the **Stage-2 regime**. So:
+
+- **Packages B (FCT2, 181.8 ms pool) and C (TDMA) are pure GPU-KERNEL levers.** Their NG5@4N payoff
+  will **not** carry to 16N — which is exactly where Stage 2 / the 2-SYPD goal lives. Size them at 4N,
+  but **do not bank them at 16N without measuring at dars@8N first.**
+- **Package D.1 (forcing → device) is a HOST lever** and should hold its value into the Stage-2 regime.
+  Combined with L84 (host work is 32× amplified on the GPU config), D.1 is now the best-evidenced lever
+  in the ladder.
+- **Package E (CG1R/EVPWIDE/CGPOLY) attacks the comm itself** — and the comm is what is absorbing the
+  kernel levers' gains at 16N. Its priority goes UP.
+
+⚠️ **Caveat, stated honestly:** dars is a different *mesh*, not just a different rank count, so
+"comm-bound" is confounded with mesh geometry. The per-rank-proxy method ([[feedback-per-rank-proxy]])
+says dars@8N is faithful for halo/comm behaviour (NOT for CG iteration counts). **Confirm at NG5@16N
+before betting the ladder on it** — but the direction is strong enough to re-rank D and E above B/C now.
