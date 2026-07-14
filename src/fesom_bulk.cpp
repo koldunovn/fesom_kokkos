@@ -725,10 +725,14 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
      * The only unique output of this function is the nod2D `heat_flux += swsurf` side effect
      * (the _kk kernel deliberately does NOT do it — see its :794 comment).
      *
-     * The dead half is not cheap. It is a nod3D memset (N*nl doubles — 1.04 GB/rank/step at
-     * NG5@4N) plus a per-column exp() walk, single-threaded, on the critical path of every
-     * step. It is the bulk of the ~25% host segment the M7 stall budget found — NOT
-     * ice_oce_fluxes_mom, which the Task-1.0 A/B measured at only 0.72%.
+     * The dead half is not cheap (NG5, nod2D=7,402,886, nl=70, dist_16 → ~466k nodes/rank):
+     *   - the nod3D memset: 466,324*70*8 B = 261 MB per RANK per step (1.04 GB per 4-GPU node).
+     *     Single-threaded, so ~30-50 ms of it.
+     *   - THE REAL COST, the exp() column walk: ~373k open-ocean nodes * ~12 levels * 2 exp()
+     *     ~= 9 M exp() calls per rank per step. At 20-50 ns per double exp, 200-450 ms.
+     * That is where the measured ~333 ms/step comes from. It is the bulk of the ~25% host
+     * segment the M7 stall budget found — NOT ice_oce_fluxes_mom, which the Task-1.0 A/B
+     * measured at only 0.72%.
      *
      * Skipping it is BIT-IDENTICAL by construction (the device twin recomputes sw_3d in full
      * from the same inputs with the same arithmetic), and provable with the FORCE_SERIAL byte

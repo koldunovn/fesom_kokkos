@@ -41,8 +41,13 @@ backends (on Serial, `sw_3d_fld.d()` *is* that same host array). The host functi
 output is the cheap nod2D `heat_flux += swsurf` side effect — which the device kernel deliberately
 does not do (`fesom_bulk.cpp:794`).
 
-The dead half is not cheap: a **nod3D `memset` (1.04 GB/rank/step at NG5@4N)** plus a per-column
-`exp()` walk, single-threaded, on the critical path of every step.
+The dead half is not cheap, and it is worth being precise about WHY (measured from the mesh:
+NG5 nod2D = 7,402,886, nl = 70, dist_16 → ~466 k nodes/rank):
+- the nod3D `memset`: 466,324 × 70 × 8 B = **261 MB per rank per step** (1.04 GB per 4-GPU node) —
+  single-threaded, so only ~30–50 ms of it;
+- **the real cost — the `exp()` column walk**: ~373 k open-ocean nodes × ~12 levels × 2 `exp()`
+  ≈ **9 M `exp()` calls per rank per step**. At 20–50 ns per double-precision `exp`, that alone is
+  200–450 ms — which is where the measured ~333 ms actually comes from.
 
 → **Task 1.2 `FESOM_SPEED_SWSKIP`**: skip the `sw_3d` half of the host function, keep `heat_flux`.
 Bit-identical by construction (the device twin recomputes `sw_3d` in full from the same inputs with
