@@ -801,4 +801,125 @@ explains it usually finds the next lever.**)*
 
 ---
 
+### L88 — Do NOT decompose a measurement by SUBTRACTING A MODEL and then name the remainder. (M7, 2026-07-15)
+
+A 25-step run was **72.6 ms/step slower** than a 300-step run. We knew `getcoeffld` was the culprit, so
+we *modelled* it (49.3 ms/step for the first K steps, then 7.7) and subtracted: 41.9 ms. The CG spin-up
+explained 8.7 more. **The 22 ms left over was then given a physical story** — *"it sits in the halos /
+host / MPI remainder that the PHASE profiler structurally cannot see. Only a trace reaches it."* It went
+into the handoff as an open question with a job attached to it.
+
+**A trace reached it. There was nothing there.** Two matched nsys traces (25-step and 300-step, same
+binary, same flags) have **identical GPU-idle gap budgets** — 93.6 vs 94.1 ms/step — and steady-state
+steps within 8 ms. The per-step wall series is a smooth 745 → 729 ms decay over ~200 steps that tracks
+the CG iteration ramp (86 → 72) exactly. **The whole residual is the CG spin-up. The 22 ms was MODEL
+ERROR in the subtraction, wearing a physical story.**
+
+**The rule:** `measured_total − modelled_part` is **not** a measurement of anything. Its error bar is the
+model's error bar, and you do not know that. If you want to know what is left, **measure what is left** —
+here, one `--diff` of two censuses that were already on disk, and one per-step time series, both free.
+
+*(Corollary — the honest version of this decomposition is a **CONTROLLED DIFFERENTIAL**: change ONE
+thing, re-measure, and let the *difference of two measurements* name the part. That is what the eta_n fix
+and the mEVP fix below both did, and neither needed a model.)*
+
+---
+
+### L89 — Name a stall by the PAIR it sits between, not by the kernel it delays. (M7 H.3, 2026-07-15)
+
+The gap census (L87) attributes GPU-idle time to *the kernel the gap ENDS at*. That found package H. But
+"`ocean2ice` waits 16.8 ms" does not tell you **what to delete** — `ocean2ice` is innocent; it is the
+victim. Keying every gap by **`(predecessor → victim)`** and itemising the PCIe inside it **by count, MB
+and direction** turns the same free query into an *address*:
+
+```
+fesom_halo_exchange_device2 -> fesom_ocean2ice_kk   16.8 ms   6.7 PCIe   8 copies   28.3 MB  DtoH
+```
+
+7.07 MB then six of 3.54 MB, **all DtoH, in source order** — which is `2N` doubles followed by six `N`
+doubles, which is *exactly* the seven `sync_host()` calls at `fesom_bulk.cpp:629-635`, in the order they
+are written. The census did not just size the lever; **it pointed at the lines.**
+
+**And it caught the half a byte-count would have missed.** Between the last copy and the next kernel sat
+**7.8 ms of untraced host time** — a dead 930k-element interpolation loop in the same gap. The plan had
+sized this lever from the *rails* alone (30 MB ⇒ ~1 %). The gap census, which counts **time the GPU is
+idle** rather than **bytes moved**, found both halves and doubled the estimate to 2.2 %.
+
+⇒ **Size a rail lever by the GAP, not by the BYTES.** Bytes miss the host code standing next to them.
+
+---
+
+### L90 — A source audit is an ARGUMENT. A trace is a MEASUREMENT. When they disagree, the trace wins — and the bug is usually one `#ifdef`. (M7 H.3, 2026-07-15)
+
+A careful, thorough source audit concluded that 3 of bulk's 7 `sync_host()` calls were **already no-ops at
+`npes>1`**, because their halo exchange (`fesom_halo_field`) ends with `modify_host(); sync_device()` and
+therefore leaves the field `Synced`. It quoted the lines. It was **wrong**.
+
+```c
+inline void fesom_halo_field(fesom::Field &f, ...) {
+    f.modify_device();
+    if (!p || p->npes <= 1) return;
+#ifdef KOKKOS_ENABLE_CUDA
+    if (fesom_halo_device_active()) { fesom_halo_exchange_device(...); return; }   // <-- CUDA STOPS HERE
+#endif
+    f.sync_host();  fesom_halo_exchange(...);  f.modify_host();  f.sync_device();  // <-- the FALLBACK
+}
+```
+
+On CUDA it **returns early** and leaves the field `Auth::Device`. The code the audit read is the
+**host-staged fallback for Serial/OpenMP**. The trace showed all seven copies firing, in source order,
+with the right sizes. **The measurement was right; the argument lost on a single early return.**
+
+This is L85's twin. L85 was *"a COUNT and a TIME name opposite culprits."* L90 is *"SOURCE and a TRACE
+name opposite culprits"* — and the failure mode is the same: a reading of the code that is locally
+correct and globally wrong, because the path you are on is selected somewhere you did not look.
+**Before believing that a rail is dead, look for it in a trace. If it is there, it is not dead.**
+
+---
+
+### L91 — THE OPTIONS MATRIX IS NOT A ONE-TIME GATE. Re-run it for EVERY new coherence lever. (M7, 2026-07-15)
+
+`FESOM_SPEED_ICERAILS` shipped (`a96e299`, gated, CUDA-fidelity-green) with a **live correctness bug**:
+under `FESOM_WHICH_EVP=1` (mEVP) it **clobbered `srfoce_u/v/ssh` and `stress_atmice` with a stale host
+mirror every step**, and with `alloc()`'s **zeros at step 1**. Measured against mEVP's own Serial oracle:
+**13 fields coherently over ceiling — `h_ice` off by 1.94 m, `T` by 1.93 °C, `a_ice` by 0.58.**
+
+The knob correctly gated the **standard-EVP** branch's IN/OUT rails on `!icerails`. **Forty lines below,
+the mEVP branch does the same pushes and was not gated.** mEVP reads *exactly the same state* — its own
+comment says so — but it is a different `else if`, and no default gate ever enters it.
+
+**Here is the part that matters, and it is not the part you expect.**
+
+**The project ALREADY HAD an options-matrix gate.** M7 Task 5.1 ran `FESOM_SPEED=1` × {TKE, mEVP, zstar},
+each against *that knob's own M6 Serial oracle*, and **all three passed** (jobs 26238785-87). The
+infrastructure was right, the reference was right, someone had already thought of this.
+
+**It was run once, in session 3. `ICERAILS` landed in session 5. Nobody re-ran it.** The matrix was
+green for the knob set that existed *when it was run*, and it silently stopped covering the knob set that
+existed later. **A gate that is not in the ladder is a gate that has already expired.**
+
+So the lesson is NOT "add an options row" — that row exists. It is:
+
+> **Any lever that changes WHO OWNS A FIELD invalidates every previously-passed options gate.**
+> The options matrix belongs in the per-lever ladder, next to the CUDA fidelity gate — not in a
+> one-off task that gets ticked off and never re-run.
+
+**And the two structural reasons it stayed invisible are the usual two:**
+- The **default is `whichEVP=0`**, so no default-config gate executes that branch — ever.
+- mEVP's own M6 certification was a **Serial bit-identity test**, and on Serial `.d()` **is** `.h()`, so
+  every one of these rails is a no-op and every clobber is a self-assignment. **L86, exactly: NO SERIAL
+  GATE CAN VALIDATE A COHERENCE INVARIANT.** It could not have caught this, and it did not.
+
+**Mechanically:** when a lever flips a field from host- to device-authoritative, `grep` **every**
+`modify_host()` on that field in the whole file — not the ones on the default path, *all* of them — and
+ask of each: *does this still have a producer?* Option knobs (`FESOM_WHICH_EVP`, `FESOM_MIX_SCHEME`,
+`FESOM_ALE`) select code your gates do not run.
+
+*(Proven by a controlled differential, not asserted: the **pre-fix** binary with `mEVP + ICERAILS`
+against the mEVP Serial oracle — **predicted FAIL, and it FAILED** — versus the **post-fix** binary —
+**predicted PASS, and it PASSED**. One code change; the bug appears and disappears. See L88: this is
+what "measure what is left" looks like when the thing you are measuring is a bug.)*
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

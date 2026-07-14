@@ -704,7 +704,24 @@ void fesom_ice_step(int                            step,
              * sigma11/12/22) — but the rheology itself is a different routine with deliberately
              * different constants and branches (see fesom_ice_maevp.cpp's trap list; do NOT
              * normalise it against the std-EVP kernel above). sigma11/12/22 PERSIST across calls
-             * in mEVP (never zeroed on entry, trap 12), which is why they are on the IN rail. */
+             * in mEVP (never zeroed on entry, trap 12), which is why they are on the IN rail.
+             *
+             * 🔴🔴 BUG FIX (M7 H.3 session). These rails were NOT gated on `icerails` while the
+             * std-EVP branch 40 lines up WAS — so `FESOM_SPEED_ICERAILS=1` + `FESOM_WHICH_EVP=1`
+             * SILENTLY CLOBBERED THE ICE DYNAMICS. Under ICERAILS, ocean2ice's five sync_host()
+             * calls are replaced by a device halo (:611-623) and on CUDA fesom_halo_field2 RETURNS
+             * EARLY (fesom_halo_device.hpp:129) leaving Auth::Device — so srfoce_u/v/ssh are
+             * device-authoritative with a STALE host mirror. modify_host() then sets
+             * host_count > dev_count and sync_device() DEEP-COPIES THAT STALE MIRROR BACK OVER THE
+             * FRESH DEVICE DATA. mEVP ran on last step's surface currents, and on ZEROS at step 1.
+             * Same story for stress_atmice (bulk's device output) and a/m/ms.
+             *
+             * WHY NOTHING CAUGHT IT — and it is the same answer as always (L86): the default is
+             * whichEVP=0, so no default gate touches this branch; and M6 certified mEVP with a
+             * SERIAL bit-identity test, where .d() IS .h() and every one of these rails is a no-op.
+             * A COHERENCE INVARIANT IS NOT VALIDATED BY A SERIAL GATE. It never was.
+             * The gate for this fix is CUDA + FESOM_WHICH_EVP=1 — which did not exist until now. */
+            if (!icerails) {
             ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
             ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
             ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
@@ -718,9 +735,12 @@ void fesom_ice_step(int                            step,
             ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
+            }
             fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
+            if (!icerails) {
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+            }
         } else {
             fprintf(stderr, "fesom_ice: whichEVP=%d not supported (0=EVP, 1=mEVP)\n",
                     ice->whichEVP);
