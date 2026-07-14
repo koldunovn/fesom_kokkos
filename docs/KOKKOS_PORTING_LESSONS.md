@@ -657,4 +657,118 @@ moves to the device, independently of any kernel getting faster.)*
 
 ---
 
+### L85 — An attribution by COUNT and an attribution by TIME can name opposite culprits. (M7 package H, 2026-07-14)
+
+A re-analysis of the M7 nsys trace asked: *of all the PCIe copies in a timestep, how many happen
+inside an MPI call?* The answer came back clean and unambiguous: **94.5 %** (57.7 % inside
+`MPI_Waitall`, 35.3 % inside `MPI_Isend`, only 5.5 % outside). The obvious reading — *"CUDA-aware MPI
+is host-staging every halo message; that is the biggest lever in the campaign"* — is **FALSE**, and I
+was one step from shipping it.
+
+**The 94.5 % is a COUNT. The MPI copies are the tiny ones.** Re-weighting the *same rows* by
+duration inverts the conclusion completely:
+
+| | calls/step | **ms/step** | MB/step |
+|---|--:|--:|--:|
+| inside an MPI call (UCX staging) | 4 157 | **18.2** | 184 |
+| NOT in MPI — the model's own DualView rails | 244 | **77.6** | 455 |
+
+**244 copies out of 4 401 (5.5 % by count) are 81 % of the time.** They are full nod2D fields
+(3.71 MB each, 114/step) that the model deep-copies host↔device itself. The real lever was never
+MPI at all — and the plan's budget table had been carrying that pool under the label *"MPI staging +
+forcing HtoD"* for the whole campaign, which is exactly why it never became a package.
+
+**Rule: weight an attribution by the quantity you actually intend to spend.** If the goal is
+milliseconds, a histogram of *events* is not evidence — it is a different question that happens to
+return a confident number. Ask "what fraction of the TIME", never "what fraction of the calls", and
+if a distribution is heavy-tailed in size (it usually is: halo messages span 400 B to 3.7 MB here),
+the two answers will not merely differ in degree — **they will point at different code.**
+
+This is L81/L82 in new clothing: a profiler (or any aggregate) will *localise* honestly and *attribute*
+misleadingly. The defence is the same one that has now worked four times in M7 — **do the arithmetic
+before you believe the summary.**
+
+*(Same session, same trace: the step-profiler's own `Kokkos::fence()` around every labelled kernel
+(`fesom_profile.cpp:61,:73`) inflates the phase it measures — 5 labelled kernels × 120 EVP subcycles =
+~1 200 extra fences/step, reporting `ice_dyn` at 73.5 ms when nsys says the loop is **38.3 ms**. An
+instrument that costs what it measures will size your next package for you, wrongly. Cross-check any
+phase number that brackets many small kernels against a trace that does not fence.)*
+
+---
+
+### L86 — A missing `modify_host()` is invisible to every gate you have, because `d()` does not sync. (M7, 2026-07-14)
+
+`fesom_step.cpp:773` writes `dyn->eta_n[]` through the **raw host alias** and never calls
+`modify_host()`. Its only rail (`:511`) fires *earlier* in the step. So on CUDA the DEVICE `eta_n`
+held the **previous step's** value for the whole back half of every step — while the DualView still
+reported `Synced`. `Field::d()` returns the device view **without syncing** (`fesom_field.hpp:74`), so
+`resolve_ssh_dev` (`fesom_io.cpp:868` — the `FESOM_SPEED_IOACC` accumulator, **in the blessed set**)
+silently accumulated `ssh` one step stale.
+
+**It shipped, and it passed everything:**
+- the **FORCE_SERIAL byte proof cannot see it** — on Serial `.d()` and `.h()` are the SAME MEMORY, so a
+  missing rail is a no-op there. (This is the D.1 trap stated as a general law: **no Serial gate can
+  ever validate a coherence invariant.**)
+- the **knob-OFF byte gate reads `snap_*.nc`**, written from the HOST path (`fesom_io.cpp:370`,
+  `.h_checked()`) — which was always correct.
+- one stale step in ~14 000 is **far below the climate gate's floor**.
+
+**Two rules fall out:**
+1. **A host write through a raw alias is a coherence event.** Grep for raw-pointer writes
+   (`x->field[n] = …`) in the per-step path and check each one is followed by `modify_host()`. The
+   DualView cannot detect what it never saw.
+2. **`modify_host()` alone is not a fix** — it only sets a dirty bit that a *later* `sync_device()`
+   would act on. If a device reader takes `.d()` directly (as every `_kk` kernel and every device I/O
+   resolver does), the fix must be an actual **`modify_host(); sync_device();`** push, or the loop must
+   move to the device.
+
+**Generalised:** *the strongest gate in this project (the FORCE_SERIAL byte proof) is structurally
+blind to the single most common CUDA-only bug class.* Any change that touches a rail, a `modify_*`, or
+a `sync_*` is validated by the **CUDA fidelity gate or by nothing.**
+
+---
+
+### L87 — A host timer tells you how long the HOST SAT THERE. It does NOT tell you what is REMOVABLE. (M7 D.1, 2026-07-14)
+
+L82 concluded — correctly, against a lying sampler — that *"a **host timer** (`FPROF`) around the call is
+the only host measurement that cannot misattribute."* **That is true of WHICH call, and false of HOW
+MUCH.** D.1 was pre-registered at **−6.6 %** off the FPROF number and delivered **−2.16 %**. The knob
+fired (announce checked — not L80). The lever was fine; **the sizing was wrong at the source.**
+
+| | ms/step |
+|---|--:|
+| FPROF host timer, `force:jra55_read` | **75.2** |
+| nsys **GPU-idle gap** for the same region (the honest exposed cost) | **60.0** (4.9 of it PCIe) |
+| ROTCACHE (D.0) had already removed | −19.7 |
+| ⇒ real removable pool at the D.1 baseline | **~35–40**, not the 57.3 that was pre-registered |
+| D.1 delivered | **18.7** |
+
+Two separate errors, and they compound:
+1. **The timer over-read the region by ~25 %** (75.2 vs 60.0). A host timer brackets everything inside
+   it — including any fence, `deep_copy`, or `sync_*` that is really *waiting for the GPU to drain work
+   it owes anyway*. That wait does not disappear when you port the loop.
+2. **Roughly half the pool survived the port.** A host timer says nothing about what the *device*
+   version will cost, nor what stays behind (the residual halo, the new D2H at the surviving host
+   reader, launch/fence overhead).
+
+**The honest instrument for "how much host time is EXPOSED" is the GPU-IDLE GAP in a trace** — the
+wall time between the end of one kernel and the start of the next, where the GPU is doing nothing. That
+is time a port can actually recover. Compute it straight from the nsys sqlite; it needs no new run:
+
+```sql
+-- per step: gap = start(kernel i) - end(kernel i-1), grouped by the kernel the gap ENDS at
+```
+
+**Do this before pre-registering any host-to-device port.** It would have sized D.1 at ~35–40 ms, not
+57.3, and it costs nothing.
+
+*(The same query paid for itself twice over: it showed **222.6 ms/step — 24 % of the step — is GPU-idle
+gaps >1 ms**, and ranked them. The three gaps before the sea-ice kernels (`ice_thermodynamics` 22.7,
+`ice_evp_dynamics` 19.5, `ocean2ice` 16.5) sum to **58.7 ms of pure GPU idle spent waiting on the ice
+step's PCIe rails** — a third independent confirmation of package H, from a different angle than either
+the memcpy accounting or the source audit. **When a lever misses, profile the miss: the diagnostic that
+explains it usually finds the next lever.**)*
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

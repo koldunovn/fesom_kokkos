@@ -8,6 +8,7 @@
 #include "fesom_halo_device.hpp"   // M7 D.1: fesom_halo_fieldN (one message for all 8)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_profile.hpp" // M7 H: FPROF the getcoeffld CALL COUNT (L82's own test, done with an instrument)
 #include "fesom_speed.hpp"   // M7 D.0: FESOM_SPEED_ROTCACHE · D.1: FESOM_SPEED_FORCEDEV
 
 #include <Kokkos_Core.hpp>   // M7 D.1: the device time-interpolation kernel
@@ -700,7 +701,27 @@ void fesom_jra55_step(fesom_jra55 *jra,
             if (rdate < lo || rdate > hi) need_refresh = 1;
         }
         if (need_refresh) {
+            /* 🔴 M7 package H — SETTLE L82 WITH AN INSTRUMENT, NOT AN ARGUMENT.
+             *
+             * L82 declared the sampler's "getcoeffld = 38.3 ms/step" a LIE, on the grounds that its
+             * body "runs ZERO times in a 25-step run" (refresh is 1-step-in-60 at dt180, verified
+             * against the real uas.1958.nc time axis). But the nsys GPU-idle gap in fesom_jra55_step
+             * is FLAT at 42.6-57.9 ms on EVERY ONE of 19 steps in the FORCEDEV trace — and 1-in-60
+             * would make 18 of those ~2 ms. Both cannot be true, and with the time-interp loop now
+             * on the DEVICE there is nothing else in this function big enough to be 32 ms.
+             *
+             * getcoeffld is NOT cheap when it does run: it holds a per-node loop over myDim_nod2D
+             * doing BILINEAR HORIZONTAL INTERPOLATION from the JRA lat-lon grid onto the mesh
+             * (:461-519), x8 fields = ~3.5 M interps. D.1 ported the TIME interpolation and left the
+             * SPATIAL one on the host.
+             *
+             * So: bracket the CALL. FPROF reports a calls/step column — the one number that settles
+             * it. ~8 calls/step => it runs EVERY step and L82's refutation is wrong. ~0.13
+             * (= 8/60) => L82 is right and the 32 ms is something else. Only the counter can say.
+             * (FPROF is inert unless FESOM_STEP_PROFILE is set, so this is free in production.) */
+            FPROF_BEG(_tgc);
             getcoeffld(flf, mesh, rdate);
+            FPROF_END(_tgc, "force:getcoeffld");
         }
     }
 
