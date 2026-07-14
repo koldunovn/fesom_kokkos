@@ -7,6 +7,7 @@
 #include "fesom_halo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"   // M7 Task D.0: FESOM_SPEED_ROTCACHE
 
 #include <math.h>
 #include <netcdf.h>
@@ -602,6 +603,8 @@ void fesom_jra55_free(fesom_jra55 *jra)
         free(flf->sbcdata1);
         free(flf->sbcdata2);
     }
+    free(jra->rot_trig);   /* M7 D.0 (ROTCACHE); NULL when the lever is off */
+
     /* M4.3d-a: the 8 physics arrays are now Field-owned (raw ptrs = non-owning aliases) — do NOT
      * free() them. *jra = fesom_jra55{} releases every Field (Kokkos refcount) + zeros the PODs,
      * the D13 release pattern (replaces the memset, which is UB on a struct with Field members,
@@ -635,6 +638,13 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
     }
 }
 
+/* M7 Task D.0 — FESOM_SPEED_ROTCACHE. One helper per TU so the lever announces once. */
+static bool m7_jra_rotcache_on()
+{
+    static int c = -1;
+    return fesom_speed_on("ROTCACHE", &c);
+}
+
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit,
@@ -645,7 +655,9 @@ void fesom_jra55_step(fesom_jra55 *jra,
                  + (real_t)(daynew - 1)
                  + timenew / 86400.0;
 
-    /* Refresh data + coefs whenever rdate has crossed t_indx_p1 in any field. */
+    /* Refresh data + coefs whenever rdate has crossed t_indx_p1 in any field.
+     * NOTE (M7 A.2): this fires ~1 step in 60 at dt180 (3-hourly JRA), NOT every step —
+     * getcoeffld is NOT the forcing's cost, whatever a dwarf-inlined profile says. */
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
         int need_refresh = 0;
@@ -659,6 +671,19 @@ void fesom_jra55_step(fesom_jra55 *jra,
             getcoeffld(flf, mesh, rdate);
         }
     }
+
+    /* M7 Task D.0 — FESOM_SPEED_ROTCACHE. Build the per-node sin/cos table once. */
+    if (!jra->rot_trig && m7_jra_rotcache_on()) {
+        int Nall = mesh->nod2D;                  /* myDim + eDim */
+        jra->rot_trig = (real_t *)malloc((size_t)Nall * 8 * sizeof(real_t));
+        FESOM_CHECK(jra->rot_trig, "fesom_jra55: rot_trig alloc (%d nodes)", Nall);
+        for (int n = 0; n < Nall; ++n) {
+            fesom_vector_g2r_trig(mesh->geo_coord_nod2D[2*n + 0], mesh->geo_coord_nod2D[2*n + 1],
+                                  mesh->coord_nod2D[2*n + 0],     mesh->coord_nod2D[2*n + 1],
+                                  &jra->rot_trig[8 * (size_t)n]);
+        }
+    }
+    const real_t *rot_trig = jra->rot_trig;      /* NULL ⇒ legacy path (recompute per step) */
 
     /* data_timeinterp + distribution to physics arrays. */
     int N = mesh->myDim_nod2D;
@@ -688,10 +713,17 @@ void fesom_jra55_step(fesom_jra55 *jra,
          * the time-interpolated wind == rotating coef_a/coef_b. Without it the
          * Arctic wind stress (on BOTH ocean and ice) is mis-directed by the large
          * g2r angle near the geographic pole -> too-slow / misdirected drift.
-         * Magnitude-preserving, so |wind|-based thermodynamics is unaffected. */
-        fesom_vector_g2r(&jra->u_wind[n], &jra->v_wind[n],
-                         mesh->geo_coord_nod2D[2*n + 0], mesh->geo_coord_nod2D[2*n + 1],
-                         mesh->coord_nod2D[2*n + 0],     mesh->coord_nod2D[2*n + 1]);
+         * Magnitude-preserving, so |wind|-based thermodynamics is unaffected.
+         *
+         * M7 D.0: this is the forcing's real cost — 4 sincos per node per step, over
+         * 463 k nodes/rank at NG5@4N. ROTCACHE reads the (constant) trig from a table
+         * instead; same expression tree, same operand order → bit-identical. */
+        if (rot_trig)
+            fesom_vector_g2r_cached(&jra->u_wind[n], &jra->v_wind[n], &rot_trig[8 * (size_t)n]);
+        else
+            fesom_vector_g2r(&jra->u_wind[n], &jra->v_wind[n],
+                             mesh->geo_coord_nod2D[2*n + 0], mesh->geo_coord_nod2D[2*n + 1],
+                             mesh->coord_nod2D[2*n + 0],     mesh->coord_nod2D[2*n + 1]);
         jra->shum     [n] = rdate * a_sh + b_sh;
         jra->shortwave[n] = rdate * a_sw + b_sw;
         jra->longwave [n] = rdate * a_lw + b_lw;

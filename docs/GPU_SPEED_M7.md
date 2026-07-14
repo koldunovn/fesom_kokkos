@@ -451,6 +451,7 @@ and `IOACC` once resolved silently to OFF there — see L80 above. Since the fix
 | `FESOM_SPEED_ICEFLUXDEV` | port `ice_oce_fluxes_mom` to device | bit-id | ✅ landed, all gates PASS. **A/B −0.72%** — real but small |
 | `FESOM_SPEED_NOFENCE2` | drop post-unpack halo fence | bit-id | ✅ landed, all gates PASS + memcheck-clean. **~−0.8%** (1.1) |
 | `FESOM_SPEED_IOACC` | 6 host I/O mean accumulators → device (`ssh`,`a_ice`,`m_ice`,`m_snow`,`uice`,`vice`) | bit-id | ✅ implemented, byte gate + FORCE_SERIAL proof PASS. A/B pending (1.0b) |
+| **`FESOM_SPEED_ROTCACHE`** | **cache the JRA wind-rotation sin/cos (a MESH CONSTANT recomputed 1.85 M×/rank/step)** | **bit-id** | ⏳ implemented (D.0), gates pending. ⚠️ **host-side lever — speeds the CPU reference up too** |
 | `FESOM_SPEED_CGSLIM` | CG iteration-body slimming | bit-id | pending (1.2) |
 | `FESOM_SPEED_FCT2` | FCT T+S tracer batching | bit-id | pending (1.3) |
 | `FESOM_SPEED_EVPCOMPACT` | EVP active-set compaction | bit-id | pending (1.4) |

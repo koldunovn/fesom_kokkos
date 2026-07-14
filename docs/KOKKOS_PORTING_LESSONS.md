@@ -551,4 +551,60 @@ into a fact — run it before writing the number down.**
 
 ---
 
+### L82 — CPU sampling names a function too. It can name the WRONG one — an inlined callee eats its caller's loop. (M7 A.2, 2026-07-14)
+
+L81's fix for "the profiler can't name host time" was **CPU sampling with call stacks**. It worked: the
+hostprof run pointed straight at the JRA55 forcing. But its top frame was a **lie**, and the lie was
+plausible enough to have funded a whole package on the wrong function.
+
+The sampler said `getcoeffld` (the JRA time-slice reader + bilinear interpolator) cost **38.3 ms/step**,
+uniformly across all 24 steps of the window — with a clean stack, `getcoeffld ← fesom_jra55_step ← main`.
+
+**It cannot cost anything.** `getcoeffld` only runs when `rdate` leaves the current 3-hourly JRA
+interval — at dt=180 that is **once per 60 steps**, and the year-start prefetch covers step 1, so in a
+25-step run **its body executes ZERO times.** (Verified by transcribing the C control flow to Python and
+running it against the real `uas.1958.nc` time axis: refreshes land at steps 61 / 121 / 181.)
+
+**Mechanism:** `getcoeffld` is `static` → inlined into its caller. `nsys --backtrace=dwarf` expands
+**DWARF inline frames**, so PCs in the caller's own per-node loop — which sits right next to the inlined
+body — get reported under the inlined callee's name. The stack looks perfect. It is still wrong.
+
+**What actually settled it:** the model's **own host timer** (`FPROF` bracket `force:jra55_read` =
+**75.2 ms/step at 1.0 calls/step**) plus **node arithmetic** (463 k nodes/rank × 4 `sincos` per node ≈
+44 ms at 2.5 GHz). A timer around a call cannot misattribute; a sampler's symbol always can.
+
+**Rules:**
+- **A sampler localises to a REGION, and only *claims* to name a function.** Treat the function name as a
+  hypothesis, not a result — especially for `static`/inlined/header code.
+- **Before believing a per-step cost, ask how many times the thing is CALLED per step.** A function that
+  cannot run every step cannot cost you every step. Control flow beats any profile.
+- **Bracket the suspect region with a host timer.** It is minutes of work and it is the only host
+  measurement that cannot lie about *which call* it is timing.
+- L80's rule, restated: **the arithmetic is the arbiter.** It killed a fake 0.00% (L80) and now a fake
+  38 ms/step.
+
+*(The payoff for being suspicious: the real cost is the wind-rotation `sincos` — and its four values per
+node depend only on the node's fixed coordinates, i.e. it is a **mesh constant recomputed 1.85 M times
+per rank per step**. Task D.0 `ROTCACHE` caches it: ~20 lines, bit-identical, ~−4.4% of step. Chasing
+`getcoeffld` would have optimised a function that never runs.)*
+
+### L83 — A gate that never reads the lever's output is not evidence. (M7 A.1, 2026-07-14)
+
+`FESOM_SPEED_FLAT` flattens four kernels; two of them (`io_acc_u`/`io_acc_v`) are **time-mean
+accumulators**. Their output goes only to the monthly stream (`u/v.fesom.1958.monthly.nc`) — it never
+reaches `snap_*.nc`, and `snap_*.nc` is the only thing `diff_snap.py` globbed.
+
+So the FORCE_SERIAL byte proof — the campaign's strongest correctness statement — would have **run those
+two kernels and compared nothing they wrote**. It would have passed. It would have meant nothing for half
+the lever. This is L80's dead-knob trap wearing the other mask: there, the gate passed because the code
+*didn't run*; here, the gate passes because the *output isn't looked at*.
+
+**Fixed:** `diff_snap.py` takes `--pattern` (default `snap_*.nc`, so every existing gate is byte-for-byte
+unchanged) and the proof now runs twice — `snap_*.nc` **and** `*.monthly.nc` (17 files, all bit-identical).
+
+**Rule:** for every lever, name the file the lever's output actually lands in, and check the gate opens
+that file. "The gate passed" is only evidence if the gate *read the bytes the lever wrote*.
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

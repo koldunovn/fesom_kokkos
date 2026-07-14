@@ -161,6 +161,52 @@ void fesom_vector_g2r(real_t *u, real_t *v,
 #endif
 }
 
+/*--- M7 Task D.0 (FESOM_SPEED_ROTCACHE) -------------------------------------
+ * fesom_vector_g2r above is called for EVERY node on EVERY step (the JRA55
+ * per-node time-interpolation loop, fesom_jra55.cpp:665) — 463 k nodes/rank at
+ * NG5@4N. Its four sin/cos pairs depend ONLY on the node's coordinates, which are
+ * fixed for the whole run: it recomputes a mesh CONSTANT ~1.85 M times per rank per
+ * step, ≈44 ms/step at 2.5 GHz (hostprof 26243196 + the node arithmetic; see
+ * docs/GPU_SPEED_M7.md "Task A.2").
+ *
+ * fesom_vector_g2r_trig precomputes the 8 values once; fesom_vector_g2r_cached is
+ * the SAME expression tree with the sin/cos calls replaced by table reads — same
+ * operands, same order, so the result is bit-identical (the FORCE_SERIAL byte proof
+ * is the arbiter, and it also catches any FMA-contraction shift). Deliberately NOT
+ * collapsed into a per-node 2x2 matrix: that would reassociate the arithmetic. */
+void fesom_vector_g2r_trig(real_t glon, real_t glat, real_t rlon, real_t rlat,
+                           real_t t[8])
+{
+    t[0] = sin(glat);  t[1] = cos(glat);
+    t[2] = sin(glon);  t[3] = cos(glon);
+    t[4] = sin(rlat);  t[5] = cos(rlat);
+    t[6] = sin(rlon);  t[7] = cos(rlon);
+}
+
+void fesom_vector_g2r_cached(real_t *u, real_t *v, const real_t t[8])
+{
+#if FESOM_FORCE_ROTATION
+    static real_t M[9];
+    static int built = 0;
+    if (!built) { build_rotation_matrix(M); built = 1; }
+
+    real_t tlon = *u, tlat = *v;              /* geographic east/north comps */
+    /* geographic vector -> Cartesian geographic */
+    real_t txg = -tlat*t[0]*t[3] - tlon*t[2];
+    real_t tyg = -tlat*t[0]*t[2] + tlon*t[3];
+    real_t tzg =  tlat*t[1];
+    /* Cartesian geographic -> Cartesian rotated */
+    real_t txr = M[0]*txg + M[1]*tyg + M[2]*tzg;
+    real_t tyr = M[3]*txg + M[4]*tyg + M[5]*tzg;
+    real_t tzr = M[6]*txg + M[7]*tyg + M[8]*tzg;
+    /* Cartesian rotated -> rotated east/north components */
+    *v = -t[4]*t[7]*txr - t[4]*t[6]*tyr + t[5]*tzr;
+    *u = -t[6]*txr + t[7]*tyr;
+#else
+    (void)u; (void)v; (void)t;
+#endif
+}
+
 /*--- nod2d.out --------------------------------------------------------------
  * Format:
  *   <count>

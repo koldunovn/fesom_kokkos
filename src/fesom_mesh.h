@@ -206,4 +206,12 @@ void fesom_mesh_alloc_state(fesom_mesh *m);
 void fesom_vector_g2r(real_t *u, real_t *v,
                       real_t glon, real_t glat, real_t rlon, real_t rlat);
 
+/* M7 Task D.0 (FESOM_SPEED_ROTCACHE). fesom_vector_g2r's four sin/cos pairs depend only
+   on the node's coordinates — mesh CONSTANTS that it recomputes for every node on every
+   step. Precompute them once (…_trig) and rotate from the table (…_cached): the same
+   expression tree with the sin/cos calls replaced by loads → bit-identical. */
+void fesom_vector_g2r_trig(real_t glon, real_t glat, real_t rlon, real_t rlat,
+                           real_t t[8]);
+void fesom_vector_g2r_cached(real_t *u, real_t *v, const real_t t[8]);
+
 #endif /* FESOM_MESH_H */

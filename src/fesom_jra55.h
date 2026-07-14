@@ -142,6 +142,11 @@ typedef struct fesom_jra55 {
     real_t  z_wind;
     real_t  z_tair;
     real_t  z_shum;
+
+    /* M7 Task D.0 (FESOM_SPEED_ROTCACHE): [nod2D * 8] cache of the sin/cos values
+     * fesom_vector_g2r needs per node. Mesh constants — built once on the first step,
+     * NULL when the lever is off (which is what selects the legacy path). */
+    real_t *rot_trig;
 } fesom_jra55;
 
 /* julday — port of gen_surface_forcing.F90:1828.
