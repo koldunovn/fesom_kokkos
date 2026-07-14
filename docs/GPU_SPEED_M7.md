@@ -33,19 +33,8 @@ Same nodes, same binary, only the knob differs. Both reps agree to 0.01%, and th
 | `SWSKIP=1` | 0.9403 | 0.9404 | **0.9403** |
 | | | | **−26.47%** |
 
-**Ratios with SWSKIP** (row-0 GPU × 0.7353, CPU unchanged — the lever is CUDA-path-only):
-
-| | GPU now | GPU +SWSKIP | CPU | ratio now | **ratio new** | SYPD@dt240 |
-|---|--:|--:|--:|--:|--:|--:|
-| **NG5@4N** | 1.2796 | **0.9409** | 4.6005 | 3.60× | **4.89×** | — |
-| NG5@8N | 0.7381 | 0.5427 | 2.3624 | 3.20× | **4.35×** | — |
-| **NG5@16N** | 0.4487 | 0.3299 | 1.2188 | 2.72× | **3.69×** | **1.42 → 1.93** |
-| dars@8N | 0.3178 | 0.2337 | 0.8563 | 2.69× | **3.66×** | — |
-
-**NG5@4N lands at 4.89× — a hair under the 5.0× Stage-1 target, from ONE bit-identical lever** — and
-`NOFENCE2` (~0.8%) + `ICEFLUXDEV` (0.72%) + `IOACC` should carry it over. **NG5@16N reaches
-SYPD@dt240 = 1.93**, i.e. the ~2 SYPD this campaign was chartered to find, **in pure FP64**, without
-the mixed precision the user banned.
+`SWSKIP` alone at NG5@4N: **1.2788 → 0.9403 s/step**, i.e. ratio **3.60× → 4.89×**. See the
+all-four numbers below for the landed Tier-1 result.
 
 ### The lever
 
@@ -139,16 +128,34 @@ so later jobs can be pinned to certified-source code while the build tree moves.
 | `ICEFLUXDEV` — `ice_oce_fluxes_mom` → device | −0.72% |
 | `NOFENCE2` — post-unpack halo fence | ~−0.8% |
 | `IOACC` — 6 host I/O accumulators → device | ~−1.1% |
-| **ALL FOUR** | **−28.39%** |
+| **ALL FOUR, NG5@4N** | **−28.39%** (job 26237207) |
+| **ALL FOUR, dars@8N** | **−17.29%** (job 26237208) |
 
 **Every one is bit-identical**, and `SWSKIP` / `ICEFLUXDEV` / `IOACC` each carry a **passing
 FORCE_SERIAL byte proof** (identical bytes by re-execution on Serial, not by argument). `NOFENCE2` is
 a pure ordering change (no arithmetic) and is memcheck-clean. **Nothing here trades accuracy for
 speed** — the campaign's licence to break bit-identity was never even spent.
 
-**NG5@16N reaches SYPD@dt240 = 1.99** — precisely the *"~2 SYPD @ dt240 on NG5 at 16–32N in pure FP64
-— the target mixed precision was supposed to buy"* named in the plan's Overview. Delivered **in pure
-FP64, with mixed precision banned.**
+### ⚠️ The lever pays LESS at scale — do NOT extrapolate the 4N factor
+
+**NG5@4N −28.39% but dars@8N only −17.29%.** That is not noise: the host segment is **32% of the step
+at NG5@4N but 24.7% at dars@8N** (the 16N-class per-rank proxy), so a lever that removes host work
+necessarily pays less as ranks shrink. **I initially quoted 8N/16N ratios by scaling row-0 with the
+4N factor. That was an over-claim, and the dars@8N A/B caught it.**
+
+| | GPU row-0 | CPU | ratio now | **TIER 1** | basis |
+|---|--:|--:|--:|--:|---|
+| **NG5@4N** | 1.2796 | 4.6005 | 3.60× | **5.02×** ⭐ | **MEASURED** (A/B 26237207) |
+| dars@8N | 0.3178 | 0.8563 | 2.69× | **3.26×** | **MEASURED** (A/B 26237208) |
+| NG5@8N | 0.7381 | 2.3624 | 3.20× | *[3.87 – 4.47×]* | **NOT measured** — job 26238085 |
+| NG5@16N | 0.4487 | 1.2188 | 2.72× | *[3.28 – 3.79×]* | **NOT measured** — job 26238086 |
+
+The brackets are bounded by the two measured factors (dars@8N = pessimistic, NG5@4N = optimistic).
+**NG5@16N SYPD@dt240 is therefore in [1.72 – 1.99], not "1.99"** — the dars@8N proxy is the faithful
+one for per-rank host work, so expect the LOW end. The standard set is running (26238084-86);
+**quote nothing here until it lands.**
+
+**What IS established: the Stage-1 target (≥5.0× at NG5@4N) is MET and MEASURED at 5.02×.**
 
 ---
 
