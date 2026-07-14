@@ -30,7 +30,13 @@ series settles by ~step 30 (the residual is the CG spin-up, 86 → 72 iters — 
 | after | NG5@4N GPU | NG5@4N CPU | **ratio** | binaries | jobs |
 |---|--:|--:|--:|---|---|
 | through the `getcoeffld` fix | 0.7239 | 4.5785 | **6.32×** | `h5` CUDA `0d39d8a2` / Serial `950ee0f9` | 26255936 / 26256684 |
-| **⭐ + H.3 `BULKTAIL`** | **0.7058** | **4.5785** | **⭐ 6.49×** | **`h8` CUDA `7dab6c5a`** / Serial `ef6bdec4` | **26257716** / 26256684 |
+| + H.3 `BULKTAIL` | 0.7058 | 4.5785 | 6.49× | `h8` CUDA `7dab6c5a` / Serial `ef6bdec4` | 26257716 / 26256684 |
+| **⭐ + H.7 `SMOOTHSCRATCH`** (session 7) | **0.6739** | **4.5785** | **⭐ 6.79×** | **`h9` CUDA `9e1f514b`** / Serial `91eeb573` | **26258582** / 26256684 |
+
+**The h9 row is a CONFIRMATION, not just an anchor** (job 26258582, one allocation, a100_80): its
+base leg re-ran h8-equivalent (`SMOOTHSCRATCH=0`) and reproduced the 0.7058 anchor at **0.7052**
+(−0.09 %), and its scratch leg hit **0.6739 twice with 0.00 % spread**. Δ = −4.44 % (pre-registered
+−4.2 % — the fifth census-sized lever to beat its pre-registration, L93).
 
 All legs **300 steps**, min of 2 reps, same day, **all pinned with `BIN=`**. Rep spreads: GPU 0.07 %,
 CPU 0.20 %. *(The CPU column is unchanged because every `FESOM_SPEED_*` lever is CUDA-only — the knobs
@@ -63,9 +69,17 @@ percentage moves, because the denominator shrank. The pre-registration for the 3
 post-fix) · and a retracted "5.83× / 6.2×" that **mixed a long-run GPU number with a 35-step CPU anchor**.
 **You cannot mix protocols and get an honest ratio.**
 
-**CG correction for SYPD:** the projection uses **×1.03, calibrated on 90 iters/step** — a cold-start
-transient. The settled value is **~72** (last-50 mean 71.9; even the 300-step *mean* of 76.9 still carries
-the ramp). The old correction is **pessimistic**; re-derive it from 72.
+**CG correction for SYPD — RE-DERIVED (session 7).** The formula is
+`correction = 1 + CG_share × (iters@240/iters@180 − 1)`. Measured on the h9 300-step trace
+(26258712, steady window, `scripts/m7_cg_share.py`): the **CG region is 43.9 ms/step = 6.5 %** of
+the 678.1 ms step at NG5@4N (kernel-busy alone 10.1 ms — the region is Allreduce/halo-dominated,
+and all of it scales with iters); settled **iters@dt180 = 71.9** (last-50 mean, reproduced
+independently from the fresh 16N CPU log). iters@dt240 is NOT measurable from a cold start; the
+original 115/89 = 1.29 ratio is carried over as a stated assumption.
+⇒ **correction = 1 + 0.065 × 0.29 = ×1.019 at NG5@4N** (the old ×1.03 was calibrated on the
+cold-start 90-iter CG — pessimistic, as suspected). ⚠️ At **16N** the CG share is unmeasured on h9
+(comm-bound, plausibly larger): quote 16N SYPD with **×1.03 as the pessimistic bound** and note
+×1.02 is the 4N-measured value (~1 % of SYPD between them).
 
 ---
 
@@ -558,6 +572,30 @@ and `IOACC` once resolved silently to OFF there — see L80 above. Since the fix
 | `FESOM_SPEED_EVPTHIN` | EVP halo thinning (stale ring) | physics | reserve (4.2) |
 
 ## Lever log
+
+### H.8 — `FESOM_SPEED_LAZYSNAP` (the ice OUT rail → snapshot cadence) — ✅ LANDED `c9f2fee` (session 7, 2026-07-15)
+
+The 9-copy ice OUT rail (`fesom_ice.cpp:934`, ICERAILS' own "ONE OUT rail that replaces all 67")
+fired every step to serve a reader that runs at *snapshot* cadence — never in benchmarks
+(`snap_every=-1→0`), monthly in production. The lever gates the rail off and makes
+`fesom_io_write_snapshot` pull the 7 gathered ice fields itself (unconditionally — no-op when
+Synced, loud `h_checked()` abort under SYNCCHECK if a sync is ever missed). `srfoce_u/v` are
+gathered by nothing → pure deletions.
+
+- **Sized from the census** (26258712, h9, 300 steps): the whole `ice_h_diag→oce_fluxes_mom` gap,
+  **7.3 ms/step** (5.0 PCIe = 9 DtoH × 3.54 MB). Pre-registered **−1.1 % (floor −1.0, ceiling −1.6)**.
+- **A/B 26259170 (h10 `13dbddb4`, a100_80): −1.05 % = −7.3 ms/step — the census number TO THE
+  DECIMAL.** First census-sized lever with no entanglement bonus (pure PCIe+fence, no host compute
+  in the gap): the census was exact, not a floor. L93's calibration note updated accordingly.
+- **NOT independent** (BULKTAIL pattern): REQUIRES ICERAILS + ICEFLUXDEV + FLUXDEV + SWSKIP + IOACC
+  (each kills a different host reader the rail fed); aborts on any missing (L80) and on
+  `FESOM_DIAG_MICE`/`FESOM_DIAG_GID`. Guard test 26259169 proved the abort fires.
+- **Gates 9/9** (26259160-69): knob-OFF byte ✓ FORCE_SERIAL ×2 ✓ CUDA fidelity iso+full ✓✓
+  options TKE/mEVP/zstar ✓✓✓ (zstar's Kv control identical to h9's floor, L79) guard-abort ✓.
+- The handoff's "ocean half" (~2× hope) was **falsified by audit**: those census rows are the SSH
+  nod2D host-halo bounces + the host `eta_n` update — step-cadence consumers, scoped separately as
+  **H.9 SSHRAILS** (~13–14 ms; see the session-7 findings §2c).
+- Binaries: **h10** = h9 + LAZYSNAP, CUDA `13dbddb4` / Serial `7c75afc0`, frozen `m7/bin/h10/`.
 
 ### Task 1.1 — `FESOM_SPEED_NOFENCE2` (post-unpack halo fence) — implemented, gates pending
 

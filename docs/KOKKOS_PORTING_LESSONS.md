@@ -1060,4 +1060,30 @@ right, and this is the mechanism behind it.**
 
 ---
 
+### L95 — A PROTOCOL IS VALIDATED PER MESH, NOT PER CAMPAIGN. A longer window can walk into a known instability the short window never reached. (M7, 2026-07-15)
+
+Session 6 replaced the contaminated 35-step protocol with the clean 300-step one, and the whole NG5
+standard set re-ran on it without incident. Session 7 then queued **dars@8N** on the same protocol
+— and **both CPU reps died at exactly step 204** (`CG_kk abort: pp·App = nan`; deterministic,
+because Serial is bit-reproducible, so identical reps die at the identical step).
+
+Nothing was newly wrong. **SCALING_M524 had documented the dars cold-start instability class all
+along** ("dt=240 is CFL-unstable from the *cold* PHC start on BOTH dars and NG5"), and the M5.24
+partition probe showed blowups arrive **earlier the finer the decomposition** — but that probe was
+**NG5-only**, and every dars number in two campaigns was a **35-step window** that ended 169 steps
+before the cliff. The protocol upgrade was validated exactly once, on the mesh it was designed on.
+
+- **The rule:** when a measurement protocol changes (length, dt, IC, cadence), re-ask *"does this
+  configuration even complete?"* **per mesh × per partition** — an instability boundary is a
+  property of the configuration, not of the protocol.
+- **The tell in the wreckage:** both reps dying at the SAME step = deterministic physics, not a
+  flaky node or an OOM. (A hardware failure would not reproduce to the step; an OOM would show in
+  the job accounting.)
+- **The honest fallback:** measure the longest window that completes with margin (dars@8N: 150 of
+  the 204 available steps — past the CG ramp that settles by ~step 30–50) and **annotate the ledger
+  row with its protocol** instead of silently mixing windows (the top of GPU_SPEED_M7.md exists
+  because mixed protocols once faked a ratio).
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

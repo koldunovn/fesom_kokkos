@@ -122,6 +122,99 @@ full) → options matrix ×3 → 35-step A/B → 300-step anchor (a100_80) → l
 | 26259169 | **GUARD test**: LAZYSNAP + ICERAILS only | must **ABORT** with the missing-deps message (job FAILs — that is the pass) |
 | 26259170 | the pre-registered 35-step A/B, NG5@4N, a100_80, h10 | **−1.1 % (floor −1.0, ceiling −1.6)** |
 
+### 2.5 ✅ GATE LADDER: NINE FOR NINE (lever committed as `c9f2fee`)
+
+| gate | result |
+|---|---|
+| 26259160 knob-OFF byte | ✅ diff_snap rc=0 |
+| 26259161 FORCE_SERIAL, LAZYSNAP+deps | ✅ rc=0 — pure re-execution elimination, snapshot bytes identical at snap_every=10 |
+| 26259162 FORCE_SERIAL, full blessed | ✅ rc=0 |
+| 26259164 CUDA fidelity, isolated | ✅ PASS — a_ice 5.7e-04, m_ice 1.5e-03, uice 5.9e-04, h_ice 5.5e-03, all far inside the floor. THE gate (L86), and it READS the lever's output (L83): the snapshot gathers all 7 lazy fields |
+| 26259165 CUDA fidelity, full blessed | ✅ PASS |
+| 26259166 options TKE | ✅ PASS |
+| 26259167 options mEVP | ✅ PASS — the branch ICERAILS silently corrupted is green with the new lever |
+| 26259168 options zstar | ✅ PASS — **the standing control holds exactly**: Kv max|Δ| = 9.537e-02, identical to zstar's own CUDA-vs-Serial floor (L79) ⇒ the levers add nothing |
+| 26259169 GUARD | ✅ **ABORTED CORRECTLY**: `REQUIRES ... (have icerails=1 icefluxdev=0 fluxdev=0 swskip=0 ioacc=0) ... Refusing to run`, rc=1 |
+
+### 2.6 ✅ THE A/B (26259170, h10 `13dbddb4` pinned, pure a100_80, announce armor clean)
+
+| leg | rep a | rep b | min |
+|---|--:|--:|--:|
+| base (`FESOM_SPEED=1;LAZYSNAP=0`) | 0.6948 | 0.6939 | **0.6939** |
+| lazy (`FESOM_SPEED=1`) | 0.6869 | 0.6866 | **0.6866** |
+| | | | **−1.05 %** |
+
+**Scored against the pre-registration (−1.1 %, floor −1.0, ceiling −1.6): RANGE HIT.** And the
+absolute delta is the census number to the decimal: **−7.3 ms/step, exactly the 7.3 ms gap the
+census named.** Calibration note for L93: this is the first census-sized lever with **no
+entanglement bonus** — it deleted pure PCIe+fence with no host compute in the gap, so there was no
+downstream launch-gap recovery to collect. The census was EXACT here, not a floor. (The internal
+consistency check also passed: the base leg 0.6939 at 35 steps = the session-6 35-step baseline
+0.7256 − 4.21 % H.7 = 0.695.)
+
+⇒ **H.8 LAZYSNAP LANDS.** 300-step h10 anchor queued (26260292) for the ledger row; expected
+≈ 0.6739 − 7.3 ms ≈ **0.667 ⇒ ratio ≈ 6.87×** (pre-registered here before the job lands; ±0.5 %
+tolerance as usual).
+
+---
+
+## 2b. THE SYPD CG CORRECTION, RE-DERIVED (handoff §1.2 asked for this)
+
+The formula: `SYPD@dt240 = 0.657 / (s/step @dt180 × correction)`, where
+`correction = 1 + CG_share × (iters@240/iters@180 − 1)`.
+
+Measured inputs (h9, NG5@4N, 300-step trace 26258712, steady window 99–295):
+- **CG region wall = 43.9 ms/step = 6.5 % of the 678.1 ms step** (kernel-busy alone is 10.1 ms —
+  the region is Allreduce/halo-latency-dominated, but ALL of it scales with the iteration count).
+  Measured with `scripts/m7_cg_share.py` against the census sqlite (CG kernels: `cg_dot`,
+  `cg_spmv`, `fesom_ssh_solve_cg_kk` lambdas).
+- **iters@dt180 settled = 71.9** (last-50 mean; independently reproduced this session from the
+  fresh 16N CPU log — same 71.9 to three digits).
+- iters@dt240: NOT measured on this binary (dt240 is CFL-unstable from cold start — SCALING_M524).
+  The only data is the original calibration's **115@240 / 89@180 = 1.29** ratio; carrying that
+  ratio over is a stated ASSUMPTION, not a measurement.
+
+⇒ **correction = 1 + 0.065 × 0.29 = ×1.019 at NG5@4N** (the old ×1.03 was calibrated on a
+cold-start 90-iter CG and a bigger share; it is pessimistic, as session 6 suspected).
+⚠️ At **16N** the CG share is UNMEASURED on h9 (comm-bound — plausibly larger). Until a 16N trace
+exists, quote 16N SYPD with the old ×1.03 (pessimistic bound) and note ×1.02 as the 4N-measured
+value; the difference is ~1 % of SYPD.
+
+---
+
+## 2c. H.9 "SSHRAILS" — pre-audit of the successor lever (scoped, NOT built)
+
+The census class LAZYSNAP could not touch (§2.1) is the **SSH/hbar host-staged nod2D bounce**,
+**~13–14 ms/step of gap ≈ −1.9 % at 4N** — and it is a HOST-class lever, so per L84(b) it should
+HOLD at 16N. Inventory (census pair-rows ↔ source):
+
+| census row | gap | the traffic | source |
+|---|--:|---|---|
+| `halo→compute_ssh_rhs_linfs` | 2.9 | HtoD 10.6 MB = d_eta + ssh_rhs_old + hbar pushes | `fesom_step.cpp:630-633` |
+| `ssh_rhs→(launch)` | 0.9 | DtoH 2.5 MB = ssh_rhs sync for its host halo | `:646-647` |
+| `ssh_solve→update_vel` | 2.4 | DtoH+HtoD 3.5+3.5 = d_eta sync → host halo → re-push | `:652-658` |
+| `compute_hbar→timestep` | 6.0 | DtoH 10.6 (ssh_rhs_old/hbar/hbar_old syncs) + HtoD 7.1 (hbar/hbar_old re-push) | `:670-682` |
+| `timestep→ale_thickness` | 2.4 | HtoD 3.5 = the eta_n push after the host update | `:818-819` |
+
+**What keeps the class host-bound — the four host `fesom_exchange_nod2D` (ssh_rhs `:647`, d_eta
+`:653`, ssh_rhs_old `:673`, hbar `:674`) plus ONE host loop: the eta_n update
+`eta_n = α·hbar + (1−α)·hbar_old` (`:776-784`)**, which reads hbar/hbar_old and writes eta_n on the
+host. The device NOD2D halo infrastructure already exists (ICERAILS used `fesom_halo_field2
+NOD2D` for srfoce_u/v). The eta_n loop is a trivial per-node kernel (no scatter).
+
+**Traps found in the pre-audit (each one is an ICERAILS-class scar):**
+1. The ice step pushes hbar with the comment *"hbar IS host-authoritative — keep"*
+   (`fesom_ice.cpp:633`). Under SSHRAILS that flips — the push becomes the BULKTAIL-IC-push clobber
+   (Z7 signature). Must be gated.
+2. eta_n's own history: the `:818` push carries a 30,000× ssh-accumulator bug scar (see the block
+   comment) — the device `resolve_ssh_dev` reads eta_n per step under IOACC. A device eta_n kernel
+   REPLACES that push; the substep-4 push `:511/:519` becomes redundant (the comment already says so).
+3. hbar/hbar_old host readers to re-audit: `fesom_ale.cpp:804/:829` (which ALE mode, what cadence?),
+   the print/BLOWUP blocks (print cadence), `fesom_ale_dump_*` bisect rails, and **zstar** (the ALE
+   chain + `update_stiff_mat_ale` — the options matrix is MANDATORY, L91).
+4. d_eta is CG's cross-step initial guess (RMW, `:619-627` capture list) — the coherence analysis
+   must cover the step boundary, not just the step.
+
 ---
 
 ## 3. STANDARD-SET LEDGER LEGS (300 steps, h9, pinned, a100_80/compute)
@@ -134,5 +227,19 @@ full) → options matrix ×3 → 35-step A/B → 300-step anchor (a100_80) → l
 | NG5@16N CPU | **1.2267** (1.2353/1.2267) | 26258753 |
 | NG5@8N GPU | ⏳ 26258752 | |
 | NG5@16N GPU | ⏳ 26258751 | |
+| dars@8N CPU (**150-step protocol** — see below) | **0.8464** (0.8464/0.8466) | 26259246 |
+| dars@8N GPU (150-step) | ⏳ 26259245 | |
+| NG5@4N GPU **h10** anchor (+LAZYSNAP) | ⏳ 26260292 (pre-reg ≈ 0.667 ⇒ ≈ 6.87×) | |
 
-**NG5@4N ratio: 6.79×.** 8N/16N ratios pending their GPU legs.
+**NG5@4N ratio: 6.79× (h9) → ≈6.87× expected (h10).** 8N/16N ratios pending their GPU legs.
+
+### 🔴 dars@8N CANNOT run the 300-step protocol from a cold PHC start
+
+Job 26259184 (dist_1024, dt180): **both reps died at exactly step 204** — `CG_kk abort: pp·App =
+nan`, deterministic (Serial is bit-reproducible, so identical reps die at the identical step). This
+is the KNOWN dars cold-start instability class (SCALING_M524 §"dt=240 is CFL-unstable from the cold
+start"; the M5.24 probe showed the blowup arrives *earlier* the finer the decomposition — that
+probe was NG5-only, and dars@dist_1024 at dt180 was simply never run past 35 steps: row-0's
+0.8563 was a 35-step window). **Not a port bug — physics from a cold IC.**
+⇒ dars@8N re-queued at **150 steps** (26259245 GPU / 26259246 CPU, h9 pinned, a100_80): safely
+below 204, past the CG ramp (settles ~step 30–50). The ledger row gets a protocol annotation.
