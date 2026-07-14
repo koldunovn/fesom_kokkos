@@ -977,6 +977,41 @@ costs you **TWICE** — the allocation *and* the mandatory deallocation fence. *
 static/persistent storage.** It is usually bit-identical (check: are the buffers written by ASSIGNMENT
 from register accumulators, not `+=`? do the producer and consumer kernels share a mask, so unwritten
 entries are never read? then nothing depends on the zero-init) and it is the cheapest lever there is.
+*(H.7 was **−4.21 %** — the second-largest lever in the campaign — and bit-identical: `diff_snap rc=0`.)*
+
+---
+
+### L93 — CALIBRATION: a HOST TIMER over-predicts. The GAP CENSUS under-predicts. Size from the census and treat it as a FLOOR. (M7, 2026-07-15)
+
+Five levers have now been pre-registered off a *measured* pool and then scored against the A/B. The
+pattern is not noise — it is a property of the two instruments:
+
+| lever | sized from | pre-registered | measured | |
+|---|---|--:|--:|---|
+| D.1 `FORCEDEV` | **a host timer** (FPROF) | −6.6 % | **−2.16 %** | ❌ **missed by 3× (OVER)** |
+| H.1 `FLUXDEV` | measured per-copy PCIe | −1.1 % | −1.45 % | ✅ beat |
+| H.2 `ICERAILS` | the gap census | −4.1 % | −6.03 % | ✅ beat |
+| H.3 `BULKTAIL` | the gap census | −2.2 % | −2.43 % | ✅ beat |
+| H.7 `SMOOTHSCRATCH` | the gap census | −2.8 % *(ceiling −3.3)* | **−4.21 %** | ✅ **beat, PAST THE CEILING** |
+
+**A HOST TIMER OVER-PREDICTS** because it brackets everything inside it — including time the host spends
+waiting for the GPU to drain work it owes *anyway*. That wait does not disappear when you port the loop
+(L87).
+
+**THE GAP CENSUS UNDER-PREDICTS**, for three structural reasons — know them, because they are the size of
+the error:
+1. **It thresholds.** `--min-gap-ms 1.0` throws away every sub-millisecond stall, and there are *many*
+   (every small fence, every small free).
+2. **You will under-attribute at the margins.** For H.7 I *saw* a 3.36 ms fence before `compute_sigma_xy`,
+   judged it "probably the same class — check it", and **excluded it from the pre-registration.** It was
+   the same class. That alone was a third of my error.
+3. 🔴 **ENTANGLEMENT — and the stall budget says so in its own footer.** Removing a stall does not only
+   return *its own* time; it lets the **host run ahead**, so the launch queue stays full and **downstream
+   launch-gap time is recovered too.** *"Spin alone is the FLOOR of the payoff, spin+gap the CEILING."*
+
+⇒ **Size from the gap census, quote it as a FLOOR, and put the ceiling well above it.** A pre-registration
+is a commitment, not a prediction you get to be proud of — and **being wrong LOW four times running is
+still being wrong.** Fixing the range is cheaper than fixing the credibility.
 
 ---
 
