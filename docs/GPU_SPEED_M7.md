@@ -51,15 +51,23 @@ Baseline anchors are re-measured same-day (row 0), not inherited from `SCALING_M
 Binaries frozen at `/work/ab0995/a270088/port2/m7/bin/row0/` (md5 `02c8a0d1…` cuda / `267c9a6a…` serial)
 so later jobs can be pinned to certified-source code while the build tree moves.
 
-| after | NG5@4N GPU | NG5@4N CPU | ratio | NG5@8N GPU | NG5@8N CPU | ratio | NG5@16N GPU | NG5@16N CPU | ratio | dars@8N GPU | dars@8N CPU | dars@2N GPU |
-|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| M5.24 (ref, 2026-05-31) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | 0.814 |
-| **row 0: m7 baseline** (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | *queued* | **2.3624** | — | *queued* | **1.2188** | — | *queued* | **0.8563** | **0.8177** |
+| after | NG5@4N GPU | NG5@4N CPU | ratio | NG5@8N GPU | NG5@8N CPU | ratio | NG5@16N GPU | NG5@16N CPU | ratio | dars@8N GPU | dars@8N CPU | ratio | dars@2N GPU |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| M5.24 (ref, 2026-05-31) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
+| **row 0: m7 baseline** (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | *queued* | **1.2188** | — | **0.3180** | **0.8563** | **2.69** | **0.8177** |
 
-Every finished leg reproduces M5.24 within noise → the tip is healthy and the Δ-anchor is sound.
-The NG5@16N CPU leg (1.2188) is the **same-day Stage-2 anchor** the plan review asked for.
-⚠️ The four GPU legs (8N ×2, 16N, dars@8N) were still queued at hand-off — the GPU partition is
-saturated. Harvest: `grep -h 'loop timing' /work/ab0995/a270088/port2/m7/base_*/log_rep_*.txt`.
+**The gap to close: 3.60× → ≥5.0× at 4N.** NG5@4N reproduces M5.24 (3.61×) exactly, so the
+Δ-anchor is sound. NG5@8N came in at **3.20×** vs M5.24's 2.91× — a difference outside the noise
+band, which is precisely why the same-day rule exists: **row 0, not M5.24, is the baseline every
+lever is measured against.** The NG5@16N CPU leg (1.2188) is the same-day Stage-2 anchor the plan
+review asked for; its GPU partner is still queued (the gpu partition is saturated).
+Harvest: `grep -h 'loop timing' /work/ab0995/a270088/port2/m7/base_*/log_rep_*.txt`.
+
+**Task 1.0 in context (a PROJECTION, not a measurement — the A/B is queued):** if the lever
+recovered the full 333.6 ms it would take NG5@4N from 1.2796 → ~0.95 s/step, i.e. **3.60× → ~4.9×**
+— essentially the whole Stage-1 target from one bit-identical lever. Read that as an upper bound:
+the honest lower bound is M5.22's independently-measured coupling phase (21.4% → ~4.6×). Either way
+it dwarfs every other Tier-1 item, and the A/B settles it.
 
 SYPD@dt240 = 0.657 / (s/step at dt180) × (1/1.03 CG correction) for NG5.
 
@@ -88,10 +96,25 @@ production step. Kernel share **46.6%** independently reproduces PROFILE_M522's 
 
 | host gap follows | ms/step | % step | gaps/step | what it is |
 |---|--:|--:|--:|---|
-| `fesom_ice_h_diag_kk` | **333.6** | **26.2** | 6 | → `fesom_ice_oce_fluxes_mom`, the host loop (Task 1.0) |
-| `resolve_bvfreq_dev` | 54.7 | 4.3 | 108 | I/O accumulator resolvers — ➕ follow-up |
+| `fesom_ice_h_diag_kk` | **333.6** | **26.2** | 6 | the coupling-phase host code — **dominated by `fesom_ice_oce_fluxes_mom`** (Task 1.0) |
+| `resolve_bvfreq_dev` | 54.7 | 4.3 | 108 | I/O accumulator resolvers — ➕ follow-up (see below) |
 | halo exchange (device2/device) | 14.9 | 1.2 | 5667 | per-exchange host overhead |
 | everything else | 5.0 | 0.4 | — | |
+
+⚠️ **Precision of the 26.2%.** It is measured as the host gap *following the last ice kernel and
+preceding `fesom_cal_shortwave_rad_kk`*. The only per-step code in that window is
+`fesom_ice_oce_fluxes_mom` plus any trailing host tail of `fesom_ice_step` (the chl block runs only
+at step 1 / month crossings). M5.22's independent phase timer puts **coupling at 21.4%**, so
+`oce_fluxes_mom` clearly dominates but may not be 100% of the 26.2%. **The Task-1.0 A/B is the
+arbiter** — do not quote 26.2% as the lever's payoff until it lands.
+
+➕ **The second host cost, root-caused.** The 54.7 ms/step is the I/O mean accumulators: six output
+vars still have `nullptr` device accumulators in `fesom_default_monthly_table`
+(`fesom_io.cpp:823`) — **`ssh`, `a_ice`, `m_ice`, `m_snow`, `uice`, `vice`** — so they fall back to
+HOST resolvers (`resolve_uice` &c, `fesom_io.cpp:712`). Under `io.config.daily_monthly` each runs at
+BOTH cadences: 12 host loops/step over ~1.86 M nodes/rank ≈ 22 M host iterations, which is the
+54.7 ms. Fix = extend the M5.14 `resolve_*_dev` pattern to those six (mechanical, bit-identical:
+per-element `out[i] += src[i]`, no reduction). ➕ Task 1.0b.
 
 Uniform, not bursty: per-step host time = mean 464.7 ms, **stdev 7.0 ms (1.5%)** across 24 steady
 steps. That rules out I/O flushes/forcing reads and confirms a per-step host loop.
