@@ -16,25 +16,55 @@ DONE. Branch `m7-speed`, **NOTHING pushed** (standing user decision).*
 **Tasks A.2 (hostprof) and A.3 (UCX) are CLOSED.** A.3 adopted nothing (`get_zcopy`/`put_zcopy` are
 **+35%**; the only positive leg is −1.15%, below the >2% bar). A.2 is where the session turned — see §2.
 
-**⏳ THE ONE THING STILL OPEN: the 4-leg A/B (job `26244262`).** It was queued behind a saturated GPU
-partition and had not started at session end. **HARVEST IT FIRST** — it is the only missing number.
+## 0b. ✅ ALL A/Bs LANDED — package A is CLOSED, tags cut
 
-```
-grep -A9 "ENV A/B RESULT" /work/ab0995/a270088/port2/m7/abenv.26244262.out
-```
-Legs (same alloc, same binary, min of 2 reps, NG5@4N dt180):
-`t1` = Tier-1 · `flat` = +FLAT · `rot` = +ROTCACHE · `both` = +both.
+| leg | NG5@4N (26244262) | dars@8N (26245783) |
+|---|--:|--:|
+| `t1` (Tier-1) | 0.9154 s/step | 0.2625 s/step |
+| `flat` | **−3.07%** | −1.03% |
+| `rot` | **−2.15%** | **−1.83%** |
+| **`both`** | **−5.37%** → 0.8662 | **−2.90%** → 0.2549 |
 
-**Acceptance arithmetic — check it BEFORE writing the ledger row (L80):**
-- `flat` vs `t1`: pool 52.6 ms of 913.5 → expect **−4..5%**.
-- `rot` vs `t1`: the rotation is ~37 ms (sampled: `sincos` 23.5 + `g2r` self 13.8) → expect **−3.5..4.5%**.
-- `both` vs `t1`: they touch disjoint code → expect roughly additive, **−8..9%**.
-- 🔴 **A result near −0.0% is a DEAD KNOB (L80), not a null lever.** Both knobs announce on rank 0
-  (`FLAT` ×3 — io/kpp/ale; `ROTCACHE` ×1). Check the announce line in the leg's log before any other
-  conclusion.
+**Ratio 5.01× → 5.29× at NG5@4N**, CPU anchor **4.5853 s/step** measured the same day (job 26244994).
+Announce armor clean in every leg (`t1` 0/0 · `flat` 3/0 · `rot` 0/1 · `both` 3/1) — no dead knobs.
+Tags: **`m7.2-packA`** (`96dcf8a`), **`m7.2b-rotcache`** (`faae871`).
 
-Then: ledger row in `docs/GPU_SPEED_M7.md`, dars@8N confirm, **tag `m7.2-packA`**.
-Frozen binaries: `m7/bin/a1/` (FLAT only) and `build-m7cuda` md5 `8b2cdd5c` (FLAT+ROTCACHE).
+**Both levers under-shot my headline estimate, and both times the PREDICTION was wrong, not the lever:**
+- `ROTCACHE` removes only the **`sincos`** — not the `g2r` matrix arithmetic I had also counted. Correct
+  pool = 23.5 − ~4 (new table loads) ≈ **20 ms**; measured **19.7 ms**. *Closes exactly.*
+  → **Size a lever by the work it REMOVES, not by the whole function it lives in.**
+- `FLAT` hit the **~50%-sector-efficiency ceiling** that the stride-2 interleaved `uv` layout imposes
+  (the packA handoff called this out as trap #3). 53% of the pool is the right answer, not a shortfall.
+
+## 0c. 🔴 THE FINDING THAT RE-RANKS THE LADDER — read before choosing the next package
+
+**(a) L84 confirmed by a PRE-REGISTERED falsifiable test** (committed `8467cc6` *before* dars ran):
+serial host work scales with **nodes/rank**. Predicted ROTCACHE at dars@8N = 4.19 ms; measured
+**4.80 ms**. The rival hypothesis ("host cost doesn't scale") predicted ~19.7 ms = 7.5% of the step;
+we measured 1.83%. **Decisive.**
+
+**(b) UNPREDICTED, and it outranks both levers.** I predicted the kernel lever would hold up *better*
+than linear. **It held up 2.2× WORSE** — and **the ordering INVERTS between scale points:**
+
+| | NG5@4N (compute-bound) | dars@8N (comm-bound) |
+|---|--:|--:|
+| `FLAT` (GPU **kernel** lever) | **−3.07%** | −1.03% |
+| `ROTCACHE` (**host** lever) | −2.15% | **−1.83%** |
+
+*Mechanism:* in a comm-bound step, freed GPU-kernel time is absorbed by MPI wait the GPU was doing
+anyway; freed **host** time is on the critical path regardless.
+
+**dars@8N = 98.5 k nodes/rank ≈ NG5@16N's 115 k → it IS the Stage-2 proxy.** Therefore:
+- 🔴 **Packages B (FCT2, 181.8 ms pool) and C (TDMA) are pure GPU-KERNEL levers — their 4N payoff will
+  NOT carry to 16N**, which is exactly where Stage 2 / 2 SYPD lives. Size them at 4N, but **measure at
+  dars@8N before banking anything at 16N.**
+- ✅ **D.1 (forcing → device) is a HOST lever** → holds its value into the Stage-2 regime, *and* L84 says
+  host work is 32× amplified on the GPU config. **Best-evidenced lever in the ladder.**
+- ✅ **Package E (CG1R/EVPWIDE/CGPOLY) attacks the comm that is absorbing the kernel gains.** Priority UP.
+
+⚠️ **Caveat:** dars is a different *mesh*, so "comm-bound" is confounded with geometry. The per-rank-proxy
+method is faithful for halo/comm (not for CG iters). **Confirm at NG5@16N before betting the ladder** —
+but the direction is strong enough to re-rank **D and E above B and C** now.
 
 ---
 
