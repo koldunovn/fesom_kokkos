@@ -47,7 +47,14 @@ export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF
 MESH=/work/ab0995/a270088/port2/mesh/core2
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
-SREF=/work/ab0995/a270088/port2/m6_baseline_serial
+# Default reference = the certified DEFAULT-config Serial baseline. For the OPTIONS-MATRIX gate
+# (plan Task 5.1 — `FESOM_SPEED=1` combined with an M6 physics knob), the reference must be that
+# knob's OWN M6 Serial oracle instead, since the physics differs:
+#   SREF=/work/ab0995/a270088/port2/m6/tke_bitid/kk_tke      with FESOM_MIX_SCHEME=TKE
+#   SREF=/work/ab0995/a270088/port2/m6/mevp_bitid/kk_mevp    with FESOM_WHICH_EVP=1
+#   SREF=/work/ab0995/a270088/port2/m6/zstar_bitid/kk_zstar  with FESOM_ALE=zstar
+# ⚠️ L79: each scheme has its OWN C-vs-Fortran floor — mEVP's uice floor is 0.954, not ~1.0.
+SREF=${SREF:-/work/ab0995/a270088/port2/m6_baseline_serial}
 FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
 
 # M6 physics knobs OFF; start from a clean M7 knob slate, then apply KNOBS.

@@ -386,6 +386,36 @@ only the time the host spins after the GPU drains — it also stops the host run
 queue empties and the GPU starves at the next kernel. Removing a fence recovers its spin **plus** some
 share of the 38.1 ms launch gap. Spin alone (13.6 ms) is the **floor**; spin+gap (51.7 ms) the **ceiling**.
 
+## ✅ Task 5.1 — OPTIONS MATRIX: `FESOM_SPEED=1` × each M6 physics knob
+
+The speed levers must not break the M6 options matrix. CORE2 dist_8 CUDA fidelity gate, master
+switch ON, each compared against **that knob's own M6 Serial oracle** (the physics differs, so the
+default-config baseline is the wrong reference):
+
+| # | config | reference | verdict |
+|---|---|---|---|
+| 26238785 | `FESOM_SPEED=1` + `FESOM_MIX_SCHEME=TKE` | `m6/tke_bitid/kk_tke` | ✅ **PASS** |
+| 26238786 | `FESOM_SPEED=1` + `FESOM_WHICH_EVP=1` (mEVP) | `m6/mevp_bitid/kk_mevp` | ✅ **PASS** |
+| 26238787 | `FESOM_SPEED=1` + `FESOM_ALE=zstar` | `m6/zstar_bitid/kk_zstar` | ✅ **PASS** |
+
+**zstar was the one that could bite**, and it is worth being explicit about why: zstar makes
+`zbar_3d_n` **time-varying**, and the device shortwave kernel that `SWSKIP` now relies on reads it —
+the exact shape of the Z7 bug (L78). It passes, and the proof is stronger than a green light:
+
+| field | M6's own zstar gate (no speed levers) | M7 zstar × `FESOM_SPEED=1` |
+|---|--:|--:|
+| Kv | 9.537e-02 | **9.537e-02** |
+| S | 5.378e-04 | 5.382e-04 |
+| T | 1.419e-03 | 1.367e-03 |
+
+**The Kv delta is IDENTICAL to four significant figures.** That 9.5e-02 (95% of its 1e-01 ceiling)
+is **zstar's own CUDA-vs-Serial floor**, not something the levers introduced — check the floor before
+judging the number (L79). `FESOM_SPEED=1` adds *nothing* on the zstar path.
+
+*(Aside worth knowing: under zstar the host `sw_3d` may have been computing from a stale host
+`zbar_3d_n` all along — and nobody noticed, precisely because its output was dead. `SWSKIP` deletes
+the latent stale read along with the wasted work.)*
+
 ## Knob registry
 
 ⚠️ **Every knob here is verified LIVE on the CUDA build** (preprocessor check, all five TUs). `SWSKIP`
