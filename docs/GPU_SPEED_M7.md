@@ -101,12 +101,22 @@ production step. Kernel share **46.6%** independently reproduces PROFILE_M522's 
 | halo exchange (device2/device) | 14.9 | 1.2 | 5667 | per-exchange host overhead |
 | everything else | 5.0 | 0.4 | — | |
 
-⚠️ **Precision of the 26.2%.** It is measured as the host gap *following the last ice kernel and
-preceding `fesom_cal_shortwave_rad_kk`*. The only per-step code in that window is
-`fesom_ice_oce_fluxes_mom` plus any trailing host tail of `fesom_ice_step` (the chl block runs only
-at step 1 / month crossings). M5.22's independent phase timer puts **coupling at 21.4%**, so
-`oce_fluxes_mom` clearly dominates but may not be 100% of the 26.2%. **The Task-1.0 A/B is the
-arbiter** — do not quote 26.2% as the lever's payoff until it lands.
+✅ **CONFIRMED by a second, independent method** (`m7/stepprof_ng5_4n`, job 26235416 — the model's
+own `FESOM_STEP_PROFILE` phase timer, which knows nothing about nsys):
+
+> `STEP PROFILE (rank0, % of loop): forcing 7.6% (0.1007 s) · sea-ice 9.6% (0.1274) ·`
+> **`coupling 24.6% (0.3270 s/step)`** · `ocean 54.5% (0.7239)`
+
+| method | the coupling-phase host cost |
+|---|--:|
+| nsys host-gap attribution | 333.6 ms/step (26.2%) |
+| `FESOM_STEP_PROFILE` phase timer | **327.0 ms/step (24.6%)** |
+
+**They agree to within 2%.** (The profiled run is 1.3272 s/step vs the 1.2796 baseline — the phase
+timer inserts its own fences, ~3.7% overhead — so its share is measured against a slightly larger
+denominator.) The coupling phase contains essentially no GPU kernels, and the only per-step code in
+it is `fesom_ice_oce_fluxes_mom`. Payoff bracket for Task 1.0: **~25–26% of the step.** The A/B
+remains the arbiter for the landed number.
 
 ➕ **The second host cost, root-caused.** The 54.7 ms/step is the I/O mean accumulators: six output
 vars still have `nullptr` device accumulators in `fesom_default_monthly_table`
@@ -118,6 +128,29 @@ per-element `out[i] += src[i]`, no reduction). ➕ Task 1.0b.
 
 Uniform, not bursty: per-step host time = mean 464.7 ms, **stdev 7.0 ms (1.5%)** across 24 steady
 steps. That rules out I/O flushes/forcing reads and confirms a per-step host loop.
+
+### The second scale point — dars@8N (the 16N-class per-rank proxy) ✅
+
+`m7/nsys_dars_8n`. Trace step **319.4 ms** vs measured baseline **318.0 ms** (0.4%) — the method
+validates again. Kernel share **27.5%** independently reproduces PROFILE_M522's *"at 16N GPU-compute
+falls to ~28%"*.
+
+| component | NG5@4N | dars@8N (16N-class) |
+|---|--:|--:|
+| GPU kernels | 46.6% | **27.5%** |
+| memcpy (mostly MPI staging) | 7.9% | 5.3% |
+| **host segment** | **32.0%** | **24.7%** |
+| MPI wait | 8.3% | **31.2%** |
+| launch gap | 3.0% | 8.9% |
+| fence spin | 1.4% | 1.8% |
+| post-unpack fences /step | 432.5 | 385.7 |
+| our fences /step | 996.3 | 910.7 |
+
+**Reading it.** The regime shifts exactly as M5.22 said it would — MPI goes 8.3% → 31.2% and becomes
+the wall — **but the host loop does NOT go away: it is still a quarter of the step.** So Task 1.0
+pays at BOTH ends of the scaling curve, while MPI/imbalance (31%) is what Tier 3 (CG1R, CGPOLY,
+EVPWIDE) has to attack for Stage 2. Fence spin stays ~1–2% everywhere: NOFENCE2 is real but small,
+at any scale.
 
 ### Per-step sync counters
 
@@ -161,16 +194,35 @@ it as a fence credits Task 1.1 with **6× the fences it can actually remove**. B
 The plan's Task-2.3 hypothesis (TDMA `real_t[128]` stack arrays → spill) is **confirmed with hard
 data**, and it gains two targets the plan did not know about.
 
-**ncu metrics** — first attempt profiled only 2 of 10 kernels (see the trap below); re-submitted.
-What landed is already suggestive (CORE2 dist_1, steady state):
+**ncu roofline ✅ COMPLETE** (`m7/ncu_top10`, job 26235287; CORE2 dist_1, np=1, steady-state launches;
+A100 peak DRAM 1.94 TB/s; **ideal sectors/request for FP64 = 8.0**, 32.0 = fully scattered):
 
-| kernel | %peak DRAM | SM% | occ% | regs | sec/req (ideal 8.0) |
-|---|--:|--:|--:|--:|--:|
-| `fesom_impl_vert_visc_kk` | 49.9 | 8.8 | 27.4 | 82 | **23.2** |
-| `fesom_pressure_bv_kk` | 34.4 | 8.7 | 44.6 | 62 | **23.4** |
+| kernel | GB/s | %peak | SM% | mem% | occ% | regs | stackB | sec/req | verdict |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|---|
+| `fesom_tracer_advect_one_fct_kk` (#1, 14.3%) | **1141** | **59.0** | 19.9 | 67.0 | 63.0 | 80 | 2048 | **7.3** | near the DRAM roofline, WELL coalesced |
+| `diff_ver_part_impl_ale_kk` (TDMA) | 1123 | 58.0 | 3.2 | 58.0 | 39.6 | 66 | **6144** | **23.6** | spill + uncoalesced |
+| `fesom_momentum_adv_scalar_kk` | 1092 | 56.4 | 17.4 | 64.6 | 63.6 | 56 | 2048 | 13.6 | spill |
+| `fesom_visc_filt_bidiff_kk` | 1065 | 55.1 | 9.6 | 63.7 | 54.4 | 60 | 0 | 16.5 | uncoalesced |
+| `fesom_impl_vert_visc_kk` (TDMA) | 979 | 50.6 | 9.0 | 56.9 | 27.2 | 82 | **7168** | **23.2** | spill + uncoalesced |
+| `fesom_smooth_nod3D_kk` | 941 | 48.6 | **45.7** | 52.3 | **88.6** | 32 | 0 | **2.8** | **balanced** |
+| `fesom_diff_part_hor_redi_kk` | 913 | 47.2 | 8.5 | 53.7 | 31.7 | 80 | 2048 | 13.1 | spill |
+| `fesom_ale_vert_vel_linfs_kk` | 913 | 47.2 | 7.0 | 55.3 | 58.2 | 48 | 0 | 17.8 | uncoalesced |
+| `fesom_diff_ver_part_redi_expl_kk` | 851 | 44.0 | 9.0 | 54.1 | 35.1 | 58 | **5120** | 12.4 | spill |
+| `fesom_fer_solve_gamma_kk` (TDMA) | 837 | 43.3 | 3.2 | 48.1 | 49.2 | 43 | **7168** | **22.0** | spill + uncoalesced |
+| `fesom_pressure_bv_kk` (EOS) | 665 | 34.3 | 8.6 | 39.8 | 44.7 | 62 | **5120** | **23.4** | spill + uncoalesced |
+| `kpp_ri_iwmix_kk` | 600 | 31.0 | **2.8** | 40.0 | 53.6 | 41 | 0 | **23.6** | badly uncoalesced, latency-bound |
 
-Both are **badly uncoalesced** (23 sectors/request vs the FP64 ideal of 8) *and* spilling, with SM
-util under 9% — i.e. latency/spill-bound, not compute-bound. Good news for Tier 2.
+**What it says for Tier 2 — and it partly rewrites it:**
+- **The #1 kernel is NOT a coalescing problem.** `tracer_advect_one_fct` already runs at **59% of
+  DRAM peak with 7.3 sectors/request** — near-perfectly coalesced and close to the memory roofline.
+  You cannot make it faster by fixing access patterns; the only lever is **moving less traffic** —
+  which is exactly what **Task 1.3 FCT2** does (batch T+S so geometry/velocity/edge loads are read
+  ONCE instead of twice). Its value is now measured, not assumed.
+- **`smooth_nod3D` is the control group** — 2.8 sec/req, SM 45.7%, occupancy 88.6%, "balanced". That
+  is the M5.18 coalescing lever's own kernel, and it proves the lever works and is *done*.
+- **Every TDMA is spill-bound AND uncoalesced** (22–24 sec/req, SM 3–9%): Task 2.3 confirmed twice
+  over, and they will benefit from the layout change as much as from the spill fix.
+- ➕ **`kpp_ri_iwmix_kk` is a new target**: SM 2.8%, 23.6 sec/req — the worst coalescing in the set.
 
 ⚠️ **The ncu regex trap.** `PROFILE_M522` names kernels by their **Kokkos runtime label**
 (`fct_eud_fill`, `gm_redi_ver_node`, `ale_vvel_scatter`) — the string passed to `parallel_for()`.
@@ -265,8 +317,31 @@ that: re-audit + re-racecheck before landing it.**
 Expected payoff (measured): floor **1.1%**, ceiling **4.1%** of the NG5@4N step.
 Gates still to run: racecheck, knob-OFF byte gate, FORCE_SERIAL byte proof, CUDA fidelity gate, A/B.
 
+## Tier-1 gate results (2026-07-14)
+
+| # | gate | knobs | verdict |
+|---|---|---|---|
+| 26235595 | knob-OFF Serial byte gate (the campaign invariant) | none | **PASS** — `diff_snap` rc=0 |
+| 26235596 | **FORCE_SERIAL byte proof** | `FORCE_SERIAL=1 ICEFLUXDEV=1` | **PASS — the ICEFLUXDEV bit-identity claim is PROVEN.** The levered kernels run on the Serial backend and reproduce the certified baseline byte-for-byte: pure re-execution, not merely "close". |
+| 26235597 | CUDA fidelity gate | `ICEFLUXDEV=1` | **PASS** (deltas in the same band as the un-levered baseline, as a bit-identical lever requires) |
+| 26235598 | CUDA fidelity gate | `NOFENCE2=1` | **PASS** |
+| 26235599 | CUDA fidelity gate | both | **PASS** |
+| 26235643/4/5 | compute-sanitizer (memcheck ×2, racecheck), baseline-differential | both | queued |
+| 26235600/1/2 | same-alloc A/B (NG5@4N ×2, dars@8N) | — | queued — **the payoff numbers** |
+
+⚠️ **A racecheck lesson, learned the hard way.** The plan said "racecheck the fence removal". The
+first attempt (job 26235606) died on an invalid flag and its non-zero exit *looked* exactly like
+"hazards found". Two things were wrong: (1) **racecheck is "Shared memory hazard checking"** — it
+sees `__shared__` only, so it structurally CANNOT prove or disprove NOFENCE2, whose entire risk
+surface is GLOBAL memory ordering. **memcheck** is the tool that can catch the one real hazard
+(`grow()` freeing `recv_d` under a running unpack = use-after-free). (2) **No baseline = no
+verdict**: Kokkos' reductions use shared memory and the model is full of intentional atomics, so a
+bare "N hazards" means nothing. `jobs/job_m7_sanitize` now runs each tool knobs-OFF *then* knobs-ON
+and only attributes the difference.
+
 ## Tier climate gates
 
 | tier | knobs ON | 1-yr climate vs C oracle | NG5@16N direct | tag |
 |---|---|---|---|---|
-| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (all 27 fields at the climate-close floor, worst 9.9e-03 `h_ice`; job 26235125) | CPU 1.2188 ✅ / GPU queued | `m7.0-baseline` (pending) |
+| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (all 27 fields at the climate-close floor, worst 9.9e-03 `h_ice`; job 26235125) | CPU 1.2188 ✅ / GPU queued | `m7.0-baseline` ✅ `3d00123` |
+| 1 | ICEFLUXDEV + NOFENCE2 | **pending** (needs the 1-yr CORE2 run) | pending | `m7.1-bitid` (pending) |
