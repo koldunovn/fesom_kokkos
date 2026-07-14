@@ -387,6 +387,21 @@ static void read_one_time_slice(const fesom_jra55_field *flf,
  * Locate t_indx, refresh sbcdata1/sbcdata2 (with cache), bilinear interp   *
  * to mesh nodes, set coef_a/coef_b for time interpolation.                 *
  * ------------------------------------------------------------------------ */
+/* M7 — FESOM_SPEED_NOCOEFCACHE: switch the getcoeffld guard fix back OFF (i.e. restore the buggy
+ * rebuild-every-step behaviour). It exists for ONE reason: a same-allocation A/B that quantifies how
+ * much the broken guard has been inflating this campaign's benchmarks. It is opt-in ONLY
+ * (fesom_speed_on_exp), so the FESOM_SPEED=1 master switch can NEVER silently turn the fix off.
+ *
+ * NOTE THE POLARITY, AND WHY THE FIX ITSELF IS NOT A KNOB: FESOM_SPEED_* levers resolve OFF on a
+ * non-CUDA build ("Serial stays legacy"). Knobbing the FIX would therefore repair the GPU benchmark
+ * and leave the CPU one broken — manufacturing exactly the GPU/CPU asymmetry we are removing. The
+ * fix is unconditional; only the DISABLE is a knob. */
+static bool m7_jra_nocoefcache()
+{
+    static int c = -1;
+    return fesom_speed_on_exp("NOCOEFCACHE", &c);
+}
+
 static void getcoeffld(fesom_jra55_field *flf,
                        const struct fesom_mesh *mesh,
                        real_t rdate)
@@ -426,6 +441,49 @@ static void getcoeffld(fesom_jra55_field *flf,
     }
     flf->t_indx    = t_indx;
     flf->t_indx_p1 = t_indx_p1;
+
+    /* ===================== M7 — THE getcoeffld GUARD FIX (bit-identical) ====================
+     * coef_a/coef_b are the LINEAR-IN-TIME interpolants over the bracket [t_indx, t_indx_p1]:
+     *     coef_a[n] = (d2 - d1) / delta_t ;  coef_b[n] = d1 - coef_a[n] * nc_time[t_indx-1]
+     * Every input below depends ONLY on that bracket — the two slices (sbcdata1/2, which the
+     * cache-reuse logic below keys on exactly these indices), delta_t, nc_time[t_indx-1] — plus
+     * things fixed at init (bilin_i/j, nc_lon/lat, the mesh). SO IF THE BRACKET IS UNCHANGED, THE
+     * REBUILD PRODUCES BITWISE THE SAME NUMBERS FROM BITWISE THE SAME INPUTS. Skipping it is
+     * bit-identical BY CONSTRUCTION — provable by the knob-OFF byte gate and the FORCE_SERIAL
+     * proof (unlike a rail change, which no Serial gate can see — L86).
+     *
+     * WHY THIS MATTERS. The caller (fesom_jra55_step) has a `need_refresh` guard that is SUPPOSED
+     * to skip this call between 3-hourly JRA records. IT DOES NOT WORK, and it never has:
+     *
+     *   THE MODEL STARTS BEFORE THE FIRST JRA RECORD. uas/vas/huss/tas begin at +1.5 h,
+     *   rsds/rlds/prra/prsn at +3 h. So fesom_jra_binarysearch returns 0, we take the "no
+     *   extrapolation back in time" clamp below, and it sets t_indx_p1 = t_indx = 1. The caller's
+     *   guard then computes lo = nc_time[t_indx-1] and hi = nc_time[t_indx_p1-1] -- THE SAME
+     *   ELEMENT -- so lo == hi == nc_time[0], and `rdate < lo` is TRUE FOREVER. Refresh fires
+     *   every step, for all 8 fields. rdate advances 3 min/step, so it takes 30-60 steps to
+     *   escape (measured: FESOM_DIAG_COEF, job 26255463).
+     *
+     * MEASURED COST: 8.0 calls/step, 49.3 ms/step = 5.62% of the step (FPROF `force:getcoeffld`,
+     * job 26254302) -- a bilinear horizontal interpolation over myDim_nod2D x 8 fields (~3.5 M
+     * interps) PLUS, because of the `t_indx_p1 != t_indx` clause in the read_data2 guard below, a
+     * fresh NetCDF slice read on every call. All of it rebuilding identical numbers.
+     *
+     * ⚠️ THIS IS NOT A PRODUCTION LEVER. In a 1-yr run the clamp regime lasts ~30-60 steps out of
+     * ~175,000. It is a MEASUREMENT bug: every benchmark in the M7 campaign is 35 steps, so this
+     * has been inflating every s/step number we have -- and ASYMMETRICALLY, since it is HOST code
+     * over myDim_nod2D and the GPU config carries 463 k nodes/rank against the CPU's 14.5 k (L84).
+     * The fix is therefore deliberately UNCONDITIONAL and NOT behind a FESOM_SPEED_* knob: those
+     * resolve OFF on a non-CUDA build, which would fix the GPU benchmark and not the CPU one and
+     * so CREATE the very asymmetry we are trying to remove. (FESOM_SPEED_NOCOEFCACHE exists only
+     * to switch it back OFF for a same-allocation A/B.)
+     *
+     * Verified against the actual data, not argued: three static hypotheses for why the guard
+     * misfires (cold start; a binarysearch off-by-one; an epoch mismatch) were each checked and
+     * each DIED before FESOM_DIAG_COEF printed t_indx/t_indx_p1/rdate/lo/hi. L82's own rule --
+     * ASK HOW MANY TIMES THE THING IS CALLED -- is right; it must be answered with a COUNTER.
+     * ======================================================================================= */
+    if (flf->coef_t_indx == t_indx && flf->coef_t_indx_p1 == t_indx_p1 && !m7_jra_nocoefcache())
+        return;
 
     /* Determine cache reuse — Fortran lines 845-876.
      * The simple/correct strategy: if sbcdata2 currently holds t_indx, swap
@@ -529,6 +587,11 @@ static void getcoeffld(fesom_jra55_field *flf,
         flf->coef_a_fld.modify_host();  flf->coef_a_fld.sync_device();
         flf->coef_b_fld.modify_host();  flf->coef_b_fld.sync_device();
     }
+
+    /* M7 guard fix: coef_a/coef_b now correspond to THIS bracket. Any later call with the same
+     * bracket may skip everything above. Stamped LAST, so a partial build can never be cached. */
+    flf->coef_t_indx    = t_indx;
+    flf->coef_t_indx_p1 = t_indx_p1;
 }
 
 /* ------------------------------------------------------------------------ *
@@ -642,6 +705,14 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
         }
         if (flf->ncid < 0) {
             nc_read_time_grid(jra, flf, yearnew);
+            /* 🔴 M7 guard fix — INVALIDATE the coef bracket cache. nc_read_time_grid FREES and
+             * REALLOCATES flf->nc_time for the new year, so a cached (t_indx, t_indx_p1) refers to
+             * the OLD year's time axis and means nothing now. Without this, a new year whose bracket
+             * indices happened to collide with the cached ones would silently reuse last year's
+             * coefficients. (It cannot collide in practice — the old year ends clamped at t_indx =
+             * Ntime and the new one starts clamped at 1 — but that is a coincidence, not an
+             * invariant, and coincidences are exactly what bite this codebase.) */
+            flf->coef_t_indx = flf->coef_t_indx_p1 = 0;
         }
         /* Bilinear indices need rebuilding only on first init (mesh doesn't change),
          * but cheap to redo per year. */

@@ -96,6 +96,13 @@ typedef struct fesom_jra55_field {
     int        sbcdata2_t_index;
     int        t_indx;           /* 1-based, like Fortran */
     int        t_indx_p1;
+    /* M7 — the (t_indx, t_indx_p1) bracket that the CURRENT coef_a/coef_b were built from.
+     * 0 = "none yet" (t_indx is 1-based, so 0 can never be a real bracket), which is exactly what
+     * fesom_jra55_init's value-init (*jra = fesom_jra55{}) gives us. INVALIDATED on a year change
+     * (fesom_jra55_open_year), where nc_read_time_grid replaces nc_time and the old indices become
+     * meaningless. See the guard-fix banner in getcoeffld. */
+    int        coef_t_indx;
+    int        coef_t_indx_p1;
 } fesom_jra55_field;
 
 /*
