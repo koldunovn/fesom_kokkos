@@ -1,3 +1,11 @@
+> # ⛔ SUPERSEDED (2026-07-14, Opus session 4) — its work queue is DONE.
+> **Read `docs/plans/20260714-m7-HANDOFF-packD.md` instead.** Task A.1 (`FESOM_SPEED_FLAT`) landed
+> @ `96dcf8a` with all gates green; A.2 (hostprof) and A.3 (UCX) are closed. The §1 work queue, the
+> §2 A.1 spec and the §3 gate ladder below are all executed. **Still true and still binding:** §4's
+> traps (esp. #1, the rebuild race) and §5.
+> **What changed:** A.2's answer re-pointed the campaign at the FORCING (75.2 ms/step of host time),
+> and the sampler MIS-NAMED the function inside it (→ L82). New Task D.0 `ROTCACHE` landed @ `faae871`.
+
 # M7 HANDOFF — Package A implementation (re-scope is DONE; this is a build-and-gate session)
 
 *Written 2026-07-14 at the close of the re-scope session. The NEXT session implements — follow this
