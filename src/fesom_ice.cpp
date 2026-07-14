@@ -12,6 +12,7 @@
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M7 H.2 ICERAILS: the srfoce_u/v host halo -> ONE device halo
 #include "fesom_speed.hpp"         // M7 H.2 ICERAILS
+#include "fesom_bulk.h"            // M7 H.3 BULKTAIL: fesom_bulktail_on()
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -586,9 +587,35 @@ void fesom_ice_step(int                            step,
         ice->thermo.thdgr_fld.modify_host();    ice->thermo.thdgr_fld.sync_device();
         /* stress_atmice_x/y and Ch/Ce are re-written by fesom_bulk_compute_kk on the DEVICE in the
          * forcing phase of every step (including step 1, which runs before this one) — they need no
-         * IC push. Pushed anyway: it is once, and an IC bug in this class costs a whole gate cycle. */
+         * IC push. Pushed anyway: it is once, and an IC bug in this class costs a whole gate cycle.
+         *
+         * 🔴 M7 H.3 — AND UNDER BULKTAIL THAT BELT-AND-BRACES BECOMES THE BUG IT WAS INSURING AGAINST.
+         * Today bulk's host tail sync_host()s stress_atmice, so the mirror is current and this push is
+         * a harmless self-assignment. BULKTAIL deletes that tail, leaving stress_atmice DEVICE-
+         * authoritative with a host mirror that is still Field::alloc()'s ZEROS. modify_host() then
+         * sets host_count > dev_count and sync_device() DEEP-COPIES THE ZEROS OVER THE FRESH DEVICE
+         * STRESS — killing the wind forcing on the ice, ON STEP 1 ONLY. That is the Z7 signature
+         * (bitwise-equal at cold start is what makes step 1 the ONLY wrong step), and step 1 being
+         * wrong is the whole run. The comment above says it best: they NEED NO IC PUSH. Under
+         * BULKTAIL, don't do one. */
+        if (!fesom_bulktail_on()) {
         ice->stress_atmice_x_fld.modify_host(); ice->stress_atmice_x_fld.sync_device();
         ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
+        }
+    }
+
+    /* 🔴 M7 H.3 — mEVP's IN rail (:687 below, the whichEVP==1 branch) is NOT gated on `icerails`, so
+     * it would push a stale host stress_atmice over the device copy on EVERY step under BULKTAIL.
+     * (It is a dead rail under ICERAILS today, and — separately — mEVP under ICERAILS has a
+     * PRE-EXISTING srfoce_u/v/ssh clobber of its own; see docs. Both need their own CUDA gate with
+     * FESOM_WHICH_EVP=1.) Rather than half-fix mEVP inside a lever that cannot gate it, refuse. */
+    if (fesom_bulktail_on() && ice->whichEVP != 0) {
+        if (partit->mype == 0)
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_BULKTAIL supports whichEVP=0 (standard EVP) "
+                            "only; got whichEVP=%d. The mEVP branch re-pushes stress_atmice from the "
+                            "host unconditionally, which this lever leaves stale. Refusing to run.\n",
+                    ice->whichEVP);
+        MPI_Abort(MPI_COMM_WORLD, 1);
     }
 
     if (icerails && (s_verify_icemap || s_verify_evp || s_verify_icefct ||

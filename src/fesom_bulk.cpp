@@ -24,6 +24,110 @@
 #include <algorithm>                // M5.16: std::copy in verify
 #include <cstdio>
 
+/* ================================================================================================ *
+ * M7 H.3 — FESOM_SPEED_BULKTAIL. Deletes fesom_bulk_compute_kk's HOST TAIL (fesom_bulk.cpp, the
+ * `if (fesom_bulktail_on()) return;` below): SEVEN full-field sync_host() plus a node→element
+ * interpolation loop over myDim_elem2D whose output oce_fluxes_mom overwrites microseconds later.
+ *
+ * ── SIZED BY MEASUREMENT, NOT BY ARGUMENT (L87, and the user directive "always measure") ────────
+ * nsys GPU-idle gap census (scripts/m7_gap_census.py), NG5@4N, h5 binary, FESOM_SPEED=1. The 25-step
+ * and 300-step traces AGREE, so this is steady state, not a cold-start artifact:
+ *
+ *     gap  halo_exchange_device2 -> ocean2ice   16.8 ms (25-step) / 17.2 ms (300-step)
+ *          of which PCIe                         6.7 ms  = 7 DtoH copies, 28.3 MB
+ *          of which host (no traced call)       10.1 ms  = the memset + the interp loop
+ *
+ * It is THE SINGLE LARGEST GAP IN THE STEP — larger than the entire sea-ice step's compute — and
+ * the GPU is provably doing NOTHING for all of it. The seven copies appear in the timeline in
+ * SOURCE ORDER with exactly the right sizes (2N doubles = 7.07 MB, then 6 x N = 3.54 MB).
+ *
+ * ── WHY THE TAIL IS DEAD (and why ONLY under the blessed set) ────────────────────────────────────
+ *   stress_node_surf / stress_surf : ICEFLUXDEV makes oce_fluxes_mom a DEVICE kernel. Its host loop
+ *       — which really did read the host mirror (fesom_ice_coupling.cpp:688) — is gone, and it
+ *       rewrites both fields on the device. The interp loop's output is overwritten either way.
+ *   heat_flux / water_flux         : overwritten wholesale by fesom_ice_oce_fluxes_kk on the device.
+ *       FLUXDEV removes the two host re-pushes (fesom_step.cpp:418, :1081) that would clobber, and
+ *       moves cal_shortwave_rad's `heat_flux[n] += swsurf` host RMW onto the device.
+ *   Ch_atm_oce / Ce_atm_oce        : read ONLY by fesom_ice_thermodynamics_kk from .d(). ICERAILS
+ *       already skips their re-push (fesom_ice.cpp:809) — and its comment there says, in as many
+ *       words, that it may do so *because this tail leaves them Synced*. Remove the tail and they
+ *       become Device-authoritative, which is what the thermo kernel wants anyway.
+ *   stress_atmice_x/y              : read ONLY by fesom_ice_evp_dynamics_kk from .d(). ICERAILS
+ *       already skips the EVP re-push (fesom_ice.cpp:660).
+ *
+ * ── ⚠️ THEREFORE BULKTAIL IS **NOT INDEPENDENT**. IT REQUIRES ICEFLUXDEV + ICERAILS + FLUXDEV. ───
+ * With any of them OFF, a downstream `modify_host(); sync_device()` finds host_count > dev_count and
+ * DEEP-COPIES THE STALE HOST MIRROR BACK OVER THE FRESH DEVICE DATA — so the model runs on last
+ * step's forcing, and at step 1 on Field::alloc()'s ZEROS. Nothing crashes. The ocean is simply
+ * driven by garbage wind, or the ice thermodynamics by zero transfer coefficients.
+ *
+ * That failure is INVISIBLE TO EVERY SERIAL GATE (L86: on Serial .d() IS .h(), so every rail is a
+ * no-op and every one of these clobbers is a self-assignment). ICERAILS shipped its first cut with
+ * exactly this bug and the FORCE_SERIAL byte proof certified it BIT-IDENTICAL while the CUDA run
+ * had NO SEA ICE. So we do NOT silently downgrade to OFF when a dependency is missing (L80: a knob
+ * that quietly resolves OFF passes every gate and reports 0.00%). WE ABORT, LOUDLY.
+ * ================================================================================================ */
+bool fesom_bulktail_on(void)
+{
+    static int c = -1;
+    if (!fesom_speed_on("BULKTAIL", &c)) return false;   /* resolves + announces once, on rank 0 */
+
+    static bool guards_done = false;                     /* the guards below run exactly once */
+    if (guards_done) return true;
+    guards_done = true;
+
+    int rank = 0, inited = 0;
+    MPI_Initialized(&inited);
+    if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    /* The three levers that make the tail dead. Ask them THROUGH THE SAME RESOLVER, so a
+     * per-lever FESOM_SPEED_X=0 override on top of the master switch is seen. */
+    static int s_icerails = -1, s_icefluxdev = -1, s_fluxdev2 = -1;
+    const bool icerails   = fesom_speed_on("ICERAILS",   &s_icerails);
+    const bool icefluxdev = fesom_speed_on("ICEFLUXDEV", &s_icefluxdev);
+    const bool fluxdev    = fesom_speed_on("FLUXDEV",    &s_fluxdev2);
+    if (!(icerails && icefluxdev && fluxdev)) {
+        if (rank == 0)
+            fprintf(stderr,
+                "[fesom_speed] FESOM_SPEED_BULKTAIL REQUIRES ICERAILS + ICEFLUXDEV + FLUXDEV "
+                "(have icerails=%d icefluxdev=%d fluxdev=%d).\n"
+                "  Without all three, a downstream modify_host()+sync_device() deep-copies the "
+                "stale host mirror back over the device forcing and the model silently runs on "
+                "ZEROS at step 1. Refusing to run.\n",
+                (int)icerails, (int)icefluxdev, (int)fluxdev);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    /* The verify twin snapshots all eight arrays straight off the raw host alias, which this lever
+     * deliberately leaves stale. Same precedent as ICERAILS (fesom_ice.cpp:594). */
+    const char *v = getenv("FESOM_KK_VERIFY");
+    if (v && strstr(v, "bulk")) {
+        if (rank == 0)
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_BULKTAIL is INCOMPATIBLE with "
+                            "FESOM_KK_VERIFY=bulk: the verify twin reads all 8 outputs from the raw "
+                            "HOST alias, which this lever leaves stale. Refusing to compare against "
+                            "garbage.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    /* The bisect toggles all do a HOST read-modify-write on an array this lever leaves device-
+     * authoritative: FESOM_NO_ICE_THERMO skips oce_fluxes, so bulk's hf/wf ARE the ocean's fluxes
+     * and sss_runoff (+= water_flux) and cal_shortwave_rad (+= heat_flux) mutate them on the host;
+     * FESOM_NO_WIND / FESOM_NO_HFLUX memset the raw host pointers with no modify_host() at all. */
+    static const char *const kBisect[] = { "FESOM_NO_ICE_THERMO", "FESOM_NO_WIND", "FESOM_NO_HFLUX" };
+    for (const char *b : kBisect) {
+        const char *e = getenv(b);
+        if (e && e[0] && atoi(e)) {
+            if (rank == 0)
+                fprintf(stderr, "[fesom_speed] FESOM_SPEED_BULKTAIL is INCOMPATIBLE with %s: that "
+                                "toggle read-modify-writes a forcing array on the HOST, which this "
+                                "lever leaves device-authoritative. Refusing to run.\n", b);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    return true;
+}
+
 /* MOD_ICE.F90 ice%thermo defaults (lines 53-79). */
 #define BULK_RHOAIR      1.3
 #define BULK_INV_RHOAIR  (1.0 / 1.3)
@@ -619,13 +723,23 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
      * batchable with these.) Bit-identical (co-pack only). */
     fesom_halo_field2(forcing->heat_flux_fld, forcing->water_flux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
 
+    /* ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ M7 H.3 — THE BULK TAIL ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+     * Everything below is DEAD under the blessed set, and it is the single most expensive
+     * dead thing in the step. See fesom_bulktail_on() for the measurement and the proof. */
+    if (fesom_bulktail_on()) return;
+
     /* DROP-IN (M5.16 Phase A): sync the FULL output set to host so the downstream — oce_fluxes_mom
      * [host] reads stress_node_surf, the ice-step IN rails (Ch/Ce → thermo, stress_atmice → EVP),
      * the host element-interp + the ocean-step re-pushes — sees byte-for-byte the host-authoritative
      * state the C fesom_bulk_compute left. (heat_flux/water_flux are overwritten by oce_fluxes; sync'd
      * for safety + the verify.) The win is the device COMPUTE + the removed T/uvnode DtoH, not these
      * small nod2D round-trips; making forcing fully device-resident (drop these + the re-pushes) is a
-     * measured follow-on. */
+     * measured follow-on.
+     *
+     * ⚠️ "these small nod2D round-trips" was wrong, and H.3 is that follow-on: on the CUDA path
+     * fesom_halo_field RETURNS EARLY (fesom_halo_device.hpp:129) leaving the field Auth::Device, so
+     * ALL SEVEN of these fire — 7.07 MB + 6 x 3.54 MB = 28.3 MB of DtoH per step. Measured in the
+     * nsys timeline as seven consecutive DtoH copies in source order. Not small: 6.7 ms/step. */
     forcing->stress_node_surf_fld.sync_host();
     forcing->heat_flux_fld.sync_host();
     forcing->water_flux_fld.sync_host();

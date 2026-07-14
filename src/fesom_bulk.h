@@ -45,6 +45,12 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         struct fesom_ice           *ice,
                         struct fesom_partit        *partit);
 
+/* M7 H.3 — FESOM_SPEED_BULKTAIL. Non-inline, defined once in fesom_bulk.cpp, so bulk's tail and the
+ * ice step's IC push read the SAME answer, the lever announces exactly once, and the dependency
+ * guards (ICERAILS+ICEFLUXDEV+FLUXDEV, else ABORT) run exactly once. See the block comment at its
+ * definition for the measurement and for why this lever is NOT independent. */
+bool fesom_bulktail_on(void);
+
 /* M5.16: device (Kokkos) twin of fesom_bulk_compute — the L&Y09 bulk formulae as a per-surface-node
  * map (bit-identical Serial; gate-only on CUDA). Drop-in replacement: leaves the same host-authoritative
  * forcing/ice state the C twin does (Phase A). Reads SST=T[surface] and uvnode on the DEVICE (so the
