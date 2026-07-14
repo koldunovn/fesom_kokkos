@@ -139,10 +139,13 @@ static long s_ss_fence_grow  = 0;                 // realloc-guard fences (warmu
 static long s_ss_pack        = 0;                 // pack kernel launches
 static long s_ss_unpack      = 0;                 // unpack kernel launches
 
+/* Opt-in ONLY (fesom_speed_on_exp): a diagnostic counter must not ride the
+ * FESOM_SPEED master switch — asking for the blessed perf set is not asking for
+ * a per-step report. Set FESOM_SPEED_SYNCSTATS=1 explicitly. */
 static inline bool syncstats_on()
 {
     static int c = -1;
-    return fesom_speed_on("SYNCSTATS", &c);
+    return fesom_speed_on_exp("SYNCSTATS", &c);
 }
 
 void fesom_halo_syncstats_report(int timed_steps, fesom_partit *p)

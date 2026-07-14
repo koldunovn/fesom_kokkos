@@ -28,6 +28,10 @@
  *     static int s_k = -2;
  *     int k = fesom_speed_int("EVPWIDE", 0, &s_k);   // 0 = lever off
  *
+ * Opt-in-only levers (fesom_speed_on_exp) skip the FESOM_SPEED master
+ * fallthrough — a diagnostic or an unadopted experiment must be named
+ * explicitly, never turned on by "give me the blessed perf set".
+ *
  * Unrecognised values abort loudly (M6 idiom).
  * ======================================================================= */
 
@@ -96,14 +100,14 @@ inline bool fesom_speed_force_serial()
  * the FORCE_SERIAL byte proof passes *because FORCE_SERIAL bypasses this very guard*. The only
  * symptom was an A/B reporting 0.00%. **A knob that does nothing is indistinguishable from a
  * lever that does not pay.** So: make the model TELL YOU what it is actually running. */
-inline int fesom_speed_resolve(const char *lever)
+inline int fesom_speed_resolve_impl(const char *lever, bool use_master)
 {
     char var[80];
     snprintf(var, sizeof var, "FESOM_SPEED_%s", lever);
     long v = 0;
     int  asked = 0, on = 0;
-    if (fesom_speed_parse_int(var, &v))                { asked = 1; on = (v != 0); }
-    else if (fesom_speed_parse_int("FESOM_SPEED", &v)) { asked = 1; on = (v != 0); }
+    if (fesom_speed_parse_int(var, &v))                              { asked = 1; on = (v != 0); }
+    else if (use_master && fesom_speed_parse_int("FESOM_SPEED", &v)) { asked = 1; on = (v != 0); }
 #ifndef KOKKOS_ENABLE_CUDA
     if (on && !fesom_speed_force_serial()) on = 0;   /* Serial stays legacy */
 #endif
@@ -121,10 +125,33 @@ inline int fesom_speed_resolve(const char *lever)
     return on;
 }
 
+inline int fesom_speed_resolve(const char *lever)
+{
+    return fesom_speed_resolve_impl(lever, true);
+}
+
+/* Opt-in-only lever: the FESOM_SPEED master switch does NOT turn it on; it must be
+ * named explicitly (FESOM_SPEED_<NAME>=1). For levers that must never ride the
+ * blessed set — diagnostics (SYNCSTATS: a counter has no business firing because a
+ * perf config was requested) and EXPERIMENTS whose physics is not yet adopted
+ * (ICELAG). Everything else — the Serial-stays-legacy guard, the rank-0 announce —
+ * is identical to fesom_speed_resolve. */
+inline int fesom_speed_resolve_exp(const char *lever)
+{
+    return fesom_speed_resolve_impl(lever, false);
+}
+
 /* Boolean lever with caller-held cache (init the static to -1). */
 inline bool fesom_speed_on(const char *lever, int *cache)
 {
     if (*cache < 0) *cache = fesom_speed_resolve(lever);
+    return *cache != 0;
+}
+
+/* Boolean opt-in-only lever with caller-held cache (init the static to -1). */
+inline bool fesom_speed_on_exp(const char *lever, int *cache)
+{
+    if (*cache < 0) *cache = fesom_speed_resolve_exp(lever);
     return *cache != 0;
 }
 

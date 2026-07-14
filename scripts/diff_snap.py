@@ -7,11 +7,16 @@ are deemed bit-identical if their numpy arrays are equal under
 that altered physics).
 
 Usage:
-    python3 scripts/diff_snap.py <pre_dir> <post_dir>
+    python3 scripts/diff_snap.py [--pattern GLOB] <pre_dir> <post_dir>
 
 Exit 0 on full match, 1 otherwise. Mismatches print field name + max
 absolute difference + lat/lon of the worst node so a follow-up debug
 run can probe the divergent column.
+
+--pattern (default "snap_*.nc") selects which files to compare. The M7
+io accumulators (u/v/temp/... device resolvers) never reach a snapshot —
+they only feed the time-mean stream — so proving THEM bit-identical needs
+`--pattern '*.monthly.nc'` against a knob-OFF run of the same binary.
 """
 import sys
 import pathlib
@@ -49,15 +54,20 @@ def diff_file(pre_path: pathlib.Path, post_path: pathlib.Path) -> bool:
 
 
 def main() -> int:
-    if len(sys.argv) != 3:
+    argv = sys.argv[1:]
+    pattern = "snap_*.nc"
+    if len(argv) >= 2 and argv[0] == "--pattern":
+        pattern = argv[1]
+        argv = argv[2:]
+    if len(argv) != 2:
         print(__doc__, file=sys.stderr)
         return 2
-    pre_dir  = pathlib.Path(sys.argv[1])
-    post_dir = pathlib.Path(sys.argv[2])
+    pre_dir  = pathlib.Path(argv[0])
+    post_dir = pathlib.Path(argv[1])
 
-    pre_files = sorted(pre_dir.glob("snap_*.nc"))
+    pre_files = sorted(pre_dir.glob(pattern))
     if not pre_files:
-        print(f"No snap_*.nc in {pre_dir}", file=sys.stderr)
+        print(f"No {pattern} in {pre_dir}", file=sys.stderr)
         return 2
 
     print(f"Comparing {len(pre_files)} file(s) in {pre_dir} vs {post_dir}")
@@ -75,7 +85,7 @@ def main() -> int:
             all_ok = False
         print()
     if all_ok:
-        print("ALL FIELDS BIT-IDENTICAL — Tasks 3/4 gate passes.")
+        print(f"ALL FIELDS BIT-IDENTICAL ({pattern}) — gate passes.")
         return 0
     else:
         print("DIVERGENCE — block on Task 5.")

@@ -6,6 +6,7 @@
 #include "fesom_partit.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"
+#include "fesom_speed.hpp"   // M7 Task A.1: FESOM_SPEED_FLAT
 
 #include <Kokkos_Core.hpp>   // M2.5: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
@@ -16,6 +17,14 @@
 #include <string>
 #include <algorithm>
 #include <cstdio>
+
+/* M7 Task A.1 — FESOM_SPEED_FLAT, the two flattenable ALE column-loops (vvel divide,
+ * wvel_split). One helper per TU so the lever announces itself exactly once here. */
+static bool m7_ale_flat_on()
+{
+    static int c = -1;
+    return fesom_speed_on("FLAT", &c);
+}
 
 void fesom_ale_thickness_linfs(struct fesom_mesh *mesh)
 {
@@ -452,7 +461,27 @@ void fesom_ale_vert_vel_linfs_kk(const struct fesom_mesh *mesh,
             }
         });
 
-    /* Step 4: divide by area(nz, n) → m/s. */
+    /* Step 4: divide by area(nz, n) → m/s.
+     * M7 Task A.1 (FESOM_SPEED_FLAT): pure per-(n,nz) map — each slot reads, divides and
+     * writes ONLY itself — so one thread per slot is bit-identical to one thread per column.
+     * (Steps 2 and 3 above are NOT flattenable: the scatter's per-column atomic order and the
+     * cumsum's sequential bottom→top scan ARE the bit-identity. They are packages B.3 / C.2.) */
+    if (m7_ale_flat_on()) {
+        Kokkos::parallel_for("fesom_ale_vvel_divide_flat", Kokkos::RangePolicy<>(0, total),
+            KOKKOS_LAMBDA(const int i) {
+                const int n  = i / nl;
+                const int nz = i - n * nl;
+                const int nzmin = ulev_n(n) - 1;
+                const int nzmax = nlev_n(n) - 1;
+                if (nz < nzmin || nz >= nzmax) return;   /* legacy: nzmin .. nzmax-1 */
+                real_t a = area((size_t)i);              /* FESOM_NODE3D(n,nz,nl) == i */
+                if (a > 0.0) {
+                    w((size_t)i) /= a;
+                    if (gm_on)
+                        fer_w((size_t)i) /= a;
+                }
+            });
+    } else {
     Kokkos::parallel_for("fesom_ale_vvel_divide", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int n) {
             int nzmin = ulev_n(n) - 1;
@@ -466,6 +495,7 @@ void fesom_ale_vert_vel_linfs_kk(const struct fesom_mesh *mesh,
                 }
             }
         });
+    }
 
     dyn->w_fld.modify_device();
     if (gm_on) dyn->fer_w_fld.modify_device();
@@ -531,6 +561,32 @@ void fesom_ale_compute_wvel_split_kk(const struct fesom_mesh *mesh,
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
 
+    /* M7 Task A.1 (FESOM_SPEED_FLAT): pure per-(n,nz) map, every slot written once →
+     * flat is bit-identical. ⚠️ The legacy level bound is INCLUSIVE (nz <= nzmax), so the
+     * flat guard must be `nz > nzmax`, not `nz >= nzmax`. */
+    if (m7_ale_flat_on()) {
+        Kokkos::parallel_for("fesom_ale_wvel_split_flat", Kokkos::RangePolicy<>(0, N * nl),
+            KOKKOS_LAMBDA(const int i) {
+                const int n  = i / nl;
+                const int nz = i - n * nl;
+                const int nzmin = ulev_n(n) - 1;
+                const int nzmax = nlev_n(n) - 1;
+                if (nz < nzmin || nz > nzmax) return;    /* legacy: nzmin .. nzmax INCLUSIVE */
+                size_t k = (size_t)i;                    /* FESOM_NODE3D(n,nz,nl) == i */
+                real_t wv  = w(k);
+                real_t cfl = cfl_z(k);
+                if (use_wsplit > 0.5 && cfl > maxcfl) {
+                    real_t excess = cfl - maxcfl;
+                    real_t dd = (excess > 0.0 ? excess : 0.0) * inv_maxcfl;
+                    real_t inv_1_dd = 1.0 / (1.0 + dd);
+                    w_e(k) = wv * inv_1_dd;
+                    w_i(k) = wv * dd * inv_1_dd;
+                } else {
+                    w_e(k) = wv;
+                    w_i(k) = 0.0;
+                }
+            });
+    } else {
     Kokkos::parallel_for("fesom_ale_wvel_split", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int n) {
             int nzmin = ulev_n(n) - 1;
@@ -551,6 +607,7 @@ void fesom_ale_compute_wvel_split_kk(const struct fesom_mesh *mesh,
                 }
             }
         });
+    }
 
     dyn->w_e_fld.modify_device();
     dyn->w_i_fld.modify_device();

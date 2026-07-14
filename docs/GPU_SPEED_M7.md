@@ -445,7 +445,8 @@ and `IOACC` once resolved silently to OFF there — see L80 above. Since the fix
 |---|---|---|---|
 | `FESOM_SPEED` | master switch (all blessed levers) | — | scaffolded |
 | `FESOM_SPEED_FORCE_SERIAL` | dev-only: allow levers on Serial (byte proofs) | — | scaffolded |
-| `FESOM_SPEED_SYNCSTATS` | per-step sync/fence counters (diagnostic) | — | ✅ implemented (0.3/1.1) |
+| `FESOM_SPEED_SYNCSTATS` | per-step sync/fence counters (diagnostic) | — | ✅ implemented (0.3/1.1). **Opt-in ONLY** (`fesom_speed_on_exp`) since A.1 — a diagnostic must not ride the master switch |
+| **`FESOM_SPEED_FLAT`** | **flatten 4 column-loop kernels to one-thread-per-(column,level)** — `io_acc_u/v`, `kpp_ri_iwmix` (2→4 launches), `ale_vvel_divide`, `ale_wvel_split` | **bit-id** | ✅ **LANDED (A.1)** — all gates PASS incl. FORCE_SERIAL byte proof on **both** streams (snapshots + monthly). A/B below |
 | **`FESOM_SPEED_SWSKIP`** | **skip the DEAD host `sw_3d` (the device twin rebuilds it in full)** | **bit-id** | ✅ **LANDED — A/B −26.47%.** All gates PASS incl. the FORCE_SERIAL byte proof (1.2) |
 | `FESOM_SPEED_ICEFLUXDEV` | port `ice_oce_fluxes_mom` to device | bit-id | ✅ landed, all gates PASS. **A/B −0.72%** — real but small |
 | `FESOM_SPEED_NOFENCE2` | drop post-unpack halo fence | bit-id | ✅ landed, all gates PASS + memcheck-clean. **~−0.8%** (1.1) |
@@ -602,3 +603,125 @@ F ICELAG **(user-approved as EXPERIMENT 2026-07-14)**. Central estimate without 
 F ≈ 8×+. **Layout big-bet DEMOTED** (the #1 kernel is already at 59% of DRAM peak — a flip helps
 only the ~130–150 ms column-serial class that A/C fix per-kernel). User decisions: start package A;
 ICELAG experiment green-lit; **no push**.
+
+---
+
+# Package A — results (2026-07-14, Opus session)
+
+## Task A.3 — UCX/transport env A/B (job 26243303, frozen Tier-1 binary, NG5@4N, min of 2 reps)
+
+| leg | s/step | vs ref |
+|---|--:|--:|
+| `ref` (current job env) | 0.9161 | — |
+| `UCX_RNDV_SCHEME=get_zcopy` | 1.2380 | **+35.14%** |
+| `UCX_RNDV_SCHEME=put_zcopy` | 1.2379 | **+35.13%** |
+| `UCX_RNDV_FRAG_MEM_TYPE=cuda` | 0.9056 | −1.15% |
+
+**Verdict: NOTHING ADOPTED — Task A.3 CLOSED.** The adoption bar was >2% *and* a fidelity gate;
+the only positive leg (`fragcuda`, −1.15%) misses the bar, and the two rendezvous-scheme overrides
+are catastrophic — forcing zcopy defeats UCX's own pipelined staging for GPU buffers. The default
+env is already the right one. Transport diag (`UCX_LOG_LEVEL=info`): every rank pair runs
+`tag(rc_mlx5/mlx5_0:1)` — RC over the single IB port, as intended.
+
+## Task A.2 — hostprof: WHAT the "unnamed host segment" is (job 26243196)
+
+CPU call-stack sampling (`--sample=process-tree --backtrace=dwarf`), rank 0, 22-step steady window,
+~880 Hz, **every sample `Running`** (the host never blocks: MPI polls and CUDA fences spin), so one
+sample = 1.136 ms of main-thread wall clock. Traced step 926 ms vs the untraced 913.5 → 1.4%
+perturbation; the shape is trustworthy.
+
+**Answer: the host segment is the JRA55 FORCING, and it is 100% serial host code.** The host timer
+(not the sampler — see the L81 note below) says it plainly:
+
+| host phase (FPROF bracket, rank 0) | ms/step | calls/step |
+|---|--:|--:|
+| **`force:jra55_read`** (`fesom_jra55_step_cal`) | **75.2** | **1.0** |
+| `force:bulk_compute` | 21.9 | 1.0 |
+| → forcing phase total | **97.1** (10.1% of step) | |
+
+Sampling attribution inside it (deepest app frame, ms/step): `getcoeffld` 38.3 · `sincos` 23.5 ·
+`fesom_vector_g2r` 13.8 · `fesom_bulk_compute_kk` 5.4 · `fesom_cal_shortwave_rad` 1.5 ·
+`read_one_time_slice` 1.2. Also visible: `Kokkos DeepCopyCuda` 26.3 (the staging memcpy's host
+cost) and `profile_fence_event` 145.5 (host spinning in `cudaStreamSynchronize` — that is *waiting
+for the GPU*, i.e. the 591.8 ms of kernels, not overhead).
+
+### 🔴 The arithmetic that actually scoped package D (and a fresh L81 sighting)
+
+The sampler says `getcoeffld` costs 38.3 ms/step. **It cannot.** `getcoeffld` re-reads and
+re-interpolates a JRA time slice only when `rdate` leaves `[nc_time[t_indx], nc_time[t_indx_p1]]`
+— 3-hourly data at dt=180 → **once per 60 steps**, and the year-start prefetch covers step 1, so in
+a 25-step run its body runs **ZERO times**. (Verified by transcribing the C control flow into Python
+and running it against the real `uas.1958.nc` time axis: 3 refreshes per 200 steps, at steps 61 /
+121 / 181. The time-axis transform `nc_time/nm_nc_freq + julday(1900,1,1)` makes `nc_time[0]`
+exactly equal `julday(1958,1,1)` = 2436205, so the search lands cleanly at `t_indx=1`.) `getcoeffld`
+is `static` and gets inlined into `fesom_jra55_step`; with `--backtrace=dwarf` nsys expands DWARF
+inline frames, so the caller's per-node loop is being reported under the inlined callee's name.
+**L81 again, in a new costume: the profiler localised (the forcing phase) and mis-named (the
+function).** The host timer + node arithmetic is what settled it.
+
+**What the 75.2 ms actually is:** the per-node time-interpolation loop in `fesom_jra55_step`
+(`:665-701`), which runs over `myDim_nod2D` = **463 k nodes/rank** at NG5@4N and, for every node,
+every step, calls `fesom_vector_g2r` → **4 `sincos` per node** (`sin/cos` of `glat, glon, rlat,
+rlon`, CSE'd by the compiler). 463k × 4 sincos ≈ 1.85 M transcendental pairs per rank per step
+≈ **~44 ms at 2.5 GHz** — which is exactly what the sampler's `sincos`+`g2r` (37 ms) shows. The rest
+is 16 coef-array streams in / 8 forcing arrays out (~89 MB/step) plus the host halo exchange of the
+8 forcing fields, all inside the same bracket.
+
+### 🔴 The lever this hands package D: **the rotation trig is a CONSTANT**
+
+`fesom_vector_g2r` rotates the wind using only the node's **fixed** coordinates (`geo_coord_nod2D`,
+`coord_nod2D`) and a **cached** rotation matrix. The four `sincos` values per node are therefore
+**identical on every step, forever** — ~44 ms/step of recomputing a mesh constant. Precomputing them
+once into a per-node table (8 doubles/node = 30 MB/rank) leaves the expression tree untouched → the
+same operands in the same order → **bit-identical**, and turns 4 transcendentals into 8 loads.
+
+→ **New Task D.0 (`FESOM_SPEED_ROTCACHE`)**, ahead of the D.1 device port: ~20 lines, expected
+**−40 ms/step ≈ −4.4% at NG5@4N** — on its own comparable to all of package A, and the cheapest
+lever left in the campaign. ⚠️ **Honesty flag:** this is a *host*-code fix, so it speeds up the CPU
+reference too; it must be enabled on **both** sides before any GPU-vs-CPU ratio is re-quoted, or the
+speedup number is inflated by a fix that has nothing to do with the GPU.
+
+## Task A.1 — `FESOM_SPEED_FLAT` (4 flattened column-loop kernels)
+
+One boolean knob, four sites, all re-parallelized from one-thread-per-column to
+one-thread-per-(column, level):
+
+| site | file | measured (Tier-1, NG5@4N) |
+|---|---|--:|
+| `io_acc_u` / `io_acc_v` | `fesom_io.cpp:765/776` | 21.7 ms (10.9 each; ~20× the streaming floor) |
+| `kpp_ri_iwmix` (2 launches → 4) | `fesom_kpp.cpp:343` | 17.0 ms (SM 2.8%, 23.6 sec/req) |
+| `ale_vvel_divide` | `fesom_ale.cpp:456` | 6.7 ms |
+| `ale_wvel_split` | `fesom_ale.cpp:518` | 7.2 ms |
+| | | **pool 52.6 ms** |
+
+`ale_vvel_scatter` (29.5 ms) and `ale_vvel_cumsum` (7.9 ms) are deliberately **NOT** touched — their
+per-column order *is* their bit-identity (packages B.3 / C.2).
+
+**Bit-identity argument.** Every flattened site is a pure per-(n, nz) map whose every slot is written
+exactly once from operands no other slot writes, so slot order cannot change a byte. `ri_iwmix` is
+the only subtle one: each legacy loop splits into an INTERIOR kernel (the map) and an EDGE-COPY
+kernel (per node, six assignments kept in the legacy order inside one lambda). That is exact because
+a node's edge copies only ever touch that node's own slots and already ran after that node's interior
+loop — including for the degenerate `nzmax == nzmin+1` column, whose stale-carry chain the edge
+kernel reproduces verbatim (the interior kernel never touched those slots either). Launch order
+1→2→3→4 is load-bearing, exactly as D20's 1→2 was.
+
+### Gates — ALL PASS
+
+| gate | job | verdict |
+|---|---|---|
+| knob-OFF byte gate | 26243832 | ✅ `diff_snap` rc=0 — default path untouched |
+| FORCE_SERIAL byte proof (`snap_*.nc`) | 26243833 | ✅ rc=0 — covers kpp (`viscA`/`diffK`) + ale (`w`, `w_e`, `w_i`) |
+| FORCE_SERIAL byte proof (`*.monthly.nc`) | ↑ same run | ✅ rc=0, **17 files** incl. `u`/`v` — covers the io resolvers |
+| CUDA fidelity gate | 26243834 | ✅ PASS (worst 3.745e-03, the climate-close floor) |
+| announce (L80 armor) | — | ✅ exactly **3** `FESOM_SPEED_FLAT = ON` lines (io, kpp, ale) — the knob FIRED |
+
+### ⚠️ A gate hole this task found and closed
+
+The two io accumulators feed **only the time-mean stream** (`u/v.fesom.1958.monthly.nc`); they never
+touch `snap_*.nc`, which is all `diff_snap.py` globbed. So a FORCE_SERIAL proof of `FLAT` would have
+been **vacuous for two of its four sites** — the kernels would run, and nothing would compare their
+output. `diff_snap.py` now takes `--pattern` (default `snap_*.nc`, so every existing gate is
+unchanged) and the proof runs twice: once on the snapshots, once on `*.monthly.nc`. **Any future
+lever touching an io resolver must do the same** — a passing gate that never reads the lever's output
+is not evidence.

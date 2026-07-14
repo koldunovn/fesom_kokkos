@@ -762,11 +762,38 @@ static void resolve_sss_dev(const fesom_state *s, real_t *out_dev, size_t n)
     const int nl = s->mesh->nl;
     Kokkos::parallel_for("io_acc_sss", n, KOKKOS_LAMBDA(const size_t i){ out(i) += S(i * (size_t)nl + 0); });
 }
+/* M7 Task A.1 — FESOM_SPEED_FLAT (one knob, four sites; io is two of them).
+ *
+ * The u/v accumulators are the only io resolvers that are NOT already flat: they run
+ * one thread per ELEMENT and loop the column inside, so adjacent threads are nl*16 B
+ * apart and the load is fully uncoalesced. Measured 10.9 ms/step EACH at NG5@4N vs a
+ * ~0.6 ms streaming floor (26242512) — ~20x the DRAM-bound cost of the same bytes.
+ * Flat = one thread per (element, level) slot.
+ *
+ * BIT-IDENTICAL by construction: each output slot i receives exactly ONE `+=` of
+ * exactly the same operand in both variants, so no execution order across slots can
+ * change any byte. (FESOM_NODE3D(e,k,nl) == e*nl + k == the flat index i, and the
+ * FORCE_SERIAL iteration order i-ascending is literally the legacy e-major/k-minor
+ * order.) The uv read stays stride-2 interleaved (FESOM_ELEMVEC) — ~50% sector
+ * efficiency by construction; that is expected, not a bug to "fix" here. */
+static bool m7_io_flat_on()
+{
+    static int c = -1;
+    return fesom_speed_on("FLAT", &c);
+}
+
 static void resolve_u_dev(const fesom_state *s, real_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto uv = s->dyn->uv_fld.d();
     const int nl = s->mesh->nl;
+    if (m7_io_flat_on()) {
+        Kokkos::parallel_for("io_acc_u_flat", n, KOKKOS_LAMBDA(const size_t i){
+            const size_t e = i / (size_t)nl, k = i % (size_t)nl;
+            out(i) += uv(e * (size_t)nl * 2 + k * 2 + 0);
+        });
+        return;
+    }
     const size_t E = n / (size_t)nl;
     Kokkos::parallel_for("io_acc_u", E, KOKKOS_LAMBDA(const size_t e){
         for (int k = 0; k < nl; ++k)
@@ -778,6 +805,13 @@ static void resolve_v_dev(const fesom_state *s, real_t *out_dev, size_t n)
     io_acc_dev_t out(out_dev, n);
     auto uv = s->dyn->uv_fld.d();
     const int nl = s->mesh->nl;
+    if (m7_io_flat_on()) {
+        Kokkos::parallel_for("io_acc_v_flat", n, KOKKOS_LAMBDA(const size_t i){
+            const size_t e = i / (size_t)nl, k = i % (size_t)nl;
+            out(i) += uv(e * (size_t)nl * 2 + k * 2 + 1);
+        });
+        return;
+    }
     const size_t E = n / (size_t)nl;
     Kokkos::parallel_for("io_acc_v", E, KOKKOS_LAMBDA(const size_t e){
         for (int k = 0; k < nl; ++k)

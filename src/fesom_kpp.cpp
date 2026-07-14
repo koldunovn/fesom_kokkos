@@ -14,6 +14,7 @@
 #include "fesom_halo_device.hpp"   /* M5.5 (B): blmc device smoother + slab device-halo */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"  /* M7 Task A.1: FESOM_SPEED_FLAT */
 #include "fesom_tracers.h"
 
 #include <Kokkos_Core.hpp>   // M2.3b: device kernels (parallel_for) + Kokkos:: math
@@ -340,6 +341,12 @@ static void kpp_ri_iwmix(fesom_kpp *k, const struct fesom_aux *aux,
  * OVERWRITES diffKt with the shear-Ri diffusivity — fusing them or running Loop 2
  * before Loop 1 completes would feed Loop 2 corrupted Ri. Verbatim arithmetic.
  */
+static bool m7_kpp_flat_on()
+{
+    static int c = -1;
+    return fesom_speed_on("FLAT", &c);
+}
+
 static void kpp_ri_iwmix_kk(fesom_kpp *k, const struct fesom_aux *aux,
                             const struct fesom_dyn *dyn, const struct fesom_mesh *mesh)
 {
@@ -357,6 +364,90 @@ static void kpp_ri_iwmix_kk(fesom_kpp *k, const struct fesom_aux *aux,
     auto Z3d    = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C reads Z_3d_n (fesom_kpp.c:238) */
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
+
+    /* M7 Task A.1 — FESOM_SPEED_FLAT: one thread per (node, level) instead of per
+     * node-with-an-inner-column-loop. Measured 17.0 ms/step at NG5@4N with SM 2.8%
+     * and 23.6 sectors/request — the column loop makes every load uncoalesced.
+     *
+     * The two launches become FOUR: each legacy loop splits into its INTERIOR (a pure
+     * per-(n,nz) map) and its EDGE COPIES (per node, still sequential inside one
+     * lambda). Order 1→2→3→4 is load-bearing exactly as D20's 1→2 was; stream order
+     * provides the dependency.
+     *
+     * BIT-IDENTICAL: (a) every interior slot is written once, from operands no other
+     * slot writes, so slot order is irrelevant; (b) a node's edge copies only ever
+     * touch that node's own slots, and in the legacy code they already ran after that
+     * node's interior loop and concurrently with every OTHER node's — so hoisting all
+     * interiors ahead of all edges changes nothing; (c) the edge lambdas keep the six
+     * assignments in the legacy ORDER, which is what makes the degenerate
+     * (nzmax == nzmin+1, empty interior) column reproduce its stale-carry chain
+     * verbatim — the interior kernel never touched those slots either. */
+    if (m7_kpp_flat_on()) {
+        const size_t tot = (size_t)Nmy * (size_t)nl;
+
+        /* 1: Ri interior — legacy loop-1 body, verbatim. */
+        Kokkos::parallel_for("kpp_ri_iwmix_Ri_flat", tot, KOKKOS_LAMBDA(const size_t i){
+            const int n  = (int)(i / (size_t)nl);
+            const int nz = (int)(i % (size_t)nl);
+            const int nzmin = ulev_n(n) - 1;
+            const int nzmax = nlev_n(n) - 1;
+            if (nz <= nzmin || nz >= nzmax) return;      /* legacy: nzmin+1 .. nzmax-1 */
+            real_t dz_inv = 1.0 / (Z3d(FESOM_NODE3D(n, nz - 1, nl))
+                                 - Z3d(FESOM_NODE3D(n, nz,     nl)));   /* > 0 */
+            real_t du = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 0)
+                      - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 0);
+            real_t dv = uvnode(FESOM_ELEMVEC(n, nz - 1, nl) + 1)
+                      - uvnode(FESOM_ELEMVEC(n, nz,     nl) + 1);
+            real_t shear = (du * du + dv * dv) * dz_inv * dz_inv;
+            real_t Nsq = bvfreq(i);                      /* FESOM_NODE3D(n,nz,nl) == i */
+            real_t Nsq_pos = Nsq > 0.0 ? Nsq : 0.0;
+            diffK(0 * slab + i) = Nsq_pos / (shear + KPP_EPSLN);
+        });
+
+        /* 2: Ri edge copies — legacy loop-1 tail, verbatim, after the FULL interior. */
+        Kokkos::parallel_for("kpp_ri_iwmix_Ri_edge", Kokkos::RangePolicy<>(0, Nmy),
+            KOKKOS_LAMBDA(const int n){
+                int nzmin = ulev_n(n) - 1;
+                int nzmax = nlev_n(n) - 1;
+                diffK(0 * slab + FESOM_NODE3D(n, nzmin, nl)) =
+                    diffK(0 * slab + FESOM_NODE3D(n, nzmin + 1, nl));
+                diffK(0 * slab + FESOM_NODE3D(n, nzmax, nl)) =
+                    diffK(0 * slab + FESOM_NODE3D(n, nzmax - 1, nl));
+            });
+
+        /* 3: shape interior — legacy loop-2 body, verbatim. */
+        Kokkos::parallel_for("kpp_ri_iwmix_shape_flat", tot, KOKKOS_LAMBDA(const size_t i){
+            const int n  = (int)(i / (size_t)nl);
+            const int nz = (int)(i % (size_t)nl);
+            const int nzmin = ulev_n(n) - 1;
+            const int nzmax = nlev_n(n) - 1;
+            if (nz <= nzmin || nz >= nzmax) return;
+            real_t Rii = diffK(0 * slab + i);
+            real_t Rigg = Rii > 0.0 ? Rii : 0.0;            /* AMAX1(Ri,0) */
+            real_t ratio = Rigg / KPP_RIINFTY;
+            if (ratio > 1.0) ratio = 1.0;                   /* AMIN1(.,1) */
+            real_t frit = 1.0 - ratio * ratio;
+            frit = frit * frit * frit;
+            viscA(i) = KPP_VISC_SH_LIMIT * frit + A_bg;
+            real_t dK = KPP_DIFF_SH_LIMIT * frit + K_bg;    /* Kv0_const branch */
+            diffK(0 * slab + i) = dK;
+            diffK(1 * slab + i) = dK;                       /* diffK(2)=diffK(1) */
+        });
+
+        /* 4: shape edge copies — legacy loop-2 tail, verbatim, after the FULL interior. */
+        Kokkos::parallel_for("kpp_ri_iwmix_shape_edge", Kokkos::RangePolicy<>(0, Nmy),
+            KOKKOS_LAMBDA(const int n){
+                int nzmin = ulev_n(n) - 1;
+                int nzmax = nlev_n(n) - 1;
+                size_t a0 = FESOM_NODE3D(n, nzmin, nl),     a1 = FESOM_NODE3D(n, nzmin + 1, nl);
+                size_t b0 = FESOM_NODE3D(n, nzmax, nl),     b1 = FESOM_NODE3D(n, nzmax - 1, nl);
+                viscA(a0) = viscA(a1);
+                diffK(0*slab + a0) = diffK(0*slab + a1); diffK(1*slab + a0) = diffK(1*slab + a1);
+                viscA(b0) = viscA(b1);
+                diffK(0*slab + b0) = diffK(0*slab + b1); diffK(1*slab + b0) = diffK(1*slab + b1);
+            });
+        return;
+    }
 
     /* Loop 1: Ri = MAX(N²,0)/(shear²+epsln) → diffKt (channel 0) scratch. */
     Kokkos::parallel_for("kpp_ri_iwmix_Ri", Kokkos::RangePolicy<>(0, Nmy),
