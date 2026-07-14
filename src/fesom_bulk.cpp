@@ -3,6 +3,7 @@
  * No sea ice — Phase 3 ocean-only.
  */
 #include "fesom_bulk.h"
+#include "fesom_speed.hpp"   // M7 Task 1.2: FESOM_SPEED_SWSKIP
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
@@ -710,8 +711,39 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
     real_t *sw_3d = forcing->sw_3d;
     real_t *chl   = forcing->chl;
 
+    /* ==================================================================== *
+     * M7 Task 1.2 — FESOM_SPEED_SWSKIP: the sw_3d half of this function is DEAD WORK.
+     *
+     * M5.20 moved the sw_3d penetration profile to the device (fesom_cal_shortwave_rad_kk,
+     * below) and removed its HtoD push — but left THIS host computation running. Both are
+     * called back-to-back every step (fesom_main.cpp:1214-1215), and the device twin STARTS
+     * BY ZEROING THE WHOLE ARRAY (the fesom_sw3d_zero kernel) and then rewrites every entry.
+     * So everything this function writes into sw_3d is overwritten microseconds later, on
+     * BOTH backends:
+     *   CUDA   — sw_3d_fld is device-authoritative; nothing reads the host copy.
+     *   Serial — sw_3d_fld.d() IS this same host array, and the _kk twin overwrites it.
+     * The only unique output of this function is the nod2D `heat_flux += swsurf` side effect
+     * (the _kk kernel deliberately does NOT do it — see its :794 comment).
+     *
+     * The dead half is not cheap. It is a nod3D memset (N*nl doubles — 1.04 GB/rank/step at
+     * NG5@4N) plus a per-column exp() walk, single-threaded, on the critical path of every
+     * step. It is the bulk of the ~25% host segment the M7 stall budget found — NOT
+     * ice_oce_fluxes_mom, which the Task-1.0 A/B measured at only 0.72%.
+     *
+     * Skipping it is BIT-IDENTICAL by construction (the device twin recomputes sw_3d in full
+     * from the same inputs with the same arithmetic), and provable with the FORCE_SERIAL byte
+     * proof.
+     *
+     * ⚠️ The ONE host reader of sw_3d is kpp_bldepth (fesom_kpp.cpp:474), which is static and
+     * runs ONLY under -DFESOM_KK_VERIFY (fesom_step.cpp:215). Do not combine this knob with
+     * FESOM_KK_VERIFY: the verify twin would read a stale sw_3d.
+     * ==================================================================== */
+    static int s_swskip = -1;
+    const bool skip_sw3d = fesom_speed_on("SWSKIP", &s_swskip);
+
     /* zero sw_3d over all local nodes/levels (Fortran 39-43) */
-    memset(sw_3d, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+    if (!skip_sw3d)
+        memset(sw_3d, 0, (size_t)N * (size_t)nl * sizeof(real_t));
 
     for (int n2 = 0; n2 < N; ++n2) {
         if (mesh->ulevels_nod2D[n2] > 1) continue;   /* cavity: no penetration (F:51) */
@@ -720,7 +752,9 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
         /* visible shortwave into ocean [W/m²]; '+'-up: add back to heat_flux (F:56-60) */
         real_t swsurf = (1.0 - albw) * jra->shortwave[n2];   /* = qsr */
         swsurf *= 0.54;                                      /* visible part (300-750nm) */
-        forcing->heat_flux[n2] += swsurf;
+        forcing->heat_flux[n2] += swsurf;   /* THE unique output — always computed */
+
+        if (skip_sw3d) continue;            /* the device twin rebuilds sw_3d in full */
 
         /* Sweeney 2005 (Appendix A) two-band coefficients from chl (F:66-79) */
         real_t cc = chl[n2];

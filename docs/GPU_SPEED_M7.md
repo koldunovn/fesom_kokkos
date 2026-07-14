@@ -4,15 +4,11 @@
 
 ---
 
-## 🔴 THE TASK-0.3 HEADLINE: the "~25–30% remainder" is a HOST LOOP, not fences
+## 🔴 THE TASK-0.3 HEADLINE: the "~25–30% remainder" is HOST WORK — and it is DEAD host work
 
-**32% of the NG5@4N step is single-threaded host C++ — and ~26 points of it are one function:
-`fesom_ice_oce_fluxes_mom` (`src/fesom_ice_coupling.cpp:512`), a per-node + per-element host loop
-that runs EVERY step from `fesom_main.cpp:1173`.**
-
-`PROFILE_M522` described the remainder as *"host / kernel-launch gaps / blocking-sync pipeline
-stalls"* and the M7 plan's Tier-1A was built on the fence/launch-gap half of that guess. The nsys
-decomposition says the fences and launch gaps are **small** and the host loop is **huge**:
+**32% of the NG5@4N step is single-threaded host C++.** The plan's Tier-1A was built on fences and
+launch gaps; measured, those are **1.4% and 3.0%**. The fence *count* was right (996/step vs the
+~880 estimate) — the fences are just cheap.
 
 | the guess (plan Tier-1A) | the measurement (NG5@4N, rank 0, 23-step steady window) |
 |---|---|
@@ -20,22 +16,47 @@ decomposition says the fences and launch gaps are **small** and the host loop is
 | "launch gaps" | **38.1 ms/step (3.0%)** |
 | "host" | **408.2 ms/step (32.0%)** ← the whole remainder is here |
 
-**M5.22 already had this number and did not read it.** Its own step profile records
-*"coupling 21.4%"* (`docs/PROFILE_M522.md:53`) — a phase that contains essentially no GPU kernels.
-That 21.4% and this 26% are the same host loop, measured two independent ways.
+**~25 points of it are ONE function — and I first attributed it to the WRONG one. Read this before
+trusting any attribution in this doc.**
 
-**Why it caps the ratio.** The loop is host code, so it runs on **4 threads on a GPU node**
-(4 ranks = 4 GPUs) but on **128 ranks on a CPU node**. It is a ~32× parallelism deficit that the
-GPU pays and the CPU does not — it inflates the GPU step while leaving the CPU step alone, and it
-grows with the mesh. This is a structural drag on the ratio, and no fence/solver lever can touch it.
+The nsys host-gap is bounded precisely: it starts after the last sea-ice kernel and ends exactly at
+`fesom_cal_shortwave_rad_kk`. I read `fesom_main.cpp:1176–1202`, saw the chlorophyll block was not
+per-step, concluded the only remaining per-step code in the window was `fesom_ice_oce_fluxes_mom`
+(`fesom_ice_coupling.cpp:512`), and stopped reading. **The answer was 12 lines further down, at
+`fesom_main.cpp:1214`.** The A/B settled it: porting `ice_oce_fluxes_mom` to the device
+(`ICEFLUXDEV`) is bit-identical, gated, and worth **−0.72%** — not 25%.
 
-**Consequence:** a new Tier-1 lever, **Task 1.0 `FESOM_SPEED_ICEFLUXDEV`** — port the loop to
-Kokkos. It is embarrassingly parallel (per-node loop, then a per-element loop reading what the
-per-node loop wrote), so it is **bit-identical-able** (no atomics, no reductions, no reassociation)
-and provable with the `FORCE_SERIAL` byte proof. Estimated payoff at NG5@4N: **up to ~26% of the
-step**, i.e. more than every other Tier-1 lever combined. See the decision note below.
+**The real culprit: `fesom_cal_shortwave_rad` (host, `fesom_bulk.cpp:698`) is DEAD WORK.**
 
----
+```c
+fesom_main.cpp:1214  fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);     // host
+fesom_main.cpp:1215  fesom_cal_shortwave_rad_kk(&mesh, &jra, &ice, &forcing);  // device (M5.20)
+```
+
+Both are called, back-to-back, every step. M5.20 moved the `sw_3d` shortwave-penetration profile to
+the device and removed its 519 MB/step HtoD push — **but left the host computation running.** The
+device twin *starts by zeroing the whole array* (`fesom_sw3d_zero`, `fesom_bulk.cpp:784`) and then
+rewrites every entry, so everything the host wrote is overwritten microseconds later, on **both**
+backends (on Serial, `sw_3d_fld.d()` *is* that same host array). The host function's only unique
+output is the cheap nod2D `heat_flux += swsurf` side effect — which the device kernel deliberately
+does not do (`fesom_bulk.cpp:794`).
+
+The dead half is not cheap: a **nod3D `memset` (1.04 GB/rank/step at NG5@4N)** plus a per-column
+`exp()` walk, single-threaded, on the critical path of every step.
+
+→ **Task 1.2 `FESOM_SPEED_SWSKIP`**: skip the `sw_3d` half of the host function, keep `heat_flux`.
+Bit-identical by construction (the device twin recomputes `sw_3d` in full from the same inputs with
+the same arithmetic) and provable with the FORCE_SERIAL byte proof. ⚠️ The one host reader of
+`sw_3d` is `kpp_bldepth` (`fesom_kpp.cpp:474`), which is `static` and runs **only** under
+`-DFESOM_KK_VERIFY` (`fesom_step.cpp:215`) — do not combine the knob with VERIFY.
+
+**Why it still caps the ratio.** Host code runs on **4 threads on a GPU node** (4 ranks = 4 GPUs)
+but on **128 ranks on a CPU node** — a ~32× parallelism deficit the GPU pays and the CPU does not.
+That reasoning was right; only the function was wrong.
+
+**The lesson (see [[feedback-profiler-traps]]):** the profiler told me *where* the time was, to the
+microsecond. It cannot tell you *which source line* is in that window — for that you must read
+**all** the code between the bracketing kernels, not the first plausible candidate.
 
 ## Gate definitions
 
