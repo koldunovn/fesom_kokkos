@@ -214,4 +214,8 @@ void fesom_vector_g2r_trig(real_t glon, real_t glat, real_t rlon, real_t rlat,
                            real_t t[8]);
 void fesom_vector_g2r_cached(real_t *u, real_t *v, const real_t t[8]);
 
+/* M7 D.1: the constant geographic→rotated rotation matrix (row-major 3x3), so a device
+   kernel can capture it by value. Same matrix fesom_vector_g2r uses internally. */
+void fesom_mesh_rotation_matrix(real_t M[9]);
+
 #endif /* FESOM_MESH_H */

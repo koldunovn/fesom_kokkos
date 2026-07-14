@@ -86,6 +86,10 @@ typedef struct fesom_jra55_field {
     int       *bilin_j;          /* [nod2D] latitude bracket index */
     real_t    *coef_a;           /* [nod2D] linear-interp slope */
     real_t    *coef_b;           /* [nod2D] linear-interp intercept */
+    /* M7 D.1: Field-owned so the device producer can read them. getcoeffld still fills them
+     * on the HOST (it runs ~1 step in 60 — the netCDF read + bilinear interp stay host-side
+     * exactly as they are); it pushes host→device right after, so the per-step H2D is ~0. */
+    fesom::Field coef_a_fld, coef_b_fld;
     real_t    *sbcdata1;         /* [Nlon*Nlat] snapshot at t_indx (with cyclic halo) */
     real_t    *sbcdata2;         /* [Nlon*Nlat] snapshot at t_indx_p1 */
     int        sbcdata1_t_index; /* -1 if not yet filled */
@@ -145,9 +149,30 @@ typedef struct fesom_jra55 {
 
     /* M7 Task D.0 (FESOM_SPEED_ROTCACHE): [nod2D * 8] cache of the sin/cos values
      * fesom_vector_g2r needs per node. Mesh constants — built once on the first step,
-     * NULL when the lever is off (which is what selects the legacy path). */
-    real_t *rot_trig;
+     * NULL when the lever is off (which is what selects the legacy path).
+     * M7 D.1: Field-owned so the device producer can read it; the raw pointer stays a
+     * non-owning alias = rot_trig_fld.h(). */
+    real_t      *rot_trig;
+    fesom::Field rot_trig_fld;
 } fesom_jra55;
+
+/* M7 Task D.1 — FESOM_SPEED_FORCEDEV: the per-node time-interpolation loop runs as a
+ * DEVICE kernel, so the 8 physics arrays above become DEVICE-authoritative each step
+ * instead of host-authoritative.
+ *
+ * ⚠️ THIS INVERTS THE DualView RAIL. The IN rails in fesom_bulk.cpp (bulk_compute_kk) and
+ * fesom_ice.cpp (thermo block) push host→device UNCONDITIONALLY; with the device producer
+ * live they would deep-copy the STALE HOST MIRROR over the fresh device data every step.
+ * They MUST be skipped when this returns true — and a Serial byte proof CANNOT catch the
+ * mistake, because on Serial the host and device views are the same memory (the rail is a
+ * no-op there). The CUDA fidelity gate is the real gate for this lever.
+ *
+ * Every surviving HOST reader of the 8 arrays must sync_host() first:
+ *   fesom_cal_shortwave_rad (fesom_bulk.cpp, EVERY step — SWSKIP does not skip its
+ *   heat_flux += swsurf half), the host fesom_bulk_compute (init + verify), and the host
+ *   fesom_ice_thermodynamics twin (verify).
+ * Declared here so the rails and the host twins all ask the same question. */
+bool fesom_forcing_dev_on(void);
 
 /* julday — port of gen_surface_forcing.F90:1828.
  * Returns julian day at noon for (yyyy,mm,dd) under the named calendar.

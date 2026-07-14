@@ -874,3 +874,48 @@ per-rank-proxy method it *is* the **Stage-2 regime**. So:
 "comm-bound" is confounded with mesh geometry. The per-rank-proxy method ([[feedback-per-rank-proxy]])
 says dars@8N is faithful for halo/comm behaviour (NOT for CG iteration counts). **Confirm at NG5@16N
 before betting the ladder on it** — but the direction is strong enough to re-rank D and E above B/C now.
+
+---
+
+# Task D.1 — `FESOM_SPEED_FORCEDEV` (the forcing loop → device)
+
+Implemented 2026-07-14. The per-node time-interpolation loop becomes a Kokkos device kernel; the 8
+forcing arrays turn DEVICE-authoritative; the 8 separate host halo rounds collapse into ONE
+`fesom_halo_fieldN` (device pack/exchange/unpack); the two host→device IN rails are skipped.
+
+### 🔴 What made this dangerous, and what a Serial proof cannot tell you
+
+The 8 arrays are DualViews whose raw host pointers were written in place by the host producer,
+invisibly to the DualView — so `fesom_bulk.cpp:520` and `fesom_ice.cpp:647` call
+`modify_host(); sync_device()` on all 8 **unconditionally, every step**. With a device producer those
+rails **deep-copy the stale host mirror over the fresh device data.** **On Serial the host and device
+views are the same memory, so the rail is a no-op and the FORCE_SERIAL byte proof passes either way.**
+The CUDA fidelity gate is the only gate that can see this.
+
+Three surviving host readers, each given a `sync_host()`:
+1. `fesom_cal_shortwave_rad` — reads `jra->shortwave` **every step, in production**. `SWSKIP` does NOT
+   skip it (it drops only the dead `sw_3d` half; the `heat_flux += swsurf` accumulation always runs).
+2. the host `fesom_bulk_compute` — **not verify-only**: `fesom_main.cpp:905` runs it once at init.
+3. the host `fesom_ice_thermodynamics` twin — verify-only.
+
+A fourth trap, found while reviewing my own diff: `fesom_halo_fieldN` is guarded on `partit`, and it is
+what sets `modify_device()`. On a single-rank run the halo call is skipped, so the fields would have
+stayed flagged *host*-current — the device data invisible to the DualView, and every later
+`sync_host()` a silent no-op returning stale values. The producer now calls `modify_device()` itself.
+
+### Acceptance arithmetic — PRE-REGISTERED (before the A/B landed), and it corrects my own error
+
+My first projection (5.78×) **double-counted**: it assumed D.1 removes the full 75.2 ms forcing from
+the 866.2 ms step — but ROTCACHE had already taken 19.7 ms of it. Forcing now = **55.5 ms**, not 75.2.
+
+| D.1 removes | ms/step |
+|---|--:|
+| host loop 55.5 → device kernel ~2 | 53.5 |
+| 8 host halo rounds → 1 device halo | 2.5 |
+| the two rails' H2D (8 × 3.7 MB/step) | 1.5 |
+| **NEW cost:** shortwave D2H for the surviving host reader | −0.2 |
+| **total** | **57.3** |
+
+- **NG5@4N: 866.2 → ~809 ms/step = −6.6% marginal → ratio ~5.67×** (NOT 5.78×).
+- **NG5@16N: −4.8% → SYPD ≈ 2.01** — **Stage 2 is right at the line, not comfortably past it.**
+- 🔴 **~0% = DEAD KNOB (L80), not a null lever.** Check the `FORCEDEV` announce line first.

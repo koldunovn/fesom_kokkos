@@ -516,6 +516,17 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
 
     /* ---- Loop 2 (myDim+eDim, halo included): per-node therm_ice ---- */
     /* Fortran line 244 — loop bound includes halo, Fortran writes halo entries */
+    /* M7 D.1 (FORCEDEV): this host C twin reads all 8 JRA arrays raw. Verify-only
+     * (FESOM_KK_VERIFY=icethermo), but with the device producer live the host mirrors are
+     * stale — without this the twin would compare the _kk output against garbage. */
+    if (fesom_forcing_dev_on()) {
+        struct fesom_jra55 *j = const_cast<struct fesom_jra55 *>(jra);
+        j->u_wind_fld.sync_host();    j->v_wind_fld.sync_host();
+        j->shum_fld.sync_host();      j->shortwave_fld.sync_host();
+        j->longwave_fld.sync_host();  j->Tair_fld.sync_host();
+        j->prec_rain_fld.sync_host(); j->prec_snow_fld.sync_host();
+    }
+
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     for (int n = 0; n < N; ++n) {
         if (mesh->ulevels_nod2D[n] > 1) continue;   /* cavity skip */

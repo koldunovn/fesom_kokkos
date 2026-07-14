@@ -248,6 +248,18 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
      * reads Ch/Ce directly over myDim+eDim; computing them on myDim only left
      * eDim stale -> divergent a_ice across ranks -> divergent stress_surf on
      * replicated boundary elements -> non-conservative SSH RHS -> dt blow-up. */
+    /* 🔴 M7 D.1 (FORCEDEV): this host C twin reads all 8 JRA arrays through the raw alias. It is
+     * NOT verify-only — fesom_main.cpp calls it once at init (right after the producer) to seed
+     * the first surface state. With the device producer live the host mirrors are stale, so pull
+     * them back. Init + FESOM_KK_VERIFY=bulk only; never in the step loop. */
+    if (fesom_forcing_dev_on()) {
+        struct fesom_jra55 *j = const_cast<struct fesom_jra55 *>(jra);
+        j->u_wind_fld.sync_host();    j->v_wind_fld.sync_host();
+        j->shum_fld.sync_host();      j->shortwave_fld.sync_host();
+        j->longwave_fld.sync_host();  j->Tair_fld.sync_host();
+        j->prec_rain_fld.sync_host(); j->prec_snow_fld.sync_host();
+    }
+
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     int E = mesh->myDim_elem2D;
 
@@ -519,7 +531,15 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
 
     /* IN rail (L28/L14): the 8 JRA physics arrays are freshly time-interpolated on the host each
      * step via the raw alias (fesom_jra55_step_cal), invisible to the DualView → push host→device.
-     * (jra const → const_cast for this coherence-only sync, like the ice-thermo IN rail.) */
+     * (jra const → const_cast for this coherence-only sync, like the ice-thermo IN rail.)
+     *
+     * 🔴 M7 D.1 (FORCEDEV): when the producer is a DEVICE kernel the arrays are already
+     * device-authoritative (fesom_halo_fieldN set modify_device()), and this rail would
+     * deep-copy the STALE HOST MIRROR back over them — every step, before anything reads it.
+     * So it must be skipped. Note a Serial byte proof CANNOT catch a mistake here: on Serial
+     * the host and device views are the same memory and the whole rail is a no-op. The CUDA
+     * fidelity gate is the gate for this. */
+    if (!fesom_forcing_dev_on()) {
     struct fesom_jra55 *j = const_cast<struct fesom_jra55 *>(jra);
     j->u_wind_fld.modify_host();    j->u_wind_fld.sync_device();
     j->v_wind_fld.modify_host();    j->v_wind_fld.sync_device();
@@ -529,6 +549,7 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
     j->Tair_fld.modify_host();      j->Tair_fld.sync_device();
     j->prec_rain_fld.modify_host(); j->prec_rain_fld.sync_device();
     j->prec_snow_fld.modify_host(); j->prec_snow_fld.sync_device();
+    }
 
     auto uw    = jra->u_wind_fld.d();    auto vw    = jra->v_wind_fld.d();
     auto qair  = jra->shum_fld.d();      auto swr   = jra->shortwave_fld.d();
@@ -702,6 +723,17 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
                              struct fesom_forcing     *forcing)
 {
     if (!FESOM_PHASE1_USE_SW_PENE) return;
+
+    /* 🔴 M7 D.1 (FORCEDEV): this is the LAST production HOST reader of a JRA array — it reads
+     * jra->shortwave[n2] raw, every step, and SWSKIP does NOT skip it (SWSKIP drops only the
+     * dead sw_3d half; the `heat_flux += swsurf` accumulation below always runs). With the
+     * device producer live, the host mirror is stale → pull it back. One nod2D D2H (~3.7 MB at
+     * NG5@4N ≈ 0.2 ms) against the 75 ms the port saves. (Follow-up: move the heat_flux
+     * accumulation into fesom_cal_shortwave_rad_kk, which deliberately omits it today, and this
+     * D2H disappears with the last host reader.) */
+    if (fesom_forcing_dev_on()) {
+        const_cast<struct fesom_jra55 *>(jra)->shortwave_fld.sync_host();
+    }
 
     const int    N    = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int    nl   = mesh->nl;

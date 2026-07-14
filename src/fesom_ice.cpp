@@ -645,7 +645,11 @@ void fesom_ice_step(int                            step,
             tg.assign(ice->thermo.thdgr,  ice->thermo.thdgr  + N);
         }
         struct fesom_jra55 *j = const_cast<struct fesom_jra55 *>(jra);
-        /* IN rail — jra (8): freshly time-interpolated on the host each step via the raw alias (L14). */
+        /* IN rail — jra (8): freshly time-interpolated on the host each step via the raw alias (L14).
+         * 🔴 M7 D.1 (FORCEDEV): skipped when the producer is a device kernel — otherwise this
+         * pushes the stale host mirror over the fresh device data. (Invisible on Serial: the
+         * views are the same memory there. The CUDA fidelity gate is the gate.) */
+        if (!fesom_forcing_dev_on()) {
         j->u_wind_fld.modify_host();    j->u_wind_fld.sync_device();
         j->v_wind_fld.modify_host();    j->v_wind_fld.sync_device();
         j->shum_fld.modify_host();      j->shum_fld.sync_device();
@@ -654,6 +658,7 @@ void fesom_ice_step(int                            step,
         j->Tair_fld.modify_host();      j->Tair_fld.sync_device();
         j->prec_rain_fld.modify_host(); j->prec_rain_fld.sync_device();
         j->prec_snow_fld.modify_host(); j->prec_snow_fld.sync_device();
+        }
         /* forcing (3) + ice inputs (uice/vice/srfoce/values/t_skin/thdgr). */
         forcing->runoff_fld.modify_host();     forcing->runoff_fld.sync_device();
         forcing->Ch_atm_oce_fld.modify_host(); forcing->Ch_atm_oce_fld.sync_device();

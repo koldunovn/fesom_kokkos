@@ -174,6 +174,13 @@ void fesom_vector_g2r(real_t *u, real_t *v,
  * operands, same order, so the result is bit-identical (the FORCE_SERIAL byte proof
  * is the arbiter, and it also catches any FMA-contraction shift). Deliberately NOT
  * collapsed into a per-node 2x2 matrix: that would reassociate the arithmetic. */
+/* M7 D.1: the (constant) geographic→rotated matrix, so a DEVICE kernel can capture it by
+ * value — build_rotation_matrix is host-only and unreachable from a lambda. */
+void fesom_mesh_rotation_matrix(real_t M[9])
+{
+    build_rotation_matrix(M);
+}
+
 void fesom_vector_g2r_trig(real_t glon, real_t glat, real_t rlon, real_t rlat,
                            real_t t[8])
 {

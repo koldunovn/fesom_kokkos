@@ -5,10 +5,12 @@
 #include "fesom_jra55.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M7 D.1: fesom_halo_fieldN (one message for all 8)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
-#include "fesom_speed.hpp"   // M7 Task D.0: FESOM_SPEED_ROTCACHE
+#include "fesom_speed.hpp"   // M7 D.0: FESOM_SPEED_ROTCACHE · D.1: FESOM_SPEED_FORCEDEV
 
+#include <Kokkos_Core.hpp>   // M7 D.1: the device time-interpolation kernel
 #include <math.h>
 #include <netcdf.h>
 #include <stdio.h>
@@ -516,6 +518,16 @@ static void getcoeffld(fesom_jra55_field *flf,
         flf->coef_a[n] = (d2 - d1) / delta_t;
         flf->coef_b[n] = d1 - flf->coef_a[n] * flf->nc_time[t_indx - 1];
     }
+
+    /* M7 D.1: the coefficients were just rewritten on the HOST (netCDF read + bilinear
+     * interp stay host-side). Push them to the device for the device producer. This runs
+     * only when the 3-hourly interval rolls over (~1 step in 60 at dt180), so the H2D is
+     * ~1 MB/step amortized — it is NOT a per-step cost. On a Serial build the Field's
+     * host and device views are the same memory and this is a no-op. */
+    if (fesom_forcing_dev_on()) {
+        flf->coef_a_fld.modify_host();  flf->coef_a_fld.sync_device();
+        flf->coef_b_fld.modify_host();  flf->coef_b_fld.sync_device();
+    }
 }
 
 /* ------------------------------------------------------------------------ *
@@ -554,9 +566,14 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         flf->year_loaded = -1;
         flf->ncid        = -1;
         /* coef_a/b are computed only at myDim — the halo of jra->* is filled
-         * by exchange after the step compute, so coefs need not extend. */
-        flf->coef_a = (decltype(flf->coef_a))calloc((size_t)N_my, sizeof(real_t));
-        flf->coef_b = (decltype(flf->coef_b))calloc((size_t)N_my, sizeof(real_t));
+         * by exchange after the step compute, so coefs need not extend.
+         * M7 D.1: Field-owned (raw ptrs = non-owning aliases, the M1.4 pattern) so the
+         * device producer can read them; .alloc zero-inits exactly like the calloc did. */
+        char nm[64];
+        snprintf(nm, sizeof nm, "jra.coef_a[%d]", f);
+        flf->coef_a_fld.alloc(nm, (size_t)N_my);  flf->coef_a = flf->coef_a_fld.h();
+        snprintf(nm, sizeof nm, "jra.coef_b[%d]", f);
+        flf->coef_b_fld.alloc(nm, (size_t)N_my);  flf->coef_b = flf->coef_b_fld.h();
         flf->sbcdata1_t_index = -1;
         flf->sbcdata2_t_index = -1;
         FESOM_CHECK(flf->coef_a && flf->coef_b,
@@ -598,12 +615,12 @@ void fesom_jra55_free(fesom_jra55 *jra)
         free(flf->nc_time);
         free(flf->bilin_i);
         free(flf->bilin_j);
-        free(flf->coef_a);
-        free(flf->coef_b);
+        /* M7 D.1: coef_a/coef_b are Field-owned now (raw ptrs = non-owning aliases) — do NOT
+         * free() them; *jra = fesom_jra55{} below releases every Field (D13). */
         free(flf->sbcdata1);
         free(flf->sbcdata2);
     }
-    free(jra->rot_trig);   /* M7 D.0 (ROTCACHE); NULL when the lever is off */
+    /* M7 D.0/D.1: rot_trig is Field-owned too — released by the assignment below. */
 
     /* M4.3d-a: the 8 physics arrays are now Field-owned (raw ptrs = non-owning aliases) — do NOT
      * free() them. *jra = fesom_jra55{} releases every Field (Kokkos refcount) + zeros the PODs,
@@ -645,6 +662,21 @@ static bool m7_jra_rotcache_on()
     return fesom_speed_on("ROTCACHE", &c);
 }
 
+/* M7 Task D.1 — FESOM_SPEED_FORCEDEV. Non-inline, defined once, so the rails in
+ * fesom_bulk.cpp / fesom_ice.cpp and the host verify twins all read the SAME answer and
+ * the lever announces exactly once. */
+bool fesom_forcing_dev_on(void)
+{
+    static int c = -1;
+    return fesom_speed_on("FORCEDEV", &c);
+}
+
+/* FORCEDEV needs the rotation table on the device, so it implies D.0's cache. */
+static bool m7_jra_need_trig()
+{
+    return m7_jra_rotcache_on() || fesom_forcing_dev_on();
+}
+
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit,
@@ -672,21 +704,123 @@ void fesom_jra55_step(fesom_jra55 *jra,
         }
     }
 
-    /* M7 Task D.0 — FESOM_SPEED_ROTCACHE. Build the per-node sin/cos table once. */
-    if (!jra->rot_trig && m7_jra_rotcache_on()) {
+    /* M7 Task D.0 — FESOM_SPEED_ROTCACHE. Build the per-node sin/cos table once.
+     * Field-owned since D.1 (the device producer reads it); the raw pointer is the alias. */
+    if (!jra->rot_trig && m7_jra_need_trig()) {
         int Nall = mesh->nod2D;                  /* myDim + eDim */
-        jra->rot_trig = (real_t *)malloc((size_t)Nall * 8 * sizeof(real_t));
-        FESOM_CHECK(jra->rot_trig, "fesom_jra55: rot_trig alloc (%d nodes)", Nall);
+        jra->rot_trig_fld.alloc("jra.rot_trig", (size_t)Nall * 8);
+        jra->rot_trig = jra->rot_trig_fld.h();
         for (int n = 0; n < Nall; ++n) {
             fesom_vector_g2r_trig(mesh->geo_coord_nod2D[2*n + 0], mesh->geo_coord_nod2D[2*n + 1],
                                   mesh->coord_nod2D[2*n + 0],     mesh->coord_nod2D[2*n + 1],
                                   &jra->rot_trig[8 * (size_t)n]);
         }
+        jra->rot_trig_fld.modify_host();
+        jra->rot_trig_fld.sync_device();         /* mesh constants: pushed once, never again */
     }
     const real_t *rot_trig = jra->rot_trig;      /* NULL ⇒ legacy path (recompute per step) */
 
-    /* data_timeinterp + distribution to physics arrays. */
     int N = mesh->myDim_nod2D;
+
+    /* ================= M7 Task D.1 — FESOM_SPEED_FORCEDEV ==========================
+     * The per-node time-interpolation loop as a DEVICE kernel. It is the easy kind of
+     * port — a pure per-node map, no reduction, no scatter, no column dependency — and
+     * it is the campaign's biggest host lever: 75.2 ms/step at NG5@4N (host timer
+     * force:jra55_read), because 463 k nodes/rank of serial host work is carried by
+     * only 4 ranks/node on the GPU config vs 128 on the CPU config (L84).
+     *
+     * On exit the 8 arrays are DEVICE-authoritative — the halo below (fesom_halo_fieldN)
+     * sets modify_device() and fills the halo on-device in ONE message per neighbour,
+     * replacing 8 separate host MPI rounds. ⚠️ The IN rails in fesom_bulk.cpp and
+     * fesom_ice.cpp MUST then be skipped, or they push the stale host mirror back over
+     * this. See fesom_jra55.h's FORCEDEV banner. */
+    if (fesom_forcing_dev_on()) {
+        auto a_xw = jra->fld[FESOM_JRA_XWIND].coef_a_fld.d();
+        auto b_xw = jra->fld[FESOM_JRA_XWIND].coef_b_fld.d();
+        auto a_yw = jra->fld[FESOM_JRA_YWIND].coef_a_fld.d();
+        auto b_yw = jra->fld[FESOM_JRA_YWIND].coef_b_fld.d();
+        auto a_sh = jra->fld[FESOM_JRA_HUMI ].coef_a_fld.d();
+        auto b_sh = jra->fld[FESOM_JRA_HUMI ].coef_b_fld.d();
+        auto a_sw = jra->fld[FESOM_JRA_QSR  ].coef_a_fld.d();
+        auto b_sw = jra->fld[FESOM_JRA_QSR  ].coef_b_fld.d();
+        auto a_lw = jra->fld[FESOM_JRA_QLW  ].coef_a_fld.d();
+        auto b_lw = jra->fld[FESOM_JRA_QLW  ].coef_b_fld.d();
+        auto a_ta = jra->fld[FESOM_JRA_TAIR ].coef_a_fld.d();
+        auto b_ta = jra->fld[FESOM_JRA_TAIR ].coef_b_fld.d();
+        auto a_pr = jra->fld[FESOM_JRA_PREC ].coef_a_fld.d();
+        auto b_pr = jra->fld[FESOM_JRA_PREC ].coef_b_fld.d();
+        auto a_sn = jra->fld[FESOM_JRA_SNOW ].coef_a_fld.d();
+        auto b_sn = jra->fld[FESOM_JRA_SNOW ].coef_b_fld.d();
+
+        auto uw = jra->u_wind_fld.d();    auto vw = jra->v_wind_fld.d();
+        auto sh = jra->shum_fld.d();      auto sw = jra->shortwave_fld.d();
+        auto lw = jra->longwave_fld.d();  auto ta = jra->Tair_fld.d();
+        auto pr = jra->prec_rain_fld.d(); auto sn = jra->prec_snow_fld.d();
+        auto tr = jra->rot_trig_fld.d();
+        const real_t rd = rdate;
+
+        /* The rotation matrix is a run-time constant; capture the 9 scalars by value
+         * (build_rotation_matrix is host-only and unreachable from a device lambda). */
+        real_t Mh[9];
+        fesom_mesh_rotation_matrix(Mh);
+        const real_t M0=Mh[0], M1=Mh[1], M2=Mh[2],
+                     M3=Mh[3], M4=Mh[4], M5=Mh[5],
+                     M6=Mh[6], M7=Mh[7], M8=Mh[8];
+
+        /* Same per-node arithmetic and the same operand order as the host loop below →
+         * bit-identical (each slot written once; no cross-node interaction). */
+        Kokkos::parallel_for("jra55_timeinterp", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                real_t u = rd * a_xw(n) + b_xw(n);
+                real_t v = rd * a_yw(n) + b_yw(n);
+#if FESOM_FORCE_ROTATION
+                /* g2r from the cached (constant) trig — the D.0 expression tree, verbatim */
+                const size_t t = 8 * (size_t)n;
+                real_t txg = -v*tr(t+0)*tr(t+3) - u*tr(t+2);
+                real_t tyg = -v*tr(t+0)*tr(t+2) + u*tr(t+3);
+                real_t tzg =  v*tr(t+1);
+                real_t txr = M0*txg + M1*tyg + M2*tzg;
+                real_t tyr = M3*txg + M4*tyg + M5*tzg;
+                real_t tzr = M6*txg + M7*tyg + M8*tzg;
+                vw(n) = -tr(t+4)*tr(t+7)*txr - tr(t+4)*tr(t+6)*tyr + tr(t+5)*tzr;
+                uw(n) = -tr(t+6)*txr + tr(t+7)*tyr;
+#else
+                uw(n) = u;
+                vw(n) = v;
+#endif
+                sh(n) = rd * a_sh(n) + b_sh(n);
+                sw(n) = rd * a_sw(n) + b_sw(n);
+                lw(n) = rd * a_lw(n) + b_lw(n);
+                ta(n) = (rd * a_ta(n) + b_ta(n)) - 273.15;
+                pr(n) = (rd * a_pr(n) + b_pr(n)) / 1000.0;
+                sn(n) = (rd * a_sn(n) + b_sn(n)) / 1000.0;
+            });
+
+        /* Mark the 8 DEVICE-authoritative. This is what makes skipping the IN rails safe, and
+         * what makes a later sync_host() at a host reader actually copy back.
+         * ⚠️ It must NOT be left to fesom_halo_fieldN below: that call is guarded on `partit`,
+         * so on a single-rank run the fields would stay flagged host-current, the device data
+         * would be invisible to the DualView, and every sync_host() would be a silent no-op
+         * returning stale values. (modify_device() is idempotent — fieldN sets it again.) */
+        jra->u_wind_fld.modify_device();    jra->v_wind_fld.modify_device();
+        jra->shum_fld.modify_device();      jra->shortwave_fld.modify_device();
+        jra->longwave_fld.modify_device();  jra->Tair_fld.modify_device();
+        jra->prec_rain_fld.modify_device(); jra->prec_snow_fld.modify_device();
+
+        /* Halo: ONE message per neighbour for all 8 (was 8 separate host MPI rounds) and, on
+         * CUDA, packed/unpacked on-device with no full-field PCIe round trip. */
+        if (partit) {
+            fesom_halo_fieldN({ &jra->u_wind_fld,    &jra->v_wind_fld,
+                                &jra->shum_fld,      &jra->shortwave_fld,
+                                &jra->longwave_fld,  &jra->Tair_fld,
+                                &jra->prec_rain_fld, &jra->prec_snow_fld },
+                              FESOM_HALO_NOD2D, 1, 1, partit);
+        }
+        return;
+    }
+    /* ================= legacy host path (unchanged) ================================ */
+
+    /* data_timeinterp + distribution to physics arrays. */
     for (int n = 0; n < N; ++n) {
         real_t a_xw  = jra->fld[FESOM_JRA_XWIND].coef_a[n];
         real_t b_xw  = jra->fld[FESOM_JRA_XWIND].coef_b[n];
