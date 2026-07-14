@@ -607,4 +607,42 @@ that file. "The gate passed" is only evidence if the gate *read the bytes the le
 
 ---
 
+### L84 — The GPU config runs 4 ranks/node; the CPU config runs 128. Every un-ported host loop therefore costs the GPU run ~32× more. (M7 D.0, 2026-07-14)
+
+This one explains the whole shape of the M7 campaign, and I only saw it while checking a claim I had
+already written down.
+
+I flagged `ROTCACHE` (a host-side fix) as a threat to the GPU-vs-CPU ratio: "it speeds the CPU
+reference up too, so enable it on both sides before quoting a ratio." Right in principle. **Wrong by
+160×**, because I assumed the two configs pay the same host cost. They do not:
+
+| | ranks/node | ranks @ NG5 4 nodes | **nodes/rank** | rotation trig |
+|---|--:|--:|--:|--:|
+| GPU run | **4** (one per GPU) | 16 | **463 k** | 37 ms of a 913 ms step = **4.05%** |
+| CPU run | **128** (one per core) | 512 | **14.5 k** | 1.2 ms of a 4599 ms step = **0.025%** |
+
+The forcing loop is **per-rank serial host work**. The CPU run spreads the mesh over 128 processes per
+node; the GPU run concentrates it into 4. **So the GPU config carries 32× more host work per rank —
+for exactly the same code.**
+
+**Consequences, and they are not small:**
+1. **A host-side cost that is invisible in a CPU profile can dominate the GPU step.** 0.025% vs 4%. Any
+   "we profiled it on CPU and that loop is nothing" reasoning is void for the GPU config.
+2. **This is *why* host code keeps being the answer in M7** — `SWSKIP` (−26%), `IOACC`, `ICEFLUXDEV`,
+   and now the forcing (75 ms/step). It is not coincidence and not sloppiness in one routine: it is
+   structural. Expect the next bottleneck to be host code too.
+3. **The fix for host code in this port is "move it to the device", never "make the host loop
+   faster".** Optimising the host loop (D.0, −4%) buys the amplification factor once; porting it (D.1,
+   −8%) removes it. D.0 is a down payment on D.1, not a substitute.
+4. **A host-side lever barely moves the CPU denominator**, so it does not inflate the ratio — but only
+   because of the rank-count asymmetry, *not* because the lever is GPU-specific. Check the arithmetic
+   before either claiming or dismissing a ratio distortion.
+
+*(Corollary for anyone reading a "GPU is N× the CPU node" number: part of that N is the GPU config
+being forced to run the un-ported serial remnant 32× more concentrated. That is a real cost of the
+port's current state, not an artefact — but it also means the ratio will keep improving as host code
+moves to the device, independently of any kernel getting faster.)*
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

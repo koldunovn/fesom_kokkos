@@ -38,12 +38,31 @@ Frozen binaries: `m7/bin/a1/` (FLAT only) and `build-m7cuda` md5 `8b2cdd5c` (FLA
 
 ---
 
-## 1. 🔴 The honesty flag you must carry into the ratio ledger
+## 1. 🔴 The rank-count asymmetry (L84) — the most useful thing learned this session
 
-**ROTCACHE is a HOST-code fix.** Unlike every other M7 lever it is not GPU-specific: the same serial
-loop runs in the CPU reference, so it speeds the CPU up too (~1% of a 4.6 s CPU step vs ~4.4% of a
-0.91 s GPU step). **Enable it on BOTH sides before re-quoting any GPU-vs-CPU ratio**, or the headline
-is inflated by a fix that has nothing to do with the GPU. Record the CPU-side number in the same row.
+ROTCACHE is a HOST fix, so I flagged it as a threat to the GPU-vs-CPU ratio ("it speeds the CPU
+reference up too"). Right in principle, **wrong by 160×** — and the reason matters far more than the
+lever:
+
+| | ranks/node | **nodes/rank** @ NG5 4N | rotation trig |
+|---|--:|--:|--:|
+| **GPU** run | **4** (one per GPU) | **463 k** | 37 ms of a 913 ms step = **4.05%** |
+| **CPU** run | **128** (one per core) | **14.5 k** | 1.2 ms of a 4599 ms step = **0.025%** |
+
+The forcing loop is **per-rank serial host work**. The CPU run spreads the mesh over 128 processes per
+node; the GPU run concentrates it into 4. **The GPU config therefore carries ~32× more host work per
+rank, for identical code.** (Measured, not just derived: `jobs/job_m7_ab_cpu` (new), job **26244994**.)
+
+**Three things follow, and they should steer the rest of the campaign:**
+1. A host cost that is *invisible* in a CPU profile can *dominate* the GPU step. 0.025% vs 4%.
+2. This is **why host code keeps being the answer in M7** — SWSKIP (−26%), IOACC, ICEFLUXDEV, and now
+   the forcing. It is structural, not coincidence. **Expect the next bottleneck to be host code too.**
+3. **The fix for host code here is "move it to the device", never "make the host loop faster."**
+   D.0 (−4%) buys the amplification factor once; **D.1 (−8%) removes it.** D.0 is a down payment.
+
+A host lever therefore does *not* inflate the ratio — but only because of the rank asymmetry, not
+because it is GPU-specific. **Still re-measure the CPU anchor same-day when quoting a ratio** (that
+rule is about ±5% cluster noise, not about this lever).
 
 ---
 

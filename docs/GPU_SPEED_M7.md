@@ -677,10 +677,31 @@ once into a per-node table (8 doubles/node = 30 MB/rank) leaves the expression t
 same operands in the same order → **bit-identical**, and turns 4 transcendentals into 8 loads.
 
 → **New Task D.0 (`FESOM_SPEED_ROTCACHE`)**, ahead of the D.1 device port: ~20 lines, expected
-**−40 ms/step ≈ −4.4% at NG5@4N** — on its own comparable to all of package A, and the cheapest
-lever left in the campaign. ⚠️ **Honesty flag:** this is a *host*-code fix, so it speeds up the CPU
-reference too; it must be enabled on **both** sides before any GPU-vs-CPU ratio is re-quoted, or the
-speedup number is inflated by a fix that has nothing to do with the GPU.
+**−40 ms/step ≈ −4% at NG5@4N** — on its own comparable to all of package A, and the cheapest lever
+left in the campaign.
+
+### 🔴 L84 — the rank-count asymmetry (why host code keeps winning)
+
+ROTCACHE is a *host* fix, so it was flagged as a threat to the GPU-vs-CPU ratio ("it speeds the CPU
+reference up too"). Right in principle, **wrong by 160×**, and the reason reframes the campaign:
+
+| | ranks/node | **nodes/rank** @ NG5 4N | the rotation trig |
+|---|--:|--:|--:|
+| **GPU** run | **4** (one per GPU) | **463 k** | 37 ms of a 913.5 ms step = **4.05%** |
+| **CPU** run | **128** (one per core) | **14.5 k** | 1.2 ms of a 4599 ms step = **0.025%** |
+
+The forcing loop is **per-rank serial host work**. The CPU run spreads the mesh over 128 processes per
+node; the GPU run concentrates it into 4 — so **the GPU config carries ~32× more host work per rank,
+for identical code.** (Measured: `jobs/job_m7_ab_cpu`, job 26244994.)
+
+Hence: a host cost invisible in a CPU profile can dominate the GPU step; **this is *why* host code keeps
+being the answer in M7** (SWSKIP −26%, IOACC, ICEFLUXDEV, now the forcing) — it is structural, so expect
+the next bottleneck to be host code too; and **the fix is always "move it to the device", never "make the
+host loop faster."** D.0 (−4%) buys the amplification factor once; **D.1 (−8%) removes it.**
+
+The CPU denominator moves by 0.025%, i.e. **40× below the same-alloc noise floor** — so a host lever does
+not inflate the ratio. But that is because of the rank asymmetry, *not* because the lever is GPU-specific.
+**Still re-measure the CPU anchor same-day when quoting a ratio** (that rule is about ±5% cluster noise).
 
 ## Task A.1 — `FESOM_SPEED_FLAT` (4 flattened column-loop kernels)
 
