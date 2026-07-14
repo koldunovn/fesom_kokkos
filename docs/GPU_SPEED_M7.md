@@ -801,3 +801,22 @@ output. `diff_snap.py` now takes `--pattern` (default `snap_*.nc`, so every exis
 unchanged) and the proof runs twice: once on the snapshots, once on `*.monthly.nc`. **Any future
 lever touching an io resolver must do the same** — a passing gate that never reads the lever's output
 is not evidence.
+
+### dars@8N — PREDICTION, recorded BEFORE the run landed (job 26245783)
+
+Pre-registering this because the campaign has twice been burned by reading a result and then
+constructing the story that fits it (L80, L81). dars@8N has **98.5 k nodes/rank** vs NG5@4N's
+**463 k** — a factor **0.213**.
+
+| lever | NG5@4N measured | dars@8N predicted | basis |
+|---|--:|--:|---|
+| `ROTCACHE` | −2.15% (−19.7 ms) | **−1.3%** (−4.2 ms) | pure per-node HOST work ⇒ scales with nodes/rank (**L84**) |
+| `FLAT` | −3.07% (−28.1 ms) | −1.9% (−6.0 ms) **or better** | GPU kernel work; launch overhead + occupancy floors mean it should NOT scale down linearly |
+| `both` | −5.37% | ~−3.2% naive | |
+
+(The packA handoff independently guessed −2..3% for FLAT at dars@8N.)
+
+🔴 **This is a FALSIFIABLE TEST of L84.** If `ROTCACHE` instead holds near −2% at dars@8N, then host
+cost does *not* scale with nodes/rank, the per-rank-amplification story is **wrong**, and the
+"host code is structurally amplified 32× on the GPU config" conclusion — which is currently steering
+the whole campaign toward D.1 — must be revisited.
