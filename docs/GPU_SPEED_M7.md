@@ -115,7 +115,7 @@ so later jobs can be pinned to certified-source code while the build tree moves.
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | M5.24 (ref, 2026-05-31 — historical, NOT the anchor) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
 | **row 0: m7 baseline** ✅ COMPLETE (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | **0.4487** | **1.2188** | **2.72** | **0.3178** | **0.8563** | **2.69** | **0.8177** |
-| **⭐ TIER 1** ✅ MEASURED (SWSKIP+ICEFLUXDEV+NOFENCE2+IOACC; standard set, jobs 26238084-86) | **0.9145** | 4.6005 | **5.03** | **0.5520** | 2.3624 | **4.28** | *queued* | 1.2188 | — | **0.2622** | 0.8563 | **3.27** | — |
+| **⭐ TIER 1** ✅ COMPLETE (SWSKIP+ICEFLUXDEV+NOFENCE2+IOACC; standard set, jobs 26238084-86) | **0.9145** | 4.6005 | **5.03** | **0.5520** | 2.3624 | **4.28** | **0.3432** | 1.2188 | **3.55** | **0.2622** | 0.8563 | **3.27** | — |
 
 ## ⭐⭐ STAGE-1 TARGET MET IN TIER 1 — 5.02× at NG5@4N, SYPD@dt240 = 1.99 at 16N
 
@@ -472,8 +472,29 @@ and only attributes the difference.
 
 | tier | knobs ON | 1-yr CORE2 climate | NG5@16N direct | tag |
 |---|---|---|---|---|
-| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (all 27 fields at the climate-close floor, worst 9.9e-03 `h_ice`; job 26235125) | GPU 0.4487 / CPU 1.2188 ✅ | `m7.0-baseline` ✅ `3d00123` |
-| **1** | **SWSKIP + ICEFLUXDEV + NOFENCE2 + IOACC** | ✅ **PASS** (job 26238055) | queued (26238086) | `m7.1-bitid` |
+| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (worst 9.9e-03 `h_ice`; job 26235125) | GPU 0.4487 / CPU 1.2188 ✅ | `m7.0-baseline` ✅ `3d00123` |
+| **1** | **SWSKIP + ICEFLUXDEV + NOFENCE2 + IOACC** | ✅ **PASS** (job 26238055) | ✅ **0.3432 → 3.55×** (26238086) | ✅ `m7.1-bitid` |
+
+## ⭐ TIER-1 VERDICT — measured standard set (jobs 26238084-86)
+
+| | row-0 GPU | Tier-1 GPU | CPU | now | **TIER 1** | gain | nod2D/rank |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| **NG5@4N** | 1.2796 | **0.9145** | 4.6005 | 3.60× | **5.03×** ⭐ | −28.5% | ~462k |
+| NG5@8N | 0.7381 | **0.5520** | 2.3624 | 3.20× | **4.28×** | −25.2% | ~231k |
+| **NG5@16N** | 0.4487 | **0.3432** | 1.2188 | 2.72× | **3.55×** | −23.5% | ~116k |
+| dars@8N | 0.3178 | **0.2622** | 0.8563 | 2.69× | **3.27×** | −17.5% | ~99k |
+
+**Against the campaign's three stated goals:**
+
+| goal (plan Overview) | result |
+|---|---|
+| **Stage 1: ≥5.0× at NG5/dars 4–8N** (4N firm, 8N stretch) | ✅ **NG5@4N = 5.03× — MET.** NG5@8N = 4.28× (the stretch edge, not reached) |
+| **Stage 2: flatten the ratio decay toward 16N** (was 2.72×) | ✅ **NG5@16N = 3.55×**, up from 2.72×. But the *relative* decay 4N→16N widened (24% → 29%) because the lever pays more where per-rank domains are large — honest, and it points Stage-2 work at comm/imbalance (Tier 3), not host code |
+| **~2 SYPD @ dt240 on NG5 at 16–32N, pure FP64** | **SYPD@dt240 = 1.86 at 16N** (from 1.42) — **within 7% of the goal**, in pure FP64, with mixed precision banned |
+
+**The gain tracks per-rank domain size** (−28.5% at 462k nod2D/rank → −17.5% at ~99k), exactly as a
+host-work lever must. ⚠️ **Never extrapolate one scale point's factor to another** — I did, published
+"SYPD 1.99", and the dars@8N A/B caught it. The measured answer is **1.86**.
 
 ### ✅ Tier-1 1-yr CORE2 climate gate — PASS (job 26238055)
 
