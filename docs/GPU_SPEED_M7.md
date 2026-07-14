@@ -54,9 +54,30 @@ the same arithmetic) and provable with the FORCE_SERIAL byte proof. ⚠️ The o
 but on **128 ranks on a CPU node** — a ~32× parallelism deficit the GPU pays and the CPU does not.
 That reasoning was right; only the function was wrong.
 
-**The lesson (see [[feedback-profiler-traps]]):** the profiler told me *where* the time was, to the
-microsecond. It cannot tell you *which source line* is in that window — for that you must read
-**all** the code between the bracketing kernels, not the first plausible candidate.
+**The lesson (see `feedback-profiler-traps` in project memory):** the profiler told me *where* the
+time was, to the microsecond, and it was right. It cannot tell you *which source line* is in that
+window — for that you must read **all** the code between the bracketing kernels, not the first
+plausible candidate. Two agreeing measurements of the same *window* are not independent confirmation
+of an *attribution*. **The same-alloc A/B is what turns an attribution into a fact.**
+
+✅ **The class is closed.** A device port that leaves the host original running is invisible to every
+correctness gate and costs full price, so I swept every `foo()` / `foo_kk()` pair for others.
+Comment-stripped, restricted to the per-step loop (`fesom_main.cpp:1072+` and `fesom_step.cpp`):
+**`fesom_cal_shortwave_rad` is the ONLY one.** Every other host twin (`bulk_compute`, `pressure_bv`,
+`compute_vel_nodes`, `mo_convect`, `pp_mixing`, `ssh_solve_cg`, `impl_vert_visc`, `update_vel`,
+`compute_hbar`, `ale_thickness_linfs`, `compute_ssh_rhs_linfs`, `pressure_force_linfs_fullcell`)
+is called only from the **initialisation / IC-seeding** section (lines 553–905), which runs once.
+
+### Gate results — Task 1.2 `SWSKIP`
+
+| # | gate | verdict |
+|---|---|---|
+| 26236816 | knob-OFF Serial byte gate | **PASS** |
+| 26236817 | **FORCE_SERIAL byte proof** (`SWSKIP=1`) | **PASS — bit-identity PROVEN** |
+| 26236818 | CUDA fidelity gate (`SWSKIP=1`) | **PASS** |
+| 26236819 | CUDA fidelity gate (all three knobs) | running |
+| 26236820 | **same-alloc A/B, NG5@4N** | **running — THE payoff number** |
+| 26236821/2 | A/B all-three (NG5@4N, dars@8N) | running |
 
 ## Gate definitions
 
