@@ -49,12 +49,28 @@ OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
 FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
 m7_provenance "$OUT" "$FESOM"
 
+# NSYS_TRACE / NSYS_SAMPLE — overridable so the same job can do BOTH of its two distinct uses:
+#   (a) HOST ATTRIBUTION (the default): -t cuda,mpi,osrt + CPU sampling with dwarf backtraces.
+#       This is what named the forcing loop (A.2). ⚠️ Read L82 before believing a symbol name.
+#   (b) GAP CENSUS (NSYS_TRACE=cuda,mpi NSYS_SAMPLE=none): kernels + memcpy + MPI + syncs only.
+#       That is everything the GPU-idle gap census needs, and it DROPS the sampler/OSRT/sched
+#       tables — which are ~half the rows (SAMPLING_CALLCHAINS 494k + OSRT 441k + SCHED 147k of
+#       ~2.5 M at 25 steps). At 300 steps the full trace would be ~12x a 100 MB sqlite and the
+#       in-job export alone would blow the wall clock. Halving it is what makes a long run viable.
+# ⚠️ FLAG TRAP (cost one job, see the banner above): --sample takes 'process-tree'|'system-wide'|
+# 'none'. NOT 'cpu', NOT 'process'. And a bad flag kills the run while the batch job still exits 0.
+NSYS_TRACE=${NSYS_TRACE:-cuda,mpi,osrt}
+NSYS_SAMPLE=${NSYS_SAMPLE:-process-tree}
+if [ "$NSYS_SAMPLE" = "none" ]; then SAMPLE_ARGS="--sample=none --cpuctxsw=none"
+else                                 SAMPLE_ARGS="--sample=$NSYS_SAMPLE --backtrace=dwarf --cpuctxsw=$NSYS_SAMPLE"; fi
+echo "nsys: -t $NSYS_TRACE  $SAMPLE_ARGS"
+
 cat > "$OUT/wrap.sh" <<WRAP
 #!/bin/bash
 F=$FESOM
 if [ "\${SLURM_PROCID:-0}" = "0" ]; then
-  exec nsys profile -t cuda,mpi,osrt -o "$OUT/hostprof" --force-overwrite=true \\
-       --sample=process-tree --backtrace=dwarf --cpuctxsw=process-tree \\
+  exec nsys profile -t $NSYS_TRACE -o "$OUT/hostprof" --force-overwrite=true \\
+       $SAMPLE_ARGS \\
        "\$F" "\$@"
 else exec "\$F" "\$@"; fi
 WRAP
