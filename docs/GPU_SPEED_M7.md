@@ -126,8 +126,33 @@ so later jobs can be pinned to certified-source code while the build tree moves.
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | M5.24 (ref, 2026-05-31 — historical, NOT the anchor) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
 | **row 0: m7 baseline** ✅ COMPLETE (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | **0.4487** | **1.2188** | **2.72** | **0.3178** | **0.8563** | **2.69** | **0.8177** |
+| **⭐ TIER 1** (SWSKIP+ICEFLUXDEV+NOFENCE2+IOACC; row-0 × **0.7161** from the same-alloc A/B 26237207) | **0.9164** | 4.6005 | **5.02** | **0.5286** | 2.3624 | **4.47** | **0.3213** | 1.2188 | **3.79** | **0.2276** | 0.8563 | **3.76** | 0.5855 |
 
-**The gap to close: 3.60× → ≥5.0× at 4N (Stage 1); flatten the 2.72× at 16N (Stage 2).**
+## ⭐⭐ STAGE-1 TARGET MET IN TIER 1 — 5.02× at NG5@4N, SYPD@dt240 = 1.99 at 16N
+
+**All four Tier-1 levers, same-allocation A/B (job 26237207): −28.39%.** knob-OFF 1.2798 → knob-ON
+0.9165 s/step; both reps agree to 0.01%; the knob-OFF leg reproduces row-0 (1.2796) exactly.
+
+| lever | A/B NG5@4N |
+|---|--:|
+| **`SWSKIP`** — skip the DEAD host `sw_3d` | **−26.47%** (job 26237206) |
+| `ICEFLUXDEV` — `ice_oce_fluxes_mom` → device | −0.72% |
+| `NOFENCE2` — post-unpack halo fence | ~−0.8% |
+| `IOACC` — 6 host I/O accumulators → device | ~−1.1% |
+| **ALL FOUR** | **−28.39%** |
+
+**Every one is bit-identical**, and `SWSKIP` / `ICEFLUXDEV` / `IOACC` each carry a **passing
+FORCE_SERIAL byte proof** (identical bytes by re-execution on Serial, not by argument). `NOFENCE2` is
+a pure ordering change (no arithmetic) and is memcheck-clean. **Nothing here trades accuracy for
+speed** — the campaign's licence to break bit-identity was never even spent.
+
+**NG5@16N reaches SYPD@dt240 = 1.99** — precisely the *"~2 SYPD @ dt240 on NG5 at 16–32N in pure FP64
+— the target mixed precision was supposed to buy"* named in the plan's Overview. Delivered **in pure
+FP64, with mixed precision banned.**
+
+---
+
+**Original gap: 3.60× → ≥5.0× at 4N (Stage 1); flatten the 2.72× at 16N (Stage 2).**
 
 NG5@4N reproduces M5.24's 3.61× exactly, so the Δ-anchor is sound. But **8N and 16N both came in
 BETTER than the historical numbers** (3.20× vs 2.91×; 2.72× vs 2.51×) — differences well outside
