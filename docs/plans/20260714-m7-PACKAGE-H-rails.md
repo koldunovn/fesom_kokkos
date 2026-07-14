@@ -383,33 +383,54 @@ profile and every ratio we have measured — and it does so ASYMMETRICALLY.**
 nodes/rank** (4 ranks/node) against the CPU's **14.5 k** (128 ranks/node) — **32×**. So the artifact
 costs the **GPU ≈ 49 ms/step and the CPU ≈ 1.5 ms/step.**
 
-| NG5@4N | reported | artifact | corrected |
-|---|--:|--:|--:|
-| GPU s/step | 0.8348 | −0.049 | **≈ 0.786** |
-| CPU s/step | 4.5853 | −0.002 | ≈ 4.584 |
-| **ratio** | **5.49×** | | **≈ 5.83×** |
+### ✅ THE FALSIFICATION TEST PASSED (job 26255546) — and it exposed MORE contamination, not less
 
-**The campaign has been UNDER-reporting the GPU/CPU ratio by ~6 %,** and the Stage-2 SYPD projection
-is correspondingly pessimistic. *(Per-lever marginal percentages are barely affected — the artifact is
-in both legs; it only inflates the denominator. FLUXDEV's −1.45 % becomes −1.56 %.)*
+Pre-registered before the run (NSTEPS=300 vs 25, same binary, same config, both step-profiled so the
+comparison is apples-to-apples):
 
-### 🔴 PRE-REGISTERED FALSIFICATION (job 26255546) — written before the run
+| | PRE-REGISTERED | **MEASURED** |
+|---|--:|--:|
+| `force:getcoeffld` | 8.0 → **≈1.2** calls/step | **1.2** ✅ |
+| `force:getcoeffld` | 49.3 → **≈7** ms/step | **7.7** ✅ |
+| getcoeffld saving | **≈42 ms** | **41.6 ms** ✅ |
+| **loop timing** | 0.8778 → ≈0.836 | **0.8778 → 0.8052** |
 
-Same binary, same config, **NSTEPS=300 instead of 25**:
-- `force:getcoeffld` should drop **8.0 → ≈ 1.2 calls/step** and **49.3 → ≈ 7 ms/step**
-- **the loop timing should come in ≈ 42 ms/step FASTER** than the 25-step run's **0.8778 s/step**
+**The mechanism is CONFIRMED and the getcoeffld numbers were exact.**
 
-**If the loop timing does NOT drop, this is wrong and the artifact is not on the critical path.**
+### 🔴 BUT THE RATIO CORRECTION IS **NOT** EARNED — do not quote one yet
 
-### What to do about it (once confirmed)
+**The loop timing dropped 72.6 ms, not 42.** Only **41.6 ms of that is `getcoeffld`** (which matched
+the prediction exactly). **The other ~31 ms is additional cold-start / amortisation contamination that
+was NOT predicted and is NOT yet attributed** — candidates: CG iteration count during barotropic
+spin-up, ice spin-up, and init costs amortising over 295 timed steps instead of 20 (the 5-step warmup
+is evidently nowhere near enough).
 
-1. **Fix the benchmark protocol** — the A/B and profile jobs must run past the cold start (≥ 60 steps
-   before the timed window, or a longer run) or start the model inside a valid JRA bracket. Every
-   number in `docs/GPU_SPEED_M7.md` needs a footnote until they are re-measured.
-2. **Fix the code anyway** — make the clamp branch STICKY (or memoize `coef_a/coef_b` on
-   `(t_indx, t_indx_p1, sbcdata1_t_index, sbcdata2_t_index)`). Recomputing identical coefficients from
-   identical data is **bit-identical to skip**, so this is a free, gate-able cleanup. Production payoff
-   ≈ 0; benchmark honesty ≈ everything.
+**An earlier draft of this section quoted a "corrected ratio ≈ 5.83× / 6.2×". That was WRONG and has
+been removed.** It mixed a *long-run GPU* number against a *35-step CPU* anchor. **The CPU anchor
+carries its own cold-start contamination of unknown size. You cannot mix protocols and get an honest
+ratio.**
+
+**What IS established:**
+- ✅ the `getcoeffld` mechanism, exactly as predicted (8.0 → 1.2 calls/step; 49.3 → 7.7 ms/step);
+- ✅ **the 35-step benchmark protocol is contaminated — by MORE than getcoeffld alone** (72.6 ms at
+  NG5@4N GPU). **Every s/step and every ratio in `docs/GPU_SPEED_M7.md` is affected.**
+- ❌ **the SIZE of the ratio correction. Unknown until BOTH anchors are re-measured the same way.**
+
+**Jobs 26255760 (GPU @300, ICERAILS, unprofiled) + 26255761 (CPU @300, dist_512) are the matched pair
+that settles it. Harvest both, then re-derive the ratio. Do not quote a corrected ratio before then.**
+
+### What to do about it
+
+1. **Fix the benchmark protocol** — A/Bs and profiles must run past the cold start (≥ 60 steps before
+   the timed window; the 300-step evidence says the true floor is higher still). **Every number in
+   `docs/GPU_SPEED_M7.md` needs a footnote until re-measured.** *(Per-lever MARGINAL percentages are
+   the least affected — the artifact sits in both legs and only inflates the denominator.)*
+2. **Attribute the missing ~31 ms** — a GPU-idle gap census on the 300-step trace vs the 25-step one
+   will name it in one query, for free.
+3. **Fix the code anyway** — make the clamp branch STICKY, or memoize `coef_a/coef_b` on
+   `(t_indx, t_indx_p1, sbcdata1_t_index, sbcdata2_t_index)`. Recomputing identical coefficients from
+   identical data is **bit-identical to skip** → a free, gate-able cleanup. Production payoff ≈ 0;
+   benchmark honesty ≈ everything.
 
 ---
 
