@@ -172,6 +172,27 @@ Skipping it is **bit-identical by construction** and proven by the FORCE_SERIAL 
 
 ## Ratio ledger
 
+> ## 🔴🔴 AND THE **16N** COLUMNS ARE CONTAMINATED A SECOND WAY: **MIXED GPU HARDWARE** (L94).
+> The Levante `gpu` partition is **heterogeneous** — `l40xxx` = **a100_40** (HBM2, 1555 GB/s),
+> `l50xxx` = **a100_80** (HBM2e, 1935 GB/s, ~25 % more). FESOM's step is 74.6 % memory-bound kernels and
+> **the slowest MPI rank sets the pace**, so ONE a100_40 node drags the whole job by a **measured +3.4 %**.
+>
+> | job | row | nodes | verdict |
+> |---|---|---|---|
+> | **26235123** | **row-0 NG5@16N** (0.4487) | **2× a100_40** of 16 | ❌ **CONTAMINATED** |
+> | **26238086** | **⭐ TIER-1 NG5@16N** (0.3432) | **1× a100_40** of 16 | ❌ **CONTAMINATED** |
+> | 26238084 / 26238085 | Tier-1 4N / 8N | pure a100_80 | ✅ clean |
+>
+> **⇒ Both 16N ratios are UNDERSTATED by ~3 %** (row-0 2.72 → ~2.81; Tier-1 **3.55 → ~3.67**).
+> **This does NOT explain the 5.03× → 3.55× decay toward 16N (a 29 % drop) — L84 SURVIVES.** It is a
+> correction, not a story change. **But it lands exactly on the Stage-2 claim:** the docs say
+> *"SYPD@dt240 = 1.99 at 16N … right AT the line, not comfortably past it."* A +3.4 % correction puts
+> that at **≈2.06 — Stage-2 may ALREADY BE MET.**
+> 🔴 **RE-MEASURE the 16N rows with `-C a100_80`. Do not adjust them.**
+> *(An **A/B is IMMUNE** — all legs share the nodes, so the hardware cancels. Only ABSOLUTE anchors are
+> hit. That includes job **26248860**, the pending 16N ladder test: it is a 4-leg A/B, so **its
+> percentages are valid even if it lands on mixed hardware.**)*
+
 > ## 🔴 EVERY ROW IN THIS TABLE IS ON THE CONTAMINATED 35-STEP PROTOCOL — SEE THE TOP OF THIS FILE.
 > They are kept for provenance (the *marginal* A/B percentages in them are still sound — the
 > `getcoeffld` artifact sits in BOTH legs and only inflates the denominator, understating each lever by
