@@ -774,6 +774,41 @@ int fesom_timestep(int                          step_n,
                               + (1.0 - alpha) * mesh->hbar_old[n];
             }
         }
+        /* 🔴 CORRECTNESS (not perf). This host loop writes eta_n through the RAW alias, so the
+         * DualView never learns the host is dirty. eta_n's only other rail is substep 4 (:511),
+         * which fires BEFORE this loop — so without the push below the DEVICE eta_n spends the
+         * whole back half of the step holding the PREVIOUS step's value, while the Field still
+         * reports Synced. Field::d() hands out the device view with no sync (fesom_field.hpp:74),
+         * so the one device reader left in this step — resolve_ssh_dev (fesom_io.cpp:868, the
+         * FESOM_SPEED_IOACC mean accumulator, which is in the BLESSED set) — silently accumulated
+         * ssh one step stale on CUDA.
+         *
+         * MEASURED (jobs/job_m7_ioacc_ssh, job 26253502): monthly-mean ssh, device resolver vs host
+         * resolver — pre-fix 7.061e-02, post-fix 2.357e-06. Every other field is UNCHANGED at the
+         * ~1e-4 CUDA run-to-run noise floor; ssh alone moves, by 30,000x. The magnitude is the one
+         * the mechanism predicts: host accumulates ssh(1..N), device ssh(0..N-1), so the means
+         * differ by (ssh(N)-ssh(0))/N = ssh(N)/20 at cold start.
+         *
+         * Why no gate caught it (L86): on Serial .d() and .h() are the SAME memory, so the
+         * FORCE_SERIAL byte proof CANNOT see a missing rail — NO SERIAL GATE CAN EVER VALIDATE A
+         * COHERENCE INVARIANT. The knob-OFF byte gate reads snap_*.nc, written from the HOST path
+         * (fesom_io.cpp:370, .h_checked()) and always correct. And one stale step in ~14k is far
+         * below the climate gate's floor. Only the arithmetic finds this class. (L80/L83/L86.)
+         *
+         * ⚠️ modify_host() ALONE IS NOT THE FIX — d() does not sync, so the device view would stay
+         * stale and only a LATER sync_device() would copy. The push is required.
+         *
+         * The push is strictly ADDITIVE: substep 4 already pushed these same host values, and no
+         * device kernel reads eta_n between here and the next substep 4, so nothing the momentum
+         * solver sees changes. It makes the device view current for the accumulator, nothing more.
+         *
+         * NOTE for the rails package: the substep-4 push at :511 is now provably redundant
+         * (this loop is the ONLY per-step host writer of eta_n — fesom_ale.cpp:788 is init-only),
+         * so :511 can be deleted for a net-zero rail count. Deliberately NOT done here: removing a
+         * rail is a CUDA-path change that no Serial gate can validate, and this commit is a pure
+         * correctness fix. */
+        dyn->eta_n_fld.modify_host();
+        dyn->eta_n_fld.sync_device();
     }
     /* eta_n already covers myDim+eDim because hbar/hbar_old are exchanged. */
     fesom_ale_dump_hbar(step_n, dyn, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:313) */

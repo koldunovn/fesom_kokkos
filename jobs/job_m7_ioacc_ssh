@@ -1,0 +1,123 @@
+#!/bin/bash
+#SBATCH --job-name=m7_ioacc_ssh
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/ioaccssh.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/ioaccssh.%j.err
+#
+# ============================================================================================
+# THE eta_n / IOACC-ssh DIFFERENTIAL — demonstrate the BUG and its FIX. (L83, L86)
+#
+# THE BUG (session 5): fesom_step.cpp substep 11 writes dyn->eta_n[] through the RAW HOST ALIAS
+# with no modify_host(). eta_n's only rail (:511) fires EARLIER in the step. So on CUDA the
+# DEVICE eta_n spends the back half of every step holding the PREVIOUS step's value, while the
+# DualView still reports Synced. Field::d() returns the device view WITHOUT syncing, and
+# resolve_ssh_dev (fesom_io.cpp:868 -- the FESOM_SPEED_IOACC mean accumulator, IN THE BLESSED
+# SET) reads exactly that view. => the IOACC monthly-mean ssh is accumulated ONE STEP STALE.
+#
+# WHY NO EXISTING GATE SEES IT (this job exists because of that):
+#   - FORCE_SERIAL byte proof: STRUCTURALLY BLIND. On Serial .d() and .h() are the SAME MEMORY,
+#     so a missing rail is a no-op there. It passes either way. (L86)
+#   - knob-OFF byte gate + CUDA fidelity gate: both read snap_*.nc, which is written from the
+#     HOST path (fesom_io.cpp:370, .h_checked()) and was ALWAYS CORRECT.
+#   - 1-yr climate: one stale step in ~14,000 is far below its floor.
+# The lever's output lands in *.monthly.nc and NOTHING WAS LOOKING AT IT. (L83, verbatim.)
+#
+# THE EXPERIMENT -- a controlled before/after. Within ONE binary, toggle ONLY IOACC:
+#   IOACC=1  -> resolve_ssh_dev   reads eta_n_fld.d()   (DEVICE -- the suspect)
+#   IOACC=0  -> resolve_ssh       reads dyn->eta_n      (HOST   -- the reference, always correct)
+# then diff *.monthly.nc between the two legs.
+#
+#   old binary (m7/bin/packa, md5 8b2cdd5c -- pre-fix)  : legs MUST DIFFER  <= proves the bug
+#   new binary (m7/bin/h1,    md5 af11605a -- post-fix) : legs MUST AGREE   <= proves the fix
+#
+# 🔴 PRE-REGISTERED FINGERPRINT: on the OLD binary the difference must appear in **ssh ONLY**.
+# The other IOACC-resolved fields (a_ice, m_ice, m_snow, uice, vice) have proper modify_device()
+# producers, so they must agree on BOTH binaries. If the old binary differs in ssh AND in those,
+# the diagnosis is WRONG and something else is stale too. If NOTHING differs on the old binary,
+# the diagnosis is wrong outright -- say so and do not retrofit.
+#
+# ⚠️ The size of the ssh difference is bounded and predictable: host accumulates ssh(1..N),
+# device accumulates ssh(0..N-1), so the means differ by (ssh(N) - ssh(0))/N. Cold start =>
+# ssh(0)=0 => the difference is ssh(N)/N -- small but FAR above round-off.
+#
+# Usage:  sbatch jobs/job_m7_ioacc_ssh
+# ============================================================================================
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2          # the PRIVATE mesh (L73), never /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+OLD=/work/ab0995/a270088/port2/m7/bin/packa/fesom_port_cuda   # pre-fix
+NEW=/work/ab0995/a270088/port2/m7/bin/h1/fesom_port_cuda      # post-fix
+
+BASE=/work/ab0995/a270088/port2/m7/ioaccssh
+rm -rf "$BASE"; mkdir -p "$BASE"
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+
+run_leg() {   # run_leg <outdir> <binary> <ioacc 0|1>
+    local out=$1 bin=$2 ioacc=$3
+    mkdir -p "$out"
+    (
+        while read -r v; do unset "$v"; done \
+            < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+        export FESOM_SPEED=1
+        export FESOM_SPEED_IOACC="$ioacc"
+        srun "$bin" "$MESH" "$out" 1800 20 10 "$PHC" 1958 > "$out/run.log" 2>&1
+    )
+    echo "    rc=$? $(grep -m1 'loop timing' "$out/run.log" 2>/dev/null || echo '(no timing)')"
+    echo "    IOACC announce: $(grep -c 'FESOM_SPEED_IOACC = ON' "$out/run.log" 2>/dev/null)"
+}
+
+echo "############ eta_n / IOACC-ssh differential ############"
+echo "old (pre-fix) : $OLD   md5 $(md5sum "$OLD" | cut -c1-8)"
+echo "new (post-fix): $NEW   md5 $(md5sum "$NEW" | cut -c1-8)"
+echo
+
+for tag in old new; do
+    bin=$OLD; [ "$tag" = new ] && bin=$NEW
+    for io in 1 0; do
+        echo "--- leg ${tag}_ioacc${io} ---"
+        run_leg "$BASE/${tag}_ioacc${io}" "$bin" "$io"
+    done
+done
+
+echo
+echo "################################################################################"
+echo "### DIFF the MEAN stream (*.monthly.nc) -- the file the lever's output lands in."
+echo "################################################################################"
+for tag in old new; do
+    echo
+    echo "=========== $tag binary: IOACC=1 (device eta_n) vs IOACC=0 (host eta_n) ==========="
+    "$PY" "$ROOT/scripts/diff_snap.py" --pattern '*.monthly.nc' \
+          "$BASE/${tag}_ioacc0" "$BASE/${tag}_ioacc1"
+    rc=$?
+    if [ "$tag" = old ]; then
+        if [ "$rc" -ne 0 ]; then echo ">>> OLD legs DIFFER (rc=$rc) -- THE BUG IS REAL. Check it is ssh ONLY."
+        else echo ">>> OLD legs AGREE -- 🔴 THE DIAGNOSIS IS WRONG. Do not retrofit; say so."; fi
+    else
+        if [ "$rc" -eq 0 ]; then echo ">>> NEW legs AGREE (rc=0) -- THE FIX WORKS. ✅"
+        else echo ">>> NEW legs still DIFFER (rc=$rc) -- 🔴 THE FIX IS INCOMPLETE."; fi
+    fi
+done
+
+echo
+echo "=== control: the SNAPSHOT stream must be identical on BOTH binaries (host path, never buggy) ==="
+for tag in old new; do
+    echo "--- $tag snap_*.nc ---"
+    "$PY" "$ROOT/scripts/diff_snap.py" "$BASE/${tag}_ioacc0" "$BASE/${tag}_ioacc1" | tail -3
+done
