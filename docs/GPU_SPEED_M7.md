@@ -85,17 +85,26 @@ run-to-run noise. That is exactly why the same-day rule exists: **row 0, not `SC
 what every lever is measured against.** The 16N legs are the same-day Stage-2 anchor the plan review
 asked for. Harvest: `grep -h 'loop timing' /work/ab0995/a270088/port2/m7/base_*/log_rep_*.txt`.
 
-**Task 1.0 in context — a PROJECTION, not a measurement (the A/B is the arbiter):**
+**Where the levers stand (measured, not projected):**
 
-| | now | −25% host loop | ratio | SYPD@dt240 |
+| lever | class | A/B | status |
+|---|---|--:|---|
+| `ICEFLUXDEV` (Task 1.0) | bit-id | **−0.72%** (NG5@4N, job 26235600) | landed, gated. Real but small — **NOT the headline** |
+| `NOFENCE2` (Task 1.1) | bit-id | queued | floor 1.1%, ceiling 4.1% from the stall budget |
+| **`SWSKIP` (Task 1.2)** | **bit-id** | **queued (26236820)** | **the actual ~25% lever — dead host `sw_3d`** |
+
+**PROJECTION for SWSKIP, the A/B is the arbiter:** if it recovers the ~25% host segment,
+
+| | now | −25% | ratio | SYPD@dt240 |
 |---|--:|--:|--:|--:|
 | NG5@4N | 1.2796 | ~0.96 | **3.60× → ~4.8×** | — |
 | NG5@16N | 0.4487 | ~0.34 | **2.72× → ~3.6×** | **1.42 → ~1.9** |
 
-At 4N that is essentially the whole Stage-1 target from one bit-identical lever. At 16N it takes
-SYPD@dt240 from 1.42 to **~1.9 — within reach of the ~2 SYPD the campaign was chartered to find**,
-in pure FP64, without the mixed precision the user banned. The 25% is justified at BOTH scales: the
-dars@8N (16N-class) trace independently shows the host segment is still **24.7%** there.
+At 4N that would be essentially the whole Stage-1 target from one bit-identical lever; at 16N it
+takes SYPD@dt240 from 1.42 to ~1.9, within reach of the ~2 SYPD the campaign was chartered to find,
+in pure FP64 without the banned mixed precision. The host segment is 24.7% at dars@8N (the 16N-class
+proxy) too, so the lever should pay at both scales. **Do not quote these until 26236820 lands** — the
+last time I quoted a projection from this budget, I had the wrong function.
 
 SYPD@dt240 = 0.657 / (s/step at dt180) × (1/1.03 CG correction) for NG5.
 
@@ -124,7 +133,7 @@ production step. Kernel share **46.6%** independently reproduces PROFILE_M522's 
 
 | host gap follows | ms/step | % step | gaps/step | what it is |
 |---|--:|--:|--:|---|
-| `fesom_ice_h_diag_kk` | **333.6** | **26.2** | 6 | the coupling-phase host code — **dominated by `fesom_ice_oce_fluxes_mom`** (Task 1.0) |
+| `fesom_ice_h_diag_kk` | **333.6** | **26.2** | 6 | the coupling-phase host code. **⚠️ This window contains BOTH `fesom_ice_oce_fluxes_mom` AND the host `fesom_cal_shortwave_rad` (`fesom_main.cpp:1214`). The A/B proved the shortwave is the cost (ICEFLUXDEV = −0.72%) → Task 1.2 `SWSKIP`.** |
 | `resolve_bvfreq_dev` | 54.7 | 4.3 | 108 | I/O accumulator resolvers — ➕ follow-up (see below) |
 | halo exchange (device2/device) | 14.9 | 1.2 | 5667 | per-exchange host overhead |
 | everything else | 5.0 | 0.4 | — | |
@@ -143,8 +152,9 @@ own `FESOM_STEP_PROFILE` phase timer, which knows nothing about nsys):
 **They agree to within 2%.** (The profiled run is 1.3272 s/step vs the 1.2796 baseline — the phase
 timer inserts its own fences, ~3.7% overhead — so its share is measured against a slightly larger
 denominator.) The coupling phase contains essentially no GPU kernels, and the only per-step code in
-it is `fesom_ice_oce_fluxes_mom`. Payoff bracket for Task 1.0: **~25–26% of the step.** The A/B
-remains the arbiter for the landed number.
+it is the host `fesom_cal_shortwave_rad` + `fesom_ice_oce_fluxes_mom`. Payoff bracket for the pair:
+**~25–26% of the step** — and the A/B has now shown the split is ~0.7% / ~25%, i.e. it is the
+shortwave. The A/B remains the arbiter for the landed number.
 
 ➕ **The second host cost, root-caused.** The 54.7 ms/step is the I/O mean accumulators: six output
 vars still have `nullptr` device accumulators in `fesom_default_monthly_table`
@@ -301,7 +311,8 @@ share of the 38.1 ms launch gap. Spin alone (13.6 ms) is the **floor**; spin+gap
 | `FESOM_SPEED_FORCE_SERIAL` | dev-only: allow levers on Serial (byte proofs) | — | scaffolded |
 | `FESOM_SPEED_SYNCSTATS` | per-step sync/fence counters (diagnostic) | — | ✅ implemented (0.3/1.1) |
 | `FESOM_SPEED_NOFENCE2` | drop post-unpack halo fence | bit-id | ✅ implemented, gates pending (1.1) |
-| `FESOM_SPEED_ICEFLUXDEV` | ➕ port `ice_oce_fluxes_mom` to device | bit-id | **pending (1.0) — top priority** |
+| `FESOM_SPEED_ICEFLUXDEV` | port `ice_oce_fluxes_mom` to device | bit-id | ✅ landed, all gates PASS. **A/B −0.72%** — real but small |
+| **`FESOM_SPEED_SWSKIP`** | **skip the DEAD host `sw_3d` (the device twin rebuilds it in full)** | **bit-id** | **implemented (1.2) — THE ~25% lever; gates + A/B queued** |
 | `FESOM_SPEED_CGSLIM` | CG iteration-body slimming | bit-id | pending (1.2) |
 | `FESOM_SPEED_FCT2` | FCT T+S tracer batching | bit-id | pending (1.3) |
 | `FESOM_SPEED_EVPCOMPACT` | EVP active-set compaction | bit-id | pending (1.4) |
