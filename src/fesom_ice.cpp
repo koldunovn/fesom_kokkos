@@ -604,19 +604,16 @@ void fesom_ice_step(int                            step,
         }
     }
 
-    /* 🔴 M7 H.3 — mEVP's IN rail (:687 below, the whichEVP==1 branch) is NOT gated on `icerails`, so
-     * it would push a stale host stress_atmice over the device copy on EVERY step under BULKTAIL.
-     * (It is a dead rail under ICERAILS today, and — separately — mEVP under ICERAILS has a
-     * PRE-EXISTING srfoce_u/v/ssh clobber of its own; see docs. Both need their own CUDA gate with
-     * FESOM_WHICH_EVP=1.) Rather than half-fix mEVP inside a lever that cannot gate it, refuse. */
-    if (fesom_bulktail_on() && ice->whichEVP != 0) {
-        if (partit->mype == 0)
-            fprintf(stderr, "[fesom_speed] FESOM_SPEED_BULKTAIL supports whichEVP=0 (standard EVP) "
-                            "only; got whichEVP=%d. The mEVP branch re-pushes stress_atmice from the "
-                            "host unconditionally, which this lever leaves stale. Refusing to run.\n",
-                    ice->whichEVP);
-        MPI_Abort(MPI_COMM_WORLD, 1);
-    }
+    /* M7 H.3 — BULKTAIL once refused to run with whichEVP != 0, because the mEVP branch below pushed
+     * stress_atmice from the host UNCONDITIONALLY and would have clobbered the device copy that this
+     * lever makes authoritative. That push is now gated on `!icerails` (the same fix that repaired the
+     * PRE-EXISTING ICERAILS+mEVP clobber — see the mEVP branch), and mEVP reads `stress_atmice` ONLY
+     * from `.d()` (fesom_ice_maevp.cpp:120-121) and touches none of BULKTAIL's other seven arrays.
+     * So the two are compatible, and the refusal is gone.
+     *
+     * ⚠️ THE POINT OF THE OPTIONS MATRIX (L91) IS THAT THIS SENTENCE IS NOT EVIDENCE. It is gated:
+     * CUDA fidelity, FESOM_SPEED=1 x FESOM_WHICH_EVP=1, against mEVP's OWN M6 Serial oracle. If you
+     * add a lever that changes who owns a field, THAT GATE IS NOW STALE AND YOU MUST RE-RUN IT. */
 
     if (icerails && (s_verify_icemap || s_verify_evp || s_verify_icefct ||
                      s_verify_icethermo || s_verify_iceflux)) {

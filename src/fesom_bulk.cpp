@@ -66,6 +66,13 @@
  * exactly this bug and the FORCE_SERIAL byte proof certified it BIT-IDENTICAL while the CUDA run
  * had NO SEA ICE. So we do NOT silently downgrade to OFF when a dependency is missing (L80: a knob
  * that quietly resolves OFF passes every gate and reports 0.00%). WE ABORT, LOUDLY.
+ *
+ * ── AND THE SAME REASONING APPLIES TO THIS LEVER ITSELF (L91) ────────────────────────────────────
+ * BULKTAIL changes WHO OWNS eight fields. That invalidates every previously-passed OPTIONS-MATRIX
+ * gate (FESOM_SPEED=1 x {TKE, mEVP, zstar}), because option knobs select code the default gates
+ * never execute. ICERAILS is the cautionary tale: an options matrix HAD been run and HAD passed —
+ * in session 3 — and ICERAILS landed in session 5 without re-running it, and silently corrupted
+ * mEVP for two sessions. **THE OPTIONS MATRIX IS PART OF THIS LEVER'S GATE LADDER, NOT A ONE-OFF.**
  * ================================================================================================ */
 bool fesom_bulktail_on(void)
 {
