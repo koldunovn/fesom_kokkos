@@ -1,4 +1,5 @@
 #include "fesom_eos.h"
+#include "fesom_speed.hpp"   // M7 H.7: FESOM_SPEED_SMOOTHSCRATCH
 #include "fesom_ale.h"   // M6.3: fesom_ale_is_zstar()
 #include "fesom_aux.h"
 #include "fesom_constants.h"
@@ -552,8 +553,49 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
      * built on sweep 0 and reused. See docs/GPU_FIDELITY.md §M5.18.
      * NB launching Nmy*NL threads wastes the shallow-node tail (avg depth < NL); that
      * is acceptable for a memory-bound kernel — coalescing + occupancy dominate. */
-    Kokkos::View<double*> vol ("smooth.vol",  (size_t)nslab * Nmy * NL);
-    Kokkos::View<double*> work("smooth.work", (size_t)nslab * Nmy * NL);
+    /* ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ M7 H.7 — FESOM_SPEED_SMOOTHSCRATCH ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+     * These two Views are (nslab x myDim_nod2D x nl) doubles — HUNDREDS OF MEGABYTES — and they
+     * were being ALLOCATED AND FREED INSIDE THE HOT LOOP, on every call, every step.
+     *
+     * MEASURED (nsys, NG5@4N, 300-step steady state — not argued):
+     *     cudaMallocAsync        11.93 ms/step   4.0 calls/step   (= 2 Views x 2 call sites)
+     *     cudaDeviceSynchronize   8.91 ms/step   4.0 calls/step   in the very next gap
+     * The allocator alone is 1.6 % of the step. The fences are almost certainly the same bug:
+     * Kokkos MUST fence when a View is destroyed, to guarantee no in-flight kernel still
+     * references the memory it is about to free. Allocate -> use -> destructor -> FENCE -> free.
+     *
+     * 🔴 HOW IT HID FOR SO LONG: the GPU-idle gap census reported this as `host` time, because
+     * its `host` column was `gap - (memcpy U MPI)` and a fence has NEITHER. It looked exactly
+     * like host compute you must PORT. It is not — it is an allocation you must HOIST. The
+     * census now carries a FENCE column precisely so this class cannot masquerade again.
+     *
+     * WHY REUSING THE BUFFERS IS BIT-IDENTICAL (and it is not obvious, so it is written down):
+     *   - `work` and `vol` are written with plain ASSIGNMENT (=), from REGISTER accumulators
+     *     (`double w = 0.0, vacc = 0.0;` inside the lambda) — never `+=` into the View. So
+     *     nothing depends on Kokkos' zero-initialisation of a fresh View.
+     *   - The gather (:581) and the scale (:607) carry the SAME level mask. An entry that the
+     *     gather skips is an entry the scale never reads. Stale contents are unobservable.
+     *   - `vol` is (re)built on sweep 0 of EVERY call (`if (sw == 0)`), and n_smooth >= 1 is
+     *     guaranteed above, so sweep 0 always runs.
+     *   - Callers use different `nslab` (blmc 3, bvfreq 1). The buffer is sized to the largest
+     *     seen and indexed by the same flat `idx`, so a smaller call uses a PREFIX; the tail is
+     *     stale but untouched. The mask depends on the mesh, not on nslab.
+     * => the arithmetic is byte-for-byte unchanged. This is a re-execution elimination, NOT a
+     *    coherence invariant, so the FORCE_SERIAL byte proof IS meaningful here (contrast L86). */
+    static int s_scratch = -1;
+    static Kokkos::View<double*> s_vol, s_work;
+    const std::size_t need = (std::size_t)nslab * Nmy * NL;
+    Kokkos::View<double*> vol, work;
+    if (fesom_speed_on("SMOOTHSCRATCH", &s_scratch)) {
+        if (s_vol.extent(0) < need) {          /* grows once, then never again for a given run */
+            s_vol  = Kokkos::View<double*>("smooth.vol",  need);
+            s_work = Kokkos::View<double*>("smooth.work", need);
+        }
+        vol = s_vol; work = s_work;
+    } else {
+        vol  = Kokkos::View<double*>("smooth.vol",  need);   /* legacy: allocate + free per call */
+        work = Kokkos::View<double*>("smooth.work", need);
+    }
 
     auto arr    = arr_fld.d();
     auto nie    = mesh->nod_in_elem2D_fld.d();
