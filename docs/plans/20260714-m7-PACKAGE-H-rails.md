@@ -98,15 +98,84 @@ either way.** It proves only the ARITHMETIC (the accumulation moving into the ke
 fidelity gate is the ONLY gate that can validate the rail removal.** Do not read a green
 FORCE_SERIAL as clearance for the rails.
 
-### H.2 `ICERAILS` — the payoff (NOT yet implemented)
+### H.2 `FESOM_SPEED_ICERAILS` — the payoff (IMPLEMENTED 2026-07-14, gates in flight)
 
-The 67-rail ice-step stack (`fesom_ice.cpp:503-716`), ≈ 250–300 MB/step. Only **three** things pin it
-to the host, and **FLUXDEV removes two of them**:
-1. the 2 `srfoce_u/v` host halos (`fesom_ice.cpp:507-508`) ← **the one remaining blocker**
+The 67-rail ice-step stack (`fesom_ice.cpp`), ≈ 250–300 MB/step. Only **three** things ever pinned it
+to the host, and **H.1 killed two**:
+1. the 2 `srfoce_u/v` host halos (`fesom_ice.cpp:507-508`) → **this lever converts them to ONE device
+   `fesom_halo_field2`. That is the unpin, and the whole stack falls.**
 2. ~~the 4 forcing host halos~~ → killed by H.1
 3. ~~the host `fesom_cal_shortwave_rad` reading `a_ice`~~ → killed by H.1
 
-> **PREDICTION: H.2 ≈ −40 ms/step ≈ −4.6 % at NG5@4N.** The single biggest lever left in the campaign.
+**Verified by grep before cutting anything:** every other host writer of the ice state is a **VERIFY
+TWIN** (host EVP `fesom_ice_evp.cpp:83-131`, host thermo `fesom_ice_thermo.cpp:551-593`, host
+oce_fluxes `fesom_ice_coupling.cpp:264`). The knob **aborts** if any `FESOM_KK_VERIFY=<ice*>` is set —
+those twins capture-before from the raw host alias, which this lever deliberately leaves stale.
+`fesom_ic.cpp` does **not** memset `sigma11/12/22`, so `Field::alloc()`'s Synced zero-init is what
+step 1 reads and they can stay device-authoritative across steps.
+
+**What STAYS:** `hbar` / `runoff` / `Ssurf` are genuinely host-authoritative — real work, not a round
+trip. And **9 D2H at the END of the ice step** pay for exactly the host readers that still exist:
+`a/m/ms` (I/O snapshot, `a_ice` if FLUXDEV is off, `FESOM_DIAG_MICE`), `uice/vice` + `srfoce_u/v` (the
+host `fesom_ice_oce_fluxes_mom`, `fesom_ice_coupling.cpp:62`, which runs whenever ICEFLUXDEV is off),
+`h_ice/h_snow` (`FESOM_DIAG_MICE`). Those 9 also leave `a/m/ms` + `uice/vice` **Synced**, which is the
+cross-step invariant the next step's EVP kernel relies on. *Do not remove them without re-deriving it.*
+
+### 🔴 PRE-REGISTERED — written BEFORE any result. Do not retrofit.
+
+| removed | count | ms/step |
+|---|--:|--:|
+| H2D (EVP 13 · FCT 5 · cut_off 3 · Ch/Ce 2 · thermo-ice 11 · h_diag 3) | **37** | 37 × 0.620 = **22.9** |
+| D2H (o2i 5 · EVP 5 · FCT 3 · cut_off 3 · thermo 9 · h_diag 2 = 27, **minus the 9 added back**) | **18** | 18 × 0.613 = **11.0** |
+| 2 host-staged halos → 1 device halo | | **≈ 0.3** |
+| **NET: 55 full-field rails/step deleted** | | **≈ 34.2** |
+
+> **PREDICTION: ICERAILS = −4.1 % (range −3.5 … −4.7 %), ≈ 34 ms/step** against the H.1 baseline of
+> 0.8348 s/step → **≈ 0.801 s/step → ratio ≈ 5.73×.**
+> *(Conservative: the GPU-idle gap census puts the three ice gaps at 58.7 ms, of which this counts only
+> the memcpy component. The host-halo MPI and launch overhead it also removes are upside.)*
+
+🔴 **ICERAILS resolves at ONE call site → expect `announce = 1`.** ~0 % ⇒ **dead knob (L80)**, not a
+null lever.
+
+### 🔴🔴 THE FIRST CUT WAS BROKEN, AND ONLY THE CUDA GATE SAW IT. Read this before touching a rail.
+
+Submitted to all four gates at once. Same binary (`m7/bin/h3`, md5 `3fa69e76`), same hour:
+
+| gate | verdict |
+|---|---|
+| knob-OFF byte gate (26255200) | **PASS** |
+| **FORCE_SERIAL byte proof, ICERAILS ON (26255201)** | **`diff_snap rc=0` — BIT-IDENTICAL to the certified baseline** |
+| announce | **1** — the knob fired (not L80) |
+| **CUDA fidelity, ICERAILS alone (26255202)** | 🔴 **CATASTROPHIC FAIL — 15 fields over ceiling COHERENTLY. `a_ice max\|Δ\| = 9.83e-01` = THE ENTIRE ICE CONCENTRATION. `m_ice` 2.15, `h_ice` 2.22. THERE WAS NO SEA ICE.** |
+
+**The project's strongest gate certified, as bit-for-bit identical to ground truth, a lever that
+deletes the sea ice.** Because on Serial `.d()` and `.h()` are the same memory — so all 55 deleted
+rails are no-ops there, and the bug *was* a rail.
+
+**THE BUG — a general trap, now L86's demonstration.** `Field::alloc()` zero-inits BOTH spaces and
+marks them `Synced` (`fesom_field.hpp:64`). The ice **initial condition** is then written **on the
+host** through the raw alias — the DualView never learns. **The only thing that had ever carried that
+IC to the device was the per-step IN rail.** The rail *is* a pure round trip between two device
+kernels — on every step **but the first**. Delete it and the device ice state stays at **zero**.
+
+> **RULE: before deleting a rail because "both sides are device kernels", ask WHO PUT THE INITIAL
+> VALUE THERE.** A per-step rail is often also, silently, the IC push.
+
+**FIXED** with an explicit one-shot IC push under the knob (`s_ice_ic_pushed`). Re-gated on
+`m7/bin/h4` (md5 `1c7934a8`):
+
+| gate | result |
+|---|---|
+| **CUDA fidelity, ICERAILS alone (26255273)** | ✅ **PASS** — `a_ice` **9.83e-01 → 4.52e-04**, `m_ice` 2.15 → 1.37e-03, `h_ice` 2.22 → 8.00e-03, T 1.02e-03. All at the climate-close floor. |
+| CUDA fidelity, all knobs (26255274) | ✅ **PASS** |
+| knob-OFF + FORCE_SERIAL | ✅ PASS (and would have passed regardless — that is the point) |
+
+**Cost of the CUDA gate: 42 seconds. Cost of trusting the byte proof: a silently ice-free ocean.**
+
+*(The first A/B, 26255204, was cancelled — it was timing the broken binary, which has no sea ice and
+therefore does less work in the ice kernels. The number would have been flattering and meaningless.
+Re-run as 26255275 on `h4`.)*
 
 ### H.3 `BULKTAIL` · H.4 `SSHRAILS` · H.5 `ETADEV`
 
@@ -276,6 +345,71 @@ purely the comm-bound decay of L84(b). Per-rank size: NG5@4N 463 k → NG5@8N 23
 dars@8N 98.5 k. **Job 26248860 (NG5@16N) is now genuinely decisive:** near **−2 %** for FLAT ⇒ the
 decay story is wrong and **B/C go back on top of the ladder**; near **−1 %** ⇒ the re-ranking stands.
 **Either way it does not touch package H, which is host-class.**
+
+---
+
+## 5c. 🔴🔴 THE BENCHMARK IS CONTAMINATED — every s/step in this campaign is inflated, and the RATIO is UNDER-reported
+
+*(2026-07-14 session 5. Pending confirmation by job 26255546 — the pre-registered test is below.
+Do not act on this until that lands.)*
+
+### The chain
+
+1. **L82 said `getcoeffld` was a profiler LIE** — "its body runs ZERO times in a 25-step run"
+   (refresh is 1-in-60 at dt180, argued from the control flow).
+2. **An FPROF bracket on the CALL (job 26254302) says `8.0 calls/step` and `49.3 ms/step` (5.62 % of
+   the step).** The sampler was right; **L82's refutation is RETRACTED.** *L82's own rule — "ask how
+   many times the thing is CALLED" — is correct; it was answered with an argument instead of a counter.*
+3. **WHY it fires every step (`FESOM_DIAG_COEF`, job 26255463 — three static hypotheses died first):**
+
+```
+t_indx=1  t_indx_p1=1        <- EQUAL: the "no extrapolation back in time" clamp branch
+rdate = 2436205.000000       lo = hi = 2436205.062500
+rdate - lo = -6.25e-02       <- rdate is 1.5 h BEFORE the first record  =>  REFRESH=1
+```
+
+**The model starts BEFORE the first JRA record.** `uas/vas/huss/tas` begin at **+1.5 h**;
+`rsds/rlds/prra/prsn` at **+3 h**. `binarysearch` returns 0 → `getcoeffld` clamps and sets
+`t_indx_p1 = t_indx` → `lo == hi` → `rdate < lo` is **true forever** → refresh every step, all 8
+fields. **`rdate` advances 3 min/step, so it needs 30–60 steps to reach the first record — and every
+benchmark in this campaign is 35 steps.**
+
+### So it is NOT a production lever. It is a MEASUREMENT-VALIDITY bug.
+
+In a 1-year run this lasts ~30–60 steps out of ~175 000. **But it contaminates every A/B, every
+profile and every ratio we have measured — and it does so ASYMMETRICALLY.**
+
+`getcoeffld` is **HOST** code over `myDim_nod2D`. Per **L84** the GPU config carries **463 k
+nodes/rank** (4 ranks/node) against the CPU's **14.5 k** (128 ranks/node) — **32×**. So the artifact
+costs the **GPU ≈ 49 ms/step and the CPU ≈ 1.5 ms/step.**
+
+| NG5@4N | reported | artifact | corrected |
+|---|--:|--:|--:|
+| GPU s/step | 0.8348 | −0.049 | **≈ 0.786** |
+| CPU s/step | 4.5853 | −0.002 | ≈ 4.584 |
+| **ratio** | **5.49×** | | **≈ 5.83×** |
+
+**The campaign has been UNDER-reporting the GPU/CPU ratio by ~6 %,** and the Stage-2 SYPD projection
+is correspondingly pessimistic. *(Per-lever marginal percentages are barely affected — the artifact is
+in both legs; it only inflates the denominator. FLUXDEV's −1.45 % becomes −1.56 %.)*
+
+### 🔴 PRE-REGISTERED FALSIFICATION (job 26255546) — written before the run
+
+Same binary, same config, **NSTEPS=300 instead of 25**:
+- `force:getcoeffld` should drop **8.0 → ≈ 1.2 calls/step** and **49.3 → ≈ 7 ms/step**
+- **the loop timing should come in ≈ 42 ms/step FASTER** than the 25-step run's **0.8778 s/step**
+
+**If the loop timing does NOT drop, this is wrong and the artifact is not on the critical path.**
+
+### What to do about it (once confirmed)
+
+1. **Fix the benchmark protocol** — the A/B and profile jobs must run past the cold start (≥ 60 steps
+   before the timed window, or a longer run) or start the model inside a valid JRA bracket. Every
+   number in `docs/GPU_SPEED_M7.md` needs a footnote until they are re-measured.
+2. **Fix the code anyway** — make the clamp branch STICKY (or memoize `coef_a/coef_b` on
+   `(t_indx, t_indx_p1, sbcdata1_t_index, sbcdata2_t_index)`). Recomputing identical coefficients from
+   identical data is **bit-identical to skip**, so this is a free, gate-able cleanup. Production payoff
+   ≈ 0; benchmark honesty ≈ everything.
 
 ---
 

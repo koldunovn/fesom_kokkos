@@ -683,6 +683,10 @@ void fesom_jra55_step(fesom_jra55 *jra,
                       struct fesom_partit     *partit,
                       int yearnew, int daynew, real_t timenew)
 {
+    /* FESOM_DIAG_COEF — see the block in the refresh loop below. */
+    static int s_coef_diag = (getenv("FESOM_DIAG_COEF") != nullptr);
+    static int s_coef_call = 0;
+
     /* Fortran sbc_do (line 1500-ish): rdate = julday(yearnew,1,1) + (daynew-1) + timenew/86400 */
     real_t rdate = (real_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar)
                  + (real_t)(daynew - 1)
@@ -700,6 +704,24 @@ void fesom_jra55_step(fesom_jra55 *jra,
             real_t hi = flf->nc_time[flf->t_indx_p1 - 1];
             if (rdate < lo || rdate > hi) need_refresh = 1;
         }
+        /* 🔴 FESOM_DIAG_COEF — why does the refresh fire EVERY step? (M7 package H)
+         * The FPROF counter says getcoeffld runs 8.0 calls/step (job 26254302, 49.3 ms/step = 5.6%
+         * of the step) — but coef_a/coef_b are CONSTANT within a 3-hourly JRA interval, so 59 of
+         * every 60 calls rebuild identical values. Three static hypotheses for why the guard below
+         * misfires (cold start before nc_time[0]; a binarysearch off-by-one; an epoch mismatch
+         * between rdate's Julian Day and nc_time's days-since-1900) were each checked and each DIED.
+         * So: print the actual numbers instead of reasoning about them. */
+        if (s_coef_diag && partit && partit->mype == 0 && s_coef_call <= 3 * FESOM_JRA_NFLD) {
+            real_t lo_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx    - 1] : -1.0;
+            real_t hi_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx_p1 - 1] : -1.0;
+            fprintf(stderr, "[COEF] call=%d f=%d t_indx=%d t_indx_p1=%d Ntime=%d "
+                            "rdate=%.9f lo=%.9f hi=%.9f  rdate-lo=%.3e hi-rdate=%.3e  REFRESH=%d\n",
+                    s_coef_call, f, flf->t_indx, flf->t_indx_p1, flf->Ntime,
+                    (double)rdate, (double)lo_d, (double)hi_d,
+                    (double)(rdate - lo_d), (double)(hi_d - rdate), need_refresh);
+            fflush(stderr);
+        }
+        ++s_coef_call;
         if (need_refresh) {
             /* 🔴 M7 package H — SETTLE L82 WITH AN INSTRUMENT, NOT AN ARGUMENT.
              *

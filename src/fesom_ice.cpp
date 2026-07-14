@@ -10,6 +10,8 @@
 #include "fesom_forcing.h"   // M4.3d-a: forcing->{runoff,Ch_atm_oce,Ce_atm_oce}_fld IN-rail push
 #include "fesom_jra55.h"     // M4.3d-a: the 8 jra physics Fields IN-rail push
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M7 H.2 ICERAILS: the srfoce_u/v host halo -> ONE device halo
+#include "fesom_speed.hpp"         // M7 H.2 ICERAILS
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -495,17 +497,130 @@ void fesom_ice_step(int                            step,
      * (host-current from the previous ocean step; const → localized const_cast, the forcing
      * pattern). OUT: sync_host(srfoce_*) for the host EVP + the u_w/v_w nod2D halo (driver,
      * the ALE pattern). Falls back to no-op if dyn or tracers are NULL. */
+    /* ==================== M7 H.2 — FESOM_SPEED_ICERAILS (package H, the payoff) ==============
+     * The ENTIRE ice step — ocean2ice, EVP, FCT, cut_off, thermo, oce_fluxes, h_diag — is device
+     * kernels. Yet it carries 40 H2D + 27 D2H FULL-nod2D-field rails per step (~250-300 MB at
+     * NG5@4N), because it still shuttles its own state host-side between consecutive DEVICE
+     * kernels. The comments justifying those rails are STALE: they say "sync_host … for the host
+     * EVP / the host cut_off / the host thermo" (see :521, :586, :609, :635 below) — every one of
+     * those is a `_kk` device kernel now. Concretely:
+     *   - srfoce_temp/salt go D2H here and are re-pushed H2D 165 lines later with NO host reader
+     *     in between;
+     *   - a_ice/m_ice/m_snow bounce D2H->H2D FOUR TIMES in one step (FCT->cut_off->thermo->h_diag);
+     *   - sigma11/12/22 go D2H every step and are read only by the NEXT step's H2D.
+     *
+     * MEASURED, three independent ways (docs/plans/20260714-m7-PACKAGE-H-rails.md):
+     *   memcpy accounting  : the model's own full-field rails are 77.6 ms/step (81% of the memcpy
+     *                        pool the plan had labelled "MPI staging");
+     *   source audit       : 40 H2D + 27 D2H in this function;
+     *   GPU-IDLE GAP census: the GPU sits idle 22.7 ms before ice_thermodynamics_kk, 19.5 ms before
+     *                        ice_evp_dynamics_kk and 16.5 ms before ocean2ice_kk = 58.7 ms/step of
+     *                        the GPU doing NOTHING while PCIe shuffles full fields.
+     *
+     * WHAT PINNED IT: only three things ever needed the host, and H.1 (FLUXDEV) already killed two
+     * (the 4 forcing host halos, and the host fesom_cal_shortwave_rad reading a_ice). The last one
+     * is the 2 srfoce_u/v HOST halos immediately below — so this lever starts by converting them to
+     * ONE device fesom_halo_field2, and the whole stack falls.
+     *
+     * WHAT STAYS: hbar / runoff / Ssurf are genuinely HOST-authoritative (the ocean's host eta_n
+     * loop writes hbar; sss_runoff writes runoff) — their H2D is real work, not a round trip.
+     * And at the END of the ice step we sync_host() exactly the fields a HOST reader can still
+     * touch: a/m/ms + uice/vice + srfoce_u/v (fesom_ice_oce_fluxes_mom's host twin reads srfoce_u/v
+     * and uice/vice — fesom_ice_coupling.cpp:62 — and it runs unless ICEFLUXDEV is on) and
+     * h_ice/h_snow (the FESOM_DIAG_MICE block). 9 D2H at the end instead of 67 rails throughout.
+     *
+     * 🔴 EVERY OTHER host writer of this state is a VERIFY TWIN (checked by grep: the host EVP
+     * fesom_ice_evp.cpp:83-131, the host thermo fesom_ice_thermo.cpp:551-593, the host oce_fluxes
+     * fesom_ice_coupling.cpp:264). Those twins CAPTURE-BEFORE from the raw HOST alias, which under
+     * this knob is deliberately stale between kernels — so the two are INCOHERENT BY CONSTRUCTION.
+     * We abort loudly rather than silently compare against garbage. (SWSKIP sets the precedent.)
+     *
+     * ⚠️ THE D.1 TRAP, FOR THE LAST TIME: on Serial .d() and .h() are the SAME MEMORY, so every
+     * rail deleted here is a NO-OP there and the FORCE_SERIAL byte proof passes WHETHER OR NOT THIS
+     * IS RIGHT. NO SERIAL GATE CAN VALIDATE A COHERENCE INVARIANT (L86). The CUDA fidelity gate is
+     * the ONLY gate for this lever. Run it standalone before believing anything.
+     *
+     * Cross-step safety: sigma11/12/22 stay DEVICE-authoritative across steps. fesom_ic.cpp does
+     * NOT memset them (verified), so Field::alloc()'s zero-init of BOTH spaces (Auth::Synced) is
+     * what step 1 reads. The end-of-step sync_host() leaves a/m/ms + uice/vice Synced, so the next
+     * step's kernels read a current device view with no push.
+     * ======================================================================================== */
+    static int s_icerails = -1;
+    const bool icerails = fesom_speed_on("ICERAILS", &s_icerails);
+
+    /* 🔴🔴 THE ONE-SHOT IC PUSH — and the story of how it was found. DO NOT DELETE.
+     *
+     * The ice INITIAL CONDITION (a/m/ms, uice/vice, sigma11/12/22, t_skin, thdgr) is written ON THE
+     * HOST at init through the raw alias. `Field::alloc()` zero-inits BOTH spaces and marks them
+     * Synced (fesom_field.hpp:64) — it never learns the host was written afterwards. And the ONLY
+     * thing that ever carried that IC to the device was the per-step IN rail this lever deletes.
+     *
+     * So the first version of ICERAILS left the DEVICE ice state at ZERO for step 1, and the sea ice
+     * simply never existed. It is the Z7 trap wearing a new face: a field that "was always pushed
+     * anyway" turns out to have had exactly one producer, and it was the rail you just removed.
+     *
+     * ⚠️ AND EVERY SERIAL GATE CERTIFIED IT AS CORRECT. On Serial .d() IS .h(), so all 55 deleted
+     * rails are no-ops and the IC is trivially "on the device". The knob-OFF byte gate passed
+     * (26255200) and — the sharp one — the FORCE_SERIAL BYTE PROOF passed BIT-IDENTICALLY against
+     * the certified baseline (26255201, diff_snap rc=0), on the very binary whose CUDA run had NO
+     * SEA ICE (26255202: a_ice max|Δ| = 9.83e-01, i.e. the entire ice concentration; 15 fields over
+     * ceiling COHERENTLY). The project's STRONGEST gate blessed a catastrophically broken lever.
+     * That is L86 stated as loudly as it can be: NO SERIAL GATE CAN EVER VALIDATE A COHERENCE
+     * INVARIANT. The standalone CUDA fidelity gate is the only thing standing between this lever
+     * and a silently ice-free ocean.
+     *
+     * (Restart note: this is a cold-start-only fix. If a restart path is ever added that reads the
+     * ice state into the HOST arrays mid-run, it must re-push — a `static bool` will not fire.) */
+    static bool s_ice_ic_pushed = false;
+    if (icerails && !s_ice_ic_pushed) {
+        s_ice_ic_pushed = true;
+        ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
+        ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        ice->uice_fld.modify_host();            ice->uice_fld.sync_device();
+        ice->vice_fld.modify_host();            ice->vice_fld.sync_device();
+        ice->work.sigma11_fld.modify_host();    ice->work.sigma11_fld.sync_device();
+        ice->work.sigma12_fld.modify_host();    ice->work.sigma12_fld.sync_device();
+        ice->work.sigma22_fld.modify_host();    ice->work.sigma22_fld.sync_device();
+        ice->thermo.t_skin_fld.modify_host();   ice->thermo.t_skin_fld.sync_device();
+        ice->thermo.thdgr_fld.modify_host();    ice->thermo.thdgr_fld.sync_device();
+        /* stress_atmice_x/y and Ch/Ce are re-written by fesom_bulk_compute_kk on the DEVICE in the
+         * forcing phase of every step (including step 1, which runs before this one) — they need no
+         * IC push. Pushed anyway: it is once, and an IC bug in this class costs a whole gate cycle. */
+        ice->stress_atmice_x_fld.modify_host(); ice->stress_atmice_x_fld.sync_device();
+        ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
+    }
+
+    if (icerails && (s_verify_icemap || s_verify_evp || s_verify_icefct ||
+                     s_verify_icethermo || s_verify_iceflux)) {
+        if (partit->mype == 0)
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_ICERAILS is INCOMPATIBLE with FESOM_KK_VERIFY="
+                            "<icemap|evp|icefct|icethermo|iceflux>: the verify twins capture-before "
+                            "from the raw HOST alias, which this lever deliberately leaves stale "
+                            "between the ice kernels. Refusing to compare against garbage.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
     if (dyn && tracers) {
         /* M5.13g1-T: T values device-resident across the boundary - no re-push; ocean2ice reads SST on device.
          * M5.14 (S flip): S values device-resident too (floor → device) - no re-push; ocean2ice reads srfoce_salt = S on device.
          * M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -
          * no re-push; ocean2ice reads uv surface (nz=0) on device. So T/S/uv all device-resident here now. */
-        mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();
+        mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();   /* hbar IS host-authoritative — keep */
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
-        ice->srfoce_temp_fld.sync_host(); ice->srfoce_salt_fld.sync_host(); ice->srfoce_ssh_fld.sync_host();
-        ice->srfoce_u_fld.sync_host();    ice->srfoce_v_fld.sync_host();
-        fesom_exchange_nod2D(ice->srfoce_u_fld.h_checked(), partit);   /* Fortran ocean2ice line 244 */
-        fesom_exchange_nod2D(ice->srfoce_v_fld.h_checked(), partit);
+        if (icerails) {
+            /* THE UNPIN. srfoce_* stay DEVICE-authoritative; the 2 host-staged halos (each a
+             * full-field D2H + host MPI + full-field H2D) become ONE co-packed device exchange.
+             * srfoce_temp/salt/ssh need no halo at all — ocean2ice_kk writes [0,N), halo included;
+             * only u/v need one (the elem->node interpolation leaves the halo short). */
+            fesom_halo_field2(ice->srfoce_u_fld, ice->srfoce_v_fld,
+                              FESOM_HALO_NOD2D, 1, 1, partit);
+        } else {
+            ice->srfoce_temp_fld.sync_host(); ice->srfoce_salt_fld.sync_host(); ice->srfoce_ssh_fld.sync_host();
+            ice->srfoce_u_fld.sync_host();    ice->srfoce_v_fld.sync_host();
+            fesom_exchange_nod2D(ice->srfoce_u_fld.h_checked(), partit);   /* Fortran ocean2ice line 244 */
+            fesom_exchange_nod2D(ice->srfoce_v_fld.h_checked(), partit);
+        }
         /* Verify AFTER the halo so the device srfoce_u/v halo (driver-exchanged) matches the
          * C twin's own halo at np>1 — the kernel leaves srfoce_u/v halo=0 pre-exchange, so a
          * pre-halo diff would false-positive on the halo nodes (the C twin halos internally). */
@@ -529,6 +644,13 @@ void fesom_ice_step(int                            step,
                 e12.assign(ice->work.sigma12, ice->work.sigma12 + Eo);
                 e22.assign(ice->work.sigma22, ice->work.sigma22 + Eo);
             }
+            /* M7 H.2 ICERAILS — 13 H2D + 5 D2H, ALL of them round trips between device kernels:
+             * a/m/ms are device-current from the previous step (left Synced by the end-of-step
+             * sync); srfoce_u/v/ssh from ocean2ice_kk above (device-halo'd); stress_atmice_x/y from
+             * fesom_bulk_compute_kk (device) via its host tail's sync_host, i.e. Synced; uice/vice +
+             * sigma11/12/22 are the EVP's own RMW state from last step's kernel. Nothing HOST wrote
+             * any of them (the only host writers are the verify twins, which this knob forbids). */
+            if (!icerails) {
             ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
             ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
             ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
@@ -542,9 +664,12 @@ void fesom_ice_step(int                            step,
             ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
+            }
             fesom_ice_evp_dynamics_kk(ice, partit, mesh);
+            if (!icerails) {
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+            }
             if (s_verify_evp) fesom_ice_evp_verify(ice, partit, mesh, step, eu, ev, e11, e12, e22);
         } else if (ice->whichEVP == 1) {
             /* mEVP (M6.2, FESOM_WHICH_EVP=1). Same IN/OUT rail as std EVP — it reads and writes
@@ -592,16 +717,23 @@ void fesom_ice_step(int                            step,
             fm.assign (ice->data[FESOM_ICE_MICE].values,  ice->data[FESOM_ICE_MICE].values  + N);
             fms.assign(ice->data[FESOM_ICE_MSNOW].values, ice->data[FESOM_ICE_MSNOW].values + N);
         }
+        /* M7 H.2 ICERAILS — 5 H2D + 3 D2H, all round trips: uice/vice come straight from the EVP
+         * kernel above, a/m/ms from the previous step. The FCT is `_kk`; the "host FCT" the OUT
+         * rail's comment cites has not existed since M4.3c. */
+        if (!icerails) {
         ice->uice_fld.modify_host(); ice->uice_fld.sync_device();
         ice->vice_fld.modify_host(); ice->vice_fld.sync_device();
         ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
         ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
         ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        }
         fesom_ice_tg_rhs_kk   (ice,       partit, mesh);
         fesom_ice_fct_solve_kk(ice, stiff, partit, mesh);
+        if (!icerails) {
         ice->data[FESOM_ICE_AICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        }
         if (s_verify_icefct) fesom_ice_fct_verify(ice, stiff, partit, mesh, step, fa, fm, fms);
     }
     /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics regardless of
@@ -615,13 +747,20 @@ void fesom_ice_step(int                            step,
             cm.assign(ice->data[FESOM_ICE_MICE].values,  ice->data[FESOM_ICE_MICE].values  + N);
             cs.assign(ice->data[FESOM_ICE_MSNOW].values, ice->data[FESOM_ICE_MSNOW].values + N);
         }
+        /* M7 H.2 ICERAILS — 3 H2D + 3 D2H, a pure D2H->H2D bounce of a/m/ms between two device
+         * kernels (FCT above, thermo below). The "host cut_off" and "host thermo" in the comments
+         * are `_kk` kernels since M4.3a/M4.3d. */
+        if (!icerails) {
         ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
         ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
         ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+        }
         fesom_ice_cut_off_kk(ice, partit, mesh);
+        if (!icerails) {
         ice->data[FESOM_ICE_AICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        }
         if (s_verify_icemap) fesom_ice_cut_off_verify(ice, partit, mesh, step, ca, cm, cs);
     }
 
@@ -659,8 +798,14 @@ void fesom_ice_step(int                            step,
         j->prec_rain_fld.modify_host(); j->prec_rain_fld.sync_device();
         j->prec_snow_fld.modify_host(); j->prec_snow_fld.sync_device();
         }
-        /* forcing (3) + ice inputs (uice/vice/srfoce/values/t_skin/thdgr). */
+        /* forcing (3) + ice inputs (uice/vice/srfoce/values/t_skin/thdgr).
+         * M7 H.2 ICERAILS: runoff is genuinely HOST-authoritative (sss_runoff writes it) — KEEP.
+         * Ch/Ce are produced by fesom_bulk_compute_kk on the DEVICE and only round-tripped through
+         * its host tail (fesom_bulk.cpp:629-635), so they are Synced — skip. All 11 ice inputs are
+         * this step's own device output (uice/vice from EVP, srfoce_* from ocean2ice, a/m/ms from
+         * cut_off, t_skin/thdgr the thermo's own RMW state from last step). */
         forcing->runoff_fld.modify_host();     forcing->runoff_fld.sync_device();
+        if (!icerails) {
         forcing->Ch_atm_oce_fld.modify_host(); forcing->Ch_atm_oce_fld.sync_device();
         forcing->Ce_atm_oce_fld.modify_host(); forcing->Ce_atm_oce_fld.sync_device();
         ice->uice_fld.modify_host();        ice->uice_fld.sync_device();
@@ -674,10 +819,17 @@ void fesom_ice_step(int                            step,
         ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
         ice->thermo.t_skin_fld.modify_host(); ice->thermo.t_skin_fld.sync_device();
         ice->thermo.thdgr_fld.modify_host();  ice->thermo.thdgr_fld.sync_device();
+        }
 
         fesom_ice_thermodynamics_kk(ice, partit, mesh, forcing, jra, sr);
 
-        /* OUT rail — the 9 consumed outputs to the host (oce_fluxes reads flx_*, h_diag reads values). */
+        /* OUT rail — the 9 consumed outputs to the host (oce_fluxes reads flx_*, h_diag reads values).
+         * M7 H.2 ICERAILS: NONE of those 9 has a production host reader any more. flx_h/flx_fw are
+         * read by fesom_ice_oce_fluxes_kk on the DEVICE (device->device, its own comment says so);
+         * t_skin/thdgr/thdgrsn/thdgra are the thermo's cross-step RMW state, re-read on the device;
+         * a/m/ms go to h_diag_kk on the device. The end-of-ice-step sync below covers every host
+         * reader that actually exists. */
+        if (!icerails) {
         ice->data[FESOM_ICE_AICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
@@ -685,6 +837,7 @@ void fesom_ice_step(int                            step,
         ice->flx_fw_fld.sync_host();  ice->flx_h_fld.sync_host();
         ice->thermo.thdgr_fld.sync_host();   ice->thermo.thdgrsn_fld.sync_host();
         ice->thermo.thdgra_fld.sync_host();
+        }
         if (s_verify_icethermo)
             fesom_ice_thermodynamics_verify(ice, partit, mesh, forcing, jra, sr, step, tm, ts, ta, tt, tg);
 
@@ -708,13 +861,40 @@ void fesom_ice_step(int                            step,
     real_t *a_ice  = ice->data[FESOM_ICE_AICE].values;     /* kept for the DEBUG diag blocks */
     real_t *m_ice  = ice->data[FESOM_ICE_MICE].values;
     (void)a_ice;
+    if (!icerails) {   /* M7 H.2: a/m/ms come straight from cut_off/thermo_kk — a 4th bounce */
     ice->data[FESOM_ICE_AICE].values_fld.modify_host();  ice->data[FESOM_ICE_AICE].values_fld.sync_device();
     ice->data[FESOM_ICE_MICE].values_fld.modify_host();  ice->data[FESOM_ICE_MICE].values_fld.sync_device();
     ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
+    }
     fesom_ice_h_diag_kk(ice, mesh);
+    if (!icerails) {
     ice->h_ice_fld.sync_host();
     ice->h_snow_fld.sync_host();
+    }
     if (s_verify_icemap) fesom_ice_h_diag_verify(ice, mesh, step);
+
+    /* ============ M7 H.2 ICERAILS — THE ONE OUT RAIL THAT REPLACES ALL 67 ====================
+     * Everything above kept the ice state DEVICE-authoritative through the whole chain. Here we
+     * pay for exactly the host readers that actually exist downstream — no more:
+     *   a/m/ms      — the I/O snapshot gather (fesom_io.cpp:370, .h_checked()), the host
+     *                 fesom_cal_shortwave_rad's a_ice read when FLUXDEV is OFF, FESOM_DIAG_MICE
+     *   uice/vice   — the I/O snapshot; and the HOST fesom_ice_oce_fluxes_mom, which reads them
+     *                 (fesom_ice_coupling.cpp:62) whenever ICEFLUXDEV is OFF
+     *   srfoce_u/v  — same host fesom_ice_oce_fluxes_mom
+     *   h_ice/h_snow— FESOM_DIAG_MICE (no production I/O reader, but 2 D2H is not worth the risk)
+     * 9 D2H, ~5.6 ms — against the 40 H2D + 27 D2H (~250-300 MB, ~41 ms) this lever deletes.
+     *
+     * These also leave a/m/ms + uice/vice SYNCED, which is exactly what the NEXT step's EVP kernel
+     * needs to read on the device with no push. That is the cross-step invariant. Do not remove
+     * them without re-deriving it. */
+    if (icerails) {
+        ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        ice->uice_fld.sync_host();       ice->vice_fld.sync_host();
+        ice->srfoce_u_fld.sync_host();   ice->srfoce_v_fld.sync_host();
+        ice->h_ice_fld.sync_host();      ice->h_snow_fld.sync_host();
+    }
 
     /* DEBUG (FESOM_DIAG_MICE): per-step global max m_ice + max ice speed with
        their global node ids. m_ice should stay < ~10 m physically; MAXLOC

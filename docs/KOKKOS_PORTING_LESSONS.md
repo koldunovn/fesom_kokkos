@@ -726,6 +726,36 @@ silently accumulated `ssh` one step stale.
 blind to the single most common CUDA-only bug class.* Any change that touches a rail, a `modify_*`, or
 a `sync_*` is validated by the **CUDA fidelity gate or by nothing.**
 
+### 🔴 L86 — THE DEMONSTRATION. Same binary, same hour, four gates. (M7 H.2, 2026-07-14)
+
+The first cut of `FESOM_SPEED_ICERAILS` (package H.2) deleted 55 full-field rails from the ice step.
+It was submitted to every gate at once:
+
+| gate | verdict |
+|---|---|
+| knob-OFF byte gate (26255200) | **PASS** |
+| **FORCE_SERIAL byte proof, ICERAILS ON (26255201)** | **`diff_snap rc=0` — BIT-IDENTICAL to the certified baseline** |
+| ICERAILS announce | **1** — the knob fired (not L80) |
+| **CUDA fidelity gate, ICERAILS alone (26255202)** | **CATASTROPHIC FAIL: 15 fields over ceiling COHERENTLY. `a_ice max|Δ| = 9.83e-01` — i.e. the ENTIRE ice concentration. `m_ice` 2.15, `h_ice` 2.22. THERE WAS NO SEA ICE.** |
+
+**The project's strongest gate certified, as bit-for-bit identical to ground truth, a lever that
+deletes the sea ice.** Because on Serial `.d()` and `.h()` are the same memory, so all 55 deleted
+rails are no-ops there — and the bug was *precisely* a rail.
+
+**The bug (and it is a general trap):** `Field::alloc()` zero-inits BOTH spaces and marks them
+`Synced` (`fesom_field.hpp:64`). The ice INITIAL CONDITION is then written **on the host** through the
+raw alias — the DualView never learns. **The only thing that had ever carried that IC to the device
+was the per-step IN rail.** Delete the rail as "a pure round trip between two device kernels" — which
+it demonstrably was, on every step but the first — and the device ice state stays at **zero**.
+
+**The rule: before deleting a rail because "both sides are device kernels", ask WHO PUT THE INITIAL
+VALUE THERE.** A per-step rail is also, silently, the IC push. The Z7 trap (a field that is bitwise
+equal at cold start) wearing the opposite face: here the field is *not* equal at cold start, and only
+step 1 is wrong — but in a coupled model step 1 being wrong is the whole run.
+
+Fixed with an explicit one-shot IC push under the knob. **Cost of the CUDA gate: 42 seconds. Cost of
+trusting the byte proof: a silently ice-free ocean.**
+
 ---
 
 ### L87 — A host timer tells you how long the HOST SAT THERE. It does NOT tell you what is REMOVABLE. (M7 D.1, 2026-07-14)
