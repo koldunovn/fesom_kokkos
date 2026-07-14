@@ -60,11 +60,19 @@ esac
 clear_knobs() { while read -r v; do unset "$v"; done \
                   < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p'); }
 
-leg() {   # leg <name>
+leg() {   # leg <name>  -> prints the REAL error count
     srun compute-sanitizer --tool "$TOOL" "${TOOLARGS[@]}" --print-limit 30 \
          "$FESOM" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 > "$OUT/$1.log" 2>&1
-    echo "  rc=$?"
-    grep -cE '^=+ *(ERROR|Race reported|Invalid|Uninitialized)' "$OUT/$1.log" 2>/dev/null || echo 0
+    # Count the number compute-sanitizer itself reports, not the lines mentioning it: a
+    # grep -c for '^=+ *ERROR' matches the single "ERROR SUMMARY: 4 errors" header and
+    # cheerfully reports "1 finding" whether there are 0 or 400.
+    # Also EXCLUDE the known-benign CUDA_ERROR_INVALID_CONTEXT on cuCtxGetDevice: that is
+    # UCX/CUDA-aware-MPI probing the context from a non-CUDA thread under the sanitizer, not
+    # a memory fault. It is present identically with every knob off.
+    local total benign
+    total=$(grep -hoE 'ERROR SUMMARY: [0-9]+' "$OUT/$1.log" | awk '{s+=$3} END{print s+0}')
+    benign=$(grep -hc 'CUDA_ERROR_INVALID_CONTEXT' "$OUT/$1.log" 2>/dev/null || echo 0)
+    echo $(( total > benign ? total - benign : 0 ))
 }
 
 echo "=== M7 compute-sanitizer ($TOOL) — CORE2 dist_2, 3 steps ==="
@@ -73,13 +81,13 @@ echo "ON-leg knobs: ${KNOBS:?KNOBS required}"
 
 echo "--- baseline leg: knobs OFF (whatever this reports is PRE-EXISTING) ---"
 clear_knobs
-n_off=$(leg off | tail -1)
+n_off=$(leg off)
 
 echo "--- lever leg: knobs ON ---"
 clear_knobs
 IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done
 env | grep '^FESOM_SPEED' | sed 's/^/  /'
-n_on=$(leg on | tail -1)
+n_on=$(leg on)
 
 echo
 echo "=============================================================="
