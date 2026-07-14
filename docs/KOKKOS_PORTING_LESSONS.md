@@ -638,6 +638,18 @@ for exactly the same code.**
    because of the rank-count asymmetry, *not* because the lever is GPU-specific. Check the arithmetic
    before either claiming or dismissing a ratio distortion.
 
+**Measured, not just derived** (job 26244994, `jobs/job_m7_ab_cpu` — the compute-partition twin of the
+GPU A/B; note a CPU leg must set `FESOM_SPEED_FORCE_SERIAL=1` as well, since knobs resolve OFF on a
+non-CUDA build): NG5@4N CPU, `base` **4.5853 s/step** vs `ROTCACHE` **4.6089** = **+0.51%**. The lever
+that is worth **−4% on the GPU is worth NOTHING on the CPU.** (Read honestly: within-leg rep spread is
+0.24–0.37%, so 0.51% is at the edge of resolution, and no mechanism supports a *real* cost — the table
+is ~123 MB/node/step ≈ 0.3 ms at 400 GB/s, not the ~23 ms a genuine +0.51% needs. Call it *no
+measurable effect*, not a regression.)
+
+**So the "levers act on the CUDA path only" rule turns out to be load-bearing for PERFORMANCE, not just
+a guard for the Serial debug oracle.** A bit-identical transformation can be a large win on one backend
+and worth nothing on the other, purely because of how the mesh is divided among ranks.
+
 *(Corollary for anyone reading a "GPU is N× the CPU node" number: part of that N is the GPU config
 being forced to run the un-ported serial remnant 32× more concentrated. That is a real cost of the
 port's current state, not an artefact — but it also means the ratio will keep improving as host code

@@ -703,6 +703,28 @@ The CPU denominator moves by 0.025%, i.e. **40× below the same-alloc noise floo
 not inflate the ratio. But that is because of the rank asymmetry, *not* because the lever is GPU-specific.
 **Still re-measure the CPU anchor same-day when quoting a ratio** (that rule is about ±5% cluster noise).
 
+#### MEASURED (job 26244994, `jobs/job_m7_ab_cpu`, NG5@4N = 4 nodes × 128 ranks = dist_512)
+
+| leg | rep a | rep b | min | vs base |
+|---|--:|--:|--:|--:|
+| `base` | 4.5965 | 4.5853 | **4.5853 s/step** | — |
+| `rot` (`FORCE_SERIAL=1;ROTCACHE=1`) | 4.6258 | 4.6089 | **4.6089 s/step** | **+0.51%** |
+
+**Verdict: ROTCACHE gives the CPU NOTHING** (predicted +0.025%; measured −0.51%). The announce fired, so
+the knob was live — this is not L80. Read it honestly: the within-leg rep spread is **0.24–0.37%**, so a
+0.51% gap is at the edge of what 2 reps resolve, and the obvious mechanism does **not** hold up — the
+table is ~960 KB/rank × 128 ranks/node ≈ 123 MB/node/step, which at Levante's ~400 GB/s is **0.3 ms**, not
+the ~23 ms a real +0.51% would need. **So: no measurable effect, NOT a demonstrated regression.** Do not
+claim an L3-pressure story without evidence for it.
+
+**What this settles:** the CPU denominator is untouched → **the GPU-vs-CPU ratio is honest**, and the
+existing "levers act on the CUDA path only" rule (knobs resolve OFF on a non-CUDA build) is now the right
+default *on performance grounds*, not merely as protection for the Serial debug oracle. **Do not enable
+ROTCACHE on the CPU path.**
+
+**Same-day CPU anchor: NG5@4N = 4.5853 s/step** — 0.3% from the ledger's 4.599, so today's cluster is
+consistent with the row-0 anchor and the package-A ratio row can be computed against it.
+
 ## Task A.1 — `FESOM_SPEED_FLAT` (4 flattened column-loop kernels)
 
 One boolean knob, four sites, all re-parallelized from one-thread-per-column to
