@@ -251,6 +251,81 @@ static void extract_uv_component(const real_t *uv, real_t *dst,
     }
 }
 
+/* ==================== M7 H.8 — FESOM_SPEED_LAZYSNAP =============================================
+ * The ice OUT rail (fesom_ice.cpp:934) syncs 9 nod2D fields to the host EVERY STEP; under the
+ * blessed set its only surviving consumer is THE SNAPSHOT GATHER below, which runs at snapshot
+ * cadence (never in the benchmarks — snap_every=-1→0; monthly in production, ~10⁴× rarer). This
+ * lever moves the sync to the reader: the rail's 9 sync_host() are skipped, and the 7 gathered ice
+ * fields are pulled at the top of fesom_io_write_snapshot instead (srfoce_u/v are gathered by
+ * NOTHING → pure deletions). Sized from the gap census (26258712, h9, 300 steps): the whole
+ * ice_h_diag_kk → ice_oce_fluxes_mom_kk gap = 7.3 ms/step — 9 DtoH copies, 31.8 MB, plus the
+ * inter-copy host gaps. Pre-registered −1.1 % (floor −1.0, ceiling −1.6) BEFORE the A/B.
+ *
+ * DEPENDENCIES — abort, never downgrade (L80). The rail also fed every OTHER host reader of these
+ * fields; each must already be dead, and each is killed by a different lever (the BULKTAIL
+ * pattern, one dependency per reader):
+ *   uice/vice/srfoce_u/v/a_ice → host oce_fluxes_mom (fesom_ice_coupling.cpp:675) : ICEFLUXDEV
+ *   a_ice                      → host cal_shortwave_rad (fesom_bulk.cpp:926)      : FLUXDEV+SWSKIP
+ *   a/m/ms + uice/vice         → the 5 legacy host IO-stream resolvers            : IOACC
+ *   (the rail itself only exists under ICERAILS, which also already aborts on
+ *    FESOM_KK_VERIFY=ice* — the verify twins capture from the raw host alias.)
+ * FESOM_DIAG_MICE / FESOM_DIAG_GID read uice/vice/m_ice/srfoce_* from the raw host alias every
+ * step → incompatible, abort (they are opt-in debug; never combined with a perf run).
+ *
+ * CROSS-STEP INVARIANT (fesom_ice.cpp:931 re-derived, rule 0.3): the 9 fields become Device-
+ * authoritative between snapshots. Every next-step consumer (std-EVP, mEVP, FCT, thermo, h_diag)
+ * reads them on the DEVICE — their host bounces are all !icerails-gated. The only remaining
+ * modify_host()+sync_device() on any of the 9 under the required set is the ONCE-ONLY IC push
+ * (fesom_ice.cpp:576), which fires at step 1 while the host mirror IS the IC. No clobber path.
+ * ============================================================================================== */
+bool fesom_lazysnap_on(void)
+{
+    static int c = -1;
+    if (!fesom_speed_on("LAZYSNAP", &c)) return false;   /* resolves + announces once, on rank 0 */
+
+    static bool guards_done = false;                     /* the guards below run exactly once */
+    if (guards_done) return true;
+    guards_done = true;
+
+    int rank = 0, inited = 0;
+    MPI_Initialized(&inited);
+    if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    /* Ask the dependencies THROUGH THE SAME RESOLVER, so a per-lever FESOM_SPEED_X=0 override on
+     * top of the master switch is seen. */
+    static int s_ir = -1, s_ifd = -1, s_fd = -1, s_sw = -1, s_io = -1;
+    const bool icerails   = fesom_speed_on("ICERAILS",   &s_ir);
+    const bool icefluxdev = fesom_speed_on("ICEFLUXDEV", &s_ifd);
+    const bool fluxdev    = fesom_speed_on("FLUXDEV",    &s_fd);
+    const bool swskip     = fesom_speed_on("SWSKIP",     &s_sw);
+    const bool ioacc      = fesom_speed_on("IOACC",      &s_io);
+    if (!(icerails && icefluxdev && fluxdev && swskip && ioacc)) {
+        if (rank == 0)
+            fprintf(stderr,
+                "[fesom_speed] FESOM_SPEED_LAZYSNAP REQUIRES ICERAILS + ICEFLUXDEV + FLUXDEV + "
+                "SWSKIP + IOACC (have icerails=%d icefluxdev=%d fluxdev=%d swskip=%d ioacc=%d).\n"
+                "  Each missing lever revives a HOST reader of the ice fields whose per-step sync "
+                "this lever deletes; that reader would silently consume a stale mirror. Refusing "
+                "to run.\n",
+                (int)icerails, (int)icefluxdev, (int)fluxdev, (int)swskip, (int)ioacc);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    /* Match the diag blocks' own enabling condition exactly (bare getenv(), no atoi). */
+    static const char *const kDiag[] = { "FESOM_DIAG_MICE", "FESOM_DIAG_GID" };
+    for (const char *d : kDiag) {
+        if (getenv(d)) {
+            if (rank == 0)
+                fprintf(stderr, "[fesom_speed] FESOM_SPEED_LAZYSNAP is INCOMPATIBLE with %s: that "
+                                "diagnostic reads ice fields from the raw HOST alias every step, "
+                                "which this lever leaves stale between snapshots. Refusing to "
+                                "run.\n", d);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    return true;
+}
+
 void fesom_io_write_snapshot(const char                  *path,
                              int                          step_n,
                              real_t                       dt,
@@ -266,6 +341,22 @@ void fesom_io_write_snapshot(const char                  *path,
     const int n_lay  = nl - 1;
     const int nod2D  = mesh->nod2D;
     const int elem2D = mesh->elem2D;
+
+    /* M7 H.8 LAZYSNAP: this gather is the reader the per-step ice OUT rail served — pull the 7
+     * gathered ice fields HERE, at snapshot cadence, instead. Unconditional (not gated on the
+     * knob): sync_host() is a no-op when the field is already Synced (knob OFF), so both knob
+     * states and both callsites (the IC snapshot and the loop) are covered by construction, and a
+     * missed field is a loud h_checked() abort under -DFESOM_KK_SYNCCHECK, never silent garbage.
+     * const_cast per the D21 precedent: a pure device→host pull, no logical mutation. Every rank
+     * syncs its own local slice before the collective gathers below. */
+    if (ice) {
+        struct fesom_ice *icew = const_cast<struct fesom_ice *>(ice);
+        icew->data[FESOM_ICE_AICE].values_fld.sync_host();
+        icew->data[FESOM_ICE_MICE].values_fld.sync_host();
+        icew->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        icew->uice_fld.sync_host();   icew->vice_fld.sync_host();
+        icew->h_ice_fld.sync_host();  icew->h_snow_fld.sync_host();
+    }
 
     /* Build gather plan once (collective). */
     gather_plan gp;

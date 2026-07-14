@@ -13,6 +13,7 @@
 #include "fesom_halo_device.hpp"   // M7 H.2 ICERAILS: the srfoce_u/v host halo -> ONE device halo
 #include "fesom_speed.hpp"         // M7 H.2 ICERAILS
 #include "fesom_bulk.h"            // M7 H.3 BULKTAIL: fesom_bulktail_on()
+#include "fesom_io.h"              // M7 H.8 LAZYSNAP: fesom_lazysnap_on()
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -930,8 +931,16 @@ void fesom_ice_step(int                            step,
      *
      * These also leave a/m/ms + uice/vice SYNCED, which is exactly what the NEXT step's EVP kernel
      * needs to read on the device with no push. That is the cross-step invariant. Do not remove
-     * them without re-deriving it. */
-    if (icerails) {
+     * them without re-deriving it.
+     *
+     * M7 H.8 LAZYSNAP — re-derived (the full derivation is above fesom_lazysnap_on() in
+     * fesom_io.cpp). The EVP kernel reads a/m/ms + uice/vice on the DEVICE, and Device-
+     * authoritative serves that read just as well as Synced — the invariant needed the device copy
+     * current, not the host one. The host mirrors' only snapshot-cadence consumer (the I/O gather)
+     * now pulls them itself; every step-cadence host reader is dead under the lever's required set
+     * (ICEFLUXDEV/FLUXDEV+SWSKIP/IOACC — enforced by abort), and the census shows this whole block
+     * is 7.3 ms/step of GPU idle. So under LAZYSNAP: skip all 9. */
+    if (icerails && !fesom_lazysnap_on()) {
         ice->data[FESOM_ICE_AICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();

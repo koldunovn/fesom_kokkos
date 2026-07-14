@@ -142,4 +142,9 @@ void fesom_io_write_snapshot(const char                  *path,
                              const struct fesom_ice      *ice,
                              struct fesom_partit         *partit);
 
+/* M7 H.8 LAZYSNAP — resolve + dependency guard (aborts on a missing dependency, L80). The per-step
+ * ice OUT rail (fesom_ice.cpp) asks this before syncing; the snapshot writer pulls the gathered
+ * ice fields itself. Definition + full rationale above fesom_io_write_snapshot in fesom_io.cpp. */
+bool fesom_lazysnap_on(void);
+
 #endif /* FESOM_IO_H */
