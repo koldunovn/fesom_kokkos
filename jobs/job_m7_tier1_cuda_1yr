@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH --job-name=m7_t1_1yr
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=03:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/t1_1yr.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/t1_1yr.%j.err
+#
+# M7 Task 1.5 — the TIER-1 CLIMATE CLOSE. 1-yr CORE2 CUDA with ALL Tier-1 speed knobs ON,
+# compared against the certified DEFAULT-config references.
+#
+# M7 levers are SPEED-ONLY — they change no physics knob — so the reference is the DEFAULT
+# config (linfs + KPP + std EVP), NOT M6's 3-knob twin:
+#   C-port  /work/ab0995/a270088/port/kpp_5yr_fix               (--cref-frame rotated)
+#   Fortran /work/ab0995/a270088/port/zstar/fortran_linfs_2yr_b (linfs+KPP; purge-safe anchor, L74)
+#
+# THE BAR (M5.23 CUDA 1-yr on the same refs, docs/REFERENCE_RUNS.md:164):
+#   sst 1.00000 · sss 0.99996 · ssh 1.00000 · a_ice 0.99997
+# Tier 1 must MATCH these. Two of the three knobs (SWSKIP, ICEFLUXDEV) carry a PASSED
+# FORCE_SERIAL byte proof, so they are bit-identical by construction and any drift here would
+# mean something else moved. NOFENCE2 is a pure ordering change (no arithmetic), memcheck-clean.
+#
+# env: KNOBS (default: all three Tier-1 knobs), M7_NSTEPS, BIN.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2      # private mesh (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${M7_NSTEPS:-17280}      # 1 model year @ dt=1800
+SNAP_EVERY=1440
+YEAR=1958
+export FESOM_PRINT_EVERY=1000
+
+# M6 physics knobs OFF (M7 changes no physics); clean M7 slate, then apply KNOBS.
+unset FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_ALE FESOM_ALE_DUMP_DIR
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+KNOBS=${KNOBS:-"FESOM_SPEED_SWSKIP=1;FESOM_SPEED_ICEFLUXDEV=1;FESOM_SPEED_NOFENCE2=1"}
+IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done
+
+OUT=/work/ab0995/a270088/port2/m7/tier1_cuda_1yr
+rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+echo "=== M7 Tier-1 CUDA 1-yr CORE2 (nodes=$SLURM_JOB_NODELIST) — $(date) ==="
+echo "knobs:"; env | grep '^FESOM_SPEED' | sed 's/^/  /'
+srun -l "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+echo "--- last step (sanity: T/S bounded, no runaway) ---"; grep -E " it=" "$OUT/run.log" | tail -1
+echo "--- nan/blowup check ---"; grep -icE "nan|blowup|inf" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo
+echo "############ TIER-1 CLIMATE COMPARE (vectors rotated to geographic on both sides, L74) ############"
+"$PY" "$ROOT/scripts/m32_climate_compare.py" "$OUT" \
+      --label "CUDA-m7tier1" --years 1958 \
+      --cref /work/ab0995/a270088/port/kpp_5yr_fix               --cref-frame rotated \
+      --fref /work/ab0995/a270088/port/zstar/fortran_linfs_2yr_b
+echo
+echo "THE BAR (M5.23 CUDA 1-yr, same refs): sst 1.00000 · sss 0.99996 · ssh 1.00000 · a_ice 0.99997"
+exit $EC
