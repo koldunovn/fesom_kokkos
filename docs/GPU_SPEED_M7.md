@@ -4,69 +4,80 @@
 
 ---
 
-## 🔴 TIER-1 RESULT — and an UNSOLVED problem. Read this before believing anything below.
+## 🔴🔴 STOP — TWO OF THE KNOBS WERE SILENTLY DEAD ON CUDA. Most numbers below are being re-measured.
 
-**Tier 1 landed three bit-identical, fully-gated levers. Together they are worth −1.55%.**
-The ~25% host segment that Task 0.3 found is **REAL and still UNEXPLAINED**, and I was wrong about
-its cause **twice**.
+`src/fesom_speed.hpp` enforces the "Serial stays legacy" rule with
 
-### The measured A/Bs (same allocation, same nodes, same binary — only the knob differs)
+```c
+#ifndef KOKKOS_ENABLE_CUDA
+    if (on && !fesom_speed_force_serial()) on = 0;
+#endif
+```
 
-| lever | what it removes | NG5@4N | dars@8N |
-|---|---|--:|--:|
-| `ICEFLUXDEV` (1.0) | `ice_oce_fluxes_mom` host loop → device | **−0.72%** | — |
-| `SWSKIP` (1.2) | the DEAD host `sw_3d` (memset + `exp()` column walk) | **−0.01%** | — |
-| `NOFENCE2` (1.1) | the post-unpack halo fence | (in the combo) | — |
-| **all three** | | **−1.55%** | **−1.99%** |
+`KOKKOS_ENABLE_CUDA` comes from Kokkos' generated config. **If `fesom_speed.hpp` is included in a
+TU before anything that pulls that config in, the macro is not yet defined, the guard fires *even on
+a CUDA build*, and every knob in that TU silently resolves to OFF.** Proven by preprocessing the real
+TUs with the real CUDA flags and grepping for the guard:
 
-All three pass every correctness gate; two carry a PASSED **FORCE_SERIAL byte proof** (bit-identical
-by re-execution, not by argument). They are worth keeping. **They are not the headline.**
+| TU | knob | on CUDA |
+|---|---|---|
+| `fesom_bulk.cpp` | `SWSKIP` | 🔴 **DEAD** |
+| `fesom_io.cpp` | `IOACC` | 🔴 **DEAD** |
+| `fesom_ice_coupling.cpp` | `ICEFLUXDEV` | ✅ live |
+| `fesom_halo_device.cpp` | `NOFENCE2` | ✅ live |
+| `fesom_step.cpp` | (ICEFLUXDEV gating) | ✅ live |
 
-### What is solidly established (do not re-derive)
+**What this invalidates:** the SWSKIP A/B (`−0.01%`) measured the **legacy path** — the lever never
+ran. Its CUDA fidelity gate "PASS" tested nothing. **SWSKIP has never actually been tested on CUDA,
+so the ~25% host segment may still be exactly the dead `sw_3d` I said it was.** Re-running:
+A/Bs 26237206-08, gates 26237209-13. `ICEFLUXDEV`'s **−0.72% is real** (its TU was fine), and the
+all-three `−1.55%` was really ICEFLUXDEV + NOFENCE2.
+
+### 🔴 The part worth internalising: EVERY correctness gate went green on a dead knob
+
+- **knob-OFF byte gate** passes — knob-OFF is exactly what a dead knob gives you.
+- **CUDA fidelity gate** passes — the output *is* the legacy output.
+- **FORCE_SERIAL byte proof** passes — **because `FORCE_SERIAL` bypasses the very guard that was
+  killing the knob.** It faithfully exercised the real code path on Serial while the CUDA run
+  quietly took the legacy one.
+
+A knob that does nothing is indistinguishable, to every gate we have, from a lever that does not pay.
+**The only thing that caught it was physics:** SWSKIP removes a **261 MB/rank/step `memset`**, and the
+A/B said it cost **0.01%**. That is not a disappointing lever — it is *physically impossible*.
+**Trust the arithmetic before you trust the gates.**
+
+**Fixes landed:** (1) `fesom_speed.hpp` now includes `<Kokkos_Macros.hpp>` itself, so it is
+include-order-independent (verified by preprocessing all five TUs on both backends). (2) Every lever
+now **announces itself** on rank 0 — one line when it turns ON, and a loud complaint if it was
+requested and resolved to OFF.
+
+---
+
+## Tier-1 result (PROVISIONAL — SWSKIP is being re-measured)
+
+| lever | what it removes | A/B NG5@4N | valid? |
+|---|---|--:|---|
+| `ICEFLUXDEV` (1.0) | `ice_oce_fluxes_mom` host loop → device | **−0.72%** | ✅ real |
+| `NOFENCE2` (1.1) | post-unpack halo fence | ~−0.8% (in the combo) | ✅ real |
+| `SWSKIP` (1.2) | the DEAD host `sw_3d` (261 MB memset + `exp()` walk) | ~~−0.01%~~ | 🔴 **knob was dead — re-running** |
+| `IOACC` (1.0b) | 6 host I/O accumulators → device | — | 🔴 **knob was dead — never tested** |
+| all three (old) | | −1.55% | = ICEFLUXDEV + NOFENCE2 only |
+
+### What is still solid regardless
 
 - **The host segment is REAL, confirmed two independent ways.** (a) GPU-idle time attributed to no
-  traced call: **408.2 ms/step (32.0%)**. (b) A completely separate computation — raw wall time in
-  which the host is inside NO traced CUDA call and NO MPI call, regardless of GPU state:
-  **437.3 ms/step (34.3%)**. Uniform across steps (stdev **1.5%**), so not I/O or forcing reads.
-  Single-threaded: nsys sees ALL CUDA API and ALL MPI on one tid.
-- The trace is trustworthy: traced step **1274.6 ms** vs untraced baseline **1279.6 ms** (0.4%);
-  kernel share **46.6%** reproduces PROFILE_M522's 46%; dars@8N reproduces its 28%.
+  traced call: **408.2 ms/step (32.0%)**. (b) A separate computation — raw wall in which the host is
+  inside NO traced CUDA call and NO MPI call: **437.3 ms/step (34.3%)**. Uniform (stdev **1.5%**).
+  Single-threaded: nsys sees all CUDA API and all MPI on one tid.
+- Trace is trustworthy: traced step **1274.6 ms** vs untraced **1279.6 ms** (0.4%); kernel share
+  **46.6%** reproduces PROFILE_M522's 46%; dars@8N reproduces its 28%.
 - **Fences are NOT the problem** (spin 1.4%); launch gaps 3.0%. The plan's Tier-1A premise is dead.
-- The model's own phase timer independently agrees there is a ~25% hole: **`coupling 24.6%`**, a
-  phase containing essentially no GPU kernels.
+- The model's own phase timer independently sees the hole: **`coupling 24.6%`**, a phase with
+  essentially no GPU kernels — and `fesom_cal_shortwave_rad`'s dead `sw_3d` sits squarely in it.
 
-### What I got WRONG, twice
-
-The nsys host-gap is bounded to the microsecond — it starts after the last sea-ice kernel and ends
-exactly at `fesom_cal_shortwave_rad_kk`. I then guessed **which** function inside that window was the
-cost, instead of measuring it:
-
-1. **`fesom_ice_oce_fluxes_mom`** (`fesom_ice_coupling.cpp:512`) — a per-node + per-element host loop.
-   Ported it to the device. **A/B: −0.72%.** Not it.
-2. **the DEAD host `sw_3d`** (`fesom_bulk.cpp:698`) — `fesom_main.cpp:1214-1215` really does call the
-   host AND device shortwave routines back-to-back every step, and the device twin really does zero
-   and rewrite the whole array, so the host's `sw_3d` work really is dead (a 261 MB/rank/step memset
-   + an `exp()` column walk). All of that is true, and skipping it is **provably** bit-identical.
-   **A/B: −0.01%.** Also not it.
-
-Both findings are real bugs and both levers are correct. **Neither costs measurable time.** Something
-else in that window does, and I have stopped guessing.
-
-### The diagnostic that will settle it (running)
-
-`-t cuda,mpi` **cannot see inside host code by construction** — that is why it localised the time but
-could not name it. Two jobs are in flight:
-
-- **`jobs/job_m7_hostprof`** (26237111) — nsys with **`--sample=cpu --backtrace=dwarf`** plus `-t osrt`.
-  CPU samples WITH CALL STACKS: the answer comes back as a *function name*, not a hypothesis. `osrt`
-  also catches time in syscalls (file I/O, futex, page faults) that a pure compute profile misses.
-- **`stepprof_swskip`** (26237118) — the phase timer with `SWSKIP=1`. If `coupling` stays at 24.6%,
-  the cost is something else in that phase; if it collapses but the step does not, the host time is
-  not on the critical path and the step is bound elsewhere. Either answer is decisive.
-
-**⚠️ Rule going forward, learned at the cost of two levers:** a profiler tells you WHERE the time is,
-never WHICH SOURCE LINE. Localising a cost is not attributing it. **Only a same-allocation A/B turns
-an attribution into a fact — run it before writing the number down.**
+**⚠️ Rule (it has now cost real time twice):** a profiler tells you WHERE the time is, never WHICH
+SOURCE LINE — localising is not attributing. And **before believing a null A/B result, check that the
+knob actually fired.**
 
 ## Gate definitions
 
