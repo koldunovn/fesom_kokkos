@@ -258,6 +258,42 @@ is smaller than the 5.6% run-to-run spread of the *identical* default configurat
 cost at scale — zstar in particular adds a full NOD3D halo exchange every step. See
 `docs/GPU_FIDELITY.md` §M6.4.
 
+**Speed levers (M7).** Each defaults OFF; with every knob unset the binary is **byte-identical**
+to the pre-M7 model. `FESOM_SPEED=1` is the master switch (turns all four ON); a per-lever
+`FESOM_SPEED_<NAME>=0|1` always overrides it. **They act on the CUDA path only** — the Serial
+backend keeps the legacy bit-identical-to-C path (the debug oracle).
+
+**All four are BIT-IDENTICAL** — they delete redundant work, they do not trade accuracy for speed:
+
+| knob | default | what it does | A/B (NG5@4N) |
+|---|---|---|---|
+| `FESOM_SPEED_SWSKIP` | off | Skip the **dead** host `sw_3d` computation. `fesom_cal_shortwave_rad` (host) and `fesom_cal_shortwave_rad_kk` (device) both run every step; the device twin zeroes and rewrites the whole array, so the host's `sw_3d` work (a 261 MB/rank/step `memset` + an `exp()` column walk) is overwritten microseconds later. Its only real output — the nod2D `heat_flux += swsurf` — is kept. | **−26.5%** |
+| `FESOM_SPEED_ICEFLUXDEV` | off | Run `fesom_ice_oce_fluxes_mom` on the device (it was a host loop over device-resident arrays). | −0.7% |
+| `FESOM_SPEED_NOFENCE2` | off | Drop the post-unpack halo `Kokkos::fence()`. Safe because every consumer is a kernel on the same stream and the *next* exchange's pre-MPI fence is unconditional. | ~−0.8% |
+| `FESOM_SPEED_IOACC` | off | Device accumulators for the last six host-resolved output vars (`ssh`, `a_ice`, `m_ice`, `m_snow`, `uice`, `vice`). | ~−1.1% |
+| **`FESOM_SPEED=1`** | off | **all four** | **−28.4%** |
+
+**Effect (measured, `docs/GPU_SPEED_M7.md`).** GPU-node vs CPU-node ratio:
+
+| | before | **with `FESOM_SPEED=1`** |
+|---|--:|--:|
+| NG5 @ 4 nodes | 3.60× | **5.03×** |
+| NG5 @ 8 nodes | 3.20× | **4.28×** |
+| NG5 @ 16 nodes | 2.72× | **3.55×** (SYPD@dt240 1.42 → **1.86**) |
+
+⚠️ **The gain tracks per-rank domain size** (−28.5% at ~462k nod2D/rank → −17.5% at ~99k), because
+the levers remove *host* work. Do not extrapolate one scale point's factor to another.
+
+**Validated:** knob-OFF byte-identical at every commit; `SWSKIP`/`ICEFLUXDEV`/`IOACC` each pass a
+**FORCE_SERIAL byte proof** (the levered code runs on Serial and reproduces the certified baseline
+byte-for-byte); `NOFENCE2` changes no arithmetic and is `compute-sanitizer memcheck`-clean; and a
+1-yr CORE2 climate run with all four ON matches the un-levered baseline to five decimals
+(sst 1.00000, sss 0.99996, ssh 1.00000, a_ice 0.99997 vs both Fortran and the C port).
+
+⚠️ **`FESOM_SPEED_FORCE_SERIAL=1`** is a **dev-only** escape hatch: it lets the levers run on the
+Serial backend for those byte proofs. Never set it in production. Do not combine `SWSKIP` with a
+`-DFESOM_KK_VERIFY` build — the verify-only `kpp_bldepth` twin reads the host `sw_3d`.
+
 **Physics master switches:** `FESOM_NO_GMREDI`, `FESOM_NO_ICE_DYN`, `FESOM_NO_ICE_ADV`,
 `FESOM_NO_ICE_THERMO` — each skips its subsystem (the GMREDI one is the byte-identity gate).
 
