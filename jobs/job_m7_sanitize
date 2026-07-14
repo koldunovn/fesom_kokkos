@@ -74,9 +74,13 @@ leg() {   # leg <name>  -> prints the REAL error count
     # So count the real thing directly. `CUDA_ERROR_INVALID_CONTEXT` on `cuCtxGetDevice` is
     # excluded by construction: it is UCX/CUDA-aware-MPI probing the context from a non-CUDA
     # thread under the sanitizer, not a memory fault, and it appears identically knob-off.
+    # ⚠️ THIRD TIME'S THE CHARM. Twice already this counter grepped for a WORD and counted the
+    # tool's own SUMMARY LINE ("ERROR SUMMARY: 4 errors", "RACECHECK SUMMARY: 0 hazards") instead
+    # of the findings. Parse the NUMBER the tool prints, or match the hazard text itself — never
+    # grep -c for a word that also appears in the summary.
     case "$TOOL" in
       memcheck)  grep -hcE 'Invalid __global__ (read|write)|Invalid (read|write)|use after free|Invalid __shared__' "$OUT/$1.log" 2>/dev/null || echo 0 ;;
-      racecheck) grep -hcE 'RACE|hazard' "$OUT/$1.log" 2>/dev/null || echo 0 ;;
+      racecheck) grep -hoE 'RACECHECK SUMMARY: [0-9]+' "$OUT/$1.log" | awk '{s+=$3} END{print s+0}' ;;
       *)         grep -hoE 'ERROR SUMMARY: [0-9]+' "$OUT/$1.log" | awk '{s+=$3} END{print s+0}' ;;
     esac
 }

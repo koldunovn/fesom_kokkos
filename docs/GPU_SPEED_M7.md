@@ -430,6 +430,11 @@ hazard would have produced had the explicit realloc fence been missing. The only
 known-benign `CUDA_ERROR_INVALID_CONTEXT` on `cuCtxGetDevice` (UCX/CUDA-aware-MPI probing the context
 from a non-CUDA thread under the sanitizer), present identically with the knobs off.
 
+**racecheck** (job 26238799) is also clean — `RACECHECK SUMMARY: 0 hazards displayed (0 errors,
+0 warnings)` on both legs. Run for completeness only: **racecheck is shared-memory-only and cannot
+speak to `NOFENCE2`'s global-memory ordering either way** (L80/L81 note). **memcheck is the tool that
+can, and it says zero.**
+
 ## Knob registry
 
 ⚠️ **Every knob here is verified LIVE on the CUDA build** (preprocessor check, all five TUs). `SWSKIP`
