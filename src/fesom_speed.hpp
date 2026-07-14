@@ -31,6 +31,23 @@
  * Unrecognised values abort loudly (M6 idiom).
  * ======================================================================= */
 
+/* ⚠️⚠️ THIS INCLUDE IS LOad-BEARING. DO NOT REMOVE IT. ⚠️⚠️
+ *
+ * fesom_speed_resolve() below is guarded by `#ifndef KOKKOS_ENABLE_CUDA` (the "Serial stays
+ * legacy" rule). That macro comes from Kokkos' generated config. If this header is included
+ * in a TU BEFORE anything that pulls the config in, the macro is not yet defined, the guard
+ * fires *even on a CUDA build*, and EVERY KNOB IN THAT TU SILENTLY RESOLVES TO OFF.
+ *
+ * That is not hypothetical: it is exactly what happened to FESOM_SPEED_SWSKIP in
+ * fesom_bulk.cpp and FESOM_SPEED_IOACC in fesom_io.cpp. The levers were correct, every
+ * correctness gate passed (the FORCE_SERIAL byte proof passes *because* FORCE_SERIAL bypasses
+ * this very guard), and the CUDA A/B quietly measured the LEGACY path and reported "0.00%".
+ * A knob that does nothing is indistinguishable from a lever that does not pay.
+ *
+ * Kokkos_Macros.hpp is the cheap header whose only job is to define the KOKKOS_ENABLE_*
+ * macros. Including it here makes this header INCLUDE-ORDER-INDEPENDENT. */
+#include <Kokkos_Macros.hpp>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
