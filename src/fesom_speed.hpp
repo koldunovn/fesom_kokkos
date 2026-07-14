@@ -84,19 +84,40 @@ inline bool fesom_speed_force_serial()
 }
 
 /* Resolve a lever, uncached: per-lever knob > master FESOM_SPEED > OFF.
- * On a non-CUDA build the result is forced OFF unless FORCE_SERIAL. */
+ * On a non-CUDA build the result is forced OFF unless FORCE_SERIAL.
+ *
+ * ANNOUNCES ITSELF. Every lever prints one line, once, on rank 0, saying whether it is ON —
+ * and shouts if it was REQUESTED but resolved to OFF.
+ *
+ * This is not cosmetic. FESOM_SPEED_SWSKIP and FESOM_SPEED_IOACC once shipped SILENTLY DEAD on
+ * the CUDA build (an include-order bug hid KOKKOS_ENABLE_CUDA from the guard above) and passed
+ * EVERY correctness gate while doing so: the knob-OFF byte gate passes because knob-OFF is what
+ * a dead knob gives you; the fidelity gate passes because the output is the legacy output; and
+ * the FORCE_SERIAL byte proof passes *because FORCE_SERIAL bypasses this very guard*. The only
+ * symptom was an A/B reporting 0.00%. **A knob that does nothing is indistinguishable from a
+ * lever that does not pay.** So: make the model TELL YOU what it is actually running. */
 inline int fesom_speed_resolve(const char *lever)
 {
     char var[80];
     snprintf(var, sizeof var, "FESOM_SPEED_%s", lever);
     long v = 0;
-    int on;
-    if (fesom_speed_parse_int(var, &v))                on = (v != 0);
-    else if (fesom_speed_parse_int("FESOM_SPEED", &v)) on = (v != 0);
-    else                                               on = 0;
+    int  asked = 0, on = 0;
+    if (fesom_speed_parse_int(var, &v))                { asked = 1; on = (v != 0); }
+    else if (fesom_speed_parse_int("FESOM_SPEED", &v)) { asked = 1; on = (v != 0); }
 #ifndef KOKKOS_ENABLE_CUDA
     if (on && !fesom_speed_force_serial()) on = 0;   /* Serial stays legacy */
 #endif
+    int rank = 0, inited = 0;
+    MPI_Initialized(&inited);
+    if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0) {
+        if (on)
+            fprintf(stderr, "[fesom_speed] %s = ON\n", var);
+        else if (asked && v != 0)
+            fprintf(stderr, "[fesom_speed] !! %s WAS REQUESTED BUT RESOLVES TO OFF — the lever is "
+                            "NOT running. (Serial backend without FESOM_SPEED_FORCE_SERIAL=1?)\n", var);
+        fflush(stderr);
+    }
     return on;
 }
 
