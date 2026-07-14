@@ -318,7 +318,8 @@ The plan ranked Tier-1A as *fence removal → CG slimming → small-kernel fusio
 
 | rank | lever | measured payoff at NG5@4N | class | status |
 |--:|---|---|---|---|
-| **1** | ➕ **Task 1.0 `ICEFLUXDEV`** — port `fesom_ice_oce_fluxes_mom` to Kokkos | **up to 333 ms/step (26.2%)** | bit-id | **NEW — the campaign's biggest single lever** |
+| **1** | ➕ **Task 1.2 `SWSKIP`** — skip the DEAD host `sw_3d` (`fesom_bulk.cpp:698`) | **the ~25% host segment** | bit-id | **THE lever. All correctness gates PASS; A/B running** |
+| ~~1~~ | ~~Task 1.0 `ICEFLUXDEV`~~ — port `ice_oce_fluxes_mom` to Kokkos | **A/B: −0.72%** | bit-id | landed + gated, but **my original attribution was WRONG** — see the headline |
 | 2 | Task 1.3 `FCT2` — T+S tracer batching | FCT is 14.3% of step in 56 launches/step; batching halves the launches AND the host issue cost | bit-id | as planned, now better motivated |
 | 3 | Task 1.1 `NOFENCE2` — post-unpack fence | **floor 13.6 ms (1.1%)**, ceiling 51.7 ms (4.1%) incl. the launch gap it unblocks | bit-id | ✅ implemented — modest, but cheap and bit-identical |
 | 4 | Task 1.2 `CGSLIM` — CG body | 351 launches/step for 12 ms GPU → pure launch overhead | bit-id | as planned |
