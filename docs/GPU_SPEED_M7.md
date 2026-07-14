@@ -115,7 +115,7 @@ so later jobs can be pinned to certified-source code while the build tree moves.
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | M5.24 (ref, 2026-05-31 — historical, NOT the anchor) | 1.273 | 4.599 | 3.61 | 0.810 | 2.356 | 2.91 | 0.492 | 1.237 | 2.51 | 0.344 | — | — | 0.814 |
 | **row 0: m7 baseline** ✅ COMPLETE (2026-07-14, min of 2 reps) | **1.2796** | **4.6005** | **3.60** | **0.7381** | **2.3624** | **3.20** | **0.4487** | **1.2188** | **2.72** | **0.3178** | **0.8563** | **2.69** | **0.8177** |
-| **⭐ TIER 1** (SWSKIP+ICEFLUXDEV+NOFENCE2+IOACC; row-0 × **0.7161** from the same-alloc A/B 26237207) | **0.9164** | 4.6005 | **5.02** | **0.5286** | 2.3624 | **4.47** | **0.3213** | 1.2188 | **3.79** | **0.2276** | 0.8563 | **3.76** | 0.5855 |
+| **⭐ TIER 1** ✅ MEASURED (SWSKIP+ICEFLUXDEV+NOFENCE2+IOACC; standard set, jobs 26238084-86) | **0.9145** | 4.6005 | **5.03** | **0.5520** | 2.3624 | **4.28** | *queued* | 1.2188 | — | **0.2622** | 0.8563 | **3.27** | — |
 
 ## ⭐⭐ STAGE-1 TARGET MET IN TIER 1 — 5.02× at NG5@4N, SYPD@dt240 = 1.99 at 16N
 
@@ -470,7 +470,27 @@ and only attributes the difference.
 
 ## Tier climate gates
 
-| tier | knobs ON | 1-yr climate vs C oracle | NG5@16N direct | tag |
+| tier | knobs ON | 1-yr CORE2 climate | NG5@16N direct | tag |
 |---|---|---|---|---|
-| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (all 27 fields at the climate-close floor, worst 9.9e-03 `h_ice`; job 26235125) | CPU 1.2188 ✅ / GPU queued | `m7.0-baseline` ✅ `3d00123` |
-| 1 | ICEFLUXDEV + NOFENCE2 | **pending** (needs the 1-yr CORE2 run) | pending | `m7.1-bitid` (pending) |
+| 0 | none | n/a — baseline CUDA fidelity gate **PASS** (all 27 fields at the climate-close floor, worst 9.9e-03 `h_ice`; job 26235125) | GPU 0.4487 / CPU 1.2188 ✅ | `m7.0-baseline` ✅ `3d00123` |
+| **1** | **SWSKIP + ICEFLUXDEV + NOFENCE2 + IOACC** | ✅ **PASS** (job 26238055) | queued (26238086) | `m7.1-bitid` |
+
+### ✅ Tier-1 1-yr CORE2 climate gate — PASS (job 26238055)
+
+Full model year, all four speed knobs ON, vs the certified DEFAULT-config references
+(`kpp_5yr_fix --cref-frame rotated` + `zstar/fortran_linfs_2yr_b`; vectors rotated to geographic on
+both sides, L74). Ran the full 17 280 steps, exit 0, T[−2.01, 31.27] / S[3.98, 41.06] — bounded, no
+runaway, no NaN.
+
+| field | vs Fortran | vs C-port | **the bar** (M5.23 CUDA, un-levered) |
+|---|--:|--:|--:|
+| sst | **1.00000** | 1.00000 | 1.00000 |
+| sss | **0.99996** | 0.99996 | 0.99996 |
+| ssh | **1.00000** | 1.00000 | 1.00000 |
+| a_ice | **0.99997** | 0.99997 | 0.99997 |
+| m_ice | 0.99997 | 0.99998 | — |
+| uice / vice | 0.99973 / 0.99976 | 0.99974 | — |
+
+**Identical to the un-levered baseline, to five decimal places** — which is what must happen:
+`SWSKIP`/`ICEFLUXDEV`/`IOACC` each carry a passing FORCE_SERIAL byte proof and `NOFENCE2` changes no
+arithmetic. **The speed came from deleting dead work, not from trading accuracy.**
