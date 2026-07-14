@@ -7,7 +7,14 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
-#SBATCH --time=00:30:00
+# ⚠️ 10 min, NOT 30. This gate ACTUALLY RUNS IN 24-32 SECONDS (measured: 26256924, 26257161,
+# 26257165, 26257689-91). The old 30-minute request was a 60x over-ask, and it does not merely waste a
+# reservation — it makes the job UN-BACKFILLABLE: SLURM will not slip a 2-node job ahead of a pending
+# 16-node reservation unless it provably fits in the gap, and a 30-minute claim never does. On
+# 2026-07-15 that left the ENTIRE options matrix stuck behind one 16-node job for hours; resubmitting
+# the identical gates with `-t 00:06:00` flipped the reason from (Priority) to (None) and they ran at
+# once. A cheap gate must LOOK cheap to the scheduler. Override with `-t` if you ever need longer.
+#SBATCH --time=00:10:00
 #SBATCH -o /work/ab0995/a270088/port2/m7/gpugate.%j.out
 #SBATCH -e /work/ab0995/a270088/port2/m7/gpugate.%j.err
 #
