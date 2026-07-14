@@ -7,6 +7,8 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80   # L94: the gpu partition is HETEROGENEOUS (a100_40 vs a100_80). A trace on
+#                               # mixed hardware inflates every MPI wait (the slowest rank sets the pace).
 #SBATCH --time=00:40:00
 #SBATCH -o /work/ab0995/a270088/port2/m7/hostprof.%j.out
 #SBATCH -e /work/ab0995/a270088/port2/m7/hostprof.%j.err
