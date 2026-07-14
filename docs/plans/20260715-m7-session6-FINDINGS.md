@@ -236,17 +236,57 @@ still does `modify_host(); sync_device()` on `srfoce_u`, `srfoce_v`, `srfoce_ssh
 data**: mEVP runs on last step's surface currents, and on **zeros at step 1**.
 
 - The standard-EVP branch right above it (`:653-667`) **is** correctly gated. The mEVP branch was missed.
-- **No gate could have caught it.** The default is `whichEVP=0`, and M6's mEVP validation was a
-  **Serial** bit-identity test — where `.d()` *is* `.h()` and every one of these rails is a no-op
-  (**L86**).
-- **Proposed fix:** gate the mEVP IN rail (`:681-693`) and OUT rail (`:695-696`) on `!icerails`,
-  exactly as the EVP branch is. It needs its **own CUDA fidelity gate with `FESOM_WHICH_EVP=1`** —
-  which does not currently exist and should be added to the gate ladder.
-- **Not fixed in the H.3 commit** (different lever, different gate). BULKTAIL refuses to run with
-  `whichEVP != 0` so it cannot compound it.
 
-**The lesson is L86's, restated: every knob that makes a field device-authoritative must be checked
-against EVERY consumer of that field — including the ones behind a non-default option knob.**
+### PROVEN BY A CONTROLLED DIFFERENTIAL — both legs pre-registered before the jobs ran
+
+| job | binary | config | predicted | actual |
+|---|---|---|---|---|
+| **26257159** | `h5` **pre-fix** | mEVP + ICERAILS | **FAIL** | ✅ **FAILED** — 13 fields COHERENTLY over ceiling: `h_ice` **1.941e+00**, `T` **1.929e+00**, `a_ice` **5.762e-01**, `uice` 5.748e-01, `u`/`v` 2.941e-01 / 3.510e-01 (49 230 / 49 511 entries) |
+| **26257161** | `h7` **post-fix** | mEVP + ICERAILS | **PASS** | ✅ **PASSED**, worst 1.002e-03 |
+| 26257163 | `h7` | mEVP, no M7 knobs | PASS | ✅ PASSED (control — the legacy path is untouched) |
+
+**One code change; the bug appears and disappears. That is proof, not argument** — and it is the honest
+form of the decomposition L88 forbids: *change one thing, re-measure, and let the DIFFERENCE OF TWO
+MEASUREMENTS name the part.*
+
+Fixed in `b26ac52` (gate the mEVP IN rail `:681-693` and OUT rail `:695-696` on `!icerails`, exactly as
+the EVP branch is).
+
+### ✅ AND THEN THE OPTIONS MATRIX — the gate that should have existed in the ladder all along
+
+`FESOM_SPEED=1` (incl. BULKTAIL) × each option knob, each against **that knob's own M6 Serial oracle**:
+
+| leg | job | verdict |
+|---|---|---|
+| `FESOM_MIX_SCHEME=TKE` | 26257689 | ✅ PASS (worst 1.492e-01) |
+| `FESOM_WHICH_EVP=1` (mEVP) | **26257690** | ✅ **PASS (worst 8.939e-04)** |
+| `FESOM_ALE=zstar` | 26257691 | ✅ PASS (worst 9.869e-02) |
+
+**The zstar leg is an exact control (L79):** its `Kv max|Δ| = 9.537e-02` is **identical to four
+significant figures** to the value session 3 recorded as **zstar's own CUDA-vs-Serial floor**. The levers
+add nothing on that path. **Always check the floor before judging the number.**
+
+*(`om_mevp` also let BULKTAIL's `whichEVP != 0` refusal be lifted — `ef8bcbb`. mEVP touches exactly one
+of BULKTAIL's eight arrays, `stress_atmice`, and only via `.d()`.)*
+
+### 🔴 THE REAL LESSON (L91) — and it is NOT the one I first wrote
+
+My first draft of L91 said *"the gate ladder needs an OPTIONS row."* **That was wrong, and the memory
+caught me: THE ROW ALREADY EXISTED.** M7 Task 5.1 ran `FESOM_SPEED=1` × {TKE, mEVP, zstar}, each against
+that knob's own oracle, and **all three PASSED — in session 3** (jobs 26238785-87). The infrastructure was
+right. The reference was right. Someone had already thought of this.
+
+**It was run once. `ICERAILS` landed two sessions later. Nobody re-ran it.**
+
+> **Any lever that changes WHO OWNS A FIELD invalidates every previously-passed options gate.**
+> **The options matrix belongs in the PER-LEVER ladder, beside the CUDA fidelity gate — not in a
+> one-off task that gets ticked off and never re-run. A gate that is not in the ladder has already
+> expired.**
+
+And the two structural reasons it stayed invisible are the usual two: the **default is `whichEVP=0`**, so
+no default gate ever enters that branch; and mEVP's own M6 certification was a **Serial** bit-identity
+test, where `.d()` **is** `.h()`, every rail is a no-op, and every clobber is a self-assignment. **L86,
+exactly. It could not have caught this, and it did not.**
 
 ---
 
