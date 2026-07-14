@@ -1,0 +1,99 @@
+#!/bin/bash
+#SBATCH --job-name=m7san
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --ntasks-per-node=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=03:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/san.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/san.%j.err
+#
+# M7 — compute-sanitizer, run knob-OFF *and* knob-ON so findings are ATTRIBUTABLE.
+#
+# TWO corrections to the plan's "racecheck the fence removal" instruction, both learned the
+# hard way (job 26235606):
+#
+#  1. WRONG TOOL. `racecheck` is, in compute-sanitizer's own words, "Shared memory hazard
+#     checking" — it sees __shared__ only. NOFENCE2's entire risk surface is GLOBAL memory
+#     ordering (kernel-vs-kernel, and MPI's device writes vs a still-running unpack kernel).
+#     racecheck structurally CANNOT prove or disprove it. The tool that can catch the one real
+#     hazard — grow() freeing recv_d while a previous unpack still reads it — is MEMCHECK
+#     (invalid / use-after-free global access). initcheck catches stale-uninitialised global
+#     reads. So memcheck is the primary here; racecheck is run only for completeness.
+#
+#  2. NO BASELINE = NO VERDICT. Kokkos' own reduction machinery uses shared memory and the
+#     model is full of intentional atomics, so a bare "N hazards" from ANY of these tools is
+#     meaningless on its own. This job runs the SAME tool with knobs OFF and then ON, and
+#     compares. Only findings that appear ONLY with the knob on are attributable to the lever.
+#
+# CORE2 dist_2 (private mesh, L73), 3 steps — compute-sanitizer serialises kernels and is
+# 10-100x slower. Race/memory detection does not need many steps: the halo exchange fires
+# hundreds of times per step.
+#
+# env: KNOBS (the ON leg), TOOL (memcheck|racecheck|synccheck|initcheck; default memcheck), BIN, TAG.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TOOL=${TOOL:-memcheck}
+TAG=${TAG:-san_$TOOL}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+TOOLARGS=()
+case "$TOOL" in
+  racecheck) TOOLARGS=(--racecheck-report hazard --racecheck-detect-level warn) ;;
+  memcheck)  TOOLARGS=(--leak-check no) ;;
+esac
+
+clear_knobs() { while read -r v; do unset "$v"; done \
+                  < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p'); }
+
+leg() {   # leg <name>
+    srun compute-sanitizer --tool "$TOOL" "${TOOLARGS[@]}" --print-limit 30 \
+         "$FESOM" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 > "$OUT/$1.log" 2>&1
+    echo "  rc=$?"
+    grep -cE '^=+ *(ERROR|Race reported|Invalid|Uninitialized)' "$OUT/$1.log" 2>/dev/null || echo 0
+}
+
+echo "=== M7 compute-sanitizer ($TOOL) — CORE2 dist_2, 3 steps ==="
+echo "binary: $FESOM"
+echo "ON-leg knobs: ${KNOBS:?KNOBS required}"
+
+echo "--- baseline leg: knobs OFF (whatever this reports is PRE-EXISTING) ---"
+clear_knobs
+n_off=$(leg off | tail -1)
+
+echo "--- lever leg: knobs ON ---"
+clear_knobs
+IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done
+env | grep '^FESOM_SPEED' | sed 's/^/  /'
+n_on=$(leg on | tail -1)
+
+echo
+echo "=============================================================="
+echo " $TOOL   knobs-OFF findings: $n_off      knobs-ON findings: $n_on"
+if [ "${n_on:-0}" -le "${n_off:-0}" ]; then
+    echo " VERDICT: CLEAN — the lever introduces NO new $TOOL findings."
+    echo " (Any findings present are pre-existing and identical with the knob off.)"
+    echo "=============================================================="
+    exit 0
+else
+    echo " VERDICT: the lever ADDS $(( n_on - n_off )) new $TOOL finding(s) — INVESTIGATE."
+    echo " diff:  $OUT/off.log  vs  $OUT/on.log"
+    echo "=============================================================="
+    diff <(grep -E '^=+ *(ERROR|Race|Invalid|Uninit)' "$OUT/off.log" | sort -u) \
+         <(grep -E '^=+ *(ERROR|Race|Invalid|Uninit)' "$OUT/on.log"  | sort -u) | head -30
+    exit 1
+fi
