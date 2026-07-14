@@ -1,0 +1,74 @@
+#!/bin/bash
+#SBATCH --job-name=m7hostprof
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/hostprof.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/hostprof.%j.err
+#
+# M7 — WHICH HOST FUNCTION burns the 408 ms/step "host segment"? CPU SAMPLING, not inference.
+#
+# The stall budget (Task 0.3) proved there is 408 ms/step (32%) of GPU-idle time in which the
+# host is inside NO traced CUDA call and NO MPI call. It localised that time to a window, and
+# I then guessed WHICH function was in it — twice, and wrong both times:
+#     fesom_ice_oce_fluxes_mom   -> ported to device (ICEFLUXDEV) -> A/B  -0.72%
+#     host fesom_cal_shortwave_rad (dead sw_3d) -> skipped (SWSKIP) -> A/B -0.01%
+# Both levers are correct, gated and bit-identical. Neither is the cost.
+#
+# `-t cuda,mpi` cannot see inside host code by construction. `--sample=cpu` can: it takes
+# periodic CPU samples WITH CALL STACKS, so the answer comes out as a function name instead of
+# a hypothesis. `-t osrt` additionally catches time in syscalls (file I/O, page faults, futex),
+# which a pure compute profile would miss.
+#
+# Sampling perturbs, so this is a DIAGNOSTIC run, not a timing run — read the SHAPE (which
+# function has the samples), not the wall clock.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:-hostprof_ng5_4n}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+cat > "$OUT/wrap.sh" <<WRAP
+#!/bin/bash
+F=$FESOM
+if [ "\${SLURM_PROCID:-0}" = "0" ]; then
+  exec nsys profile -t cuda,mpi,osrt -o "$OUT/hostprof" --force-overwrite=true \\
+       --sample=cpu --sampling-period=1000000 --cpuctxsw=process --backtrace=dwarf \\
+       "\$F" "\$@"
+else exec "\$F" "\$@"; fi
+WRAP
+chmod +x "$OUT/wrap.sh"
+
+echo "=== M7 host CPU-sampling profile — NG5 dist_16, ${NSTEPS:-20} steps ==="
+echo "knobs: ${KNOBS:-none}"
+srun "$OUT/wrap.sh" "$MESH" "$OUT" 180 "${NSTEPS:-20}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "rc=$?"; grep -m1 'loop timing' "$OUT/run.log" || true
+
+echo
+echo "############ WHERE THE HOST TIME ACTUALLY IS ############"
+nsys stats --report cpu_profile --format column "$OUT/hostprof.nsys-rep" 2>&1 | head -40
+echo
+echo "--- OS-runtime (syscalls: file I/O, futex, page faults) ---"
+nsys stats --report osrt_sum --format column "$OUT/hostprof.nsys-rep" 2>&1 | head -18
+
+nsys export --type sqlite --force-overwrite=true -o "$OUT/hostprof.sqlite" "$OUT/hostprof.nsys-rep" > /dev/null 2>&1
+echo "sqlite: $(du -h "$OUT/hostprof.sqlite" 2>/dev/null | cut -f1)"
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true
+echo "=== done: $OUT ==="

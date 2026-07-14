@@ -4,85 +4,66 @@
 
 ---
 
-## 🔴 THE TASK-0.3 HEADLINE: the "~25–30% remainder" is HOST WORK — and it is DEAD host work
+## 🔴 TIER-1 RESULT — and an UNSOLVED problem. Read this before believing anything below.
 
-**32% of the NG5@4N step is single-threaded host C++.** The plan's Tier-1A was built on fences and
-launch gaps; measured, those are **1.4% and 3.0%**. The fence *count* was right (996/step vs the
-~880 estimate) — the fences are just cheap.
+**Tier 1 landed three bit-identical, fully-gated levers. Together they are worth −1.55%.**
+The ~25% host segment that Task 0.3 found is **REAL and still UNEXPLAINED**, and I was wrong about
+its cause **twice**.
 
-| the guess (plan Tier-1A) | the measurement (NG5@4N, rank 0, 23-step steady window) |
-|---|---|
-| ~880 device fences/step, "blocking-sync stalls" | 996 fences/step ✅ — but their **spin is only 18.1 ms/step (1.4%)** |
-| "launch gaps" | **38.1 ms/step (3.0%)** |
-| "host" | **408.2 ms/step (32.0%)** ← the whole remainder is here |
+### The measured A/Bs (same allocation, same nodes, same binary — only the knob differs)
 
-**~25 points of it are ONE function — and I first attributed it to the WRONG one. Read this before
-trusting any attribution in this doc.**
+| lever | what it removes | NG5@4N | dars@8N |
+|---|---|--:|--:|
+| `ICEFLUXDEV` (1.0) | `ice_oce_fluxes_mom` host loop → device | **−0.72%** | — |
+| `SWSKIP` (1.2) | the DEAD host `sw_3d` (memset + `exp()` column walk) | **−0.01%** | — |
+| `NOFENCE2` (1.1) | the post-unpack halo fence | (in the combo) | — |
+| **all three** | | **−1.55%** | **−1.99%** |
 
-The nsys host-gap is bounded precisely: it starts after the last sea-ice kernel and ends exactly at
-`fesom_cal_shortwave_rad_kk`. I read `fesom_main.cpp:1176–1202`, saw the chlorophyll block was not
-per-step, concluded the only remaining per-step code in the window was `fesom_ice_oce_fluxes_mom`
-(`fesom_ice_coupling.cpp:512`), and stopped reading. **The answer was 12 lines further down, at
-`fesom_main.cpp:1214`.** The A/B settled it: porting `ice_oce_fluxes_mom` to the device
-(`ICEFLUXDEV`) is bit-identical, gated, and worth **−0.72%** — not 25%.
+All three pass every correctness gate; two carry a PASSED **FORCE_SERIAL byte proof** (bit-identical
+by re-execution, not by argument). They are worth keeping. **They are not the headline.**
 
-**The real culprit: `fesom_cal_shortwave_rad` (host, `fesom_bulk.cpp:698`) is DEAD WORK.**
+### What is solidly established (do not re-derive)
 
-```c
-fesom_main.cpp:1214  fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);     // host
-fesom_main.cpp:1215  fesom_cal_shortwave_rad_kk(&mesh, &jra, &ice, &forcing);  // device (M5.20)
-```
+- **32.0% of the NG5@4N step is host time**: GPU idle, no traced CUDA call, no traced MPI call.
+  Uniform across steps (mean 464.7 ms, **stdev 1.5%**), so not I/O or forcing reads.
+- The trace is trustworthy: traced step **1274.6 ms** vs untraced baseline **1279.6 ms** (0.4%);
+  kernel share **46.6%** reproduces PROFILE_M522's 46%; dars@8N reproduces its 28%.
+- **Fences are NOT the problem** (spin 1.4%); launch gaps 3.0%. The plan's Tier-1A premise is dead.
+- The model's own phase timer independently agrees there is a ~25% hole: **`coupling 24.6%`**, a
+  phase containing essentially no GPU kernels.
 
-Both are called, back-to-back, every step. M5.20 moved the `sw_3d` shortwave-penetration profile to
-the device and removed its 519 MB/step HtoD push — **but left the host computation running.** The
-device twin *starts by zeroing the whole array* (`fesom_sw3d_zero`, `fesom_bulk.cpp:784`) and then
-rewrites every entry, so everything the host wrote is overwritten microseconds later, on **both**
-backends (on Serial, `sw_3d_fld.d()` *is* that same host array). The host function's only unique
-output is the cheap nod2D `heat_flux += swsurf` side effect — which the device kernel deliberately
-does not do (`fesom_bulk.cpp:794`).
+### What I got WRONG, twice
 
-The dead half is not cheap, and it is worth being precise about WHY (measured from the mesh:
-NG5 nod2D = 7,402,886, nl = 70, dist_16 → ~466 k nodes/rank):
-- the nod3D `memset`: 466,324 × 70 × 8 B = **261 MB per rank per step** (1.04 GB per 4-GPU node) —
-  single-threaded, so only ~30–50 ms of it;
-- **the real cost — the `exp()` column walk**: ~373 k open-ocean nodes × ~12 levels × 2 `exp()`
-  ≈ **9 M `exp()` calls per rank per step**. At 20–50 ns per double-precision `exp`, that alone is
-  200–450 ms — which is where the measured ~333 ms actually comes from.
+The nsys host-gap is bounded to the microsecond — it starts after the last sea-ice kernel and ends
+exactly at `fesom_cal_shortwave_rad_kk`. I then guessed **which** function inside that window was the
+cost, instead of measuring it:
 
-→ **Task 1.2 `FESOM_SPEED_SWSKIP`**: skip the `sw_3d` half of the host function, keep `heat_flux`.
-Bit-identical by construction (the device twin recomputes `sw_3d` in full from the same inputs with
-the same arithmetic) and provable with the FORCE_SERIAL byte proof. ⚠️ The one host reader of
-`sw_3d` is `kpp_bldepth` (`fesom_kpp.cpp:474`), which is `static` and runs **only** under
-`-DFESOM_KK_VERIFY` (`fesom_step.cpp:215`) — do not combine the knob with VERIFY.
+1. **`fesom_ice_oce_fluxes_mom`** (`fesom_ice_coupling.cpp:512`) — a per-node + per-element host loop.
+   Ported it to the device. **A/B: −0.72%.** Not it.
+2. **the DEAD host `sw_3d`** (`fesom_bulk.cpp:698`) — `fesom_main.cpp:1214-1215` really does call the
+   host AND device shortwave routines back-to-back every step, and the device twin really does zero
+   and rewrite the whole array, so the host's `sw_3d` work really is dead (a 261 MB/rank/step memset
+   + an `exp()` column walk). All of that is true, and skipping it is **provably** bit-identical.
+   **A/B: −0.01%.** Also not it.
 
-**Why it still caps the ratio.** Host code runs on **4 threads on a GPU node** (4 ranks = 4 GPUs)
-but on **128 ranks on a CPU node** — a ~32× parallelism deficit the GPU pays and the CPU does not.
-That reasoning was right; only the function was wrong.
+Both findings are real bugs and both levers are correct. **Neither costs measurable time.** Something
+else in that window does, and I have stopped guessing.
 
-**The lesson (see `feedback-profiler-traps` in project memory):** the profiler told me *where* the
-time was, to the microsecond, and it was right. It cannot tell you *which source line* is in that
-window — for that you must read **all** the code between the bracketing kernels, not the first
-plausible candidate. Two agreeing measurements of the same *window* are not independent confirmation
-of an *attribution*. **The same-alloc A/B is what turns an attribution into a fact.**
+### The diagnostic that will settle it (running)
 
-✅ **The class is closed.** A device port that leaves the host original running is invisible to every
-correctness gate and costs full price, so I swept every `foo()` / `foo_kk()` pair for others.
-Comment-stripped, restricted to the per-step loop (`fesom_main.cpp:1072+` and `fesom_step.cpp`):
-**`fesom_cal_shortwave_rad` is the ONLY one.** Every other host twin (`bulk_compute`, `pressure_bv`,
-`compute_vel_nodes`, `mo_convect`, `pp_mixing`, `ssh_solve_cg`, `impl_vert_visc`, `update_vel`,
-`compute_hbar`, `ale_thickness_linfs`, `compute_ssh_rhs_linfs`, `pressure_force_linfs_fullcell`)
-is called only from the **initialisation / IC-seeding** section (lines 553–905), which runs once.
+`-t cuda,mpi` **cannot see inside host code by construction** — that is why it localised the time but
+could not name it. Two jobs are in flight:
 
-### Gate results — Task 1.2 `SWSKIP`
+- **`jobs/job_m7_hostprof`** (26237111) — nsys with **`--sample=cpu --backtrace=dwarf`** plus `-t osrt`.
+  CPU samples WITH CALL STACKS: the answer comes back as a *function name*, not a hypothesis. `osrt`
+  also catches time in syscalls (file I/O, futex, page faults) that a pure compute profile misses.
+- **`stepprof_swskip`** (26237118) — the phase timer with `SWSKIP=1`. If `coupling` stays at 24.6%,
+  the cost is something else in that phase; if it collapses but the step does not, the host time is
+  not on the critical path and the step is bound elsewhere. Either answer is decisive.
 
-| # | gate | verdict |
-|---|---|---|
-| 26236816 | knob-OFF Serial byte gate | **PASS** |
-| 26236817 | **FORCE_SERIAL byte proof** (`SWSKIP=1`) | **PASS — bit-identity PROVEN** |
-| 26236818 | CUDA fidelity gate (`SWSKIP=1`) | **PASS** |
-| 26236819 | CUDA fidelity gate (all three knobs) | running |
-| 26236820 | **same-alloc A/B, NG5@4N** | **running — THE payoff number** |
-| 26236821/2 | A/B all-three (NG5@4N, dars@8N) | running |
+**⚠️ Rule going forward, learned at the cost of two levers:** a profiler tells you WHERE the time is,
+never WHICH SOURCE LINE. Localising a cost is not attributing it. **Only a same-allocation A/B turns
+an attribution into a fact — run it before writing the number down.**
 
 ## Gate definitions
 
