@@ -4,6 +4,7 @@
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   // M7 FLUXDEV: fesom_halo_fieldN — the 4 forcing fluxes halo on the DEVICE
 #include "fesom_kpp.h"     /* [forcing-diff dig] reuse the KPP dump harness for the iceforce dump */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -435,6 +436,45 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
 
     forcing->heat_flux_fld.modify_device();    forcing->water_flux_fld.modify_device();
     forcing->virtual_salt_fld.modify_device(); forcing->relax_salt_fld.modify_device();
+
+    /* ================== M7 FLUXDEV — the rails package keystone ==========================
+     * These 4 fluxes are produced ON THE DEVICE, right above. The legacy OUT rail then drags
+     * every one of them back to the host in FULL (4 × nod2D = 4 × 3.71 MB at NG5@4N), halos them
+     * on the HOST, and the ocean step re-pushes them in FULL — 2 fields at substep 3
+     * (fesom_step.cpp:411) and all 4 at substep 13b (:1032). Eleven full-field PCIe crossings per
+     * step, ~41 MB, ~6.7 ms — to serve exactly ONE host consumer: the `heat_flux += swsurf`
+     * accumulation in the host fesom_cal_shortwave_rad (fesom_bulk.cpp:791). That accumulation now
+     * runs in fesom_cal_shortwave_rad_kk under this same knob, so the host round trip has no reader
+     * left and the fields can stay device-authoritative end to end.
+     *
+     * The 4 host halos collapse into ONE device fesom_halo_fieldN (co-packed, GPU-aware MPI):
+     * 4 host-staged exchanges → 1 device exchange.
+     *
+     * Measured motivation (nsys, NG5@4N, Tier-1): the model's OWN DualView rails — not MPI — are
+     * 77.6 ms/step of the 95.8 ms memcpy pool (114 full-field copies/step). The plan's budget table
+     * labelled that pool "MPI staging + forcing HtoD"; the trace says 81 % of it is this class.
+     *
+     * ⚠️ THE D.1 TRAP (handoff §3) APPLIES HERE VERBATIM: on Serial, .d() and .h() are the SAME
+     * memory, so leaving/removing these rails is a no-op there and the FORCE_SERIAL byte proof
+     * passes EITHER WAY. The CUDA fidelity gate is the ONLY gate that can see a rail mistake.
+     *
+     * The halo set MATCHES the legacy set exactly (virtual_salt only when uvs) so that no field
+     * gains or loses an exchange under the knob. fesom_halo_fieldN calls modify_device() on every
+     * field BEFORE its npes<=1 early return (fesom_halo_device.hpp:181), so the single-rank case
+     * cannot leave the fields flagged host-current — the D.1 trap-#4 hole is already closed there.
+     * ==================================================================================== */
+    static int s_fluxdev = -1;
+    if (fesom_speed_on("FLUXDEV", &s_fluxdev)) {
+        if (uvs)
+            fesom_halo_fieldN({&forcing->virtual_salt_fld, &forcing->relax_salt_fld,
+                               &forcing->heat_flux_fld,    &forcing->water_flux_fld},
+                              FESOM_HALO_NOD2D, 1, 1, partit);
+        else
+            fesom_halo_fieldN({&forcing->relax_salt_fld, &forcing->heat_flux_fld,
+                               &forcing->water_flux_fld},
+                              FESOM_HALO_NOD2D, 1, 1, partit);
+        return;
+    }
 
     /* OUT: → host(forcing), then the 4 halos on the HOST (the ocean step's IN rail re-pushes the
      * halo'd host forcing → device). Matches the C exchange set; order is field-independent. */

@@ -408,8 +408,16 @@ int fesom_timestep(int                          step_n,
         if (!fesom_speed_on("ICEFLUXDEV", &s_ifd_a)) {
             fnc->stress_node_surf_fld.modify_host(); fnc->stress_node_surf_fld.sync_device();
         }
-        fnc->heat_flux_fld.modify_host();        fnc->heat_flux_fld.sync_device();
-        fnc->water_flux_fld.modify_host();       fnc->water_flux_fld.sync_device();
+        /* M7 H.1 FLUXDEV (rails): under the knob heat_flux/water_flux are DEVICE-authoritative all
+         * the way from fesom_ice_oce_fluxes_kk (device halo) through fesom_cal_shortwave_rad_kk (the
+         * heat_flux += swsurf accumulation). The host mirror is STALE, and this push would
+         * deep-copy it over the fresh device result — the D.1 trap, verbatim. Skip it.
+         * Knob OFF: unchanged legacy rail. */
+        static int s_fluxdev_a = -1;
+        if (!fesom_speed_on("FLUXDEV", &s_fluxdev_a)) {
+            fnc->heat_flux_fld.modify_host();        fnc->heat_flux_fld.sync_device();
+            fnc->water_flux_fld.modify_host();       fnc->water_flux_fld.sync_device();
+        }
         /* M5.20: sw_3d push REMOVED — sw_3d is now computed on the DEVICE by fesom_cal_shortwave_rad_kk
          * (forcing phase, main.cpp); KPP reads it device-resident. Eliminates 259 MB/step HtoD here (the
          * substep-13b re-push, another 259, was a placebo also removed). The host heat_flux += swsurf
@@ -1064,10 +1072,23 @@ int fesom_timestep(int                          step_n,
         /* M5.7b: Kv is device-resident with its halo from substep 3 (mo_convect device-halo) — no re-push. */
         mesh->hnode_new_fld.sync_device();   /* no-op: Synced since 12a; documents the dependency */
         {   auto *fnc = const_cast<struct fesom_forcing *>(forcing);
-            fnc->heat_flux_fld.modify_host();    fnc->heat_flux_fld.sync_device();
-            fnc->water_flux_fld.modify_host();   fnc->water_flux_fld.sync_device();
-            fnc->virtual_salt_fld.modify_host(); fnc->virtual_salt_fld.sync_device();
-            fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device(); }
+            /* M7 H.1 FLUXDEV (rails): all 4 fluxes are DEVICE-authoritative under the knob — see the
+             * substep-3 rail above and fesom_ice_coupling.cpp. These 4 pushes are the other half of
+             * the 11-full-field round trip the knob deletes; they would clobber the device result. */
+            static int s_fluxdev_b = -1;
+            const bool fluxdev = fesom_speed_on("FLUXDEV", &s_fluxdev_b);
+            if (!fluxdev) {
+                fnc->heat_flux_fld.modify_host();    fnc->heat_flux_fld.sync_device();
+                fnc->water_flux_fld.modify_host();   fnc->water_flux_fld.sync_device();
+                fnc->relax_salt_fld.modify_host();   fnc->relax_salt_fld.sync_device();
+            }
+            /* virtual_salt is device-halo'd under FLUXDEV ONLY when use_virt_salt — the knob's halo
+             * set matches the legacy set field-for-field (fesom_ice_coupling.cpp), and under zstar
+             * (!uvs) the legacy path never syncs or exchanges it. So under zstar the legacy rail
+             * stays, and no field silently gains or loses an exchange because a knob was set. */
+            if (!fluxdev || !fesom_ale_use_virt_salt()) {
+                fnc->virtual_salt_fld.modify_host(); fnc->virtual_salt_fld.sync_device();
+            } }
         /* M5.20: sw_3d re-push REMOVED here — sw_3d is forcing (set once/step by cal_shortwave_rad in the
          * forcing phase, pushed at substep 3); it is not mutated between substep 3 and 13b, so tracer_diff
          * reads it device-current from the substep-3 push. This was a PLACEBO re-push (259 MB/step H2D). */

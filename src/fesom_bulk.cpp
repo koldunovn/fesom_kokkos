@@ -724,13 +724,32 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
 {
     if (!FESOM_PHASE1_USE_SW_PENE) return;
 
-    /* 🔴 M7 D.1 (FORCEDEV): this is the LAST production HOST reader of a JRA array — it reads
-     * jra->shortwave[n2] raw, every step, and SWSKIP does NOT skip it (SWSKIP drops only the
-     * dead sw_3d half; the `heat_flux += swsurf` accumulation below always runs). With the
-     * device producer live, the host mirror is stale → pull it back. One nod2D D2H (~3.7 MB at
-     * NG5@4N ≈ 0.2 ms) against the 75 ms the port saves. (Follow-up: move the heat_flux
-     * accumulation into fesom_cal_shortwave_rad_kk, which deliberately omits it today, and this
-     * D2H disappears with the last host reader.) */
+    /* ================== M7 FLUXDEV — the rails-package keystone (the "follow-up" below) ========
+     * The `heat_flux += swsurf` accumulation further down is the LAST production host reader of
+     * jra->shortwave AND the last host writer of heat_flux. It is the sole reason the 4 forcing
+     * fluxes are dragged host-side every step: 11 FULL-FIELD PCIe crossings (~41 MB, ~6.7 ms at
+     * NG5@4N) plus 4 host-staged MPI halos in fesom_ice_oce_fluxes_kk, all to serve this one line.
+     *
+     * Under FLUXDEV the accumulation runs in fesom_cal_shortwave_rad_kk instead (which deliberately
+     * omitted it until now — see its comment), the fluxes stay device-authoritative end to end, and
+     * this function has nothing left to do once SWSKIP has taken the dead sw_3d half.
+     *
+     * Knob interaction is orthogonal by construction:
+     *   FLUXDEV && SWSKIP  → return immediately (the blessed set: no host loop, no shortwave D2H)
+     *   FLUXDEV && !SWSKIP → host still rebuilds sw_3d, so it still needs the shortwave D2H below;
+     *                        only the heat_flux accumulation moves to the device
+     *   !FLUXDEV           → legacy, unchanged
+     * ==========================================================================================*/
+    static int s_swskip  = -1;
+    static int s_fluxdev = -1;
+    const bool skip_sw3d = fesom_speed_on("SWSKIP",  &s_swskip);
+    const bool fluxdev   = fesom_speed_on("FLUXDEV", &s_fluxdev);
+    if (fluxdev && skip_sw3d) return;   /* the _kk twin does BOTH halves; nothing left here */
+
+    /* 🔴 M7 D.1 (FORCEDEV): the sw_3d half below reads jra->shortwave[n2] raw on the host. With the
+     * device producer live the host mirror is stale → pull it back. One nod2D D2H (~3.7 MB at
+     * NG5@4N ≈ 0.2 ms). Unreachable in the blessed set — FLUXDEV+SWSKIP returned above, which is
+     * exactly how this D2H "disappears with the last host reader". */
     if (fesom_forcing_dev_on()) {
         const_cast<struct fesom_jra55 *>(jra)->shortwave_fld.sync_host();
     }
@@ -774,8 +793,8 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
      * runs ONLY under -DFESOM_KK_VERIFY (fesom_step.cpp:215). Do not combine this knob with
      * FESOM_KK_VERIFY: the verify twin would read a stale sw_3d.
      * ==================================================================== */
-    static int s_swskip = -1;
-    const bool skip_sw3d = fesom_speed_on("SWSKIP", &s_swskip);
+    /* (skip_sw3d / fluxdev resolved at the top of the function — the FLUXDEV early-return needs
+     * both before the shortwave D2H.) */
 
     /* zero sw_3d over all local nodes/levels (Fortran 39-43) */
     if (!skip_sw3d)
@@ -788,7 +807,8 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
         /* visible shortwave into ocean [W/m²]; '+'-up: add back to heat_flux (F:56-60) */
         real_t swsurf = (1.0 - albw) * jra->shortwave[n2];   /* = qsr */
         swsurf *= 0.54;                                      /* visible part (300-750nm) */
-        forcing->heat_flux[n2] += swsurf;   /* THE unique output — always computed */
+        if (!fluxdev)
+            forcing->heat_flux[n2] += swsurf;   /* M7 FLUXDEV: moved to the _kk twin (device) */
 
         if (skip_sw3d) continue;            /* the device twin rebuilds sw_3d in full */
 
@@ -850,6 +870,14 @@ void fesom_cal_shortwave_rad_kk(const struct fesom_mesh  *mesh,
     auto uln   = mesh->ulevels_nod2D_fld.d();
     auto nln   = mesh->nlevels_nod2D_fld.d();
 
+    /* M7 FLUXDEV: take over the `heat_flux += swsurf` accumulation from the host twin. heat_flux is
+     * device-authoritative + device-halo'd on entry (fesom_ice_oce_fluxes_kk under the same knob).
+     * Race-free: each surface node owns its own heat_flux(n2). The loop spans myDim+eDim exactly as
+     * the host twin did, so halo nodes get the same owner-halo'd base + their own swsurf. */
+    static int s_fluxdev = -1;
+    const bool fluxdev = fesom_speed_on("FLUXDEV", &s_fluxdev);
+    auto hf = forcing->heat_flux_fld.d();
+
     /* zero sw_3d over all local nodes/levels (mirrors the host memset, Fortran 39-43) */
     Kokkos::parallel_for("fesom_sw3d_zero", Kokkos::RangePolicy<>(0, (size_t)N * (size_t)nl),
         KOKKOS_LAMBDA(const std::size_t i) { sw_3d(i) = 0.0; });
@@ -861,7 +889,10 @@ void fesom_cal_shortwave_rad_kk(const struct fesom_mesh  *mesh,
 
             real_t swsurf = (1.0 - albw) * swr(n2);   /* = qsr */
             swsurf *= 0.54;                            /* visible part (300-750nm) */
-            /* heat_flux[n2] += swsurf — done on the HOST in cal_shortwave_rad, NOT here. */
+            /* THE unique output. Knob OFF: the host twin does it (fesom_bulk.cpp, cal_shortwave_rad)
+             * and this kernel must NOT, or it would double-count. Accumulate BEFORE the /vcpw below,
+             * exactly where the host twin does it. */
+            if (fluxdev) hf(n2) += swsurf;
 
             real_t cc = chl(n2);
             if (cc < 0.02) cc = 0.02;
@@ -890,4 +921,8 @@ void fesom_cal_shortwave_rad_kk(const struct fesom_mesh  *mesh,
         });
 
     forcing->sw_3d_fld.modify_device();
+    /* M7 FLUXDEV: heat_flux was just written on the DEVICE. Mark it, or every later sync_host()
+     * is a silent no-op returning the pre-accumulation value (the D.1 trap-#4 lesson: never let a
+     * conditional call be the only thing that establishes a coherence invariant). */
+    if (fluxdev) forcing->heat_flux_fld.modify_device();
 }
