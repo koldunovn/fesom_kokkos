@@ -493,6 +493,62 @@ still apply; this file adds the **C→Kokkos / CPU↔GPU** layer.
 
   mEVP is a fixed-point iteration (α=β=250 pseudo-steps) that is only *approximately* converged, so an ice-velocity field is genuinely not reproducible to 1e-5 across two independent implementations — while TKE and zstar leave std EVP alone and reproduce `uice` at ~1.0. Our CUDA-mEVP (0.933/0.913) sits ~0.02 under its own scheme's floor, which is the D22 atomic-scatter noise amplified by that same iteration; every mass/scalar field stays ≥0.9999 (`a_ice` 0.99997, `m_ice` 0.99998, `sst`/`ssh` 1.00000) and **Kokkos-Serial mEVP is BIT-IDENTICAL to the C oracle**, so the port is provably exact. **Rule: before you judge a backend-vs-C number, spend the 30 seconds to measure C-vs-Fortran on the same two reference dirs.** It is free (the refs already exist), it needs no HPC allocation, and it is the difference between "the port is broken" and "this scheme has a 0.95 floor". This is L74's lesson in a new costume: do not accept a suspicious correlation as a *property of the port* until you have measured what the property actually is. Baselines are tabulated in `docs/REFERENCE_RUNS.md`.
 
+### L80 — A knob that does nothing passes EVERY gate. Trust the arithmetic before the gates. (M7, 2026-07-14)
+
+`src/fesom_speed.hpp` enforces "Serial stays legacy" with
+
+```c
+#ifndef KOKKOS_ENABLE_CUDA
+    if (on && !fesom_speed_force_serial()) on = 0;
+#endif
+```
+
+`KOKKOS_ENABLE_CUDA` comes from Kokkos' **generated config**. Include `fesom_speed.hpp` in a TU
+*before* anything that pulls that config in, and the macro is not yet defined — the guard fires **even
+on a CUDA build**, and **every knob in that TU silently resolves to OFF**. It killed
+`FESOM_SPEED_SWSKIP` (`fesom_bulk.cpp`) and `FESOM_SPEED_IOACC` (`fesom_io.cpp`) while the same knobs
+worked in `fesom_ice_coupling.cpp` and `fesom_halo_device.cpp` — a **per-TU, invisible** failure.
+
+**Every correctness gate went green on the dead knob:**
+- knob-OFF byte gate — passes, because knob-OFF is exactly what a dead knob gives you.
+- CUDA fidelity gate — passes, because the output *is* the legacy output.
+- **FORCE_SERIAL byte proof — passes, because `FORCE_SERIAL` bypasses the very guard that was killing
+  the knob.** The strongest proof in the arsenal was structurally blind to this.
+
+**What caught it was physics.** The lever removes a **261 MB/rank/step `memset`** and the A/B said it
+cost **0.01%**. That is not a disappointing lever, it is *arithmetically impossible* — a 261 MB
+single-threaded memset cannot cost under ~10 ms of a 1280 ms step.
+
+**Rules:**
+1. **Before believing a null A/B, verify the knob FIRED.** 0.00% is a claim about the code path.
+2. **Sanity-check any payoff against a physical floor** (bytes moved ÷ bandwidth, flops ÷ rate). A
+   measurement below the floor means the plumbing is wrong, not the hardware.
+3. **Any header whose behaviour depends on a config macro must include that config itself.**
+   `fesom_speed.hpp` now includes `<Kokkos_Macros.hpp>` → include-order-independent.
+4. **Verify with the preprocessor, not by reading includes:** `nvcc -E <real flags> | grep <guard>`
+   settles in seconds what an include-chain audit only guesses at.
+5. **Make knobs announce themselves.** `fesom_speed_resolve` now prints one line on rank 0 when a
+   lever turns ON, and shouts if it was requested and resolved to OFF.
+
+### L81 — A profiler tells you WHERE the time is, never WHICH SOURCE LINE. (M7, 2026-07-14)
+
+The M7 stall budget correctly found that **32–34% of the NG5@4N GPU step is host time** with no traced
+CUDA call and no traced MPI call (confirmed two independent ways; uniform, stdev 1.5%), and bounded it
+to the microsecond: a window starting after the last sea-ice kernel and ending exactly at
+`fesom_cal_shortwave_rad_kk`. **`-t cuda,mpi` cannot see inside host code by construction** — it can
+localise a cost but never name it.
+
+I then *guessed* which function in that window was the cost, twice, and shipped a lever for each:
+`fesom_ice_oce_fluxes_mom` (**−0.72%**) and the dead host `sw_3d` (whose knob turned out to be dead —
+see L80). Both were real bugs; both levers are correct and bit-identical. The model's own phase timer
+"confirmed" 24.6% — but **two agreeing measurements of the same *window* are not independent
+confirmation of an *attribution*.**
+
+**Rules:** localising ≠ attributing. To name host time, use **CPU sampling with call stacks**
+(`nsys profile --sample=process-tree --backtrace=dwarf -t osrt`; note the values are
+`process-tree|system-wide|none` — *not* `cpu`). And **only a same-allocation A/B turns an attribution
+into a fact — run it before writing the number down.**
+
 ---
 
 *Keep appending. Date entries when the context (versions, paths) might age.*
