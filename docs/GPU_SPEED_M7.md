@@ -22,18 +22,30 @@ Phase profile, **same binary** (`788844b3`), knob off vs on — `m7/stepprof_ng5
 The arithmetic closes exactly: the step drop (−0.3387 s) = the coupling collapse (−0.3152 s) + a
 small ocean gain (−0.0236 s, cache pressure from the 261 MB/step `memset` going away).
 
-**Projected ratios** (scaling row-0 by 0.7448; the same-alloc A/B 26237206 is the arbiter):
+### ✅ CONFIRMED BY THE SAME-ALLOCATION A/B (job 26237206) — **−26.47%**
 
-| | now | with SWSKIP | SYPD@dt240 |
+Same nodes, same binary, only the knob differs. Both reps agree to 0.01%, and the knob-OFF leg
+(1.2788) reproduces row-0 (1.2796) exactly.
+
+| leg | rep a | rep b | min |
 |---|--:|--:|--:|
-| NG5@4N | **3.60×** | **~4.83×** | — |
-| NG5@8N | 3.20× | ~4.3× | — |
-| **NG5@16N** | 2.72× | **~3.65×** | **1.42 → ~1.91** |
-| dars@8N | 2.69× | ~3.62× | — |
+| knob-OFF | 1.2788 | 1.2808 | **1.2788** |
+| `SWSKIP=1` | 0.9403 | 0.9404 | **0.9403** |
+| | | | **−26.47%** |
 
-That is essentially the whole **Stage-1 target** from ONE bit-identical lever, and it puts
-**~1.9 SYPD@dt240** — the number this campaign was chartered to find — within reach **in pure FP64**,
-without the mixed precision the user banned.
+**Ratios with SWSKIP** (row-0 GPU × 0.7353, CPU unchanged — the lever is CUDA-path-only):
+
+| | GPU now | GPU +SWSKIP | CPU | ratio now | **ratio new** | SYPD@dt240 |
+|---|--:|--:|--:|--:|--:|--:|
+| **NG5@4N** | 1.2796 | **0.9409** | 4.6005 | 3.60× | **4.89×** | — |
+| NG5@8N | 0.7381 | 0.5427 | 2.3624 | 3.20× | **4.35×** | — |
+| **NG5@16N** | 0.4487 | 0.3299 | 1.2188 | 2.72× | **3.69×** | **1.42 → 1.93** |
+| dars@8N | 0.3178 | 0.2337 | 0.8563 | 2.69× | **3.66×** | — |
+
+**NG5@4N lands at 4.89× — a hair under the 5.0× Stage-1 target, from ONE bit-identical lever** — and
+`NOFENCE2` (~0.8%) + `ICEFLUXDEV` (0.72%) + `IOACC` should carry it over. **NG5@16N reaches
+SYPD@dt240 = 1.93**, i.e. the ~2 SYPD this campaign was chartered to find, **in pure FP64**, without
+the mixed precision the user banned.
 
 ### The lever
 
