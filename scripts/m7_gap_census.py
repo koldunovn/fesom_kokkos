@@ -127,6 +127,31 @@ def load_memcpy_detail(con):
     return [(s, e, b, COPY_KIND.get(k, f"k{k}")) for s, e, b, k in rows]
 
 
+def load_cuda_api(con):
+    """TRAP 3 (added 2026-07-15, and it was a flaw in THIS script).
+
+    The `host` column used to be `gap - (memcpy U MPI)`. That silently lumps together two
+    completely different things:
+      - the host spinning inside cudaDeviceSynchronize (a FENCE — the GPU has already drained;
+        you fix it by removing the fence), and
+      - the host running its own code (a PORT — you fix it by moving the loop to the device).
+    A fence spin has no memcpy and no MPI, so it landed in `host` and looked exactly like host
+    compute. Sizing a port off that number would repeat L87's mistake in a new costume.
+
+    So: subtract the CUDA RUNTIME API too, and report it in its own column. `host` then means
+    what it says — the host is in NO traced call at all.
+
+    ⚠️ CUPTI records the runtime API with a VERSION SUFFIX (cudaLaunchKernel_v7000), so match on
+    the base name or you find nothing and cheerfully report 0.0."""
+    t = "CUPTI_ACTIVITY_KIND_RUNTIME"
+    if t not in tables(con):
+        return []
+    sid = strings(con)
+    name_col = pick(["nameId", "demangledName", "shortName"], cols(con, t))
+    rows = con.execute(f"SELECT start, end, {name_col} FROM {t} ORDER BY start")
+    return [(s, e, re.sub(r"_v\d+$", "", sid.get(n, f"<{n}>"))) for s, e, n in rows]
+
+
 def load_mpi(con):
     """TRAP 2. MPI_START_WAIT_EVENTS holds one row PER REQUEST: a Waitall(n) emits n rows all
     carrying the SAME (start,end). Dedupe on (start,end,tid) before touching counts or times."""
@@ -225,9 +250,18 @@ def census(path, min_gap_ns, frm=None, to=None, steps=None):
     # through the copy engine from inside MPI_Waitall). So `host` CANNOT be computed as
     # gap - pcie - mpi: that subtracts the overlap twice and prints a NEGATIVE host time.
     # Take the UNION for the host residual, and let the pcie/mpi columns overlap.
-    busy_host = merge(mcpy + mpi)
+    #
+    # TRAP 3: the union must include the CUDA RUNTIME API, or a FENCE SPIN (no memcpy, no MPI)
+    # is reported as HOST COMPUTE — and you size a device port off a number that a fence removal
+    # would have got for free.
+    api = load_cuda_api(con)
+    fence_iv = merge([(s, e) for s, e, n in api if n == "cudaDeviceSynchronize"])
+    api_iv = merge([(s, e) for s, e, _ in api])
+    busy_host = merge(mcpy + mpi + api_iv)
     mcpy_s = [x[0] for x in mcpy]
     mpi_s = [x[0] for x in mpi]
+    fence_s = [x[0] for x in fence_iv]
+    api_s = [x[0] for x in api_iv]
     busy_s = [x[0] for x in busy_host]
     mdet = load_memcpy_detail(con)
     mdet_s = [x[0] for x in mdet]
@@ -242,7 +276,8 @@ def census(path, min_gap_ns, frm=None, to=None, steps=None):
     g_n = collections.Counter()     # how many such gaps
     g_cpy = collections.Counter()   # ns of that gap covered by a memcpy (PCIe)
     g_mpi = collections.Counter()   # ns covered by an MPI call
-    g_hst = collections.Counter()   # ns covered by NEITHER (host code, no traced call)
+    g_fen = collections.Counter()   # ns covered by cudaDeviceSynchronize (a FENCE — remove it)
+    g_hst = collections.Counter()   # ns covered by NOTHING TRACED (real host code — PORT it)
     p_tot = collections.Counter()   # ns of gap, by (predecessor, victim)
     p_cpy = collections.Counter()   # ns of PCIe, by pair
     p_by = collections.Counter()    # copy BYTES, by pair
@@ -262,6 +297,7 @@ def census(path, min_gap_ns, frm=None, to=None, steps=None):
                 g_n[tag] += 1
                 g_cpy[tag] += covered(mcpy, mcpy_s, prev_end, s)
                 g_mpi[tag] += covered(mpi, mpi_s, prev_end, s)
+                g_fen[tag] += covered(fence_iv, fence_s, prev_end, s)
                 g_hst[tag] += gap - covered(busy_host, busy_s, prev_end, s)
                 p_tot[pair] += gap
                 p_cpy[pair] += covered(mcpy, mcpy_s, prev_end, s)
@@ -291,6 +327,7 @@ def census(path, min_gap_ns, frm=None, to=None, steps=None):
                           "n": g_n[t] / win_steps,
                           "pcie_ms": g_cpy[t] * NS_MS / win_steps,
                           "mpi_ms": g_mpi[t] * NS_MS / win_steps,
+                          "fence_ms": g_fen[t] * NS_MS / win_steps,
                           "host_ms": g_hst[t] * NS_MS / win_steps}
                       for t in g_tot},
         "by_pair": {f"{p[0]} -> {p[1]}": {
@@ -316,18 +353,23 @@ def show(c, min_gap_ms):
     print(f"GAPS > {min_gap_ms} ms between kernels:   {c['gap_ms']:.1f} ms/step "
           f"({100*c['gap_ms']/c['step_ms']:.1f}%)  in {c['gaps_per_step']:.1f} gaps/step")
     print()
-    print(f"  {'the kernel KEPT WAITING':<40} {'gap':>8} {'n':>6} {'PCIe':>8} {'MPI':>8} {'host':>8}")
-    print(f"  {'-'*40} {'-'*8} {'-'*6} {'-'*8} {'-'*8} {'-'*8}")
+    print(f"  {'the kernel KEPT WAITING':<40} {'gap':>7} {'n':>5} {'PCIe':>7} {'MPI':>7} "
+          f"{'FENCE':>7} {'host':>7}")
+    print(f"  {'-'*40} {'-'*7} {'-'*5} {'-'*7} {'-'*7} {'-'*7} {'-'*7}")
     for t, d in sorted(c["by_kernel"].items(), key=lambda kv: -kv[1]["ms"])[:22]:
-        print(f"  {t[:40]:<40} {d['ms']:8.1f} {d['n']:6.1f} {d['pcie_ms']:8.1f} "
-              f"{d['mpi_ms']:8.1f} {d['host_ms']:8.1f}")
+        print(f"  {t[:40]:<40} {d['ms']:7.1f} {d['n']:5.1f} {d['pcie_ms']:7.1f} "
+              f"{d['mpi_ms']:7.1f} {d['fence_ms']:7.1f} {d['host_ms']:7.1f}")
     print()
-    print("  gap  = ms/step the SMs sat idle immediately before this kernel")
-    print("  PCIe = of that, ms covered by a memcpy (a RAIL — delete it)")
-    print("  MPI  = of that, ms covered by an MPI call (comm — overlap it)")
-    print("  host = covered by NEITHER: host code the GPU is waiting on (PORT it)")
-    print("  NB PCIe and MPI OVERLAP (CUDA-aware MPI stages through the copy engine), so they")
-    print("     do NOT sum to `gap`. `host` is the residual against their UNION.")
+    print("  gap   = ms/step the SMs sat idle immediately before this kernel")
+    print("  PCIe  = of that, ms covered by a memcpy      -> a RAIL.  DELETE IT.")
+    print("  MPI   = of that, ms covered by an MPI call   -> COMM.    OVERLAP IT.")
+    print("  FENCE = of that, ms inside cudaDeviceSynchronize -> a FENCE. REMOVE IT.")
+    print("  host  = covered by NOTHING TRACED           -> HOST CODE. PORT IT.")
+    print("  🔴 FENCE vs host is the distinction that decides WHICH LEVER you reach for, and the")
+    print("     first version of this script did not make it — a fence spin has no memcpy and no")
+    print("     MPI, so it landed in `host` and looked exactly like host compute you must port.")
+    print("  NB PCIe/MPI/FENCE overlap each other, so they do NOT sum to `gap`. `host` is the")
+    print("     residual against their UNION.")
     print()
     print("--- the same gaps, named by the PAIR they sit between (this is the actionable form) ---")
     print(f"  {'predecessor -> the kernel kept waiting':<58} {'gap':>7} {'PCIe':>7} "

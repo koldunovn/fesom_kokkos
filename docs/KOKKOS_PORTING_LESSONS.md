@@ -922,4 +922,62 @@ what "measure what is left" looks like when the thing you are measuring is a bug
 
 ---
 
+### L92 — An instrument's RESIDUAL bucket is where its blind spots hide. Name every column, and make them SUM. (M7 H.7, 2026-07-15)
+
+The GPU-idle gap census (L87/L89) attributes each stall to PCIe / MPI / **host**. `host` was defined as
+the residual: `gap − (memcpy ∪ MPI)`. That is where it lied.
+
+It reported **`kpp_mixing`: 8.4 ms, 0.0 PCIe, 0.0 MPI, 8.4 host** and **`smooth_nod3D`: 13.4 ms, 1.1
+PCIe, 12.4 host**. I wrote *"the KPP host chain — 21.8 ms of gap, 16.3 ms of it PURE HOST COMPUTE with
+ZERO PCIe. Not a rail at all. Now the largest host pool"* into the handoff, and queued it as the next
+lever: **port the KPP host loops to the device.**
+
+**There are no KPP host loops.** Adding a **FENCE** column and itemising the CUDA runtime API inside
+those gaps by name took four minutes and said:
+
+| gap → | ms/step | what is ACTUALLY in it |
+|---|--:|---|
+| `smooth_nod3D` | 13.2 | **`cudaMallocAsync` 11.93 ms/step, 4.0 calls/step** |
+| `kpp_mixing` | 9.0 | **`cudaDeviceSynchronize` 8.91 ms/step, 4.0 calls/step** |
+| `compute_sigma_xy` | 3.4 | **`cudaDeviceSynchronize` 3.36 ms/step** |
+
+**It was never host code. It was the ALLOCATOR.** `fesom_smooth_nod3D_kk` (`fesom_eos.cpp:555`)
+constructed two `Kokkos::View`s of `nslab × myDim_nod2D × nl` doubles — hundreds of MB — **inside the
+hot loop, every call, every step.** Two Views × two call sites = **exactly the 4.0 `cudaMallocAsync`/step
+measured.** And the fences are the *same* bug: **Kokkos MUST fence when a View is destroyed**, to
+guarantee no in-flight kernel still references the memory it is about to free. *Allocate → use →
+destructor → FENCE → free.*
+
+**A fence has no memcpy and no MPI. So it fell into the residual and wore host compute's clothes.**
+A device port would have burned a session and recovered nothing.
+
+**Two rules, and the second is the general one:**
+
+1. **A stall with zero PCIe and zero MPI is not automatically host compute.** Four causes look
+   identical from the outside and want four *different* levers:
+   | cause | the lever |
+   |---|---|
+   | a memcpy | **delete the rail** |
+   | an MPI call | **overlap the comm** |
+   | `cudaDeviceSynchronize` | **remove the fence** |
+   | `cudaMallocAsync` / `cudaFree` | **HOIST THE ALLOCATION** |
+   | nothing traced at all | **port the host code** |
+   The census now carries an explicit **FENCE** column so this class cannot masquerade again.
+
+2. 🔴 **The general rule: NEVER let a bucket called "everything else" carry a lever.** A residual is
+   whatever your instrument could not name — its size is the sum of the real thing *and every blind
+   spot you have*. **Make the columns SUM to the total.** When `smooth_nod3D` showed `gap 13.2` against
+   `PCIe 1.1 + MPI 0.0 + FENCE 0.0 + host 0.1 = 1.2`, the missing **12 ms was the bug announcing
+   itself** — and it only announced itself because the columns were forced to add up.
+   *(This is L88's twin. L88: do not name the remainder of `measured − modelled`. L92: do not name the
+   remainder of `total − everything_I_thought_to_measure`. Both are "the residual is not evidence".)*
+
+**And a standing Kokkos rule, worth its own line:** a `Kokkos::View` constructed in a per-step function
+costs you **TWICE** — the allocation *and* the mandatory deallocation fence. **Hoist scratch buffers to
+static/persistent storage.** It is usually bit-identical (check: are the buffers written by ASSIGNMENT
+from register accumulators, not `+=`? do the producer and consumer kernels share a mask, so unwritten
+entries are never read? then nothing depends on the zero-init) and it is the cheapest lever there is.
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*
