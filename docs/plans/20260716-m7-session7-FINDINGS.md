@@ -12,7 +12,8 @@ the H.8 number below is committed to BEFORE its A/B job is submitted, per the st
 | **26258712** (300-step nsys census, h9, a100_80) | the three H.7 gaps (`smooth_nod3D` 13.2, `kpp_mixing` 9.0, `sigma_xy` 3.4) GONE; top becomes halo self-gaps + `ice_h_diag→oce_fluxes_mom` ~7 + `hbar→timestep` ~6 | **exactly that**: no trace of the three H.7 gaps; halo self-gaps 9.0+8.2; `ice_h_diag→oce_fluxes_mom` **7.3**; `hbar→timestep` **6.0** | ✅ **HIT** |
 | **26258753** (NG5@16N CPU, 300 steps, h9 Serial `91eeb573` pinned ✓) | *the measurement* | **1.2267 s/step** (min of 2: 1.2353 / 1.2267, 0.7 % spread) | ✅ landed |
 | **26258582** (H.7 confirmation A/B, h9 `9e1f514b` pinned ✓, a100_80) | base 0.7058 ±0.5 %; scratch ≈0.675; Δ≈−4.2 %; if both hold ⇒ ratio ≈6.78× | base **0.7052** (0.7061/0.7052, −0.09 % vs anchor); scratch **0.6739** (twice, 0.00 % spread; announce fired); **Δ = −4.44 %** | ✅ **HIT — ⭐ RATIO = 4.5785 / 0.6739 = 6.79× at NG5@4N** |
-| 26258751/52/54 (16N GPU, 8N GPU, 8N CPU) | 16N ratio 4.5–5.0×; 8N 5.0–5.8× | *in flight / pending* | ⏳ |
+| **26258752/54** (NG5@8N GPU+CPU, h9 pinned ✓, a100_80 ✓) | 8N ratio 5.0–5.8× | GPU **0.4143** (0.4143/0.4145) / CPU **2.3530** ⇒ **ratio 5.68×** | ✅ **IN RANGE** |
+| 26258751 (16N GPU) | 16N ratio 4.5–5.0×; 🔴 below 4.0 ⇒ L84(b) WRONG, say loudly | *pending* | ⏳ |
 | 26248860 (old 16N 4-leg ladder) | FLAT ≈−2.0 % ⇒ B/C on top; ≈−0.9 % ⇒ L84(b) stands | *pending (Priority)* | ⏳ |
 
 **The h9 census headline (steps 99–296 of 297, rank 0):** step **678.1 ms** (traced),
@@ -225,13 +226,14 @@ NOD2D` for srfoce_u/v). The eta_n loop is a trivial per-node kernel (no scatter)
 | NG5@4N CPU (h5-measured, CPU never moves) | 4.5785 | 26256684 |
 | NG5@8N CPU | **2.3530** (2.3530/2.3533) | 26258754 |
 | NG5@16N CPU | **1.2267** (1.2353/1.2267) | 26258753 |
-| NG5@8N GPU | ⏳ 26258752 | |
+| NG5@8N GPU | **0.4143** (0.4143/0.4145) ⇒ **8N ratio 5.68×** | 26258752 |
 | NG5@16N GPU | ⏳ 26258751 | |
 | dars@8N CPU (**150-step protocol** — see below) | **0.8464** (0.8464/0.8466) | 26259246 |
-| dars@8N GPU (150-step) | ⏳ 26259245 | |
-| NG5@4N GPU **h10** anchor (+LAZYSNAP) | ⏳ 26260292 (pre-reg ≈ 0.667 ⇒ ≈ 6.87×) | |
+| dars@8N GPU (150-step) | **0.2041** (0.2041/0.2051) ⇒ **dars@8N ratio 4.15×** (was 3.27× at Tier-1) | 26259245 |
+| NG5@4N GPU **h10** anchor (+LAZYSNAP) | **0.6666** (0.6666/0.6675; pre-reg ≈0.667 ✅ HIT to 0.06 %) | 26260292 |
 
-**NG5@4N ratio: 6.79× (h9) → ≈6.87× expected (h10).** 8N/16N ratios pending their GPU legs.
+**⭐ NG5@4N ratio: 4.5785 / 0.6666 = 6.87× (h10, matched 300-step pinned pair, pure a100_80).**
+8N/16N ratios pending their GPU legs.
 
 ### 🔴 dars@8N CANNOT run the 300-step protocol from a cold PHC start
 

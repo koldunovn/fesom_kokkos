@@ -31,12 +31,31 @@ series settles by ~step 30 (the residual is the CG spin-up, 86 → 72 iters — 
 |---|--:|--:|--:|---|---|
 | through the `getcoeffld` fix | 0.7239 | 4.5785 | **6.32×** | `h5` CUDA `0d39d8a2` / Serial `950ee0f9` | 26255936 / 26256684 |
 | + H.3 `BULKTAIL` | 0.7058 | 4.5785 | 6.49× | `h8` CUDA `7dab6c5a` / Serial `ef6bdec4` | 26257716 / 26256684 |
-| **⭐ + H.7 `SMOOTHSCRATCH`** (session 7) | **0.6739** | **4.5785** | **⭐ 6.79×** | **`h9` CUDA `9e1f514b`** / Serial `91eeb573` | **26258582** / 26256684 |
+| + H.7 `SMOOTHSCRATCH` (session 7) | 0.6739 | 4.5785 | 6.79× | `h9` CUDA `9e1f514b` / Serial `91eeb573` | 26258582 / 26256684 |
+| **⭐ + H.8 `LAZYSNAP`** (session 7) | **0.6666** | **4.5785** | **⭐ 6.87×** | **`h10` CUDA `13dbddb4`** / Serial `7c75afc0` | **26260292** / 26256684 |
 
 **The h9 row is a CONFIRMATION, not just an anchor** (job 26258582, one allocation, a100_80): its
 base leg re-ran h8-equivalent (`SMOOTHSCRATCH=0`) and reproduced the 0.7058 anchor at **0.7052**
 (−0.09 %), and its scratch leg hit **0.6739 twice with 0.00 % spread**. Δ = −4.44 % (pre-registered
 −4.2 % — the fifth census-sized lever to beat its pre-registration, L93).
+
+### ⭐ THE CLEAN STANDARD SET — 300 steps, pinned, `-C a100_80`, min of 2 (session 7)
+
+The re-measure L94 demanded (the old 16N rows ran on mixed hardware). GPU = `h9` `9e1f514b`
+except the 4N row (h10 `13dbddb4`); CPU = `h9` Serial `91eeb573` (the CPU column is
+lever-independent). *dars@8N is the **150-step** protocol — the 300-step window walks into the
+known cold-start blowup at step 204 (deterministic, both reps; L95). Every other row is 300 steps.*
+
+| | GPU s/step | CPU s/step | **ratio** | jobs (GPU/CPU) |
+|---|--:|--:|--:|---|
+| **NG5@4N (h10)** | **0.6666** | 4.5785 | **⭐ 6.87×** | 26260292 / 26256684 |
+| NG5@4N (h9) | 0.6739 | 4.5785 | 6.79× | 26258582 / 26256684 |
+| **NG5@8N** | **0.4143** | **2.3530** | **5.68×** | 26258752 / 26258754 |
+| **NG5@16N** | *in flight (26258751, ~11:20)* | **1.2267** | *pre-reg 4.5–5.0×* | — / 26258753 |
+| **dars@8N** (150-step) | **0.2041** | **0.8464** | **4.15×** | 26259245 / 26259246 |
+
+*(Tier-1, for the decay shape: 5.03× / 4.28× / 3.55×-mixed-hw / 3.27×. The 4N→8N decay is now
+6.87→5.68 (−17 %), vs Tier-1's 5.03→4.28 (−15 %) — the host levers hold their share at 8N.)*
 
 All legs **300 steps**, min of 2 reps, same day, **all pinned with `BIN=`**. Rep spreads: GPU 0.07 %,
 CPU 0.20 %. *(The CPU column is unchanged because every `FESOM_SPEED_*` lever is CUDA-only — the knobs
