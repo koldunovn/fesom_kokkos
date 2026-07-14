@@ -48,6 +48,16 @@ single-threaded, on the critical path of every step.
 
 Skipping it is **bit-identical by construction** and proven by the FORCE_SERIAL byte proof (26237210).
 
+**Triple-confirmed, three independent ways:**
+
+| method | evidence |
+|---|---|
+| **phase timer** (job 26237118) | coupling **327 ms → 12 ms**; step **−25.5%**; arithmetic closes exactly |
+| **CPU sampling** (job 26237176, `--sample=process-tree --backtrace=dwarf`) | **42.6% of leaf samples** in two adjacent addresses inside nvhpc's **math library** = the `exp()`/`log10()` column walk; `__memset_avx2_unaligned_erms` also present (the 261 MB memset); `fesom_cal_shortwave_rad` has **10× the samples** of `fesom_ice_oce_fluxes_mom` (1917 vs 194) — exactly the −25.5% vs −0.72% ratio |
+| **code reading** | the device twin zeroes (`fesom_sw3d_zero`) and rewrites every entry; the host's only unique output is the nod2D `heat_flux += swsurf` (`fesom_bulk.cpp:794`) |
+
+*(The sampling run's absolute percentages are diluted by init — `_IO_vfscanf`/`extrap_nod3D`/`flush_all` are mesh-read and I/O, not the step loop — but the math-library dominance and the shortwave-vs-oce_fluxes ratio are unambiguous.)*
+
 ### 🔴 Why this took three attempts — the two lessons (L80, L81)
 
 1. **A dead knob passes EVERY gate.** `fesom_speed.hpp`'s `#ifndef KOKKOS_ENABLE_CUDA` guard fires on
