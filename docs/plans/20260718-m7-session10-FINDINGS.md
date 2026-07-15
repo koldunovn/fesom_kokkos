@@ -125,9 +125,20 @@ All submitted 2026-07-15 ~14:55, all `-C a100_80` (job-script default), all pinn
 | 26274344 / 26274345 | NG5@16N row0 / h14 (the priority 16-node survey ask; the h14 leg doubles as the h14 ledger 16N row) | 25 / 20 min |
 | 26274728 / 26274729 | dars@2N **dt120** rescue pair (§3.2) | 20 / 18 min |
 | 26274906 / 07 / 09 / 10 | h15 Serial gates: knob-OFF byte / FORCE_SERIAL FERNOINIT iso / VISCNOINIT iso / full-blessed+both | 20 min each |
+| **26278160** | h15 3-leg A/B (§3.0c): ref / +FERNOINIT / +both, NG5@4N 300-step same-alloc | 50 min |
 | 26274911 / 13 / 15 / 16 / 17 | h15 CUDA gates: fidelity iso / fidelity full / options TKE / mEVP / zstar | 10 min each |
 
 ## 3. HARVEST (filled as jobs land)
+
+### ⭐ 3.-1 Job 26267149 — the h11 16N leg (the session's #1 harvest)
+
+**0.2629 s/step** (h11 `d74d31b4` ✓ SHA checked, 16 × pure a100_80 ✓, min of 2, spread
+0.11 %). Pre-reg 0.2650 ±0.5 % → measured 0.8 % BETTER, 0.3 % below the band floor — the
+THIRD consecutive at-scale under-run (8N −0.7 %, dars@8N −0.75 %, session 9): H.9's
+retention away from 4N systematically beats the L84(b) 60 % model. **Stage-2 SYPD@dt240 =
+0.657/0.2629/1.03 = 2.43** (2.45 with the 4N-measured ×1.019), up from h9's 2.37. 16N ratio
+vs the h9-era CPU row (1.2267, cross-day caveat): **4.67×** (h9: 4.56×). E's re-size at 16N
+waits on the census (26274311).
 
 ### 3.0 h15 ladder — Serial half: 4/4 GREEN (~2 min wall each)
 
@@ -165,7 +176,7 @@ in particular the dt120 rescue row's SYPD is intrinsically ~2/3 of a dt180 numbe
 | farc@4N | 0.1260 | 0.0864 | **−31.4 %** | 3.91 → **5.70** | −20 ±8 — **MISSED HIGH** (4th) | 26274336/26274337 | ordering (a) within farc holds: −40.3 (2N) → −31.4 (4N) |
 | farc@8N | 0.1087 | 0.0861 | **−20.8 %** | 4.53 → **5.72** | −15 ±10 ✓ (first in-band point) | 26274338/26274339 | Strong-scaling note: row0 4N→8N is only −14 % (20k verts/rank — deep comm plateau) |
 | NG5@4N | 1.2299 | 0.6497 | **−47.2 %** | 0.40 → **0.76** | row0 1.21 ±4 ✓, Δ −46.5 ±2 ✓ **BOTH IN BAND** | 26274340/26274341 | h14 leg REPRODUCES the anchor 26271441 (0.6497 vs 0.6495, +0.03 %). Protocol cross-check: 35-step-era row0 1.2796 → clean-300 1.2299 = −3.9 %, inside the modelled 4–7 % contamination correction ✓ |
-| NG5@8N | 0.7085 | | | | row0 0.70 ±4 ✓ | 26274342/26274343 | row0 in band; h14 running |
+| NG5@8N | 0.7085 | 0.4025 | **−43.2 %** | 0.70 → **1.22** | row0 0.70 ±4 ✓, Δ −42.5 ±2.5 ✓ **BOTH IN BAND** | 26274342/26274343 | h14 leg reproduces session-9 h11 (0.4025 vs 0.4022, +0.07 %) |
 
 ### 3.0b h15 ladder — ✅ **9/9 GREEN**
 
@@ -188,6 +199,40 @@ One same-alloc 3-leg job (job_m7_ab_env, NG5@4N, h15 `ce1e859d`, 300 steps, min 
   not the A/B delta.
 - Promotion rule 0.13: each lever promotes to the master ONLY if its attributed effect lands
   in range; a wrong-sign result flips it to permanent `_exp` (REDISWEEP precedent).
+
+### 3.0d ✅ A/B 26278160 + ncu pair 26279695/96 — BOTH RANGE HITS ⇒ BOTH PROMOTED
+
+A/B (same-alloc, h15 `ce1e859d` ✓, min of 2): ref 0.6482 · fer **0.6470 (−0.19 %** ∈
+[0, −0.45] ✓**)** · both **0.6452 (−0.46 %** ∈ [0, −0.6] ✓**)**. Rep spreads 0.08/0.26/0.33 %.
+ncu attribution (steps 11-12, reps agree to 3 digits):
+| kernel | dur/launch | locST | locLD | dramW |
+|---|--:|--:|--:|--:|
+| fer_solve_gamma | 9.75→8.10 ms (**−1.65, −17 %**) | 4.697→3.687 (**−1.010 GB = the predicted 1.0 TO THE DIGIT**) | unchanged ✓ | −1.30 GB |
+| impl_vert_visc | 13.66→13.33 ms (**−0.33**) | 8.804→7.947 (**−0.857 GB**, 2× the conservative model) | unchanged ✓ | −0.43 GB |
+
+Kernel-sum −2.0 ms/step ≈ −0.31 %; the A/B's −0.46 % includes downstream relief (L93
+direction). FERNOINIT promotes on its range-hit A/B + digit-exact counter; VISCNOINIT on its
+pre-registered ncu route (real, right-sign, byte-proven). Pricing-rule datapoint #3: coalesced
+local stores again converted at ~full byte price ON THE DELETING KERNEL (1.65 ms ≈ 1.0 GB
+at ~1600 GB/s effective − the dramW share), consistent with TDMANOINIT.
+
+## 5. h16 CANDIDATE (h15 + both promotions) — cert pre-registration (BEFORE submission)
+
+CUDA `470ead46` / Serial `23d55df3`. Cert = knob-OFF byte + CUDA fidelity full-blessed
+(h14-promotion precedent) + fresh 300-step 4N anchor. Pre-registered: knob-OFF bit-identical;
+fidelity PASS rc=0 with FERNOINIT+VISCNOINIT announcing under bare `FESOM_SPEED=1` and
+REDISWEEP absent; **anchor 0.6465 ±0.5 % (band [0.6433, 0.6497]; = 0.6495 × (1−0.0046))** ⇒
+ratio 4.5785/0.6465 = **7.08×** at NG5@4N if it lands on point.
+
+### ✅ 5.1 h16 CERTIFIED — anchor HIT to 0.03 %
+
+26280025 knob-OFF byte PASS (diff_snap rc=0) · 26280026 fidelity full-blessed PASS rc=0
+(FERNOINIT+VISCNOINIT announce under bare `FESOM_SPEED=1` ✓, REDISWEEP absent ✓) ·
+**anchor 26280027: 0.6467** (min of 2, spread 0.08 %, pure a100_80, md5 `470ead46` ✓) —
+pre-reg 0.6465 **HIT** ⇒ **⭐ RATIO 4.5785 / 0.6467 = 7.08× at NG5@4N.** h16 = CURRENT BEST.
+(The C strict-reduction tail is now harvested: TDMANOINIT −0.30 % + FERNOINIT/VISCNOINIT
+−0.43 % measured anchor-to-anchor. Remaining C candidates are all sub-0.05 % — the package
+winds down as priced; E and 16N remain the frontier.)
 
 **farc column complete — the regime read so far:** ordering (a) is perfect on every complete
 column (farc −40.3/−31.4/−20.8; dars −44.3/−34.2; core2 −30.6/−23.5). Ordering (c) at matched

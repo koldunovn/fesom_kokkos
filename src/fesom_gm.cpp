@@ -1406,12 +1406,15 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
     auto nlev_n    = mesh->nlevels_nod2D_fld.d();
     auto ulev_n    = mesh->ulevels_nod2D_fld.d();
 
-    /* M7 C.2b — FESOM_SPEED_FERNOINIT (opt-in _exp until its A/B lands; rule 0.13).
-     * Strict store-DELETIONS only (L97 / rule 0.12): loop structure, expression forms
-     * and every surviving store are byte-identical to the legacy path. Three deletions,
-     * proofs at the three init sites below. */
+    /* M7 C.2b — FESOM_SPEED_FERNOINIT (rides the master since h16). Strict
+     * store-DELETIONS only (L97 / rule 0.12): loop structure, expression forms and every
+     * surviving store are byte-identical to the legacy path. Three deletions, proofs at
+     * the three init sites below. PROMOTED after the h15 ladder (9/9, 26274906-17) +
+     * A/B 26278160: −0.19 % at NG5@4N (pre-reg −0.15, floor 0.0, ceiling −0.45 — RANGE
+     * HIT); ncu pair 26279695/96: locST −1.010 GB/step vs 1.0 predicted TO THE DIGIT,
+     * dur −1.65 ms/launch, locLD unchanged. */
     static int s_fernoinit = -1;
-    const int fernoinit = fesom_speed_on_exp("FERNOINIT", &s_fernoinit) ? 1 : 0;
+    const int fernoinit = fesom_speed_on("FERNOINIT", &s_fernoinit) ? 1 : 0;
 
     Kokkos::parallel_for("fesom_gm_fer_solve_gamma", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int n) {

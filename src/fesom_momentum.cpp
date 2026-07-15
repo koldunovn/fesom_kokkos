@@ -846,10 +846,15 @@ void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
     auto w_i    = dyn->w_i_fld.d();
     auto stress = forcing->stress_surf_fld.d();
 
-    /* M7 C.3a — FESOM_SPEED_VISCNOINIT (opt-in _exp until its A/B lands; rule 0.13).
-     * Strict store-deletion only (L97 / rule 0.12) — see the banner at the init site. */
+    /* M7 C.3a — FESOM_SPEED_VISCNOINIT (rides the master since h16). Strict
+     * store-deletion only (L97 / rule 0.12) — see the banner at the init site.
+     * PROMOTED after the h15 ladder (9/9) + the joint A/B 26278160 (−0.46 % with
+     * FERNOINIT, RANGE HIT) with its OWN effect attributed by the ncu pair
+     * 26279695/96 (locST −0.857 GB/step, dur −0.33 ms/launch — small, real,
+     * mechanism-proven; the pre-registered promotion route for a lever below
+     * single-A/B resolution). */
     static int s_viscnoinit = -1;
-    const int viscnoinit = fesom_speed_on_exp("VISCNOINIT", &s_viscnoinit) ? 1 : 0;
+    const int viscnoinit = fesom_speed_on("VISCNOINIT", &s_viscnoinit) ? 1 : 0;
 
     Kokkos::parallel_for("fesom_impl_vert_visc", Kokkos::RangePolicy<>(0, E),
         KOKKOS_LAMBDA(const int e) {

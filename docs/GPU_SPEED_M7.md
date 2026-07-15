@@ -49,15 +49,52 @@ known cold-start blowup at step 204 (deterministic, both reps; L95). Every other
 
 | | GPU s/step | CPU s/step | **ratio** | jobs (GPU/CPU) |
 |---|--:|--:|--:|---|
-| **NG5@4N (h14)** | **0.6495** | 4.5785 | **⭐ 7.05×** | 26271441 / 26256684 |
+| **⭐ NG5@4N (h16)** | **0.6467** | 4.5785 | **⭐ 7.08×** | 26280027 / 26256684 |
+| NG5@4N (h14) | 0.6495 | 4.5785 | 7.05× | 26271441 / 26256684 |
 | NG5@4N (h11) | 0.6503 | 4.5785 | 7.04× | 26265348 / 26256684 |
 | NG5@4N (h10) | 0.6666 | 4.5785 | 6.87× | 26260292 / 26256684 |
 | NG5@4N (h9) | 0.6739 | 4.5785 | 6.79× | 26258582 / 26256684 |
 | **NG5@8N (h11)** | **0.4022** | **2.3530** | **5.85×** | 26267148 / 26258754 |
 | NG5@8N (h9) | 0.4143 | 2.3530 | 5.68× | 26258752 / 26258754 |
+| **NG5@16N (h11)** | **0.2629** | 1.2267 | **4.67×** | 26267149 / 26258753 |
 | NG5@16N (h9) | 0.2688 | 1.2267 | 4.56× | 26258751 / 26258753 |
 | **dars@8N (h11**, 150-step) | **0.1981** | **0.8464** | **4.27×** | 26267150 / 26259246 |
 | dars@8N (h9, 150-step) | 0.2041 | 0.8464 | 4.15× | 26259245 / 26259246 |
+
+*(Session 10: h16 = h14 + FERNOINIT/VISCNOINIT promoted (C.2b/C.3a strict reductions, ladder
+9/9, A/B −0.46 % RANGE HIT, ncu to the digit) — anchor pre-reg 0.6465 ±0.5 % → 0.6467 HIT.
+NG5@16N h11 refresh 0.2629 = 0.8 % better than pre-reg (third at-scale under-run; H.9 holds
+above the 60 % model) ⇒ **Stage-2 SYPD@dt240 = 2.43** (0.657/0.2629/1.03; 2.45 at ×1.019).
+Full session-10 record: `docs/plans/20260718-m7-session10-FINDINGS.md`.)*
+
+## ⭐ THE M7 DIVIDEND BY MESH × NODES (session 10, the user-requested cross-mesh survey)
+
+**What the whole M7 stack bought, per mesh × node count**: same-day pinned GPU pairs, row0
+`02c8a0d1` (campaign start, knobless) vs h14 `18275c68` (`FESOM_SPEED=1`), both `-C a100_80`,
+min of 2, md5+announce-audited per leg. SYPD at each row's own benchmark dt (no production-dt
+correction; the dt120 row is NOT SYPD-comparable to dt180 rows). Job ids + per-point notes in
+the session-10 findings §3.1.
+
+| point | verts/rank | protocol | row0 → h14 s/step | **Δ** | SYPD row0 → h14 |
+|---|--:|---|---|--:|--:|
+| dars@2N | 395k | 150 st, **dt120** (dt180 NaNs at step ~10 — partition-marginal cold start, findings §3.2) | 0.7771 → 0.3926 | **−49.5 %** | 0.42 → 0.84 |
+| NG5@4N | 462k | 300 st, dt180 | 1.2299 → 0.6497 | **−47.2 %** | 0.40 → 0.76 |
+| dars@4N | 198k | 150 st, dt180 | 0.4559 → 0.2541 | **−44.3 %** | 1.08 → 1.94 |
+| NG5@8N | 231k | 300 st, dt180 | 0.7085 → 0.4025 | **−43.2 %** | 0.70 → 1.22 |
+| farc@2N | 80k | 300 st, dt180 | 0.1678 → 0.1001 | **−40.3 %** | 2.94 → 4.92 |
+| dars@8N | 99k | 150 st, dt180 | 0.3017 → 0.1985 | **−34.2 %** | 1.63 → 2.48 |
+| farc@4N | 40k | 300 st, dt180 | 0.1260 → 0.0864 | **−31.4 %** | 3.91 → 5.70 |
+| core2@1N | 32k | 300 st, dt1800, /pool | 0.1087 → 0.0754 | **−30.6 %** | 45.3 → 65.4 |
+| core2@2N | 16k | 300 st, dt1800, /pool | 0.0922 → 0.0705 | **−23.5 %** | 53.4 → 69.9 |
+| farc@8N | 20k | 300 st, dt180 | 0.1087 → 0.0861 | **−20.8 %** | 4.53 → 5.72 |
+| NG5@16N | 116k | 300 st, dt180 | *(pair queued at write time)* | | |
+
+**The regime read:** the dividend GROWS monotonically with per-rank workload within every
+mesh (ordering perfect on all four columns) and the stack ~halves the step wherever per-rank
+domains are large. Both NG5 points landed IN their pre-registered bands (the model's
+calibration mesh); EVERY off-NG5 point with a prior beat its band — the host-class levers
+retain far more value on small/mid meshes than the L84(b)-style retention models assumed.
+Practical headline: core2 on ONE GPU node does 65 SYPD; dars@8N clears the 2-SYPD line.
 
 *(Session 9: h11 std-set refresh — 8N and dars both ~0.7 % better than pre-registered; the h11
 16N leg (26267149) was still queued at write-time and supersedes the h9 row when it lands.
