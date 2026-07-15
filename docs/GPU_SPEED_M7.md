@@ -32,7 +32,8 @@ series settles by ~step 30 (the residual is the CG spin-up, 86 → 72 iters — 
 | through the `getcoeffld` fix | 0.7239 | 4.5785 | **6.32×** | `h5` CUDA `0d39d8a2` / Serial `950ee0f9` | 26255936 / 26256684 |
 | + H.3 `BULKTAIL` | 0.7058 | 4.5785 | 6.49× | `h8` CUDA `7dab6c5a` / Serial `ef6bdec4` | 26257716 / 26256684 |
 | + H.7 `SMOOTHSCRATCH` (session 7) | 0.6739 | 4.5785 | 6.79× | `h9` CUDA `9e1f514b` / Serial `91eeb573` | 26258582 / 26256684 |
-| **⭐ + H.8 `LAZYSNAP`** (session 7) | **0.6666** | **4.5785** | **⭐ 6.87×** | **`h10` CUDA `13dbddb4`** / Serial `7c75afc0` | **26260292** / 26256684 |
+| + H.8 `LAZYSNAP` (session 7) | 0.6666 | 4.5785 | 6.87× | `h10` CUDA `13dbddb4` / Serial `7c75afc0` | 26260292 / 26256684 |
+| **⭐ + H.9 `SSHRAILS`** (session 8) | **0.6503** | **4.5785** | **⭐ 7.04×** | **`h11` CUDA `d74d31b4`** / Serial `c125b424` | **26265348** / 26256684 |
 
 **The h9 row is a CONFIRMATION, not just an anchor** (job 26258582, one allocation, a100_80): its
 base leg re-ran h8-equivalent (`SMOOTHSCRATCH=0`) and reproduced the 0.7058 anchor at **0.7052**
@@ -48,7 +49,8 @@ known cold-start blowup at step 204 (deterministic, both reps; L95). Every other
 
 | | GPU s/step | CPU s/step | **ratio** | jobs (GPU/CPU) |
 |---|--:|--:|--:|---|
-| **NG5@4N (h10)** | **0.6666** | 4.5785 | **⭐ 6.87×** | 26260292 / 26256684 |
+| **NG5@4N (h11)** | **0.6503** | 4.5785 | **⭐ 7.04×** | 26265348 / 26256684 |
+| NG5@4N (h10) | 0.6666 | 4.5785 | 6.87× | 26260292 / 26256684 |
 | NG5@4N (h9) | 0.6739 | 4.5785 | 6.79× | 26258582 / 26256684 |
 | **NG5@8N** | **0.4143** | **2.3530** | **5.68×** | 26258752 / 26258754 |
 | **NG5@16N** | **0.2688** | **1.2267** | **4.56×** | 26258751 / 26258753 |

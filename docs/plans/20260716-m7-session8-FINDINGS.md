@@ -316,6 +316,30 @@ the SECOND time this lesson has paid this campaign). 300-step h11 anchor queued 
 (single-leg 300-step job_m7_ab_env, the std300 pattern). **Anchor pre-registration, committed
 before either job lands: anchor = 0.6666 × (1 + Δ_A/B), tolerance ±0.5 %** (H.8's formula).
 
+### 3.5 ✅ THE A/B AND THE ANCHOR (both h11 `d74d31b4` pinned ✓, pure a100_80 ✓, rc=0)
+
+| leg (26265290, 35 steps) | rep a | rep b | min |
+|---|--:|--:|--:|
+| base (`FESOM_SPEED=1;SSHRAILS=0`) | 0.6867 | 0.6867 | **0.6867** |
+| sshr (`FESOM_SPEED=1`) | 0.6710 | 0.6712 | **0.6710** |
+| | | | **−2.29 %** |
+
+**Scored against the pre-registration (−1.9 %, floor −1.3, ceiling −2.4): RANGE HIT**, above the
+point estimate — the sixth census-sized lever to beat its point (L93), and the calibration nuance
+from H.8 held in BOTH directions: LAZYSNAP's pure-PCIe gap was census-EXACT, this gap held host
+compute (pack/unpack + the eta_n loop) and collected the entanglement bonus (−15.7 ms measured vs
+14.8 census + ~2 ms device-halo cost added back). Internal consistency: the base leg (h11 knob-off
+= h10-equivalent) reproduces the H.8 A/B's lazy leg **0.6867 vs 0.6866** — to 0.01 %.
+
+**The 300-step anchor (26265348): 0.6503 s/step** (0.6503 / 0.6523, 0.31 % spread). Pre-registered
+0.6666 × (1 − 0.0229) = 0.6513 ⇒ **HIT to 0.16 %** (tolerance ±0.5 %).
+
+### ⭐⭐ THE RATIO: 4.5785 / 0.6503 = **7.04× at NG5@4N** (h11 = h10 + SSHRAILS, matched 300-step pinned pair, pure a100_80)
+
+The 8× stretch now needs 0.6503 → ~0.572 = another **−12 %** — C's re-derived pool (§4) is the
+only single pool bigger than that, and C.1+C.2 alone (75 ms busy in the two worst spillers) is
+plausibly half of it.
+
 ---
 
 ## 4. THE B vs C vs E DECISION (PROMPT §4) — decided on the measurements, not priors
