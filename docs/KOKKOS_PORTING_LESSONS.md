@@ -1152,4 +1152,57 @@ Rules this adds:
 
 ---
 
+### L98 — A THRESHOLD IS PART OF THE MEASUREMENT. A pool that is "18 ms" at one gap threshold was 97 ms at another — and a campaign decision was made on the small number. (M7 session 10, 2026-07-15)
+
+The gap census counted GPU-idle gaps **> 1 ms** and reported "package E (halo MPI-wait) =
+18 ms/step at 4N"; the session-9 handoff then did honest-looking arithmetic on it ("E 18 + C tail
++ H.10 ≈ −4 % ⇒ the 8× stretch is NOT reachable") and the user set the campaign endpoint on that
+basis. The 16N census broke the story: the step was only 49.7 % kernel-busy yet the >1 ms census
+could name 14 ms of the 139 ms idle. Histogramming the residual (L92: a residual is not
+evidence) found **81 % of all idle in ~350 gaps/step of 100–1000 µs** — individually under the
+bar. Re-running BOTH censuses at `--min-gap-ms 0.1`:
+
+| halo-wait pool | 4N | 16N |
+|---|--:|--:|
+| @ >1 ms threshold | 18.0 ms (2.7 %) | 13.2 ms (4.8 %) |
+| **@ >0.1 ms threshold** | **97.3 ms (14.8 %)** | **124.8 ms (45.0 %)** |
+
+The event count is IDENTICAL at both scales (358/step — per-field exchange calls, structural),
+per-event wait ~278→386 µs. Kernels scale ÷3.94; event latency doesn't ⇒ this IS the whole
+4N→16N ratio decay.
+
+- **The rule: a derived pool inherits every parameter of the tool that derived it.** Quote the
+  threshold with the number ("18 ms at >1 ms") or the number will outlive the caveat — this one
+  did, for two sessions, into a user decision.
+- **The tell: a pool that SHRINKS while its share of idle EXPLODES.** 18→13 ms against
+  83→50 % busy cannot both be true of the same mechanism; the contradiction is the alarm.
+- **The consequence-handling rule: when a re-measurement invalidates the basis of a USER
+  decision, SURFACE it — do not silently re-litigate the decision, and do not silently keep
+  honoring the stale basis either.** (Here: "~7× is the 4N endpoint" was decided on the 18 ms
+  figure; the honest 97 ms pool puts 8× back in range at 50 % conversion.)
+- Ops note: `--min-gap-ms 0.1` is the census setting of record for all package-E work; the
+  >1 ms tables remain valid for the classes they named (SSH, ice-thermo, jra55).
+
+### L99 — AN INSTABILITY BOUNDARY IS PARTITION-MARGINAL, NOT JUST MESH-MARGINAL; and two small audit traps that nearly mislabeled it. (M7 session 10, 2026-07-15)
+
+dars@2N (dist_8) at dt180 from cold PHC died with `CG_kk: pp·App = -nan` at step ~10 — while
+dist_16 and dist_32 complete 150 steps at the same dt, same binary, same IC. Both binaries
+(row0 AND h14), all reps, same step ⇒ deterministic configuration failure. dt180-from-cold is
+MARGINAL on dars and **partition-dependent reduction/rounding order decides which decomposition
+trips** — and it was the COARSEST that died, INVERTING the L95/NG5 "finer dies earlier"
+observation. L95 refined: re-ask "does this configuration complete" per mesh × per partition ×
+per dt, and expect no monotone rule in the partition axis. (Rescue that preserved the survey
+point: dt120, annotated as its own protocol — a same-day pair's Δ% is per-step work and stays
+comparable.)
+
+Two audit traps from the same session, both caught before they cost anything:
+1. **The "Killed" tasks were MPI_Abort collateral, not OOM.** First hypothesis (default memory
+   too small) had a fix ready to submit; READING THE LOG found the FATAL. A signal that
+   pattern-matches a known failure class can have a different cause — check before acting.
+2. **`job_m7_gate_serial` SPLITS streams: the `[fesom_speed]` announces land in `run.err`,
+   not `run.log`** (job_m7_ab_env merges them). An L80 announce audit that greps the wrong
+   stream reports a dead knob on a live lever. Grep the right stream before crying L80.
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*
