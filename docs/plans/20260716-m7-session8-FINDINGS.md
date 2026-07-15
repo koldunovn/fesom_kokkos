@@ -308,4 +308,64 @@ Then: 300-step h11 anchor (a100_80) → ledger.
 
 (`run rc=134` on the knob-ON CUDA gates is the pre-existing full-blessed teardown quirk — h10's
 26259165 shows the same; the isolated legs exit rc=0 both ladders. Announce lines fired on every
-leg, L80.) A/B 26265027 pending.
+leg, L80.)
+
+**Lever committed as `f5c130a` on ladder-green (the H.8 criterion).** The A/B was resubmitted as
+**26265290** with `-t 00:25:00` after 26265027 sat un-backfillable on a 1:30 claim (rule 0.7 —
+the SECOND time this lesson has paid this campaign). 300-step h11 anchor queued as **26265348**
+(single-leg 300-step job_m7_ab_env, the std300 pattern). **Anchor pre-registration, committed
+before either job lands: anchor = 0.6666 × (1 + Δ_A/B), tolerance ±0.5 %** (H.8's formula).
+
+---
+
+## 4. THE B vs C vs E DECISION (PROMPT §4) — decided on the measurements, not priors
+
+**Verdict: C first. B parked. E stays live as the 16N-side complement.**
+
+- **B (FCT2)** — the §1.2 pre-registered line said *f* ≥ 0.25 ⇒ GO; **measured *f* = 0.242**
+  (§2.2) ⇒ by the pre-registration B ranks behind C. The conversion analysis makes the margin
+  wider than the headline: only ~11 of the 17.3 invariant GB sit in DRAM-bound kernels, so the
+  honest payoff is ≈1.5–2.2 % for the most invasive rewrite on the table (28 kernels, 3–5 GB/rank
+  scratch, fused-kernel register pressure on an already-spilling limiter). PARKED unless C
+  disappoints at implementation.
+- **C (TDMA/spills)** — the re-derived pool (§2.1) is **188.8 ms/step busy across 10 spilling
+  kernels = 28 % of the step**, each fixable INDEPENDENTLY (measure → restructure column scratch →
+  gate → A/B, one kernel at a time — the opposite of B's monolith). The ladder verdict (26248860)
+  says kernel levers keep ~56 % of their 4N value at real 16N. Order of attack by
+  busy × spill-severity: **C.1 `diff_ver_part_redi_expl`** (42.4 ms, 5,120 B/thr, L2 2.4× DRAM
+  measured), **C.2 `diff_ver_part_impl_ale`** (32.6 ms, 6,144 B/thr — the TDMA column, the
+  M5.24-era frontier), then `momentum_adv_scalar` (24.8), `diff_part_hor_redi` (23.7, 80 reg —
+  occupancy as much as stack), FCT `zal_a34` (22.5 — NOTE: this one kernel is B∩C; fixing its
+  column buffers under C removes part of B's remaining case). Even a conservative 15–25 %
+  recovery on the top four ≈ **2.8–4.6 % of the step** — bigger than any remaining H lever.
+- **E (comm)** — the halo self-gaps are now MEASURED as MPI-wait (18 ms/step at 4N, §2.3) and
+  grow with rank count; it is the only pool that gets BIGGER toward the 16N Stage-2 point. It
+  stays live, but per the ladder it no longer outranks B/C by default at 4N.
+- Remaining H-class tail (for completeness): the ice-thermo bounce class ≈ 4.3 ms (§2.3) — a
+  possible H.10, sized below C's first two rungs.
+
+Honest denominator note: all 4N percentages above are against the h10/h11 step (~0.66 s); 16N
+projections must use 0.2688 (not packa's 0.3420), per the PROMPT §4 caveat.
+
+### 4.1 C.1 pre-audit (`diff_ver_part_redi_expl`) — scoped in source, session 8
+
+- The 5,120 B/thread is EXACTLY five `NL_MAX=128` column buffers in the per-node kernel
+  `fesom_gm_redi_ver_node` (fesom_gm.cpp:1809: `txn, tyn, zbar_n, z_n, vd_flux` = 5×128×8).
+  That kernel is 36.8 ms of the group's 42.4 (2 × 18.4 ms/launch measured); the trxy+zero
+  sub-kernels are clean.
+- **The rewrite is a single bottom-up column sweep with O(1) carried state — no arrays:** the
+  zbar_n/z_n recurrence already runs bottom-up (:1835); `vd_flux[nz]` needs only
+  zbar_n[nz]/z_n[nz∓1] (computable on the fly from hnode) and txn/tyn at [nz−1, nz] (the
+  surrounding-element gather is order-free → fuse it per level, carry a rolling pair); the apply
+  loop needs vd_flux at [nz, nz+1] → rolling pair, one-level lag. Every value keeps its exact
+  expression and evaluation order ⇒ **Serial bit-identity is achievable** (FORCE_SERIAL
+  byte-proof, unlike most kernel levers).
+- (Alternative considered and NOT needed: reading the existing `Z_3d_n`/`zbar_3d_n` device fields
+  instead of rebuilding depths — value-equivalence vs the local hnode recurrence would need its
+  own proof; the O(1)-sweep avoids the question entirely.)
+- Sizing prior (NOT a pre-registration yet — ncu the kernel first): spill slots are 461k threads
+  × 5,120 B = 2.4 GB backing; the kernel measures 17.8 GB DRAM + 42.7 GB L2 per launch at
+  ~950 GB/s — near-roof partly BECAUSE of spill traffic. If spills are 30–50 % of its DRAM bytes,
+  the sweep recovers ~30–45 % of 36.8 ms ≈ **11–17 ms/step ≈ 1.7–2.5 % at 4N**, kernel-class
+  (holds ~56 % at 16N). Pre-register properly from a targeted ncu
+  (`smsp__inst_executed_op_local_ld/st` or `l1tex__t_bytes_pipe_lsu_mem_local`) before building.
