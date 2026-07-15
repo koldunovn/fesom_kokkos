@@ -588,6 +588,14 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
     Kokkos::View<double*> vol, work;
     if (fesom_speed_on("SMOOTHSCRATCH", &s_scratch)) {
         if (s_vol.extent(0) < need) {          /* grows once, then never again for a given run */
+            /* Session-9 fix, UNCONDITIONAL like the getcoeffld precedent: these function-scope
+             * statics used to be destroyed AFTER Kokkos::finalize — every full-blessed run died
+             * with "smooth.work is being deallocated after Kokkos::finalize was called" AT
+             * TEARDOWN (SIGABRT; job state FAILED with complete output — the 0.10a wart, and it
+             * cost census 26267147 its whole nsys trace). Release them from a finalize hook,
+             * registered once on first allocation, so they never outlive the runtime. */
+            if (s_vol.extent(0) == 0)
+                Kokkos::push_finalize_hook([] { s_vol = {}; s_work = {}; });
             s_vol  = Kokkos::View<double*>("smooth.vol",  need);
             s_work = Kokkos::View<double*>("smooth.work", need);
         }

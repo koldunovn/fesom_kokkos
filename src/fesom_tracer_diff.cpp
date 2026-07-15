@@ -32,6 +32,7 @@
 #include "fesom_forcing.h"
 #include "fesom_gm.h"
 #include "fesom_mesh.h"
+#include "fesom_speed.hpp"   // M7 C.2a: FESOM_SPEED_TDMANOINIT
 #include "fesom_tracers.h"
 #include "fesom_types.h"
 
@@ -445,6 +446,12 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
     fesom::Field::dev_view_t st_v, Ki_v;
     if (gm) { st_v = gm->slope_tapered_fld.d(); Ki_v = gm->Ki_fld.d(); }
 
+    /* M7 C.2a — FESOM_SPEED_TDMANOINIT (opt-in until its A/B proves it; resolved here so both
+     * tracer calls flip together). Skips the a/b/c/tr zero-init inside the lambda — see the
+     * banner at the init loop for the per-column bit-identity proof. */
+    static int s_tdmanoinit = -1;
+    const int tdmanoinit = fesom_speed_on_exp("TDMANOINIT", &s_tdmanoinit) ? 1 : 0;
+
     Kokkos::parallel_for("fesom_impl_vert_diff_tracers",
         Kokkos::RangePolicy<>(0, myDim_nod2D),
         KOKKOS_LAMBDA(const int n) {
@@ -458,15 +465,36 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
              * the scratch directly cuts the dominant cost. */
             real_t *cp = c, *tp = tr;
 
-            /* initialise (Fortran lines 727-733) */
-            for (int k = 0; k < NL_MAX; ++k) {
-                a[k] = 0.0; b[k] = 0.0; c[k] = 0.0;
-                tr[k] = 0.0;                  /* cp aliases c, tp aliases tr (zeroed above) */
-                zbar_n[k] = 0.0; Z_n[k] = 0.0;
-            }
             const int nzmax = nlev_n(n) - 1;    /* bottom interface (0-based) */
             const int nzmin = ulev_n(n) - 1;    /* top    interface (0-based) */
             if (nzmax - nzmin < 1) return;      /* C twin: continue */
+
+            /* initialise (Fortran lines 727-733)
+             * M7 C.2a — FESOM_SPEED_TDMANOINIT: skip the a/b/c/tr zero-init (4 x 128 x 8 B of
+             * stores per thread). Bit-identical per column because, for MULTI-LAYER columns
+             * (nzmax-nzmin >= 2), every slot the kernel READS is WRITTEN first:
+             *   - a/b/c: assigned on all of [nzmin, nzmax-1] by the surface/interior/bottom
+             *     construction blocks before the RHS reads them;
+             *   - tr: assigned (=) on [nzmin, nzmax-1] by the RHS blocks before the BC/sw +=
+             *     and the forward sweep; cp/tp alias c/tr and are written by the forward sweep
+             *     before back-substitution reads them;
+             *   - no negative or beyond-nzmax stack index exists on the multi-layer path
+             *     (bottom block reads Z_n[nzmax-2] >= Z_n[nzmin]; nothing reads Z_n[nzmax]).
+             * SINGLE-LAYER columns (nzmax-nzmin == 1) KEEP the legacy full init: there the
+             * surface block reads Z_n[nzmax] (only ever the init-zero), the bottom block
+             * overwrites the surface row reading Z_n[nzmin-1] — for nzmin=0 an out-of-bounds
+             * stack slot that today aliases a zeroed neighbouring-array tail. Deleting init
+             * stores under THOSE reads would change bytes; the per-column branch removes the
+             * question. zbar_n/Z_n keep their init in BOTH paths (Z_n's tail is load-bearing). */
+            if (!tdmanoinit || nzmax - nzmin == 1) {
+                for (int k = 0; k < NL_MAX; ++k) {
+                    a[k] = 0.0; b[k] = 0.0; c[k] = 0.0;
+                    tr[k] = 0.0;              /* cp aliases c, tp aliases tr (zeroed above) */
+                    zbar_n[k] = 0.0; Z_n[k] = 0.0;
+                }
+            } else {
+                for (int k = 0; k < NL_MAX; ++k) { zbar_n[k] = 0.0; Z_n[k] = 0.0; }
+            }
 
             /* zbar_n & Z_n on the NEW vertical mesh (Fortran lines 743-751). */
             zbar_n[nzmax]   = zbar(nzmax);

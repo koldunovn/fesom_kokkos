@@ -1112,6 +1112,44 @@ not evidence; make the columns sum") generalized to *any* derived table.
 total (543.2 ms/step) and the corrected pool reproduces the session-7 audit's per-kernel numbers
 (42.3 ms / 5,120 B / 58 reg for `redi_expl`) to the digit.
 
+### L97 — A SPILL POOL IS AN UPPER BOUND WHOSE REALIZATION FACTOR CAN BE NEGATIVE. The spills can be the CHEAPEST bytes a kernel moves — and the structure that spills can be what keeps the caches hot. (M7 session 9, 2026-07-15)
+
+Package C's premise was "188.8 ms/step of busy time sits in 10 spilling kernels ⇒ removing the
+spills recovers a slice of it". C.1 rebuilt the pool's #1 kernel (`fesom_gm_redi_ver_node`, five
+NL_MAX column arrays, 5,120 B/thread STACK, 36.8 ms/step) as a single bottom-up sweep with O(1)
+carried scalars: **REG 54 / STACK 0, FORCE_SERIAL byte-proof rc=0 — a perfect lever on every
+static metric. The A/B measured +1.88 %.** The ncu pair (26268785/87) explains it:
+
+| | dur/launch | DRAM | L2 | local | occupancy |
+|---|--:|--:|--:|--:|--:|
+| spilling original | 15.76 ms | 17.8 GB | 42.9 GB | 5.1 GB | 46.5 % |
+| STACK-0 sweep | 22.17 ms | **+45 %** | **+27 %** | 0 | 53.1 % |
+
+Removing 5.1 GB of local traffic ADDED ~8 GB of DRAM traffic, and time tracks DRAM. Two
+mechanisms, both structural:
+1. **Local memory is thread-interleaved ⇒ spill ld/st are perfectly coalesced.** A "GB of spill
+   traffic" and a "GB of irregular gather traffic" are not the same currency — the spill GB was
+   ~free.
+2. **The three-pass original was cache-shaped; the fused sweep is not.** The old gather pass ran
+   top-anchored (all threads of a warp at the SAME level ⇒ adjacent nodes share element-lines)
+   with a tiny working set per phase (lines reused within a few iterations). The fused sweep
+   anchors each thread at its own bottom depth (no cross-thread line sharing) and stretches every
+   line's required lifetime across the whole gather+flux+apply body (evicted before reuse). The
+   local arrays were BUYING the phase separation.
+
+Rules this adds:
+- **"STACK bytes × busy ms" RANKS candidates; it never PRICES one.** Price = a per-kernel ncu of
+  the restructured kernel, or a strict-reduction probe (delete stores, change nothing else) —
+  something that cannot be slower.
+- **A lever that changes loop STRUCTURE (fusion, anchor direction, phase count) must be priced as
+  a cache-locality change, not a byte-count change.** Byte deltas that ignore reuse-distance are
+  models, and today the model had the wrong SIGN.
+- The byte proof and the perf claim are INDEPENDENT: 8/8 correctness gates green and a wrong-sign
+  A/B coexisted happily. Gates certify values, never speed.
+- Ops note: an opt-in `_exp` knob is where a byte-correct-but-slower lever goes to be studied —
+  never let it ride the master. And pre-register the A/B with a FLOOR OF ZERO when the mechanism
+  is unpriced: a null result on a strict-reduction probe is a DECISION, not a failure.
+
 ---
 
 *Keep appending. Date entries when the context (versions, paths) might age.*

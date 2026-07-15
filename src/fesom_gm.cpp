@@ -1951,9 +1951,15 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
      * its column → race-free map).
      * M7 C.1 — FESOM_SPEED_REDISWEEP: O(1)-state bottom-up sweep twin (bit-identical, see the
      * banner above fesom_gm_redi_ver_node_sweep). The branch lives HERE, inside the kernel
-     * function, so both tracer calls (T and S, fesom_step.cpp) flip together. */
+     * function, so both tracer calls (T and S, fesom_step.cpp) flip together.
+     * ⚠️ OPT-IN ONLY (fesom_speed_on_exp), NEVER the master: the A/B (26267527) measured
+     * +1.88% — the sweep is byte-correct but SLOWER. ncu (26268785/87) named the mechanism:
+     * the five local arrays were coalesced/thread-interleaved (≈free) and the phase-separated
+     * passes kept txy/st/Ki cache lines hot; the fused bottom-anchored sweep raised DRAM
+     * traffic +45% (17.8→25.9 GB/launch) and time tracks DRAM. Kept for study: it is the
+     * measured counter-example to "spill bytes = recoverable time" (session-9 findings §3.3). */
     static int s_redisweep = -1;
-    if (fesom_speed_on("REDISWEEP", &s_redisweep)) {
+    if (fesom_speed_on_exp("REDISWEEP", &s_redisweep)) {
         fesom_gm_redi_ver_node_sweep(tr_idx, gm, mesh, tracers);
         tracers->data[tr_idx].values_fld.modify_device();
         return;
