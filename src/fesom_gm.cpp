@@ -14,6 +14,7 @@
 #include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"   // M7 C.1: FESOM_SPEED_REDISWEEP
 #include "fesom_tracers.h"
 
 #include <Kokkos_Core.hpp>   // M2.5b: device kernels (parallel_for) + Kokkos:: math + atomic
@@ -1740,6 +1741,150 @@ void fesom_gm_gamma2vel_verify(struct fesom_dyn *dyn, const struct fesom_mesh *m
  * by copying the C verbatim (no per-cell clamp anywhere).
  *===========================================================================*/
 
+/* ==================== M7 C.1 — FESOM_SPEED_REDISWEEP =====================================
+ * The spill pool's #1 row: the per-node kernel below ("fesom_gm_redi_ver_node") holds FIVE
+ * NL_MAX=128 column buffers (txn/tyn/zbar_n/z_n/vd_flux = 5,120 B/thread ptxas STACK), all of
+ * which live in spilled local memory. This twin computes THE SAME VALUES in a single bottom-up
+ * column sweep with O(1) carried scalars — no local arrays, target STACK == 0.
+ *
+ * Why it is BIT-IDENTICAL by construction (⇒ FORCE_SERIAL byte-provable):
+ *  1. The zbar_n/z_n depth recurrence already runs bottom-up; carried as scalars it performs
+ *     the exact same adds in the exact same order.
+ *  2. The txn/tyn gather is level-independent (each level's k-loop over off/nie is a separate
+ *     accumulation, same k order); the sweep evaluates each level's gather ONCE, as before,
+ *     just one level ahead of its consumption (vd_flux[nz] reads txn at nz-1 and nz).
+ *  3. vd_flux is consumed one level behind its production (the apply at nz reads vd_flux[nz]
+ *     and vd_flux[nz+1]) — a rolling pair. The boundary zeros are EXPLICIT: vd_flux[nle] and
+ *     vd_flux[ule] are never written by the flux loop (init-zeros in the array version), so
+ *     the literal 0.0 enters the apply arithmetic exactly as before.
+ *  4. The apply loop is ORDER-FREE across nz: iteration nz writes only vals[nz] (+=) and reads
+ *     only vd_flux / areasvol / hnode_new at its own level — no read of any other level's
+ *     write — so applying bottom-up instead of top-down is bit-identical per element.
+ *  5. zbar_n[ule] in the array version is computed but NEVER READ (the flux loop reads zbar_n
+ *     only on [ule+1, nle-1]); the sweep omits that dead value.
+ * Both guards are kept verbatim: the `nle <= ule` cavity return and the `av>0 && hn>0` apply
+ * guard (branch order is byte-visible). The host C twin (fesom_diff_ver_part_redi_expl) is
+ * untouched — it stays the knob-OFF/verify reference. */
+static void fesom_gm_redi_ver_node_sweep(int                      tr_idx,
+                                         fesom_gm                *gm,
+                                         const struct fesom_mesh *mesh,
+                                         struct fesom_tracers    *tracers)
+{
+    const int    nl    = mesh->nl;
+    const int    nl1   = nl - 1;
+    const int    myDim = mesh->myDim_nod2D;
+    const real_t dt    = (real_t)FESOM_PHASE1_DT;
+
+    auto vals     = tracers->data[tr_idx].values_fld.d();
+    auto txy      = gm->tr_xy_fld.d();
+    auto st       = gm->slope_tapered_fld.d();
+    auto Ki       = gm->Ki_fld.d();
+    auto nlev_e   = mesh->nlevels_fld.d();
+    auto ulev_e   = mesh->ulevels_fld.d();
+    auto nlev_n   = mesh->nlevels_nod2D_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    auto off      = mesh->nod_in_elem2D_offsets_fld.d();
+    auto nie      = mesh->nod_in_elem2D_fld.d();
+    auto earea    = mesh->elem_area_fld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto hnode    = mesh->hnode_fld.d();
+    auto hnode_new= mesh->hnode_new_fld.d();
+    auto zbar     = mesh->zbar_fld.d();
+    auto area     = mesh->area_fld.d();
+
+    Kokkos::parallel_for("fesom_gm_redi_ver_node_sweep", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n) {
+            int nle = nlev_n(n) - 1, ule = ulev_n(n) - 1;
+            if (nle <= ule) return;
+
+            /* Bottom seed — the exact adds of the array recurrence's seed lines. */
+            real_t zbar_below = zbar(nle);                                        /* zbar_n[nle]  */
+            real_t z_cur = zbar_below + hnode((size_t)n * nl + (nle - 1)) * 0.5;  /* z_n[nle-1]   */
+            real_t tx_cur, ty_cur;                                                /* txn/tyn[nle-1] */
+            {
+                real_t Tx = 0.0, Ty = 0.0;
+                int o0 = off(n), o1 = off(n + 1);
+                for (int k = o0; k < o1; ++k) {
+                    int el = nie(k);
+                    int el_nle = nlev_e(el) - 1, el_ule = ulev_e(el) - 1;
+                    if (nle - 1 >= el_ule && nle - 1 < el_nle) {
+                        real_t a = earea(el);
+                        Tx += txy((size_t)el * nl1 * 2 + (nle - 1) * 2 + 0) * a;
+                        Ty += txy((size_t)el * nl1 * 2 + (nle - 1) * 2 + 1) * a;
+                    }
+                }
+                real_t inv = 1.0 / (3.0 * areasvol((size_t)n * nl + (nle - 1)));
+                tx_cur = Tx * inv;
+                ty_cur = Ty * inv;
+            }
+            real_t flux_below = 0.0;   /* vd_flux[nle] — never written by the flux loop */
+
+            for (int nz = nle - 1; nz >= ule + 1; --nz) {
+                /* depth recurrence, verbatim */
+                real_t zbar_cur = zbar_below + hnode((size_t)n * nl + nz);        /* zbar_n[nz]  */
+                real_t z_up = zbar_cur + hnode((size_t)n * nl + (nz - 1)) * 0.5;  /* z_n[nz-1]   */
+                /* gather at nz-1 (same k order as the array version's level loop) */
+                real_t tx_up, ty_up;
+                {
+                    real_t Tx = 0.0, Ty = 0.0;
+                    int o0 = off(n), o1 = off(n + 1);
+                    for (int k = o0; k < o1; ++k) {
+                        int el = nie(k);
+                        int el_nle = nlev_e(el) - 1, el_ule = ulev_e(el) - 1;
+                        if (nz - 1 >= el_ule && nz - 1 < el_nle) {
+                            real_t a = earea(el);
+                            Tx += txy((size_t)el * nl1 * 2 + (nz - 1) * 2 + 0) * a;
+                            Ty += txy((size_t)el * nl1 * 2 + (nz - 1) * 2 + 1) * a;
+                        }
+                    }
+                    real_t inv = 1.0 / (3.0 * areasvol((size_t)n * nl + (nz - 1)));
+                    tx_up = Tx * inv;
+                    ty_up = Ty * inv;
+                }
+                /* vd_flux[nz], verbatim */
+                real_t st_x_up = st((size_t)n * nl1 * 3 + (nz - 1) * 3 + 0);
+                real_t st_y_up = st((size_t)n * nl1 * 3 + (nz - 1) * 3 + 1);
+                real_t st_x_dn = st((size_t)n * nl1 * 3 + nz       * 3 + 0);
+                real_t st_y_dn = st((size_t)n * nl1 * 3 + nz       * 3 + 1);
+                real_t Ki_up   = Ki((size_t)n * nl + (nz - 1));
+                real_t Ki_dn   = Ki((size_t)n * nl + nz);
+                real_t up = (z_up - zbar_cur)
+                          * (st_x_up * tx_up + st_y_up * ty_up) * Ki_up;
+                real_t dn = (zbar_cur - z_cur)
+                          * (st_x_dn * tx_cur + st_y_dn * ty_cur) * Ki_dn;
+                real_t mid = z_up - z_cur;
+                real_t a_int = area((size_t)n * nl + nz);
+                real_t flux_cur = (up + dn) / mid * a_int;
+
+                /* apply at nz (order-free across nz, see banner point 4) */
+                real_t av = areasvol((size_t)n * nl + nz);
+                real_t hn = hnode_new((size_t)n * nl + nz);
+                if (av > 0.0 && hn > 0.0) {
+                    vals((size_t)n * nl + nz) +=
+                        (flux_cur - flux_below) * dt / (av * hn);
+                }
+
+                /* roll the carried state one level up */
+                flux_below = flux_cur;
+                zbar_below = zbar_cur;
+                z_cur  = z_up;
+                tx_cur = tx_up;
+                ty_cur = ty_up;
+            }
+
+            /* surface layer (nz = ule): vd_flux[ule] is the init-zero of the array version —
+             * the literal 0.0 enters the subtraction exactly as before. */
+            {
+                real_t av = areasvol((size_t)n * nl + ule);
+                real_t hn = hnode_new((size_t)n * nl + ule);
+                if (av > 0.0 && hn > 0.0) {
+                    vals((size_t)n * nl + ule) +=
+                        (0.0 - flux_below) * dt / (av * hn);
+                }
+            }
+        });
+}
+
 /*--- diff_ver_part_redi_expl — DEVICE (substep 13) --------------------------
  * Vertical-explicit Redi: tr_xy=∇_h(valuesold) per element (+ internal halo),
  * then per-node area-weighted gather + vd_flux divergence into `values`. */
@@ -1803,7 +1948,16 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
     fesom_halo_field(gm->tr_xy_fld, FESOM_HALO_ELEM2D_FULL, nl1, 2, partit);
 
     /* Step 2: per-node Redi vertical-explicit flux → += values (each node owns
-     * its column → race-free map). */
+     * its column → race-free map).
+     * M7 C.1 — FESOM_SPEED_REDISWEEP: O(1)-state bottom-up sweep twin (bit-identical, see the
+     * banner above fesom_gm_redi_ver_node_sweep). The branch lives HERE, inside the kernel
+     * function, so both tracer calls (T and S, fesom_step.cpp) flip together. */
+    static int s_redisweep = -1;
+    if (fesom_speed_on("REDISWEEP", &s_redisweep)) {
+        fesom_gm_redi_ver_node_sweep(tr_idx, gm, mesh, tracers);
+        tracers->data[tr_idx].values_fld.modify_device();
+        return;
+    }
     Kokkos::parallel_for("fesom_gm_redi_ver_node", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int n) {
             real_t txn[NL_MAX], tyn[NL_MAX], zbar_n[NL_MAX], z_n[NL_MAX], vd_flux[NL_MAX];

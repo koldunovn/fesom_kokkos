@@ -80,7 +80,13 @@ chmod +x "$OUT/wrap.sh"
 
 echo "=== M7 host CPU-sampling profile — NG5 dist_16, ${NSTEPS:-20} steps ==="
 echo "knobs: ${KNOBS:-none}"
-srun "$OUT/wrap.sh" "$MESH" "$OUT" 180 "${NSTEPS:-20}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+# --kill-on-bad-exit=0: the blessed set's known teardown SIGABRT (the H.7 "smooth.work" static
+# View destructs after Kokkos::finalize — session-9 finding) fires on EVERY rank after
+# MPI_Finalize + output. If any rank's abort lands before rank 0's nsys finishes FINALIZING,
+# slurmstepd cancels the step and SIGKILLs nsys — the whole trace is lost (job 26267147: run
+# complete, loop timing printed, NO report). The abort is post-output, so not killing the step
+# risks nothing; rank 0's nsys gets to write the report.
+srun --kill-on-bad-exit=0 "$OUT/wrap.sh" "$MESH" "$OUT" 180 "${NSTEPS:-20}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
 echo "rc=$?"; grep -m1 'loop timing' "$OUT/run.log" || true
 
 # Fail LOUDLY if nsys wrote nothing. The first attempt died on a bad flag, produced no report,
