@@ -357,6 +357,12 @@ void fesom_io_write_snapshot(const char                  *path,
         icew->uice_fld.sync_host();   icew->vice_fld.sync_host();
         icew->h_ice_fld.sync_host();  icew->h_snow_fld.sync_host();
     }
+    /* M7 H.9 SSHRAILS: same writer-pull for eta_n — the ONLY field of the SSH class this gather
+     * reads (hbar/d_eta/ssh_rhs* are not snapshot fields). Unconditional for the same reasons. */
+    {
+        struct fesom_dyn *dynw = const_cast<struct fesom_dyn *>(dyn);
+        dynw->eta_n_fld.sync_host();
+    }
 
     /* Build gather plan once (collective). */
     gather_plan gp;

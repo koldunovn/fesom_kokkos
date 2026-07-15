@@ -1245,6 +1245,12 @@ skip_rest_state:
                 /* Iterate myDim only for stat collection — halo entries are
                  * just owner copies, so global max via MPI_Allreduce is
                  * exact. Reduces noise from divergent halos before exchange. */
+                /* M7 H.9 SSHRAILS: eta_n is device-written — pull it at print cadence (the H.8
+                 * writer-pull; no-op when host-authoritative). NB uv/w/T/S below are ALREADY
+                 * stale device-resident reads under the blessed set (pre-existing, pre-H.9):
+                 * the printed stats and the uv_max blowup trip are IC-frozen on CUDA unless a
+                 * snapshot recently pulled them. Documented, not fixed here. */
+                dyn.eta_n_fld.sync_host();
                 real_t uv_max = 0.0, eta_max = 0.0, w_max = 0.0;
                 size_t te = (size_t)mesh.myDim_elem2D * (size_t)mesh.nl * 2;
                 for (size_t i = 0; i < te; ++i) {

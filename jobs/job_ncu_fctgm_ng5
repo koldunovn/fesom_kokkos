@@ -8,27 +8,40 @@
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
 #SBATCH --time=01:00:00
-#SBATCH -o /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ng5.%j.out
-#SBATCH -e /work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ng5.%j.err
-# ncu --set basic on NG5 dist_16 (462k nod2D/rank, production regime), rank 0 only. 3 steps (profiling
-# in init+step1, then detaches; ranks block at collectives so none exit early). Identifies FCT
-# (fesom_tracer_adv) + GM (fesom_gm/fer) kernels by name; reports Compute% vs Memory% + occupancy.
+#SBATCH -o /work/ab0995/a270088/port2/m7/ncu_ng5.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/ncu_ng5.%j.err
+# ncu on NG5 dist_16 (462k nod2D/rank, production regime), rank 0 only. 12 steps (NCU_SKIP skips the
+# spin-up launches where uv~0 short-circuits the kernels; ranks block at collectives so none exit early).
+# FCT (fesom_tracer_adv) + GM/Redi (redi|fer_) kernels by name.
+#
+# Two modes (ncu_rank0.sh): NCU_METRICS set -> targeted --metrics (bytes/sectors; the M7 B-precondition
+# DRAM/L2 traffic run); unset -> --set basic (occupancy/duration/SOL, the original M5 use).
+# env: BIN (0.7: ALWAYS pin), KNOBS, TAG, NCU_METRICS, NCU_REGEX, NCU_COUNT, NCU_SKIP.
+
+set -u
 ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
 source "$ROOT/env_cuda.sh"
 export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
 export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
 MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
-OUT=/work/ab0995/a270088/port2/kokkos_gpu_runs/ncu_ng5; rm -rf "$OUT"; mkdir -p "$OUT"
-export FESOM="$ROOT/build-cuda/fesom_port"
+OUT=/work/ab0995/a270088/port2/m7/${TAG:-ncu_ng5}; rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM="${BIN:-$ROOT/build-m7cuda/fesom_port}"
+m7_provenance "$OUT" "$FESOM"
 export NCU_OUT="$OUT/ng5_fctgm"
-export NCU_COUNT=90
-export NCU_SKIP=650
-echo "=== ncu NG5 dist_16 (rank0), 16 ranks/4 nodes, dt=180, 3 steps ==="
+export NCU_COUNT=${NCU_COUNT:-90}
+export NCU_SKIP=${NCU_SKIP:-650}
+echo "=== ncu NG5 dist_16 (rank0), 16 ranks/4 nodes, dt=180, 12 steps ==="
+echo "metrics: ${NCU_METRICS:-<--set basic>}  regex: ${NCU_REGEX:-<default>}  skip/count: $NCU_SKIP/$NCU_COUNT"
 srun "$ROOT/jobs/ncu_rank0.sh" "$MESH" "$OUT" 180 12 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
 echo "srun rc=$?"
 ncu -i "$NCU_OUT.ncu-rep" --page details > "$OUT/details.txt" 2>&1 && echo "details.txt: $(wc -l < "$OUT/details.txt") lines"
-ncu -i "$NCU_OUT.ncu-rep" --csv --page raw \
-    --metrics gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active \
+CSV_METRICS=${NCU_METRICS:-gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active}
+ncu -i "$NCU_OUT.ncu-rep" --csv --page raw --metrics "$CSV_METRICS" \
     > "$OUT/sol.csv" 2>&1 && echo "sol.csv: $(wc -l < "$OUT/sol.csv") rows"
 echo "=== done ==="

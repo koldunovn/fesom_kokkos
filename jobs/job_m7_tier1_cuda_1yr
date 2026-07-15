@@ -48,7 +48,7 @@ while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-
 KNOBS=${KNOBS:-"FESOM_SPEED_SWSKIP=1;FESOM_SPEED_ICEFLUXDEV=1;FESOM_SPEED_NOFENCE2=1"}
 IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done
 
-OUT=/work/ab0995/a270088/port2/m7/tier1_cuda_1yr
+OUT=/work/ab0995/a270088/port2/m7/${TAG:-tier1_cuda_1yr}
 rm -rf "$OUT"; mkdir -p "$OUT"
 FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
 m7_provenance "$OUT" "$FESOM"

@@ -76,4 +76,10 @@ int fesom_timestep(int                          step_n,
                    struct fesom_tracers        *tracers,
                    const struct fesom_forcing  *forcing);
 
+/* M7 H.9 SSHRAILS — resolves + guards once (requires IOACC; aborts on the per-step host
+ * readers of the SSH class). Under it, ssh_rhs/d_eta/ssh_rhs_old/hbar/hbar_old go
+ * device-authoritative and eta_n is device-written; callers outside fesom_step.cpp
+ * (fesom_ice.cpp:634) gate their hbar push on it. */
+bool fesom_sshrails_on(void);
+
 #endif /* FESOM_STEP_H */

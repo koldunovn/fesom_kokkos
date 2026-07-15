@@ -77,6 +77,78 @@ static void ocean_synccheck_roundtrip(struct fesom_dyn     *dyn,
 #undef FESOM_KK_BOUNCE
 #endif
 
+/* ==============================================================================================
+ * M7 H.9 "SSHRAILS" — the SSH/hbar host-staged nod2D bounce class goes device-resident.
+ *
+ * WHAT (gap300_h10 census, 14.8 ms/step at NG5@4N): per step, five nod2D fields bounce
+ * device→host→device to feed four host fesom_exchange_nod2D calls (ssh_rhs, d_eta, ssh_rhs_old,
+ * hbar) and ONE host loop (eta_n = α·hbar + (1−α)·hbar_old). Under the knob the four exchanges
+ * become device NOD2D halos (the ICERAILS infrastructure), the eta_n loop becomes a per-node
+ * device kernel, and every push/sync of the class dies. ssh_rhs/d_eta/ssh_rhs_old/hbar/hbar_old
+ * are then DEVICE-authoritative across the step (and the step BOUNDARY: d_eta is the CG warm
+ * start, ssh_rhs_old the (1−α) term, hbar/hbar_old feed dhe_fill + the next eta_n).
+ *
+ * WHO STILL READS THE CLASS FROM THE HOST (the complete census, session 8):
+ *   - snapshot gather (fesom_io.cpp): eta_n only → unconditional sync_host inside
+ *     fesom_io_write_snapshot (the H.8 writer-pull; no-op when host-authoritative).
+ *   - print block (fesom_main.cpp): eta_n for eta_max → print-cadence sync_host there.
+ *   - IO stream: host resolve_ssh reads eta_n per step → REQUIRE IOACC (device resolver).
+ *   - fesom_ale_dump_* bisect rails: self-sync via ale_sync() — safe as-is.
+ *   - ale init (fesom_ale.cpp:784-829) + startup self-tests (fesom_main.cpp:655-760): run
+ *     BEFORE the loop; the once-only step-1 IC push in fesom_timestep carries their values to
+ *     the device (rule 0.3: legacy re-pushed them every step; the device must start from the
+ *     same state).
+ *   - FESOM_DIAG_SSHSLV / FESOM_DIAG_SPREAD and FESOM_KK_VERIFY=ssh|vrhs read the raw host
+ *     aliases per step → incompatible, ABORT (opt-in debug; never combined with a perf run).
+ * ============================================================================================== */
+bool fesom_sshrails_on(void)
+{
+    static int c = -1;
+    if (!fesom_speed_on("SSHRAILS", &c)) return false;   /* resolves + announces once, on rank 0 */
+
+    static bool guards_done = false;                     /* the guards below run exactly once */
+    if (guards_done) return true;
+    guards_done = true;
+
+    int rank = 0, inited = 0;
+    MPI_Initialized(&inited);
+    if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+
+    /* Ask the dependency THROUGH THE SAME RESOLVER so a per-lever override is seen. */
+    static int s_io = -1;
+    if (!fesom_speed_on("IOACC", &s_io)) {
+        if (rank == 0)
+            fprintf(stderr,
+                "[fesom_speed] FESOM_SPEED_SSHRAILS REQUIRES IOACC (have ioacc=0).\n"
+                "  Without it the IO stream's host resolve_ssh reads eta_n from the raw HOST "
+                "alias every step, which this lever leaves stale between snapshots. Refusing "
+                "to run.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+
+    /* Match the diag blocks' own enabling condition exactly (bare getenv(), no atoi). */
+    static const char *const kDiag[] = { "FESOM_DIAG_SSHSLV", "FESOM_DIAG_SPREAD" };
+    for (const char *d : kDiag) {
+        if (getenv(d)) {
+            if (rank == 0)
+                fprintf(stderr, "[fesom_speed] FESOM_SPEED_SSHRAILS is INCOMPATIBLE with %s: that "
+                                "diagnostic reads ssh_rhs/d_eta/hbar from the raw HOST alias every "
+                                "step, which this lever leaves stale. Refusing to run.\n", d);
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
+    }
+    const char *v = getenv("FESOM_KK_VERIFY");
+    if (v && (strstr(v, "ssh") || strstr(v, "vrhs"))) {
+        if (rank == 0)
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_SSHRAILS is INCOMPATIBLE with "
+                            "FESOM_KK_VERIFY=<ssh|vrhs>: the verify twins capture-before/compare "
+                            "from the raw HOST aliases of the SSH class, which this lever "
+                            "deliberately leaves stale. Refusing to compare against garbage.\n");
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    return true;
+}
+
 int fesom_timestep(int                          step_n,
                    const fesom_step_ctx        *ctx,
                    struct fesom_mesh           *mesh,
@@ -178,6 +250,24 @@ int fesom_timestep(int                          step_n,
             }
         }
         s_verify_loaded = 1;
+    }
+
+    /* M7 H.9 SSHRAILS — the ONCE-ONLY IC push (the ICERAILS fesom_ice.cpp:576 pattern, and the
+     * same Z7 lesson: the class's step-1 device values had exactly one producer — the per-step
+     * pushes this lever deletes). The host mirrors hold the IC + whatever the startup self-tests
+     * (fesom_main.cpp:655-760) left; legacy pushed them at :630-633/:519 every step, so the
+     * device trajectory must start from those same values. Serial: h==d, all no-ops.
+     * (Restart note: cold-start-only, like ICERAILS — a restart path that loads HOST arrays
+     * mid-run must re-push; a `static bool` will not fire.) */
+    static bool s_sshrails_ic_pushed = false;
+    if (fesom_sshrails_on() && !s_sshrails_ic_pushed) {
+        s_sshrails_ic_pushed = true;
+        dyn->eta_n_fld.modify_host();        dyn->eta_n_fld.sync_device();
+        dyn->d_eta_fld.modify_host();        dyn->d_eta_fld.sync_device();
+        dyn->ssh_rhs_fld.modify_host();      dyn->ssh_rhs_fld.sync_device();
+        dyn->ssh_rhs_old_fld.modify_host();  dyn->ssh_rhs_old_fld.sync_device();
+        mesh->hbar_fld.modify_host();        mesh->hbar_fld.sync_device();
+        mesh->hbar_old_fld.modify_host();    mesh->hbar_old_fld.sync_device();
     }
 
     /* M5.6: per-substep timing (FESOM_STEP_PROFILE; host+device, fence-bounded — finds hidden
@@ -516,7 +606,13 @@ int fesom_timestep(int                          step_n,
     /* M5.13g1: uv device-resident - no re-push (compute_vel_rhs reads it on device). */
     /* M5.13d: uv_rhsAB device-resident with its halo (cross-step AB2 history) - no IN re-push;
      * compute_vel_rhs part i reads it on device (last step's fesom_halo_field left it owned+halo). */
-    dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
+    /* M7 H.9 SSHRAILS: eta_n is DEVICE-written (the substep-11 kernel) — this push would clobber
+     * the device copy with the stale host mirror (the Z7/BULKTAIL-IC signature). The :814 comment
+     * already proved this push redundant even under legacy (the host loop is eta_n's only per-step
+     * writer, and substep 11 re-pushes); under the knob it is the clobber itself. Gated. */
+    if (!fesom_sshrails_on()) {
+        dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
+    }
     /* M5.13e: w_e device-resident with its halo (12d fesom_halo_field) - no re-push; compute_vel_rhs reads it on device. */
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     /* M5.13f: hnode device-resident from last step's commit - no re-push; compute_vel_rhs reads it on device. */
@@ -627,10 +723,15 @@ int fesom_timestep(int                          step_n,
     }
     /* M5.13g1: uv device-resident - no re-push (ssh_rhs/CG read it on device). */
     /* M5.4: uv_rhs is device-resident with its halo from substep 6 — no re-push. */
-    dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
-    dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
-    /* M5.13f: helem device-resident from last step's commit - no re-push; ssh_rhs/CG read it on device. */
-    mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
+    /* M7 H.9 SSHRAILS: the three IN-rail pushes die — the class is device-authoritative (d_eta
+     * from last step's device halo, ssh_rhs_old/hbar from compute_hbar + device halos). Under the
+     * knob the host mirrors are STALE, so these self-containment pushes would be Z7 clobbers. */
+    if (!fesom_sshrails_on()) {
+        dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
+        dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
+        /* M5.13f: helem device-resident from last step's commit - no re-push; ssh_rhs/CG read it on device. */
+        mesh->hbar_fld.modify_host();       mesh->hbar_fld.sync_device();
+    }
 
     PMARK("6_ivisc");
     /*  6b. M6.3 (zstar): the CUMULATIVE stiffness update from the PREVIOUS step's dhe, BEFORE
@@ -643,19 +744,33 @@ int fesom_timestep(int                          step_n,
     /*  7. SSH RHS (linfs + the M6.3 zstar water-flux tail) — device. CG reads ssh_rhs at OWNED
      *     rows only, so no re-push after the halo (the device owned ssh_rhs stays current). */
     fesom_compute_ssh_rhs_linfs_kk(mesh, dyn, forcing);
-    dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
-    fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
+    if (fesom_sshrails_on()) {
+        /* M7 H.9: device NOD2D halo — same replace semantics, no D2H/H2D staging. (CG reads
+         * ssh_rhs at OWNED rows only; the halo is kept to match the Fortran/legacy values.) */
+        fesom_halo_field(dyn->ssh_rhs_fld, FESOM_HALO_NOD2D, 1, 1, p);
+    } else {
+        dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
+        fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
+    }
 
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
     int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
-    dyn->d_eta_fld.sync_host();                            /* OUT: before the nod2D halo */
-    fesom_exchange_nod2D(dyn->d_eta_fld.h_checked(), p);   /* Fortran solver.F90:279 */
-    fesom_ale_dump_sshsolve(step_n, dyn, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:199) */
+    if (fesom_sshrails_on()) {
+        /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
+         * reads and the next step's CG warm start both read exactly this copy. The sync_host,
+         * the host exchange AND the L30 re-push below all die. */
+        fesom_halo_field(dyn->d_eta_fld, FESOM_HALO_NOD2D, 1, 1, p);
+        fesom_ale_dump_sshsolve(step_n, dyn, mesh, p);   /* self-syncs (ale_sync) — safe */
+    } else {
+        dyn->d_eta_fld.sync_host();                            /* OUT: before the nod2D halo */
+        fesom_exchange_nod2D(dyn->d_eta_fld.h_checked(), p);   /* Fortran solver.F90:279 */
+        fesom_ale_dump_sshsolve(step_n, dyn, mesh, p);   /* M6.3 bisect rail (C fesom_step.c:199) */
 
-    /*  9. velocity update — device. update_vel reads d_eta at the 3 element vertices
-     *     (incl. HALO), so re-push d_eta after its halo (L30 cross-op re-push). */
-    dyn->d_eta_fld.modify_host(); dyn->d_eta_fld.sync_device();
+        /*  9. velocity update — device. update_vel reads d_eta at the 3 element vertices
+         *     (incl. HALO), so re-push d_eta after its halo (L30 cross-op re-push). */
+        dyn->d_eta_fld.modify_host(); dyn->d_eta_fld.sync_device();
+    }
     fesom_update_vel_kk(mesh, dyn);
     /* M5.13g1: uv device-halo (GPU-aware MPI). uv stays device-resident across the whole step +
      * the next step's substeps 3-7 + the ice-step ocean2ice (ALL uv re-pushes removed). snap-out
@@ -667,19 +782,29 @@ int fesom_timestep(int                          step_n,
      *     so re-push it (L30) to keep the device copy coherent with the host. */
     /* M5.13g1: uv device-resident (update_vel fesom_halo_field) - no re-push; compute_hbar reads it on device. */
     fesom_compute_hbar_kk(mesh, dyn, forcing);
-    dyn->ssh_rhs_old_fld.sync_host();                      /* OUT (3 fields) before the halos */
-    mesh->hbar_fld.sync_host();
-    mesh->hbar_old_fld.sync_host();
-    fesom_exchange_nod2D(dyn->ssh_rhs_old_fld.h_checked(), p);   /* Fortran oce_ale.F90:2078 */
-    fesom_exchange_nod2D(mesh->hbar_fld.h_checked(),       p);   /* Fortran oce_ale.F90:2102 */
+    if (fesom_sshrails_on()) {
+        /* M7 H.9: ONE co-packed device exchange for the two adjacent same-kind halos (the
+         * ICERAILS srfoce pattern). hbar_old needs NO exchange — compute_hbar_kk writes it
+         * full-extent from pre-update hbar, which was halo-complete from ITS exchange, exactly
+         * why legacy never exchanged it either. The 10.6 MB DtoH + 7.1 MB HtoD re-push die. */
+        fesom_halo_field2(dyn->ssh_rhs_old_fld, mesh->hbar_fld, FESOM_HALO_NOD2D, 1, 1, p);
+    } else {
+        dyn->ssh_rhs_old_fld.sync_host();                      /* OUT (3 fields) before the halos */
+        mesh->hbar_fld.sync_host();
+        mesh->hbar_old_fld.sync_host();
+        fesom_exchange_nod2D(dyn->ssh_rhs_old_fld.h_checked(), p);   /* Fortran oce_ale.F90:2078 */
+        fesom_exchange_nod2D(mesh->hbar_fld.h_checked(),       p);   /* Fortran oce_ale.F90:2102 */
+    }
 
     /* M6.3 — dhe fill (oce_ale.F90:2298-2305): the NEXT step's cumulative stiffness increment,
      * mean(hbar - hbar_old) per element. ⚠️ UNCONDITIONAL in the Fortran (it runs under linfs
      * too, where nothing reads it) and the C mirrors that, so we do as well -- a dead store
      * under linfs, which the knob-OFF byte gate proves. MUST run AFTER the hbar exchange: the
      * element's vertices reach HALO nodes. Per-element gather => race-free, no atomics. */
-    mesh->hbar_fld.modify_host();     mesh->hbar_fld.sync_device();
-    mesh->hbar_old_fld.modify_host(); mesh->hbar_old_fld.sync_device();
+    if (!fesom_sshrails_on()) {   /* M7 H.9: device hbar/hbar_old already current — re-push dies */
+        mesh->hbar_fld.modify_host();     mesh->hbar_fld.sync_device();
+        mesh->hbar_old_fld.modify_host(); mesh->hbar_old_fld.sync_device();
+    }
     {
         auto dhe_v    = mesh->dhe_fld.d();
         auto hbar_v   = mesh->hbar_fld.d();
@@ -773,7 +898,28 @@ int fesom_timestep(int                          step_n,
 
     /* 11. eta_n inline (oce_ale.F90:3771-3775).
           eta_n = α·hbar + (1-α)·hbar_old, but ONLY where ulevels_nod2D == 1.  */
-    {
+    if (fesom_sshrails_on()) {
+        /* M7 H.9: the SAME map as a per-node device kernel (identical expression order, so the
+         * Serial byte proof compares bit-for-bit). Range covers myDim+eDim like the host loop:
+         * hbar's device halo just completed, and hbar_old is full-extent by compute_hbar_kk.
+         * modify_device() replaces the :818 push — resolve_ssh_dev (IOACC, required) and next
+         * step's compute_vel_rhs read eta_n on the device; the host mirror goes stale by design
+         * (snapshot gather + print block pull it at their own cadence). No scatter, no atomics. */
+        const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
+        const int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        auto eta_v  = dyn->eta_n_fld.d();
+        auto hbar_v = mesh->hbar_fld.d();
+        auto hbo_v  = mesh->hbar_old_fld.d();
+        auto ulev_v = mesh->ulevels_nod2D_fld.d();
+        Kokkos::parallel_for("fesom_eta_n_sshrails", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int n) {
+                if (ulev_v(n) == 1) {
+                    eta_v(n) = alpha * hbar_v(n)
+                             + (1.0 - alpha) * hbo_v(n);
+                }
+            });
+        dyn->eta_n_fld.modify_device();
+    } else {
         const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
         int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
         for (int n = 0; n < N; ++n) {

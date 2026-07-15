@@ -14,6 +14,7 @@
 #include "fesom_speed.hpp"         // M7 H.2 ICERAILS
 #include "fesom_bulk.h"            // M7 H.3 BULKTAIL: fesom_bulktail_on()
 #include "fesom_io.h"              // M7 H.8 LAZYSNAP: fesom_lazysnap_on()
+#include "fesom_step.h"            // M7 H.9 SSHRAILS: fesom_sshrails_on() (the :634 hbar push gate)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -631,7 +632,13 @@ void fesom_ice_step(int                            step,
          * M5.14 (S flip): S values device-resident too (floor → device) - no re-push; ocean2ice reads srfoce_salt = S on device.
          * M5.13g1: uv device-resident across the step boundary (ocean update_vel fesom_halo_field) -
          * no re-push; ocean2ice reads uv surface (nz=0) on device. So T/S/uv all device-resident here now. */
-        mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();   /* hbar IS host-authoritative — keep */
+        /* M7 H.9 SSHRAILS flips the ownership this comment asserts: under the knob hbar is
+         * DEVICE-authoritative (device halo in the SSH block) and the host mirror is STALE — this
+         * push would clobber the fresh device hbar that ocean2ice_kk is about to read (the
+         * BULKTAIL-IC / Z7 signature, PROMPT §3.3 trap 1). Legacy: unchanged. */
+        if (!fesom_sshrails_on()) {
+            mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();   /* hbar IS host-authoritative (legacy) — keep */
+        }
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
         if (icerails) {
             /* THE UNPIN. srfoce_* stay DEVICE-authoritative; the 2 host-staged halos (each a
