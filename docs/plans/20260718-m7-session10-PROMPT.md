@@ -56,15 +56,50 @@ path. The kernel-busy 543 ms (83.6 % of the h14 step) is the wall: further 4N ga
 making the BUSY kernels faster (roofline work: launch bounds, occupancy on the 80-reg pair,
 fusion that RESPECTS locality), each priced per L97 before building.
 
-## 2. SESSION-10 SHAPE (proposed, not user-committed)
+## 2. SESSION-10 SHAPE — **USER-APPROVED (2026-07-15): ~7× IS THE 4N ENDPOINT; the effort
+moves to 16N.** While the long 16N jobs queue, run the cross-mesh dividend survey (§2.1).
 
 1. **Harvest 26267149 (16N)** if it ran; else resubmit (`job_m7_ab_env` single-leg pattern,
    BIN=h11cuda or h14cuda — note which; h14 differs from h11 by −0.30 % 4N-kernel-class).
    Refresh Stage-2 SYPD; then re-size E at 16N (its pool grows exactly where the ratio decays).
-2. **E, opened properly**: the 18 ms is MPI-WAIT, not bandwidth — the levers are overlap
-   (async halo + compute between post and wait), message coalescing (device2/deviceN pairs),
-   and rank-order/topology. Start from the gap300_h11 pair rows (§2.1c) + `m7_gap_census.py
-   --diff` between 4N and a 16N census (fire a gap300_16N_h14 FIRST, background).
+   Also fire the **gap300_16N census on h14** (background, `-C a100_80`, the fixed
+   job_m7_hostprof) — E's design input. Expect BOTH to sit long in queue: 16 a100_80 nodes.
+
+### 2.1 🔴 USER-REQUESTED: the cross-mesh dividend survey (the while-we-wait workstream)
+
+**Question: what did the whole M7 stack actually buy on every mesh × node count we track —
+not just NG5@4N?** Nothing outside NG5@{4,8,16}N + dars@8N has ever been measured on a
+post-Tier-1 binary.
+
+- **Design: per point, a same-day pinned GPU pair** — leg A `m7/bin/row0/fesom_port_cuda`
+  (`02c8a0d1`, campaign start, run KNOBLESS — it predates most knobs), leg B
+  `m7/bin/h14/fesom_port_cuda` (`18275c68`, `FESOM_SPEED=1`). Two single-leg `job_m7_ab_env`
+  jobs per point, both `-C a100_80`, min of 2, walltime sized (rule 0.7). Same-day pairing
+  makes the DELTA immune to cluster drift (L94/same-day rule); it is not a same-alloc A/B, so
+  quote each point as (row0, h14, Δ%) with both job ids.
+- **The matrix** (4 GPUs/node; partitions verified to exist 2026-07-15):
+  | mesh | node points | protocol |
+  |---|---|---|
+  | core2 (**/pool** — perf runs; only the CORE2 *gates* must use the private mesh, L73) | 1N (dist_4), 2N (dist_8) | ⚠️ no validated M7 long-window protocol — validate per L95 (start 300-step @ dt1800; watch for blowup; a matched-window pair is still honest if shorter) |
+  | dars | 2N, 4N, 8N (dist_8/16/32) | **150-step** (L95), dt180 |
+  | farc | 2N, 4N, 8N (dist_8/16/32) | ⚠️ no validated M7 protocol — same L95 drill, dt180 |
+  | NG5 | 4N, 8N (dist_16/32) | 300-step, dt180 (4N/8N h14 legs also complete the h14 ledger row set) |
+  16N points for dars/farc (dist_64 exists) are OPTIONAL — only if the queue is kind; the NG5
+  16N pair is the priority 16-node ask.
+- **Read the result by REGIME, not just as one number**: host-class levers pay by
+  host-work-per-step (≈ mesh-size-independent), kernel-class by kernel time ⇒ the dividend %
+  should GROW on smaller per-rank workloads at fixed node count and SHRINK toward comm-bound
+  points. A point that breaks that pattern is a finding (L84 precedent), not noise — chase it.
+- **CPU/SYPD context**: reuse the existing protocol-matched CPU rows (NG5/dars session-7,
+  core2 M5.24) with an explicit cross-day caveat; fire fresh Serial legs ONLY where a headline
+  ratio is wanted (CPU legs at scale are expensive). The GPU-vs-GPU dividend needs no CPU leg.
+- **Deliverable**: a "M7 dividend by mesh × nodes" table in `docs/GPU_SPEED_M7.md` (row0 →
+  h14 s/step, Δ%, regime note), plus the ledger rows for every fresh h14 leg.
+
+2. **E, opened properly** (once the 16N census lands): the 18 ms is MPI-WAIT, not bandwidth —
+   the levers are overlap (async halo + compute between post and wait), message coalescing
+   (device2/deviceN pairs), and rank-order/topology. Start from the gap300_h11 pair rows
+   (§2.1c) + `m7_gap_census.py --diff` between the 4N and 16N censuses.
 3. C strict-reduction tail as filler between E measurements: audit fer_solve_gamma's 7-array
    TDMA (same shape as impl_ale: fold gather/coeffs bottom-up? NO — L97 — only DELETIONS;
    check its init pattern + M5.24-style aliasing candidates), each behind `_exp` → A/B → promote.
