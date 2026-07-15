@@ -224,6 +224,44 @@ fidelity PASS rc=0 with FERNOINIT+VISCNOINIT announcing under bare `FESOM_SPEED=
 REDISWEEP absent; **anchor 0.6465 ±0.5 % (band [0.6433, 0.6497]; = 0.6495 × (1−0.0046))** ⇒
 ratio 4.5785/0.6465 = **7.08×** at NG5@4N if it lands on point.
 
+## 6. 🔴🔴 THE gap300_16N CENSUS (26274311) — E'S POOL WAS ALWAYS ~5× BIGGER THAN THE LEDGER SAID. THE 1 ms THRESHOLD WAS THE ARTIFACT.
+
+Job clean: h14 `18275c68` ✓, `FESOM_SPEED=1` ✓, **rc=0** (pre-reg (i) HIT — first 16N census
+to survive teardown), traced 0.2797 vs untraced 0.2629 (+6 % nsys overhead), 598 MB sqlite.
+Scoring: (iii) kernel-busy 543.0 → **137.8 ms/step = ÷3.94, near-perfect strong scaling** HIT.
+(ii) at the OLD >1 ms threshold the E pool SHRANK 18.0 → 13.2 ms — which smelled wrong against
+a 45 % idle step, so the sub-ms residual was histogrammed instead of hand-waved (L92):
+**113 ms/step — 81 % of ALL 16N GPU idle — sits in ~350 gaps/step of 100–1000 µs each**,
+individually under the census bar. Re-running BOTH censuses at `--min-gap-ms 0.1` attributes it:
+
+| @0.1 ms | 4N (h11) | 16N (h14) |
+|---|--:|--:|
+| step / kernel-busy | 656.8 / 543.0 (82.7 %) | 277.3 / 137.8 (49.7 %) |
+| **halo-wait pool (device+device2+deviceN)** | **97.3 ms = 14.8 %** | **124.8 ms = 45.0 %** |
+| — MPI-covered | 88.8 | 116.3 |
+| — PCIe (staging copies, ~70 KB/copy) | 16.5 | 16.5 |
+| halo gap events/step | **358** | **358** |
+| per-event wait (device leg) | ~278 µs | ~386 µs |
+
+- **The event count is IDENTICAL (358/step) at both scales** — the class is structural
+  (per-field exchange calls), fixed by the code path, not the partition. Kernels shrink 4×;
+  each event's ~300 µs latency does not ⇒ the share explodes 14.8 → 45 % and THIS is the
+  whole ratio decay (7.08× → 4.67×), measured end to end.
+- **⇒ the session-8/9 "E pool = 18 ms at 4N" was a THRESHOLD ARTIFACT.** The honest 4N pool
+  is 97 ms/step (14.8 %). The "8× stretch is NOT reachable from the measured 4N pools"
+  arithmetic (handoff §1) was computed on the 18 ms figure — **the user's ~7×-is-the-endpoint
+  decision rested on an undersized E; surface this to the user rather than silently
+  re-litigating.** Even a 50 % conversion of the honest 4N pool ≈ −7.4 % ≈ 7.6×; the −11.9 %
+  the 8× stretch needs is no longer out of range *if* E converts well (a big if — 358
+  latency-bound events/step, ~70 KB staged messages).
+- **E's measured levers, in order of the evidence**: (1) EVENT-COUNT reduction / message
+  coalescing (358 latency-dominated events/step at ~70 KB — fuse per-field exchanges);
+  (2) overlap (post early, compute between post and wait); (3) GPU-direct vs the measured
+  16.5 ms/step of staging PCIe (CUDA-aware MPI exists in env_cuda, L: openmpi/4.1.5-nvhpc);
+  (4) per-event latency (rendezvous scheme, rank order/topology).
+- Bookkeeping: `--min-gap-ms 0.1` is the census setting of record for E work from now on;
+  the >1 ms tables remain valid for the classes they named (SSH, ice-thermo, jra55).
+
 ### ✅ 5.1 h16 CERTIFIED — anchor HIT to 0.03 %
 
 26280025 knob-OFF byte PASS (diff_snap rc=0) · 26280026 fidelity full-blessed PASS rc=0
