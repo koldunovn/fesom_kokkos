@@ -1451,6 +1451,7 @@ skip_rest_state:
     fesom_halo_device_free();   // device Views must not outlive Kokkos::finalize()
     fesom_ice_evp_free();       // M5.8: same — release the EVP coastal-node mask View
     fesom_ice_maevp_free();     // M6.2: same — release the mEVP coastal-node mask View
+    fesom_ssh_cgpipe_free();    // M7 E.CG1: same — CGPIPE comm lists/buffers/shipped CSR
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;

@@ -36,6 +36,8 @@
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.1: on-device (GPU-aware-MPI) halo exchange
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"         // M7 E.CG1: FESOM_SPEED_CGPIPE (opt-in _exp lever)
+#include <unordered_map>           // M7 E.CG1: one-time gid->local maps (setup only)
 
 /*===========================================================================
  * Stiffness matrix: build CSR + fill values
@@ -604,6 +606,442 @@ static real_t cg_dot(DV a, DV b, int N)
 /* (cg_dot2 removed in M5.2 — the in-loop sp0/sp1 dot is now fused into the
  * preconditioner SpMV; the only remaining dot is the single-accumulator cg_dot.) */
 
+/* ======================================================================= *
+ * M7 E.CG1 — FESOM_SPEED_CGPIPE: single-exchange 2-ring PCG (opt-in _exp).
+ *
+ * BACKEND-AGNOSTIC ON PURPOSE (pure Kokkos + MPI — no CUDA-specific API): on
+ * Serial the Views live in host space and MPI moves host pointers, so the
+ * FORCE_SERIAL byte proof (Serial np>1, knob ON vs the certified baseline,
+ * diff_snap rc=0) exercises the REAL lever end to end — the strongest gate
+ * this lever has, since full-model CUDA runs are not run-to-run byte-stable
+ * (atomic scatters elsewhere in the step, D22). Production Serial stays
+ * legacy: fesom_speed resolve forces the knob OFF on Serial builds without
+ * FESOM_SPEED_FORCE_SERIAL=1.
+ *
+ * WHY (session-11 E ledger): the CG is the halo pool's #1 site — 2 exchanges
+ * per iteration (pp before the SpMV, rr before the preconditioner SpMV) x ~72
+ * iters = 146 sync points/step at ~190-260 us each (27/38 ms at 4N/16N).
+ * Both operators are sparse and each needs its operand's fresh 1-ring halo, so
+ * 2 exchanges/iter is STRUCTURAL for exact PCG on a 1-ring. On a 2-RING it is
+ * not:
+ *   - exchange rr on ring1+ring2 (ONE fused message per partner);
+ *   - zz = M^-1 rr is then computable at owned AND ring1 rows (the ring1
+ *     preconditioner rows are shipped VERBATIM from their owners once at
+ *     setup — pr_values is set-once, never refreshed, valid under linfs AND
+ *     zstar: the zstar increment touches `values` only, and A is only ever
+ *     applied at owned rows);
+ *   - pp = zz + be*pp then maintains its OWN ring1 halo by recurrence, and
+ *     exch(pp) is DELETED. Exchanges/solve: 2+2k -> 2+k.
+ *
+ * BYTE-IDENTITY (the lever's hard gate, pre-registered in the session-11
+ * findings §5): ring1 rr bytes = owner bytes (same com lists as the 1-ring
+ * path); zz at a ring1 row = the owner's zz BITWISE (verbatim row: same
+ * coefficients, same column ORDER -> same summation order, same loop shape in
+ * the same TU -> same FMA contraction; operand bytes equal); pp at ring1 =
+ * owner's pp by induction from pp0 = zz0 with globally-identical be. All
+ * owned-row kernels are byte-unchanged => d_eta identical every step => the
+ * MODEL is byte-identical ON vs OFF (gate: diff_snap rc=0, multi-rank CUDA;
+ * corollary: iteration counts + residual prints match exactly).
+ *
+ * SETUP (one-time, lazy, collective — all ranks enter solve together):
+ *   A. every owner ships, to each com_nod2D send-partner, the preconditioner
+ *      CSR rows of the nodes in its slist block (row lengths, colind as
+ *      1-based GLOBAL ids in row order, pr_values slices) — 3 staged msgs;
+ *   B. the receiver translates gids: owned/ring1 via myList_nod2D, anything
+ *      else becomes a RING2 slot appended at N+eDim+t (rr_fld is re-alloc'd
+ *      to N+eDim+nring2); ring2 owners come from partit->part (global
+ *      partition vector, binary search);
+ *   C. ring2 want-lists per owner; MPI_Alltoall(counts) handshake (ring2 can
+ *      introduce NEW diagonal partner ranks); owners translate the want gids
+ *      to their owned indices -> ring2 send lists;
+ *   D. flat per-partner send/recv lists = [existing 1-ring block] ++ [ring2
+ *      block], pushed to device once. The per-iteration exchange is then the
+ *      standard pack -> fence -> Irecv/Isend -> Waitall -> unpack, one message
+ *      per partner, tag 2100 (the fesom_halo_device pattern, M5.17 prof hooks
+ *      included).
+ *
+ * NOFENCE2-audit parity (fesom_halo_device.cpp items 1-4): consumers of the
+ * unpack are same-stream kernels; there are no mid-step host readers; the
+ * UNCONDITIONAL pre-MPI fence in THIS function drains the previous unpack
+ * before rbuf is re-posted; the buffers are CG-private and sized ONCE at
+ * setup (no realloc after warmup) => no post-unpack fence.
+ * ======================================================================= */
+namespace {
+
+struct CgPipeState {
+    bool built = false;
+    int  N = 0, eDim = 0, nring2 = 0;
+    int  nsend = 0, nrecv = 0;
+    std::vector<int> partner;            /* partner ranks, ascending (message order) */
+    std::vector<int> soff, roff;         /* per-partner offsets into sbuf/rbuf [P+1] */
+    Kokkos::View<int*>    sidx_d;        /* [nsend] local slots to pack   */
+    Kokkos::View<int*>    ridx_d;        /* [nrecv] local slots to unpack */
+    Kokkos::View<double*> sbuf_d, rbuf_d;
+    std::vector<MPI_Request> reqs;
+    /* ring1 preconditioner CSR: row r (= local slot N+r), cols are LOCAL slots
+     * into the extended rr; entries in the OWNER's row order (byte-identity). */
+    Kokkos::View<int*>    rp2_d;         /* [eDim+1] */
+    Kokkos::View<int*>    ci2_d;
+    Kokkos::View<double*> pv2_d;
+};
+CgPipeState g_cgpipe;
+
+void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                  const struct fesom_mesh *mesh, fesom_partit *p)
+{
+    const fesom_com_struct *cs = &p->com_nod2D;
+    const int N    = mesh->myDim_nod2D;
+    const int eDim = mesh->eDim_nod2D;
+    MPI_Comm comm  = p->MPI_COMM_FESOM;
+    const int npes = p->npes;
+
+    /* gid -> local for owned + ring1 (myList_nod2D holds 1-based gids, [0, N+eDim)). */
+    std::unordered_map<int, int> g2l;
+    g2l.reserve((size_t)(N + eDim) * 2);
+    for (int l = 0; l < N + eDim; ++l) g2l.emplace(p->myList_nod2D[l], l);
+
+    /* OWNER rank of every LOCAL node: [0,N) = me; ring1 slots = the com_nod2D
+     * provider that delivers them (rptr block k -> rPE[k]). Shipped alongside
+     * each column gid — ownership must come from the com graph, NOT from
+     * partit->part ranges (global ids are NOT contiguous per rank; the range
+     * test mis-assigns owners — caught by the SELF-owned FESOM_CHECK, pi np2). */
+    std::vector<int> owner_l((size_t)(N + eDim), p->mype);
+    for (int k = 0; k < cs->rPEnum; ++k)
+        for (int j = cs->rptr[k] - 1; j < cs->rptr[k + 1] - 1; ++j)
+            owner_l[(size_t)(cs->rlist[j] - 1)] = cs->rPE[k];
+
+    /* ---- A. ship pr rows: send my slist blocks' rows; receive my rlist blocks' rows. */
+    struct Bundle { std::vector<int> ints; std::vector<double> dbls; int hdr[2]; };
+    std::vector<Bundle> sb(cs->sPEnum), rb(cs->rPEnum);
+    std::vector<MPI_Request> rq;
+    rq.reserve((size_t)(cs->sPEnum + cs->rPEnum));
+
+    for (int k = 0; k < cs->rPEnum; ++k) {                    /* headers in */
+        rq.push_back(MPI_Request());
+        MPI_Irecv(rb[k].hdr, 2, MPI_INT, cs->rPE[k], 2101, comm, &rq.back());
+    }
+    for (int k = 0; k < cs->sPEnum; ++k) {                    /* build + headers out */
+        Bundle &b = sb[k];
+        const int j0 = cs->sptr[k] - 1, j1 = cs->sptr[k + 1] - 1;
+        const int nrows = j1 - j0;
+        b.ints.push_back(nrows);                              /* [nrows, len_0.., gids..] */
+        int nent = 0;
+        for (int j = j0; j < j1; ++j) {
+            const int row = cs->slist[j] - 1;                 /* 1-based -> owned idx */
+            const int a = S->rowptr[row], e = S->rowptr[row + 1];
+            b.ints.push_back(e - a);
+            nent += e - a;
+        }
+        for (int j = j0; j < j1; ++j) {
+            const int row = cs->slist[j] - 1;
+            for (int n = S->rowptr[row]; n < S->rowptr[row + 1]; ++n) {
+                const int col = S->colind[n];                      /* col < N+eDim always */
+                b.ints.push_back(p->myList_nod2D[col]);            /* col gid */
+                b.ints.push_back(owner_l[(size_t)col]);            /* col OWNER rank */
+                b.dbls.push_back((double)S->pr_values[n]);         /* VERBATIM, row order */
+            }
+        }
+        b.hdr[0] = nrows; b.hdr[1] = nent;
+        rq.push_back(MPI_Request());
+        MPI_Isend(b.hdr, 2, MPI_INT, cs->sPE[k], 2101, comm, &rq.back());
+    }
+    MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+    rq.clear();
+
+    for (int k = 0; k < cs->rPEnum; ++k) {                    /* payloads */
+        const int nrows_exp = (cs->rptr[k + 1] - 1) - (cs->rptr[k] - 1);
+        FESOM_CHECK(rb[k].hdr[0] == nrows_exp,
+                    "cgpipe: provider %d shipped %d rows, expected %d",
+                    cs->rPE[k], rb[k].hdr[0], nrows_exp);
+        rb[k].ints.resize((size_t)1 + rb[k].hdr[0] + 2 * (size_t)rb[k].hdr[1]);
+        rb[k].dbls.resize((size_t)rb[k].hdr[1]);
+        rq.push_back(MPI_Request());
+        MPI_Irecv(rb[k].ints.data(), (int)rb[k].ints.size(), MPI_INT,    cs->rPE[k], 2102, comm, &rq.back());
+        rq.push_back(MPI_Request());
+        MPI_Irecv(rb[k].dbls.data(), (int)rb[k].dbls.size(), MPI_DOUBLE, cs->rPE[k], 2103, comm, &rq.back());
+    }
+    for (int k = 0; k < cs->sPEnum; ++k) {
+        rq.push_back(MPI_Request());
+        MPI_Isend(sb[k].ints.data(), (int)sb[k].ints.size(), MPI_INT,    cs->sPE[k], 2102, comm, &rq.back());
+        rq.push_back(MPI_Request());
+        MPI_Isend(sb[k].dbls.data(), (int)sb[k].dbls.size(), MPI_DOUBLE, cs->sPE[k], 2103, comm, &rq.back());
+    }
+    MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+    rq.clear();
+    sb.clear();
+
+    /* ---- B. translate rows into per-ring1-slot CSR; discover ring2. */
+    std::vector<std::vector<int>>    row_ci((size_t)eDim);
+    std::vector<std::vector<double>> row_pv((size_t)eDim);
+    std::unordered_map<int, int> g2r2;                        /* gid -> ring2 ordinal */
+    std::vector<int> r2gid, r2owner;
+    for (int k = 0; k < cs->rPEnum; ++k) {
+        const Bundle &b = rb[k];
+        const int nrows = b.hdr[0];
+        size_t ip = (size_t)1 + nrows;                        /* (gid,owner) stream cursor */
+        size_t dp = 0;
+        for (int j = 0; j < nrows; ++j) {
+            const int slot = cs->rlist[(cs->rptr[k] - 1) + j] - 1;   /* local, [N, N+eDim) */
+            FESOM_CHECK(slot >= N && slot < N + eDim,
+                        "cgpipe: rlist slot %d outside ring1", slot);
+            const int r   = slot - N;
+            const int len = b.ints[(size_t)1 + j];
+            row_ci[r].reserve(len); row_pv[r].reserve(len);
+            for (int q = 0; q < len; ++q) {
+                const int gid = b.ints[ip++];
+                const int own = b.ints[ip++];
+                int loc;
+                auto it = g2l.find(gid);
+                if (it != g2l.end()) { loc = it->second; }
+                else {
+                    FESOM_CHECK(own != p->mype,
+                                "cgpipe: shipped gid %d claims MY ownership but is not local", gid);
+                    auto r2 = g2r2.emplace(gid, (int)r2gid.size());
+                    if (r2.second) { r2gid.push_back(gid); r2owner.push_back(own); }
+                    else FESOM_CHECK(r2owner[(size_t)r2.first->second] == own,
+                                     "cgpipe: gid %d shipped with conflicting owners %d/%d",
+                                     gid, r2owner[(size_t)r2.first->second], own);
+                    loc = N + eDim + r2.first->second;
+                }
+                row_ci[r].push_back(loc);
+                row_pv[r].push_back(b.dbls[dp++]);
+            }
+        }
+        FESOM_CHECK(dp == b.dbls.size() && ip == b.ints.size(),
+                    "cgpipe: bundle from %d not fully consumed", cs->rPE[k]);
+    }
+    rb.clear();
+    const int nring2 = (int)r2gid.size();
+
+    /* ---- C. ring2 want-lists by owner; Alltoall handshake (new partners possible). */
+    std::vector<std::vector<int>> want((size_t)npes);
+    for (int t = 0; t < nring2; ++t)
+        want[(size_t)r2owner[(size_t)t]].push_back(r2gid[(size_t)t]);   /* slot order within owner */
+    std::vector<int> scnt((size_t)npes, 0), rcnt((size_t)npes, 0);
+    for (int T = 0; T < npes; ++T) scnt[(size_t)T] = (int)want[(size_t)T].size();
+    MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, comm);
+    std::vector<std::vector<int>> wantin((size_t)npes);
+    for (int Q = 0; Q < npes; ++Q) {
+        if (rcnt[(size_t)Q] > 0) {
+            wantin[(size_t)Q].resize((size_t)rcnt[(size_t)Q]);
+            rq.push_back(MPI_Request());
+            MPI_Irecv(wantin[(size_t)Q].data(), rcnt[(size_t)Q], MPI_INT, Q, 2104, comm, &rq.back());
+        }
+        if (scnt[(size_t)Q] > 0) {
+            rq.push_back(MPI_Request());
+            MPI_Isend(want[(size_t)Q].data(), scnt[(size_t)Q], MPI_INT, Q, 2104, comm, &rq.back());
+        }
+    }
+    MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+    rq.clear();
+    std::vector<std::vector<int>> slist2((size_t)npes);       /* ring2 SEND lists (owned idx) */
+    for (int Q = 0; Q < npes; ++Q) {
+        slist2[(size_t)Q].reserve(wantin[(size_t)Q].size());
+        for (int gid : wantin[(size_t)Q]) {
+            auto it = g2l.find(gid);
+            FESOM_CHECK(it != g2l.end() && it->second < N,
+                        "cgpipe: rank %d wants gid %d that is not my owned node", Q, gid);
+            slist2[(size_t)Q].push_back(it->second);
+        }
+    }
+
+    /* ---- D. flat per-partner lists = [1-ring block] ++ [ring2 block]. */
+    std::vector<int> s1k((size_t)npes, -1), r1k((size_t)npes, -1);
+    for (int k = 0; k < cs->sPEnum; ++k) s1k[(size_t)cs->sPE[k]] = k;
+    for (int k = 0; k < cs->rPEnum; ++k) r1k[(size_t)cs->rPE[k]] = k;
+    /* ring2 recv blocks grouped by owner, slot order = want order. */
+    std::vector<std::vector<int>> rslot2((size_t)npes);
+    for (int t = 0; t < nring2; ++t)
+        rslot2[(size_t)r2owner[(size_t)t]].push_back(N + eDim + t);
+
+    CgPipeState &s = g_cgpipe;
+    s.N = N; s.eDim = eDim; s.nring2 = nring2;
+    s.partner.clear(); s.soff.assign(1, 0); s.roff.assign(1, 0);
+    std::vector<int> sidx, ridx;
+    for (int P = 0; P < npes; ++P) {
+        const bool has = s1k[(size_t)P] >= 0 || r1k[(size_t)P] >= 0
+                      || !slist2[(size_t)P].empty() || !rslot2[(size_t)P].empty();
+        if (!has) continue;
+        s.partner.push_back(P);
+        if (s1k[(size_t)P] >= 0) {
+            const int k = s1k[(size_t)P];
+            for (int j = cs->sptr[k] - 1; j < cs->sptr[k + 1] - 1; ++j)
+                sidx.push_back(cs->slist[j] - 1);
+        }
+        for (int l : slist2[(size_t)P]) sidx.push_back(l);
+        if (r1k[(size_t)P] >= 0) {
+            const int k = r1k[(size_t)P];
+            for (int j = cs->rptr[k] - 1; j < cs->rptr[k + 1] - 1; ++j)
+                ridx.push_back(cs->rlist[j] - 1);
+        }
+        for (int slot : rslot2[(size_t)P]) ridx.push_back(slot);
+        s.soff.push_back((int)sidx.size());
+        s.roff.push_back((int)ridx.size());
+    }
+    s.nsend = (int)sidx.size();
+    s.nrecv = (int)ridx.size();
+    s.reqs.assign(2 * s.partner.size(), MPI_Request());
+
+    /* ---- E. device pushes + the rr extension. */
+    auto push_i = [](const char *lbl, const std::vector<int> &v) {
+        /* std::string(lbl): Kokkos' is_view_label rejects a const char* VARIABLE
+         * (literals work only because they are char[N]) — the grow() idiom. */
+        Kokkos::View<int*> d(std::string(lbl), v.size());
+        auto h = Kokkos::create_mirror_view(d);
+        for (size_t i = 0; i < v.size(); ++i) h(i) = v[i];
+        Kokkos::deep_copy(d, h);
+        return d;
+    };
+    s.sidx_d = push_i("cgpipe.sidx", sidx);
+    s.ridx_d = push_i("cgpipe.ridx", ridx);
+    s.sbuf_d = Kokkos::View<double*>("cgpipe.sbuf", (size_t)s.nsend);
+    s.rbuf_d = Kokkos::View<double*>("cgpipe.rbuf", (size_t)s.nrecv);
+
+    std::vector<int> rp2((size_t)eDim + 1, 0), ci2;
+    std::vector<double> pv2;
+    for (int r = 0; r < eDim; ++r) {
+        rp2[(size_t)r + 1] = rp2[(size_t)r] + (int)row_ci[(size_t)r].size();
+        ci2.insert(ci2.end(), row_ci[(size_t)r].begin(), row_ci[(size_t)r].end());
+        pv2.insert(pv2.end(), row_pv[(size_t)r].begin(), row_pv[(size_t)r].end());
+    }
+    s.rp2_d = push_i("cgpipe.rp2", rp2);
+    s.ci2_d = push_i("cgpipe.ci2", ci2);
+    {
+        Kokkos::View<double*> d("cgpipe.pv2", pv2.size());
+        auto h = Kokkos::create_mirror_view(d);
+        for (size_t i = 0; i < pv2.size(); ++i) h(i) = pv2[i];
+        Kokkos::deep_copy(d, h);
+        s.pv2_d = d;
+    }
+
+    /* rr gains the ring2 tail: [0,N) owned | [N,N+eDim) ring1 | [.., +nring2) ring2.
+     * Fresh zeroed alloc is safe: every solve writes owned rr before the first
+     * exchange, and ring1/ring2 are filled by the exchange before any read. */
+    si->rr_fld.alloc("ssh.cg.rr", (size_t)(N + eDim + nring2));
+    si->rr = si->rr_fld.h();
+
+    long loc[4] = { (long)nring2, (long)s.partner.size(),
+                    (long)(cs->sPEnum > cs->rPEnum ? cs->sPEnum : cs->rPEnum),
+                    (long)rp2[(size_t)eDim] };
+    long mx[4];
+    MPI_Reduce(loc, mx, 4, MPI_LONG, MPI_MAX, 0, comm);
+    if (p->mype == 0)
+        fprintf(stderr, "[cgpipe] built: ring2(max)=%ld partners(max)=%ld ring1-partners(max)=%ld "
+                        "shipped-nnz(max)=%ld — 2-ring single-exchange CG ACTIVE\n",
+                mx[0], mx[1], mx[2], mx[3]);
+    s.built = true;
+}
+
+/* The per-iteration fused 2-ring rr exchange. Pattern + fence discipline =
+ * fesom_halo_exchange_device (see the banner above for the no-post-fence audit). */
+void cgpipe_exchange_rr(fesom::Field &rr_fld, fesom_partit *p)
+{
+    CgPipeState &s = g_cgpipe;
+    fesom_halo_prof_barrier(p);                       /* M5.17 split instrumentation parity */
+    auto rr = rr_fld.d();
+    {
+        auto sidx = s.sidx_d; auto sbuf = s.sbuf_d;
+        if (s.nsend > 0)
+            Kokkos::parallel_for("fesom_cgpipe_pack", Kokkos::RangePolicy<>(0, s.nsend),
+                KOKKOS_LAMBDA(const int i) { sbuf(i) = rr(sidx(i)); });
+    }
+    Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d (drains prev unpack) */
+
+    int nreq = 0;
+    double *sp = s.sbuf_d.data();
+    double *rp = s.rbuf_d.data();
+    for (size_t q = 0; q < s.partner.size(); ++q) {
+        const int rc = s.roff[q + 1] - s.roff[q];
+        if (rc > 0)
+            MPI_Irecv(rp + s.roff[q], rc, MPI_DOUBLE, s.partner[q], 2100,
+                      p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
+    }
+    for (size_t q = 0; q < s.partner.size(); ++q) {
+        const int sc = s.soff[q + 1] - s.soff[q];
+        if (sc > 0)
+            MPI_Isend(sp + s.soff[q], sc, MPI_DOUBLE, s.partner[q], 2100,
+                      p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
+    }
+    fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
+    fesom_halo_prof_waitall(nreq, s.reqs.data());
+
+    {
+        auto ridx = s.ridx_d; auto rbuf = s.rbuf_d;
+        if (s.nrecv > 0)
+            Kokkos::parallel_for("fesom_cgpipe_unpack", Kokkos::RangePolicy<>(0, s.nrecv),
+                KOKKOS_LAMBDA(const int i) { rr(ridx(i)) = rbuf(i); });
+    }
+    /* no post-unpack fence — see the NOFENCE2-audit-parity note in the banner. */
+    rr_fld.modify_device();
+}
+
+/* zz at ring1 rows from the shipped preconditioner rows. Loop body shape is
+ * IDENTICAL to cg_spmv / the fused psolve (same TU) so the FMA contraction —
+ * and therefore the bits — match the owner's owned-row computation. */
+void cgpipe_zz_ring1(DV rr, DV zz)
+{
+    CgPipeState &s = g_cgpipe;
+    if (s.eDim <= 0) return;
+    const int N = s.N;
+    auto rp2 = s.rp2_d; auto ci2 = s.ci2_d; auto pv2 = s.pv2_d;
+    Kokkos::parallel_for("fesom_cgpipe_zz_ring1", Kokkos::RangePolicy<>(0, s.eDim),
+        KOKKOS_LAMBDA(const int r) {
+            real_t sacc = 0.0;
+            const int a = rp2(r), e = rp2(r + 1);
+            for (int n = a; n < e; ++n) sacc += pv2(n) * rr(ci2(n));
+            zz(N + r) = sacc;
+        });
+}
+
+/* FESOM_CGPIPE_SELFCHECK=1 — bring-up validator: after each pp update, diff the
+ * RECURRED pp ring1 against a reference host 1-ring exchange of the same owned
+ * data. Byte-identity claim => max|Δ| MUST print 0.000e+00. Diagnostic only. */
+bool cgpipe_selfcheck_on()
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("FESOM_CGPIPE_SELFCHECK"); c = (e && e[0] == '1') ? 1 : 0; }
+    return c != 0;
+}
+
+void cgpipe_selfcheck_pp(fesom_solverinfo *si, fesom_partit *p, int iter)
+{
+    const int N = g_cgpipe.N, eDim = g_cgpipe.eDim;
+    si->pp_fld.modify_device();
+    si->pp_fld.sync_host();
+    const real_t *pph = si->pp;
+    std::vector<real_t> ref(pph, pph + (size_t)(N + eDim));
+    fesom_halo_exchange(ref.data(), FESOM_HALO_NOD2D, 1, 1, p);   /* reference ring1 */
+    double maxd = 0.0;
+    for (int l = N; l < N + eDim; ++l) {
+        const double d = fabs((double)pph[l] - (double)ref[(size_t)l]);
+        if (d > maxd) maxd = d;
+    }
+    double gmax = 0.0;
+    MPI_Allreduce(&maxd, &gmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+    if (p->mype == 0)
+        fprintf(stderr, "[cgpipe-selfcheck] iter %4d: max|recurred pp - exchanged pp| = %.3e%s\n",
+                iter, gmax, gmax == 0.0 ? "" : "  <-- MUST BE 0: BYTE-IDENTITY BROKEN");
+}
+
+} // namespace
+
+/* free the persistent CGPIPE Views BEFORE Kokkos::finalize() (fesom_main.cpp
+ * teardown, next to fesom_halo_device_free — same static-destruction hazard). */
+void fesom_ssh_cgpipe_free(void)
+{
+    CgPipeState &s = g_cgpipe;
+    s.sidx_d = Kokkos::View<int*>();
+    s.ridx_d = Kokkos::View<int*>();
+    s.sbuf_d = Kokkos::View<double*>();
+    s.rbuf_d = Kokkos::View<double*>();
+    s.rp2_d  = Kokkos::View<int*>();
+    s.ci2_d  = Kokkos::View<int*>();
+    s.pv2_d  = Kokkos::View<double*>();
+    s.reqs.clear();
+    s.partner.clear(); s.soff.clear(); s.roff.clear();
+    s.built = false;
+}
+
 void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh    *mesh,
                                     struct fesom_dyn           *dyn,
                                     const struct fesom_forcing *forcing)  /* M6.3: water_flux
@@ -798,6 +1236,30 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     const int     parallel = (partit && partit->npes > 1);
     const int     N_global = parallel ? mesh->nod2D : N;
 
+    /* M7 E.CG1 — FESOM_SPEED_CGPIPE (opt-in _exp; see the banner above cg_dot).
+     * Resolve FIRST (announces itself, L80), then the activity conjunction; a
+     * requested-but-inactive knob warns loudly instead of dying silent. The
+     * one-time setup re-allocs rr_fld (ring2 tail) so it MUST run before the
+     * device views are taken below. */
+    static int s_cgpipe = -1;
+    const bool cgpipe_env = fesom_speed_on_exp("CGPIPE", &s_cgpipe);
+#ifdef KOKKOS_ENABLE_CUDA
+    const bool transport_ok = fesom_halo_device_active();   /* keep the debug toggle coherent */
+#else
+    const bool transport_ok = true;   /* Serial: host Views + host MPI (the FORCE_SERIAL proof) */
+#endif
+    const bool cgpipe = cgpipe_env && parallel && transport_ok;
+    if (cgpipe_env && !cgpipe) {
+        static bool warned = false;
+        if (!warned && (!partit || partit->mype == 0)) {
+            fprintf(stderr, "[cgpipe] !! FESOM_SPEED_CGPIPE requested but INACTIVE "
+                            "(npes==1 or FESOM_HOST_HALO=1) — running the 2-exchange CG\n");
+            fflush(stderr);
+        }
+        warned = true;
+    }
+    if (cgpipe && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
+
     /* device views (set-once CSR + the warm-start X / rhs / scratch vectors). */
     auto rowptr = S->rowptr_fld.d();
     auto colind = S->colind_fld.d();
@@ -847,11 +1309,15 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     cg_spmv(rowptr, colind, vals, X, rr, N);
     Kokkos::parallel_for("fesom_cg_r0", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
-    exch(si->rr_fld);                                /* solver.F90:424 EXCH(rr) */
+    if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: ONE fused 2-ring exchange */
+    else        exch(si->rr_fld);                    /* solver.F90:424 EXCH(rr) */
 
-    /* z0 = M⁻¹ r0 ; pp = z0 */
+    /* z0 = M⁻¹ r0 ; pp = z0. E.CG1: zz + pp additionally at ring1 (owned rows
+     * byte-unchanged; ring1 rows from the shipped preconditioner CSR). */
     cg_spmv(rowptr, colind, prvals, rr, zz, N);
-    Kokkos::parallel_for("fesom_cg_pp0", Kokkos::RangePolicy<>(0, N),
+    if (cgpipe) cgpipe_zz_ring1(rr, zz);
+    const int Next = cgpipe ? N + mesh->eDim_nod2D : N;
+    Kokkos::parallel_for("fesom_cg_pp0", Kokkos::RangePolicy<>(0, Next),
         KOKKOS_LAMBDA(const int row) { pp(row) = zz(row); });
 
     /* s_old = r0·z0 */
@@ -865,7 +1331,9 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     double _cg_t0 = 0.0;
     if (cg_prof) { Kokkos::fence(); _cg_t0 = MPI_Wtime(); }   /* M5.2: opt-in CG-share timer (fences cost ~2-3%) */
     for (iter = 1; iter <= si->maxiter; ++iter) {
-        exch(si->pp_fld);                            /* solver.F90:442 EXCH(pp) */
+        if (!cgpipe)                                 /* E.CG1: pp ring1 is maintained by the
+                                                      * recurrence — the exchange is DELETED */
+            exch(si->pp_fld);                        /* solver.F90:442 EXCH(pp) */
         /* M5.2: fuse SpMV (App=A·pp) with the dot (s_aux=Σ pp·App) into ONE
          * parallel_reduce — App(row) is computed and pp(row)·App(row) accumulated
          * in row order, identical to the separate cg_spmv+cg_dot (Serial bit-id),
@@ -894,7 +1362,8 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                 X (row) += al * pp (row);
                 rr(row) -= al * App(row);
             });
-        exch(si->rr_fld);                            /* solver.F90:462 EXCH(rr) */
+        if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: the iteration's ONLY exchange */
+        else        exch(si->rr_fld);                /* solver.F90:462 EXCH(rr) */
 
         /* M5.2: fuse the preconditioner SpMV (zz=M⁻¹·rr) with cg_dot2 (sp0=Σrr·zz,
          * sp1=Σrr·rr) into ONE parallel_reduce (row order → Serial bit-id), then ONE
@@ -910,6 +1379,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                 l0 += rr(row) * s;
                 l1 += rr(row) * rr(row);
             }, sp0, sp1);
+        if (cgpipe) cgpipe_zz_ring1(rr, zz);         /* E.CG1: ring1 rows (dots stay owned-only) */
         if (parallel) {
             double sbuf[2] = { (double)sp0, (double)sp1 };
             MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
@@ -935,8 +1405,10 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
 
         const real_t be = sp0 / s_old;
         s_old = sp0;
-        Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, N),
+        Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, Next),
             KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
+        if (cgpipe && cgpipe_selfcheck_on())         /* bring-up: recurred ring1 MUST equal exchanged */
+            cgpipe_selfcheck_pp(si, partit, iter);
     }
     if (cg_prof) {
         Kokkos::fence();

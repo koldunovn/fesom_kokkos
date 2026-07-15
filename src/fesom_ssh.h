@@ -131,6 +131,11 @@ int  fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                            const struct fesom_mesh *mesh,
                            struct fesom_dyn        *dyn);
 
+/* M7 E.CG1: free the CGPIPE persistent device Views (comm lists, buffers, the
+ * shipped ring1 preconditioner CSR). MUST be called before Kokkos::finalize()
+ * (the fesom_halo_device_free() pattern). No-op when the knob never fired. */
+void fesom_ssh_cgpipe_free(void);
+
 /*
  * FESOM_KK_VERIFY=ssh gate: the §5 block (substeps 7-11) read-modify-writes
  * ssh_rhs/d_eta/uv/ssh_rhs_old/hbar/hbar_old/eta_n, so this is the L26

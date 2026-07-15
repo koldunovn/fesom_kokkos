@@ -119,7 +119,77 @@ Pre-registered readouts and rules:
 - (iii) Overhead sanity: LEG2 wall vs LEG1 ≤ +6 % (349 barriers/step × 20-50 µs at 64 ranks).
 - (iv) The legs differ only in DIAGNOSTIC env; no fidelity gate needed (nothing adoptable here).
 
-## 5. Machinery + corrections log
+## 5. E.CG1 `FESOM_SPEED_CGPIPE` — single-exchange 2-ring PCG (pre-registration, design frozen BEFORE implementation)
+
+*User decision 2026-07-15: decisions 1+2 are approved as OPT-IN options — default OFF/safer,
+explicit switch to enable, never folded into `FESOM_SPEED=1` without a later explicit promotion.
+Implementation order: pipelined CG first. Knob class: `fesom_speed_on_exp` (opt-in only).*
+
+**Mechanism.** The CG does 2 halo exchanges/iteration (`pp` before the SpMV, `rr` before the
+preconditioner — both operators are sparse, each needs its operand's fresh 1-ring halo, and the
+operands are updated after the other operator: 2 exchanges is structural for exact PCG on a
+1-ring). CGPIPE replaces both with **ONE fused 2-ring exchange of `rr`** per iteration:
+- `rr` is exchanged on ring1+ring2 (ring2 = neighbors-of-ring1; new comm lists + possibly new
+  diagonal partner ranks, built once at setup).
+- `zz = M⁻¹·rr` is then computable at owned **and ring1** rows — the ring1 preconditioner rows
+  are shipped VERBATIM (values + column order) from their owners once at setup. `pr_values` is
+  set-once and never refreshed (fesom_ssh.cpp banner; the zstar path increments `values` only,
+  and A is only ever applied at owned rows) ⇒ ship-once is valid under linfs AND zstar.
+- `pp = zz + β·pp` is then maintained at owned+ring1 by the recurrence — `exch(pp)` is DELETED.
+
+**The byte-identity claim (the novel HARD gate this lever earns).** Ring1 `rr` bytes = owner
+bytes (same com lists as today). `zz` at a ring1 row = the owner's `zz` BITWISE: verbatim row
+(same coefficients, same summation order), same operand bytes, same loop shape in the same TU
+(same FMA contraction). `pp` at ring1 ≡ owner's `pp` by induction from `pp₀ = zz₀` with
+globally-identical β. All owned-row kernels byte-unchanged ⇒ `App`, all dots, all scalars,
+`d_eta` identical every step ⇒ **the whole model output is byte-identical ON vs OFF** — not
+merely climate-close. Corollary: iteration counts and residual prints must match EXACTLY.
+
+**Event arithmetic.** Exchanges/solve: 2+2k → 2+k (k ≈ 72) ⇒ CG events 146 → 74/step. New
+per-event cost slightly higher (bytes ×~2.3 — still ~25-45 KB/msg, latency-dominated; partner
+set grows by ring2-only diagonal ranks). **Pre-registered range: 4N −8…−13 ms/step (central
+−10 ≈ −1.5 %); 16N −12…−19 ms (central −15 ≈ −5.5 %); floor 0** (L93/L98: latency-pool
+conversion factors unknown until the first A/B; E.split may further discount — if the split
+says imbalance-dominant, each surviving exchange absorbs more skew and the saving compresses).
+
+**Ladder (all pre-registered):** (i) build serial+cuda; (ii) pi smoke np1+np2; (iii) knob-OFF
+byte gate vs h16 (diff_snap rc=0); (iv) **knob-ON byte gate: CUDA multi-rank, CGPIPE=1 vs
+CGPIPE=0, diff_snap rc=0** + identical CG iteration counts; (v) `FESOM_CGPIPE_SELFCHECK=1`
+bring-up validator (recurred pp ring1 vs a reference host exchange, max|Δ| must be 0.0);
+(vi) options matrix ×3 with the knob ON (comm-structure change = L91 ownership-adjacent);
+(vii) A/B at BOTH 4N and 16N (same-alloc, h16-derived binary, KNOBS legs); (viii) counter
+checks: `[cgpipe]` build announce (ring2 size, partners), CG events/step ≈ 74 in a walker
+trace, `[fesom_speed] FESOM_SPEED_CGPIPE = ON` announce present (L80/0.19).
+
+**⚠️ AMENDMENT to gate (iv), made BEFORE any gate ran** (recorded per rule 0.x honesty): a
+full-model CUDA ON-vs-OFF byte diff is NOT well-defined — the step contains atomic scatters
+(D22), so even same-binary CUDA runs differ run-to-run and diff_snap between two CUDA runs
+proves nothing. The lever was therefore made **backend-agnostic on purpose** (pure Kokkos+MPI,
+no CUDA API), which unlocks the STRONGER established gate: **(iv-a) the FORCE_SERIAL byte
+proof** — Serial np=8 CORE2 (ice active), `FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_CGPIPE=1`,
+diff_snap rc=0 vs the certified m6 baseline (job_m7_gate_serial's documented double-duty) —
+plus **(iv-b) the in-vivo CUDA selfcheck** (per-iteration recurred-vs-exchanged pp on device,
+max|Δ|==0 — this is the CUDA-side FMA-contraction check the static argument can't replace).
+
+**Bring-up (login node, pi, Serial, 2026-07-15): GREEN.** np=2 AND np=8, ON vs OFF
+`diff_snap rc=0` (ALL FIELDS BIT-IDENTICAL), every selfcheck line exactly 0.000e+00, identical
+iteration counts, clean teardown (after adding `fesom_ssh_cgpipe_free()` — file-static Views
+must not outlive Kokkos::finalize, the fesom_halo_device_free class). Two real bugs caught by
+the protocol FESOM_CHECKs: (1) `partit->part[]` does NOT encode ownership as contiguous gid
+ranges (its header comment is misleading) — owners are now shipped per column from the com
+graph, never derived from part[]; (2) Kokkos `is_view_label<const char*>` rejects label
+VARIABLES (literals are char[N]) — std::string wrap.
+
+**Frozen binary `m7/bin/cgpipe0/`**: CUDA `60fe548b` / Serial `851e1ca9` (h16 code + the
+opt-in lever; PROVENANCE.txt in the dir). **Jobs (2026-07-15 night):** serial knob-OFF
+26288247 · FORCE_SERIAL proof 26288248 · gpu OFF/ON/self 26288249/50/51 · options
+TKE/mEVP/zstar 26288252/53/54 · **A/B 4N 26288255 · A/B 16N 26288256** (both: LEG1
+`FESOM_SPEED=1` vs LEG2 `FESOM_SPEED=1;FESOM_SPEED_CGPIPE=1`, NSTEPS=300, same-alloc).
+
+**Non-goals:** EVP untouched (next lever); host CG and Serial builds untouched (CUDA-only
+lever); no promotion into `FESOM_SPEED=1` — explicitly opt-in until the user decides otherwise.
+
+## 6. Machinery + corrections log
 
 - **NEW `scripts/m7_halo_sites.py`** — site attribution for the halo pool from any nsys sqlite;
   reuses m7_gap_census loaders; window/threshold conventions identical. This is the tool that
