@@ -1086,4 +1086,32 @@ before the cliff. The protocol upgrade was validated exactly once, on the mesh i
 
 ---
 
+### L96 — TWO WAYS A KERNEL-RESOURCE TABLE LIES: the spill column isn't called "spill", and a demangled name's first familiar token isn't the kernel. Both returned CONFIDENT wrong answers before the right one. (M7 session 8, 2026-07-15)
+
+Re-deriving package C's spill pool (cuobjdump × kernel-busy) hit two independent tool traps in one
+hour; each produced a *complete, plausible, wrong* table, and only disagreement with a
+pre-registered expectation (14 spilling kernels) forced the re-look — L92's rule ("a residual is
+not evidence; make the columns sum") generalized to *any* derived table.
+
+1. **In `cuobjdump --dump-resource-usage`, spills live in `STACK`, not `LOCAL`.** `LOCAL` is the
+   static `.local` section — **0 for every kernel in this binary** — while the ptxas stack frame
+   (spill slots + ABI stack) is `STACK`. Keying on LOCAL yields an empty pool that reads as
+   "nothing spills". (nsys's `localMemoryPerThread` is a third trap — a non-collection artifact,
+   always 0, from the same family as L82/L83.) The tell: the pre-registration said 14 spillers;
+   grep said `STACK:[1-9]` on exactly 14 functions.
+2. **Never name a kernel by "the first `fesom_*` token" in its demangled symbol.** For static
+   (internal-linkage) kernels the first familiar token is a PARAMETER TYPE (`fesom_mesh`,
+   `fesom_kpp`…) or the internal-linkage module hash (`fesom_tke_cpp_a1eea344`). The TDMA kernel
+   `diff_ver_part_impl_ale_kk` — **32.6 ms/step, the pool's #2 entry** — hid inside a fake
+   "fesom_mesh" row for exactly this reason, invisible to every previous per-kernel table. Parse
+   the enclosing function after `ParallelFor</ParallelReduce<` instead
+   (`scripts/m7_kernel_busy.py`, `scripts/m7_spill_pool.py`). The tell: a "kernel" named after a
+   struct, with a launch count that matches no call site.
+
+**Cross-check that certifies the fix:** the corrected busy table sums to the census's kernel-busy
+total (543.2 ms/step) and the corrected pool reproduces the session-7 audit's per-kernel numbers
+(42.3 ms / 5,120 B / 58 reg for `redi_expl`) to the digit.
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*
