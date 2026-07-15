@@ -1203,6 +1203,27 @@ Two audit traps from the same session, both caught before they cost anything:
    not `run.log`** (job_m7_ab_env merges them). An L80 announce audit that greps the wrong
    stream reports a dead knob on a live lever. Grep the right stream before crying L80.
 
+### L100 — A PAIR-KEYED CENSUS COLLAPSES SAME-TAG CHAINS: the biggest site in the halo pool (the CG solver, 28-31 %) was INVISIBLE because both ends of its gaps carried the same kernel tag. (M7 session 11, 2026-07-15)
+
+The gap census names a gap by (predecessor → victim) kernel pair, and the halo pack/unpack
+lambdas all demangle to their ENCLOSING exchange function — so every same-class MPI wait,
+whatever the call site, lands in ONE `halo → halo` row. Filtering for `ssh_solve_cg` showed
+~0.2 ms, and session 10 concluded (flagged "verify") that the CG's ~146 exchanges/step were not
+in the pool. The E.0 timeline walker (`scripts/m7_halo_sites.py`: a maximal run of halo-class
+kernels = one block; the BRACKETING compute kernels name the site) found the truth: **CG 27/38
+ms (4N/16N) — the pool's single largest site — and the ledger reconciles exactly (349
+exchanges/step = the 349 >0.1 ms events, one wait each, at both scales).**
+
+- **The rule: when all members of a class share one tag, a pair-keyed table can only tell you
+  the class exists, not where it is called from.** Attribution needs the timeline (bracketing
+  neighbors), not the pair histogram.
+- **The tell:** a phase that "contains no pool events" while the pool's event count (~350/step)
+  is far larger than any static call census of the remaining phases can explain (~66 singles).
+  Reconcile counts BEFORE believing an absence.
+- Corollary of the same walk: the ~70 KB "staging copies" are UCX pipeline CHUNKS, not
+  per-message payloads (2D halo msgs are ~10-20 KB, 3D exchanges MB-scale) — the device-pointer
+  MPI path bounces every byte D2H+H2D through pinned host (181 MB/step at 4N, symmetric).
+
 ---
 
 *Keep appending. Date entries when the context (versions, paths) might age.*
