@@ -51,11 +51,23 @@ known cold-start blowup at step 204 (deterministic, both reps; L95). Every other
 | **NG5@4N (h10)** | **0.6666** | 4.5785 | **⭐ 6.87×** | 26260292 / 26256684 |
 | NG5@4N (h9) | 0.6739 | 4.5785 | 6.79× | 26258582 / 26256684 |
 | **NG5@8N** | **0.4143** | **2.3530** | **5.68×** | 26258752 / 26258754 |
-| **NG5@16N** | *in flight (26258751, ~11:20)* | **1.2267** | *pre-reg 4.5–5.0×* | — / 26258753 |
+| **NG5@16N** | **0.2688** | **1.2267** | **4.56×** | 26258751 / 26258753 |
 | **dars@8N** (150-step) | **0.2041** | **0.8464** | **4.15×** | 26259245 / 26259246 |
 
 *(Tier-1, for the decay shape: 5.03× / 4.28× / 3.55×-mixed-hw / 3.27×. The 4N→8N decay is now
 6.87→5.68 (−17 %), vs Tier-1's 5.03→4.28 (−15 %) — the host levers hold their share at 8N.)*
+
+**16N scored against the pre-registration (4.5–5.0×; below 4.0 falsifies L84(b)): 4.56× — IN
+RANGE, at the low end. L84(b) SURVIVES: the host-class packH levers carried to 16N.**
+
+### ⭐⭐ STAGE-2 IS MET, COMFORTABLY: NG5@16N SYPD@dt240 = 2.37 (pessimistic ×1.03; 2.40 with the 4N-measured ×1.019)
+
+`0.657 / 0.2688 / 1.03 = 2.37` — on clean hardware (pure a100_80), the clean 300-step protocol, a
+pinned certified binary (h9), min of 2 reps. The last read was "1.99, right AT the line" on mixed
+hardware and the contaminated protocol. The 2-SYPD goal the campaign was chartered for is now past
+with an 18 % margin, in pure FP64, with mixed precision still banned and unspent. GPU strong-scaling
+efficiency 4N→16N: 62.7 % (CPU: 93.3 %) — the 8× stretch at 4N and the 16N flattening both route
+through packages B/C (+E for the halo self-gaps) per the 26248860 ladder verdict.
 
 All legs **300 steps**, min of 2 reps, same day, **all pinned with `BIN=`**. Rep spreads: GPU 0.07 %,
 CPU 0.20 %. *(The CPU column is unchanged because every `FESOM_SPEED_*` lever is CUDA-only — the knobs

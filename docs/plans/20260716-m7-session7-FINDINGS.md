@@ -13,7 +13,7 @@ the H.8 number below is committed to BEFORE its A/B job is submitted, per the st
 | **26258753** (NG5@16N CPU, 300 steps, h9 Serial `91eeb573` pinned ✓) | *the measurement* | **1.2267 s/step** (min of 2: 1.2353 / 1.2267, 0.7 % spread) | ✅ landed |
 | **26258582** (H.7 confirmation A/B, h9 `9e1f514b` pinned ✓, a100_80) | base 0.7058 ±0.5 %; scratch ≈0.675; Δ≈−4.2 %; if both hold ⇒ ratio ≈6.78× | base **0.7052** (0.7061/0.7052, −0.09 % vs anchor); scratch **0.6739** (twice, 0.00 % spread; announce fired); **Δ = −4.44 %** | ✅ **HIT — ⭐ RATIO = 4.5785 / 0.6739 = 6.79× at NG5@4N** |
 | **26258752/54** (NG5@8N GPU+CPU, h9 pinned ✓, a100_80 ✓) | 8N ratio 5.0–5.8× | GPU **0.4143** (0.4143/0.4145) / CPU **2.3530** ⇒ **ratio 5.68×** | ✅ **IN RANGE** |
-| 26258751 (16N GPU) | 16N ratio 4.5–5.0×; 🔴 below 4.0 ⇒ L84(b) WRONG, say loudly | *pending* | ⏳ |
+| **26258751** (NG5@16N GPU, h9 pinned ✓, pure a100_80 ✓, announce ✓) | 16N ratio 4.5–5.0×; 🔴 below 4.0 ⇒ L84(b) WRONG | GPU **0.2688** (0.2692/0.2688) / CPU 1.2267 ⇒ **ratio 4.56×** | ✅ **IN RANGE (low end) — L84(b) SURVIVES; ⭐ Stage-2 SYPD@dt240 = 0.657/0.2688/1.03 = 2.37, COMFORTABLY past the 2.0 line** (2.40 with the 4N-measured ×1.019) |
 | **26248860** (16N 4-leg ladder, `packa` `8b2cdd5c` pinned ✓, pure a100_80) | FLAT ≈−2.0 % ⇒ B/C on top; ≈−0.9 % ⇒ L84(b) stands | t1 0.3420 / **FLAT −1.73 %** / ROT −1.35 % / both −3.19 % | 🔴 **B/C BACK ON TOP — see §4** |
 
 **The h9 census headline (steps 99–296 of 297, rank 0):** step **678.1 ms** (traced),
@@ -227,7 +227,7 @@ NOD2D` for srfoce_u/v). The eta_n loop is a trivial per-node kernel (no scatter)
 | NG5@8N CPU | **2.3530** (2.3530/2.3533) | 26258754 |
 | NG5@16N CPU | **1.2267** (1.2353/1.2267) | 26258753 |
 | NG5@8N GPU | **0.4143** (0.4143/0.4145) ⇒ **8N ratio 5.68×** | 26258752 |
-| NG5@16N GPU | ⏳ 26258751 | |
+| NG5@16N GPU | **0.2688** (0.2692/0.2688) ⇒ **16N ratio 4.56×; SYPD@dt240 = 2.37** | 26258751 |
 | dars@8N CPU (**150-step protocol** — see below) | **0.8464** (0.8464/0.8466) | 26259246 |
 | dars@8N GPU (150-step) | **0.2041** (0.2041/0.2051) ⇒ **dars@8N ratio 4.15×** (was 3.27× at Tier-1) | 26259245 |
 | NG5@4N GPU **h10** anchor (+LAZYSNAP) | **0.6666** (0.6666/0.6675; pre-reg ≈0.667 ✅ HIT to 0.06 %) | 26260292 |
