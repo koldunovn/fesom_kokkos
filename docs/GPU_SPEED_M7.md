@@ -56,7 +56,8 @@ known cold-start blowup at step 204 (deterministic, both reps; L95). Every other
 | NG5@4N (h9) | 0.6739 | 4.5785 | 6.79× | 26258582 / 26256684 |
 | **NG5@8N (h11)** | **0.4022** | **2.3530** | **5.85×** | 26267148 / 26258754 |
 | NG5@8N (h9) | 0.4143 | 2.3530 | 5.68× | 26258752 / 26258754 |
-| **NG5@16N (h11)** | **0.2629** | 1.2267 | **4.67×** | 26267149 / 26258753 |
+| **NG5@16N (h14)** | **0.2629** | 1.2267 | **4.67×** | 26274345 / 26258753 |
+| NG5@16N (h11) | 0.2629 | 1.2267 | 4.67× | 26267149 / 26258753 |
 | NG5@16N (h9) | 0.2688 | 1.2267 | 4.56× | 26258751 / 26258753 |
 | **dars@8N (h11**, 150-step) | **0.1981** | **0.8464** | **4.27×** | 26267150 / 26259246 |
 | dars@8N (h9, 150-step) | 0.2041 | 0.8464 | 4.15× | 26259245 / 26259246 |
@@ -87,7 +88,7 @@ the session-10 findings §3.1.
 | core2@1N | 32k | 300 st, dt1800, /pool | 0.1087 → 0.0754 | **−30.6 %** | 45.3 → 65.4 |
 | core2@2N | 16k | 300 st, dt1800, /pool | 0.0922 → 0.0705 | **−23.5 %** | 53.4 → 69.9 |
 | farc@8N | 20k | 300 st, dt180 | 0.1087 → 0.0861 | **−20.8 %** | 4.53 → 5.72 |
-| NG5@16N | 116k | 300 st, dt180 | *(pair queued at write time)* | | |
+| NG5@16N | 116k | 300 st, dt180 | 0.4267 → 0.2629 | **−38.4 %** | 1.15 → 1.87 |
 
 **The regime read:** the dividend GROWS monotonically with per-rank workload within every
 mesh (ordering perfect on all four columns) and the stack ~halves the step wherever per-rank

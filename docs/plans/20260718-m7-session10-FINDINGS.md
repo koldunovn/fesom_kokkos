@@ -177,6 +177,7 @@ in particular the dt120 rescue row's SYPD is intrinsically ~2/3 of a dt180 numbe
 | farc@8N | 0.1087 | 0.0861 | **−20.8 %** | 4.53 → **5.72** | −15 ±10 ✓ (first in-band point) | 26274338/26274339 | Strong-scaling note: row0 4N→8N is only −14 % (20k verts/rank — deep comm plateau) |
 | NG5@4N | 1.2299 | 0.6497 | **−47.2 %** | 0.40 → **0.76** | row0 1.21 ±4 ✓, Δ −46.5 ±2 ✓ **BOTH IN BAND** | 26274340/26274341 | h14 leg REPRODUCES the anchor 26271441 (0.6497 vs 0.6495, +0.03 %). Protocol cross-check: 35-step-era row0 1.2796 → clean-300 1.2299 = −3.9 %, inside the modelled 4–7 % contamination correction ✓ |
 | NG5@8N | 0.7085 | 0.4025 | **−43.2 %** | 0.70 → **1.22** | row0 0.70 ±4 ✓, Δ −42.5 ±2.5 ✓ **BOTH IN BAND** | 26274342/26274343 | h14 leg reproduces session-9 h11 (0.4025 vs 0.4022, +0.07 %) |
+| NG5@16N | 0.4267 | 0.2629 | **−38.4 %** | 1.15 → **1.87** | row0 0.42 ±5 ✓, Δ −37 ±4 ✓ **BOTH IN BAND** | 26274344/26274345 | h14 leg = the h11 16N std value EXACTLY (0.2629) ⇒ doubles as the h14 ledger 16N row (ratio 4.67×, SYPD@dt240 2.43). **SURVEY COMPLETE: 11/11 points.** NG5 column −47.2/−43.2/−38.4 — all three IN band; every ordering perfect on all four meshes |
 
 ### 3.0b h15 ladder — ✅ **9/9 GREEN**
 
