@@ -280,6 +280,49 @@ Three changes, one rung (CUDA `2981d6ee` / Serial `bdccfc71`):
 
 Announce audit: `TDMANOINIT = ON` present in every knob-ON leg (×7) — no vacuous gate.
 
+### 3.7 ✅ C.2a A/B (26269642): **−0.30 % — RANGE HIT** (pre-reg −0.2, floor 0.0, ceiling −0.6)
+
+| leg (35 steps, min of 2, same alloc, a100_80, h13 `2981d6ee` ✓, announce ✓) | s/step |
+|---|--:|
+| base (`FESOM_SPEED=1`) | 0.6706 |
+| noinit (`… ;TDMANOINIT=1`) | **0.6686** → **−0.30 %** |
+
+**The decisive contrast to C.1** (same traffic class, opposite outcomes): a strict reduction —
+delete 3.78 GB/step of coalesced local stores, restructure NOTHING — converts at ~60 % of byte
+price (2.0 ms measured vs 3.3 ms full-price). L97 sharpened: local bytes are NOT free; C.1
+failed because its RESTRUCTURING cost more in global-stream locality than its local bytes were
+worth. **Package C survives as a strict-reduction campaign** (init deletions, array removals
+that keep loop structure), NOT as a rewrite campaign.
+
+**PROMOTED**: TDMANOINIT → rides the master (`fesom_speed_on`). h14 = h13 + the promotion
+(CUDA `18275c68` / Serial `27f2eb7d`), promotion gates 26271439 (knob-OFF byte) + 26271440
+(CUDA fid full on the promoted master). **h14 anchor 26271441 PRE-REGISTERED: 0.6503 ×
+(1 − 0.0030) = 0.6483, tolerance ±0.5 % (H.8's formula).**
+
+### 3.8 ✅ The impl_ale ncu pair (26269643/44, h13 ✓, announce ✓) — every number cross-checks
+
+| impl_ale TDMA | dur/launch | DRAM GB | L2 GB | locLD GB | locST GB | occ % |
+|---|--:|--:|--:|--:|--:|--:|
+| legacy init | 16.26 ms | 22.54 | 49.52 | 4.616 | 5.568 | 42.3 |
+| TDMANOINIT | 15.20 ms | 20.49 | 45.47 | 4.608 | **3.677** | 42.3 |
+
+- locST **−1.89 GB = −34.0 %** — the predicted 461k × 4,096 B = 1.89 GB TO THE DIGIT.
+- locLD unchanged ⇒ no read ever consumed the deleted zeros (the byte proof, seen in traffic).
+- **DRAM −2.05 GB/launch (−9.1 %)** ⇒ the init stores were DRAM-priced (write-allocate +
+  writeback of ~2.4 GB of once-per-step lines). The mechanistic contrast to C.1: REDISWEEP's
+  spill working set was REUSED (cache-resident, cheap); the init stores were write-once
+  (pure DRAM writeback, full price).
+- dur −6.5 % × 2 launches = −2.1 ms/step ≈ the A/B's −2.0 ms; occupancy identical.
+**A/B, byte model, and per-kernel ncu all agree. The C-package pricing rule is now measured
+from both sides: reused local traffic ≈ free; once-per-step local writeback ≈ full DRAM price.**
+
+### 3.9 ⭐ h14 ANCHOR (26271441): **0.6495 — HIT** (pre-reg 0.6483 ±0.5 %, band [0.6451, 0.6515])
+
+Reps 0.6495 / 0.6495 (0.003 % spread), h14 `18275c68` ✓, pure a100_80 ✓.
+**⭐⭐ RATIO: 4.5785 / 0.6495 = 7.05× at NG5@4N.** The 8× stretch needs 0.6495 → 0.5723 =
+another −11.9 %. h14 promotion gates 26271439/40 both PASS (knob-OFF byte; full-blessed
+fidelity rc=0 with the correct announce set: TDMANOINIT ON, REDISWEEP absent).
+
 ## 4. C.2/C.3 AUDIT NOTES (source read while the ladder ran)
 
 - **C.2 `diff_ver_part_impl_ale_kk`** (fesom_tracer_diff.cpp:403; 6 arrays after M5.24's

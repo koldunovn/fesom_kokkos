@@ -446,11 +446,14 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
     fesom::Field::dev_view_t st_v, Ki_v;
     if (gm) { st_v = gm->slope_tapered_fld.d(); Ki_v = gm->Ki_fld.d(); }
 
-    /* M7 C.2a — FESOM_SPEED_TDMANOINIT (opt-in until its A/B proves it; resolved here so both
-     * tracer calls flip together). Skips the a/b/c/tr zero-init inside the lambda — see the
-     * banner at the init loop for the per-column bit-identity proof. */
+    /* M7 C.2a — FESOM_SPEED_TDMANOINIT (rides the master; resolved here so both tracer calls
+     * flip together). Skips the a/b/c/tr zero-init inside the lambda — see the banner at the
+     * init loop for the per-column bit-identity proof. PROMOTED to the blessed set after its
+     * ladder (26269634-641, 8/8) + A/B 26269642: −0.30 % at NG5@4N (pre-reg −0.2, floor 0.0,
+     * ceiling −0.6 — RANGE HIT). The strict-reduction contrast to REDISWEEP's +1.88 %: same
+     * traffic class, no restructuring ⇒ coalesced local stores convert at ~60 % byte price. */
     static int s_tdmanoinit = -1;
-    const int tdmanoinit = fesom_speed_on_exp("TDMANOINIT", &s_tdmanoinit) ? 1 : 0;
+    const int tdmanoinit = fesom_speed_on("TDMANOINIT", &s_tdmanoinit) ? 1 : 0;
 
     Kokkos::parallel_for("fesom_impl_vert_diff_tracers",
         Kokkos::RangePolicy<>(0, myDim_nod2D),
