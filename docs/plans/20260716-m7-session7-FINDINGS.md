@@ -14,7 +14,7 @@ the H.8 number below is committed to BEFORE its A/B job is submitted, per the st
 | **26258582** (H.7 confirmation A/B, h9 `9e1f514b` pinned ✓, a100_80) | base 0.7058 ±0.5 %; scratch ≈0.675; Δ≈−4.2 %; if both hold ⇒ ratio ≈6.78× | base **0.7052** (0.7061/0.7052, −0.09 % vs anchor); scratch **0.6739** (twice, 0.00 % spread; announce fired); **Δ = −4.44 %** | ✅ **HIT — ⭐ RATIO = 4.5785 / 0.6739 = 6.79× at NG5@4N** |
 | **26258752/54** (NG5@8N GPU+CPU, h9 pinned ✓, a100_80 ✓) | 8N ratio 5.0–5.8× | GPU **0.4143** (0.4143/0.4145) / CPU **2.3530** ⇒ **ratio 5.68×** | ✅ **IN RANGE** |
 | 26258751 (16N GPU) | 16N ratio 4.5–5.0×; 🔴 below 4.0 ⇒ L84(b) WRONG, say loudly | *pending* | ⏳ |
-| 26248860 (old 16N 4-leg ladder) | FLAT ≈−2.0 % ⇒ B/C on top; ≈−0.9 % ⇒ L84(b) stands | *pending (Priority)* | ⏳ |
+| **26248860** (16N 4-leg ladder, `packa` `8b2cdd5c` pinned ✓, pure a100_80) | FLAT ≈−2.0 % ⇒ B/C on top; ≈−0.9 % ⇒ L84(b) stands | t1 0.3420 / **FLAT −1.73 %** / ROT −1.35 % / both −3.19 % | 🔴 **B/C BACK ON TOP — see §4** |
 
 **The h9 census headline (steps 99–296 of 297, rank 0):** step **678.1 ms** (traced),
 kernels busy **543.2 ms = 80.1 %**, gaps > 1 ms only **46.4 ms/step (6.8 %)**. The step is even
@@ -234,6 +234,42 @@ NOD2D` for srfoce_u/v). The eta_n loop is a trivial per-node kernel (no scatter)
 
 **⭐ NG5@4N ratio: 4.5785 / 0.6666 = 6.87× (h10, matched 300-step pinned pair, pure a100_80).**
 8N/16N ratios pending their GPU legs.
+
+## 4. 🔴 THE LADDER VERDICT (26248860): B/C GO BACK ON TOP — the dars proxy is NOT faithful for kernel-lever decay
+
+The 4-leg A/B at the REAL Stage-2 point (NG5@16N, `packa` `8b2cdd5c` pinned ✓ — the SHA fear in the
+handoff was unfounded; and the allocation happened to be pure a100_80, though an A/B never needed
+it, L94):
+
+| leg | s/step (min of 2) | Δ vs t1 | 4N (for shape) | dars@8N (the proxy) |
+|---|--:|--:|--:|--:|
+| t1 | 0.3420 | — | — | — |
+| **FLAT** (GPU-kernel lever) | 0.3361 | **−1.73 %** | −3.07 % | −1.03 % |
+| **ROTCACHE** (host lever) | 0.3374 | **−1.35 %** | −2.15 % | −1.83 % |
+| both | 0.3311 | −3.19 % (≈ additive) | −5.37 % | −2.90 % |
+
+**Scored against the pre-registered rule** (*FLAT ≈ −2.0 % ⇒ B/C back on top; ≈ −0.9 % ⇒ L84(b)
+stands*): **−1.73 % is the B/C branch.** The kernel lever holds **56 %** of its 4N value at real
+16N — roughly **2× what the dars@8N proxy predicted** (~−0.9 %).
+
+**The sharper finding: the ORDERING FLIPS between the proxy and the real point.** At dars@8N,
+FLAT < ROT (kernel levers looked absorbed by comm); at NG5@16N, **FLAT > ROT**. The session-5
+conclusion "kernel levers decay in the comm-bound regime; host levers do not" was built on the dars
+proxy — at the real Stage-2 point it is **backwards**. [[feedback-per-rank-proxy]] already warned
+the proxy is faithful for halo/comm and NOT for CG iters; add: **NOT for lever-decay ranking
+either** (dars is a different mesh — kernel-size effects and comm structure are confounded).
+
+**Consequences for the 8× stretch (~19 % needed):**
+- **Packages B (FCT2) and C (TDMA) move back to the front** — kernel work still pays ~56 % at 16N,
+  and they are the only pools big enough.
+- Before B: measure FCT's tracer-invariant traffic fraction (nobody has). Before C:
+  `diff_ver_part_redi_expl` (42.3 ms, the biggest spiller) is NOT in package C's list — re-derive
+  the pool with `cuobjdump --dump-resource-usage` (free, exact). *(Both from PROMPT §4.1.)*
+- **E (comm) stays live** at 16N (the halo self-gaps are still the top of the census) but no longer
+  outranks B/C by default.
+- Caveat kept honest: these percentages are against the `packa` baseline (0.3420); against the
+  current h9/h10 step the same absolute ms would be a LARGER percentage — the ranking conclusion is
+  unaffected.
 
 ### 🔴 dars@8N CANNOT run the 300-step protocol from a cold PHC start
 
