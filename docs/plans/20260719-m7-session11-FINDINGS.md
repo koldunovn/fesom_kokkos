@@ -180,11 +180,27 @@ ranges (its header comment is misleading) — owners are now shipped per column 
 graph, never derived from part[]; (2) Kokkos `is_view_label<const char*>` rejects label
 VARIABLES (literals are char[N]) — std::string wrap.
 
-**Frozen binary `m7/bin/cgpipe0/`**: CUDA `60fe548b` / Serial `851e1ca9` (h16 code + the
-opt-in lever; PROVENANCE.txt in the dir). **Jobs (2026-07-15 night):** serial knob-OFF
-26288247 · FORCE_SERIAL proof 26288248 · gpu OFF/ON/self 26288249/50/51 · options
-TKE/mEVP/zstar 26288252/53/54 · **A/B 4N 26288255 · A/B 16N 26288256** (both: LEG1
-`FESOM_SPEED=1` vs LEG2 `FESOM_SPEED=1;FESOM_SPEED_CGPIPE=1`, NSTEPS=300, same-alloc).
+**Frozen binary `m7/bin/cgpipe0/`**: CUDA **`ef86c3c9`** (REFROZEN — see below) / Serial
+`851e1ca9` (h16 code + the opt-in lever; PROVENANCE.txt in the dir).
+
+**Gate results, first wave (2026-07-15 night):** serial knob-OFF 26288247 **PASS rc=0** ·
+**FORCE_SERIAL ON byte proof 26288248 PASS rc=0** — CGPIPE=ON on Serial np=8 CORE2 (ice
+active) is BIT-IDENTICAL to the certified m6 baseline; announce fired (`run.err`, 0.19);
+`[cgpipe] built: ring2(max)=325 partners(max)=3`; **2627 selfcheck lines, ALL exactly
+0.000e+00** · gpu knob-OFF 26288249 **PASS**.
+
+**🔴 A STALE-BINARY TRAP, caught by the gate ladder in minutes:** gpu ON/self/TKE
+(26288250/51/52) CRASHED with the *pre-fix* FATAL text ("ring2 gid owned by SELF") — the
+first cgpipe0 CUDA freeze (`60fe548b`) was built BEFORE the owner-shipping fix; only Serial
+had been rebuilt after the last source edit. The message text itself was the tell (that
+CHECK no longer exists in the source). Rule: **rebuild BOTH backends after the LAST edit,
+then freeze — and when a frozen pair splits Serial-pass/CUDA-fail, suspect the freeze before
+the code.** Refrozen CUDA `ef86c3c9` (verified: the stale string is absent from the binary).
+
+**Jobs, second wave:** gpu ON 26288437 · self 26288438 · options TKE/mEVP/zstar
+26288439/40/41 · **A/B 4N 26288442 · A/B 16N 26288443** (LEG1 `FESOM_SPEED=1` vs LEG2
+`FESOM_SPEED=1;FESOM_SPEED_CGPIPE=1`, NSTEPS=300, same-alloc; stale-binary predecessors
+26288253-56 scancelled before start).
 
 **Non-goals:** EVP untouched (next lever); host CG and Serial builds untouched (CUDA-only
 lever); no promotion into `FESOM_SPEED=1` — explicitly opt-in until the user decides otherwise.
