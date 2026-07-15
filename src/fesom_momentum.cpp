@@ -13,6 +13,7 @@
 #include "fesom_halo_device.hpp"   // M5.1: GPU-aware-MPI on-device halo (fesom_halo_field)
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"   // M7 C.3a: FESOM_SPEED_VISCNOINIT
 
 #include <Kokkos_Core.hpp>   // M2.4: device kernels (parallel_for) + Kokkos:: math + atomic
 #include <math.h>
@@ -845,6 +846,11 @@ void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
     auto w_i    = dyn->w_i_fld.d();
     auto stress = forcing->stress_surf_fld.d();
 
+    /* M7 C.3a — FESOM_SPEED_VISCNOINIT (opt-in _exp until its A/B lands; rule 0.13).
+     * Strict store-deletion only (L97 / rule 0.12) — see the banner at the init site. */
+    static int s_viscnoinit = -1;
+    const int viscnoinit = fesom_speed_on_exp("VISCNOINIT", &s_viscnoinit) ? 1 : 0;
+
     Kokkos::parallel_for("fesom_impl_vert_visc", Kokkos::RangePolicy<>(0, E),
         KOKKOS_LAMBDA(const int e) {
             int nzmin = ulev(e) - 1;
@@ -865,9 +871,20 @@ void fesom_impl_vert_visc_kk(const struct fesom_mesh    *mesh,
              * (ncu: ~7% compute, STACK:10240, REG:80). */
             real_t *cp = c, *up = ur, *vp = vr;
 
-            /* Build zbar_n and Z_n from helem upward (lines 3167-3179). */
-            for (int k = 0; k <= nzmax; ++k) zbar_n[k] = 0.0;
-            for (int k = 0; k < nzmax; ++k)  Z_n[k]   = 0.0;
+            /* Build zbar_n and Z_n from helem upward (lines 3167-3179).
+             * VISCNOINIT: drop the (already depth-bounded) zero-init. Byte-identical for
+             * MULTI-LAYER columns (nzmax-nzmin >= 2): every read of zbar_n is in
+             * [nzmin, nzmax] and of Z_n in [nzmin, nzmax-1] — exactly the ranges the
+             * build writes (per-element ulev/nlev bounds; no cross-field relation
+             * involved). TWO-LAYER columns (nzmax-nzmin == 1) KEEP the legacy init:
+             * their surface row reads Z_n[nzmax] and the (later overwritten) bottom row
+             * reads Z_n[nzmin-1] — slots the legacy init loops do not write either, and
+             * the branch keeps those columns bit-exactly on the legacy path so the
+             * question never arises (the TDMANOINIT per-column-branch precedent). */
+            if (!viscnoinit || nzmax - nzmin == 1) {
+                for (int k = 0; k <= nzmax; ++k) zbar_n[k] = 0.0;
+                for (int k = 0; k < nzmax; ++k)  Z_n[k]   = 0.0;
+            }
             zbar_n[nzmax]   = zbar(nzmax);
             Z_n[nzmax - 1]  = zbar_n[nzmax]
                             + helem(FESOM_ELEM3D(e, nzmax - 1, nl)) / 2.0;

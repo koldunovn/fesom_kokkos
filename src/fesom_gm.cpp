@@ -1406,6 +1406,13 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
     auto nlev_n    = mesh->nlevels_nod2D_fld.d();
     auto ulev_n    = mesh->ulevels_nod2D_fld.d();
 
+    /* M7 C.2b — FESOM_SPEED_FERNOINIT (opt-in _exp until its A/B lands; rule 0.13).
+     * Strict store-DELETIONS only (L97 / rule 0.12): loop structure, expression forms
+     * and every surviving store are byte-identical to the legacy path. Three deletions,
+     * proofs at the three init sites below. */
+    static int s_fernoinit = -1;
+    const int fernoinit = fesom_speed_on_exp("FERNOINIT", &s_fernoinit) ? 1 : 0;
+
     Kokkos::parallel_for("fesom_gm_fer_solve_gamma", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int n) {
             real_t zbar_n[NL_MAX], Z_n[NL_MAX];
@@ -1422,8 +1429,16 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
             int nzmin_o = ulev_n(n) - 1;     /* = 0 in our config       */
             if (nzmax_o <= nzmin_o + 1) return;   /* degenerate column */
 
-            /* Build zbar_n, Z_n on [nzmin_o, nzmax_o]. */
-            for (int nz = 0; nz < nl; ++nz) { zbar_n[nz] = 0.0; Z_n[nz] = 0.0; }
+            /* Build zbar_n, Z_n on [nzmin_o, nzmax_o].
+             * FERNOINIT deletion (1/3): drop the zbar_n/Z_n zero-init. Byte-identical
+             * because every read of either array is inside the BUILT range: the TDMA
+             * body and the zinv2 seed read zbar_n on [nzmin, nzmax] ⊆ [nzmin_o, nzmax_o]
+             * and Z_n on [nzmin, nzmax-1] ⊆ [nzmin_o, nzmax_o-1] — the inner⊆outer
+             * bounds relation (nlev_min <= nlev_n, ulev_max >= ulev_n) is enforced once
+             * at mesh setup (compute_vertical_levels_aux aborts on violation). The
+             * inner-degenerate early-out below reads neither array. */
+            if (!fernoinit)
+                for (int nz = 0; nz < nl; ++nz) { zbar_n[nz] = 0.0; Z_n[nz] = 0.0; }
             zbar_n[nzmax_o] = zbar(nzmax_o);
             Z_n[nzmax_o - 1] = zbar_n[nzmax_o]
                              + hnode_new((size_t)n * nl + (nzmax_o - 1)) * 0.5;
@@ -1468,9 +1483,20 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
             /* Bottom boundary (Dirichlet). */
             a[nzmax] = 0.0; c[nzmax] = 0.0; b[nzmax] = 1.0;
 
-            /* RHS. */
+            /* RHS.
+             * FERNOINIT deletion (2/3): of the full-range RHS zero-init only TWO zeros
+             * per component are ever read — [nzmin] (top Dirichlet RHS, the sweep seed)
+             * and [nzmax] (bottom Dirichlet RHS, the last sweep iteration). The body
+             * loop writes (nzmin, nzmax) before the sweep reads it; tp_x/tp_y alias
+             * tr_x/tr_y and are sweep-written before back-substitution reads them;
+             * nothing reads outside [nzmin, nzmax]. */
             const real_t r = g / rho_ref;
-            for (int nz = 0; nz < nl; ++nz) { tr_x[nz] = 0.0; tr_y[nz] = 0.0; }
+            if (!fernoinit) {
+                for (int nz = 0; nz < nl; ++nz) { tr_x[nz] = 0.0; tr_y[nz] = 0.0; }
+            } else {
+                tr_x[nzmin] = 0.0; tr_y[nzmin] = 0.0;
+                tr_x[nzmax] = 0.0; tr_y[nzmax] = 0.0;
+            }
             for (int nz = nzmin + 1; nz < nzmax; ++nz) {
                 real_t sx_up = sxy((size_t)n * nl * 2 + (nz - 1) * 2 + 0);
                 real_t sx_dn = sxy((size_t)n * nl * 2 + nz       * 2 + 0);
@@ -1492,10 +1518,25 @@ void fesom_fer_solve_gamma_kk(const struct fesom_aux  *aux,
                 tp_y[nz] = (tr_y[nz] - tp_y[nz - 1] * a[nz]) / m;
             }
 
-            /* Back-substitution into fer_gamma. Zero outside [nzmin, nzmax]. */
-            for (int nz = 0; nz < nl; ++nz) {
-                fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
-                fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+            /* Back-substitution into fer_gamma. Zero outside [nzmin, nzmax].
+             * FERNOINIT deletion (3/3): write the zeros ONLY outside [nzmin, nzmax] —
+             * back-substitution overwrites the whole inside range below, so the global
+             * bytes are identical and 2*(nzmax-nzmin+1) GLOBAL stores are deleted per
+             * column (these price at full DRAM, rule 0.12). */
+            if (!fernoinit) {
+                for (int nz = 0; nz < nl; ++nz) {
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+                }
+            } else {
+                for (int nz = 0; nz < nzmin; ++nz) {
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+                }
+                for (int nz = nzmax + 1; nz < nl; ++nz) {
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 0) = 0.0;
+                    fer_gamma((size_t)n * nl * 2 + nz * 2 + 1) = 0.0;
+                }
             }
             fer_gamma((size_t)n * nl * 2 + nzmax * 2 + 0) = tp_x[nzmax];
             fer_gamma((size_t)n * nl * 2 + nzmax * 2 + 1) = tp_y[nzmax];

@@ -586,6 +586,21 @@ static void compute_vertical_levels_aux(fesom_mesh *m)
         m->nlevels_nod2D_min[n] = mn;
         m->ulevels_nod2D_max[n] = mx_u;
     }
+
+    /* The conservative-extrema invariant: nlevels_nod2D_min <= nlevels_nod2D and
+     * ulevels_nod2D_max >= ulevels_nod2D. For consistent mesh files it holds by
+     * construction (elvls(e) = min over e's nodes of nlvls); a violating mesh (e.g.
+     * swapped nlvls/elvls, L73) would make every kernel that builds column scratch on
+     * the OUTER bounds and solves on the INNER bounds (fer_solve_gamma; and M7 C.2b
+     * FERNOINIT's init deletion depends on it) read init-zeros/garbage SILENTLY —
+     * abort loudly instead, once, at setup. */
+    for (int n = 0; n < N; ++n)
+        FESOM_CHECK(m->nlevels_nod2D_min[n] <= m->nlevels_nod2D[n]
+                 && m->ulevels_nod2D_max[n] >= m->ulevels_nod2D[n],
+                    "vertical-levels invariant violated at node %d: "
+                    "nlev_min %d > nlev %d or ulev_max %d < ulev %d",
+                    n, m->nlevels_nod2D_min[n], m->nlevels_nod2D[n],
+                    m->ulevels_nod2D_max[n], m->ulevels_nod2D[n]);
 }
 
 /*--- GM/Redi mesh prerequisites -------------------------------------------- *
