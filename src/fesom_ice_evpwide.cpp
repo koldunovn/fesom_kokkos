@@ -64,20 +64,25 @@ struct EvpwState {
     int  Eg = 0;
     std::vector<int> eg_gid1;                   /* [Eg] element gids, 1-based */
     std::vector<int> eg_vert;                   /* [3Eg] unified vertex slots */
+    std::vector<int> eg_owner;                  /* [Eg] sigma owner (first-vertex owner) */
     long ring1_bfs = 0, ring1_extra = 0;        /* diagnostics: BFS ring-1 vs eDim */
 
     /* stage B: lazy build */
     bool built = false;
     FesomEvpwideDev dev;
     std::vector<int> partner;                   /* ascending ranks */
-    std::vector<int> soff, roff;                /* [P+1] slot offsets */
-    int nsend = 0, nrecv = 0;
+    std::vector<int> soff, roff;                /* [P+1] node-slot offsets */
+    std::vector<int> esoff, eroff;              /* [P+1] elem-segment offsets (sigma refresh) */
+    int nsend = 0, nrecv = 0, nesend = 0, nerecv = 0;
     Kokkos::View<int*>    sidx_d, ridx_d;       /* owned idx / slot idx */
+    Kokkos::View<int*>    esidx_d, eridx_d;     /* owner-local elem idx / my ghost elem idx */
     Kokkos::View<char*>   selff_d;              /* [nrecv] selfcheck flag: dist(slot) <= K-1 */
     Kokkos::View<real_t*> sbuf_d, rbuf_d;       /* [nsend*11] / [nrecv*11] */
+    Kokkos::View<real_t*> esbuf_d, erbuf_d;     /* [nesend*3] / [nerecv*3] */
     std::vector<MPI_Request> reqs;
     int selfcheck = -1;                         /* env FESOM_EVPWIDE_SELFCHECK */
     long exch_count = 0;
+    const real_t *gs_h = nullptr, *ea_h = nullptr, *mf_h = nullptr;   /* dump aids (host mesh) */
 };
 EvpwState g_w;
 
@@ -176,8 +181,16 @@ void fesom_evpwide_mesh_hook(struct fesom_mesh *m, struct fesom_partit *p,
 {
     const int K = fesom_evpwide_env_K();
     if (K <= 0 || p->npes <= 1) return;
-    FESOM_CHECK(K <= 60, "evpwide: K=%d unreasonable (rings 2K-1)", K);
-    const int R = 2 * K - 1;
+    FESOM_CHECK(K <= 60, "evpwide: K=%d unreasonable", K);
+    /* R = K with PER-WINDOW SIGMA REFRESH (design §2 as corrected by the first CORE2 gate):
+     * velocity-only refresh can NOT be exact for ANY finite R — carried ghost sigma is never
+     * re-baselined and the cleanliness recursion has no fixed point (outer-element staleness
+     * reaches ring-1 from window 2 on; observed as the linear ~1e-5/window u_rhs drift).
+     * Refreshing sigma on the ghost elements every exchange closes the induction at R = K. */
+    int R = K;
+    /* debug override: R > K widens the end-clean set to rings <= R-K, turning the drift
+     * diagnostic into an EXACT-ZERO check there (e.g. K=2 R=3: ring-1 drift MUST be 0). */
+    if (const char *rr = getenv("FESOM_EVPWIDE_RINGS")) { const int v = atoi(rr); if (v > R) R = v; }
 
     const int myDim = p->myDim_nod2D, eDim = p->eDim_nod2D;
     const int N = myDim + eDim;
@@ -268,8 +281,10 @@ void fesom_evpwide_mesh_hook(struct fesom_mesh *m, struct fesom_partit *p,
 
     /* ghost elements: any vertex with dist <= R-1, not in the owned/shared block [0, E).
      * (dist-file eDim/eXDim halo elements re-derived here on purpose — their mesh vertex
-     * refs contain -1.) Vertex slots resolved to the unified space now. */
-    std::vector<int> egid1, evert;
+     * refs contain -1.) Vertex slots resolved to the unified space now. Each ghost element
+     * gets a deterministic SIGMA OWNER = owner of its FIRST vertex (global elem_nodes order
+     * is global) — that rank holds it as a maxring<=1 element with owner-clean sigma. */
+    std::vector<int> egid1, evert, eown;
     for (int e = 0; e < gE; ++e) {
         const int v[3] = { m->elem_nodes[3*e+0], m->elem_nodes[3*e+1], m->elem_nodes[3*e+2] };
         signed char dmin = 127;
@@ -290,11 +305,13 @@ void fesom_evpwide_mesh_hook(struct fesom_mesh *m, struct fesom_partit *p,
         FESOM_CHECK(ok, "evpwide: ghost elem gid=%d has a vertex beyond ring R=%d "
                         "(element-ring/node-ring inconsistency)", e + 1, R);
         egid1.push_back(e + 1);
+        eown.push_back(own[(size_t)v[0]]);
         for (int k = 0; k < 3; ++k) evert.push_back(slots[k]);
     }
     g_w.Eg = (int)egid1.size();
-    g_w.eg_gid1 = std::move(egid1);
-    g_w.eg_vert = std::move(evert);
+    g_w.eg_gid1  = std::move(egid1);
+    g_w.eg_vert  = std::move(evert);
+    g_w.eg_owner = std::move(eown);
     g_w.hook_done = true;
 
     long loc[4] = { (long)next, (long)g_w.Eg, extra, bfs1 };
@@ -358,6 +375,36 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
         if (s < N) { *x = m->coord_nod2D[2*s + 0]; *y = m->coord_nod2D[2*s + 1]; }
         else       { *x = S.ext_coord[(size_t)2*(s - N) + 0]; *y = S.ext_coord[(size_t)2*(s - N) + 1]; }
     };
+
+    /* orient_cw REPLAY (fesom_mesh.cpp:460): the mesh orients its LOCAL elements CW AFTER
+     * scatter_mesh, but the hook stashed the PRE-orientation global vertex order. Replicate
+     * the exact swap rule (pure function of vertex coords) on the ghost elements BEFORE any
+     * geometry / kk-slot mapping, so eps/sigma arithmetic matches the owner's post-swap
+     * order. (The first ice-active smoke caught this: ~half the ghost elements had inverted
+     * orientation => wrong-signed gradients => sigma diverged from window 1.) */
+    {
+        const real_t cyc      = FESOM_CYCLIC_LENGTH_RAD;
+        const real_t half_cyc = 0.5 * cyc;
+        long nsw = 0;
+        for (int eg = 0; eg < Eg; ++eg) {
+            int *v = &S.eg_vert[(size_t)3*eg];
+            real_t ax, ay, bx1, by1, cx1, cy1;
+            slot_xy(v[0], &ax,  &ay);
+            slot_xy(v[1], &bx1, &by1);
+            slot_xy(v[2], &cx1, &cy1);
+            real_t bx = bx1 - ax, by = by1 - ay;
+            real_t cx = cx1 - ax, cy = cy1 - ay;
+            if (bx >  half_cyc) bx -= cyc;
+            if (bx < -half_cyc) bx += cyc;
+            if (cx >  half_cyc) cx -= cyc;
+            if (cx < -half_cyc) cx += cyc;
+            if (bx * cy - by * cx > 0.0) { const int t = v[1]; v[1] = v[2]; v[2] = t; ++nsw; }
+        }
+        long mxsw = 0;
+        MPI_Reduce(&nsw, &mxsw, 1, MPI_LONG, MPI_MAX, 0, comm);
+        if (p->mype == 0)
+            fprintf(stderr, "[evpwide] ghost orient_cw replay: swapped(max) %ld ghost elems\n", mxsw);
+    }
 
     /* ghost geometry (verbatim formulas) + the formula cross-check on owned elements. */
     {
@@ -510,6 +557,49 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
     rq.clear();
 
+    /* -------- element (sigma-refresh) handshake: want ghost-element sigma from each
+     * element's deterministic owner (first-vertex owner — holds it maxring<=1, sigma clean).
+     * Tags 2204. Order per owner: ascending my ghost index => deterministic both sides. */
+    std::vector<std::vector<int>> wantE((size_t)npes), ewslot((size_t)npes);
+    for (int eg = 0; eg < Eg; ++eg) {
+        const int o = S.eg_owner[(size_t)eg];
+        wantE[(size_t)o].push_back(S.eg_gid1[(size_t)eg]);
+        ewslot[(size_t)o].push_back(eg);
+    }
+    std::vector<int> escnt((size_t)npes, 0), ercnt((size_t)npes, 0);
+    for (int q = 0; q < npes; ++q) escnt[(size_t)q] = (int)wantE[(size_t)q].size();
+    MPI_Alltoall(escnt.data(), 1, MPI_INT, ercnt.data(), 1, MPI_INT, comm);
+    std::vector<std::vector<int>> wantEin((size_t)npes);
+    for (int q = 0; q < npes; ++q) {
+        if (ercnt[(size_t)q] > 0) {
+            wantEin[(size_t)q].resize((size_t)ercnt[(size_t)q]);
+            rq.push_back(MPI_Request());
+            MPI_Irecv(wantEin[(size_t)q].data(), ercnt[(size_t)q], MPI_INT, q, 2204, comm, &rq.back());
+        }
+        if (escnt[(size_t)q] > 0) {
+            rq.push_back(MPI_Request());
+            MPI_Isend(wantE[(size_t)q].data(), escnt[(size_t)q], MPI_INT, q, 2204, comm, &rq.back());
+        }
+    }
+    MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+    rq.clear();
+    std::vector<std::vector<int>> eslist((size_t)npes);      /* my local elem idx, requester order */
+    {
+        std::unordered_map<int, int> own_e2l;
+        own_e2l.reserve((size_t)E * 2);
+        for (int e = 0; e < E; ++e) own_e2l.emplace(p->myList_elem2D[e], e);
+        for (int q = 0; q < npes; ++q) {
+            eslist[(size_t)q].reserve(wantEin[(size_t)q].size());
+            for (int gid1 : wantEin[(size_t)q]) {
+                auto it = own_e2l.find(gid1);
+                FESOM_CHECK(it != own_e2l.end(),
+                            "evpwide: rank %d wants sigma of elem gid %d that is not my "
+                            "myDim_elem2D (first-vertex-owner invariant broken)", q, gid1);
+                eslist[(size_t)q].push_back(it->second);
+            }
+        }
+    }
+
     /* -------- unified statics + gather CSR. */
     std::vector<real_t> area0x((size_t)(N + next), 0.0), corx((size_t)(N + next), 0.0);
     std::vector<int>    coastx((size_t)(N + next), 0);
@@ -594,32 +684,50 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
                             "(expected ulp-level; owner bytes adopted for the replay)\n", a0mx);
     }
 
-    /* -------- runtime exchange lists (cgpipe shape): ascending partner ranks. */
+    /* -------- runtime exchange lists (cgpipe shape): ascending partner ranks; the elem
+     * (sigma) segments ride the SAME partner set (union). */
     S.partner.clear(); S.soff.assign(1, 0); S.roff.assign(1, 0);
-    std::vector<int> sidx, ridx;
+    S.esoff.assign(1, 0); S.eroff.assign(1, 0);
+    std::vector<int> sidx, ridx, esidx, eridx;
     std::vector<char> selff;
     for (int q = 0; q < npes; ++q) {
-        const bool has = !slist[(size_t)q].empty() || !wslot[(size_t)q].empty();
+        const bool has = !slist[(size_t)q].empty() || !wslot[(size_t)q].empty()
+                      || !eslist[(size_t)q].empty() || !ewslot[(size_t)q].empty();
         if (!has) continue;
         S.partner.push_back(q);
         for (int n : slist[(size_t)q]) sidx.push_back(n);
         for (int s : wslot[(size_t)q]) {
             ridx.push_back(s);
-            selff.push_back(S.dist[(size_t)s] <= (signed char)(K - 1) ? 1 : 0);
+            char fl = S.dist[(size_t)s] <= (signed char)(S.R - K) ? 1 : 0;   /* end-clean set */
+            if (fl) {   /* debug split: 2 = the gather row touches a GHOST element */
+                for (int a = gath_ptr[(size_t)s]; a < gath_ptr[(size_t)s + 1]; ++a)
+                    if (gath_elem[(size_t)a] >= E) { fl = 2; break; }
+            }
+            selff.push_back(fl);
         }
+        for (int e : eslist[(size_t)q]) esidx.push_back(e);
+        for (int eg : ewslot[(size_t)q]) eridx.push_back(eg);
         S.soff.push_back((int)sidx.size());
         S.roff.push_back((int)ridx.size());
+        S.esoff.push_back((int)esidx.size());
+        S.eroff.push_back((int)eridx.size());
     }
     S.nsend = (int)sidx.size();
     S.nrecv = (int)ridx.size();
-    S.reqs.assign(2 * S.partner.size(), MPI_Request());
+    S.nesend = (int)esidx.size();
+    S.nerecv = (int)eridx.size();
+    S.reqs.assign(4 * S.partner.size(), MPI_Request());
 
     /* -------- device pushes. */
     S.sidx_d  = push_dev("evpw.sidx", sidx);
     S.ridx_d  = push_dev("evpw.ridx", ridx);
+    S.esidx_d = push_dev("evpw.esidx", esidx);
+    S.eridx_d = push_dev("evpw.eridx", eridx);
     S.selff_d = push_dev("evpw.selff", selff);
     S.sbuf_d  = Kokkos::View<real_t*>("evpw.sbuf", (size_t)S.nsend * 11);
     S.rbuf_d  = Kokkos::View<real_t*>("evpw.rbuf", (size_t)S.nrecv * 11);
+    S.esbuf_d = Kokkos::View<real_t*>("evpw.esbuf", (size_t)S.nesend * 3);
+    S.erbuf_d = Kokkos::View<real_t*>("evpw.erbuf", (size_t)S.nerecv * 3);
 
     FesomEvpwideDev &D = S.dev;
     D.K = K; D.R = R; D.next = next; D.Eg = Eg; D.nUpd = (int)upd_slots.size();
@@ -640,7 +748,9 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     D.coastx    = push_dev("evpw.coastx", coastx);
 
     S.selfcheck = 0;
-    if (const char *sc = getenv("FESOM_EVPWIDE_SELFCHECK")) S.selfcheck = atoi(sc) != 0;
+    if (const char *sc = getenv("FESOM_EVPWIDE_SELFCHECK")) S.selfcheck = atoi(sc);
+    D.dbg = (S.selfcheck >= 2) ? 1 : 0;
+    S.gs_h = m->gradient_sca; S.ea_h = m->elem_area; S.mf_h = m->metric_factor;
 
     long loc[5] = { (long)S.partner.size(), (long)S.nrecv, (long)S.nsend, (long)D.nUpd,
                     (long)(S.roff.empty() ? 0 : *std::max_element(S.roff.begin(), S.roff.end())) };
@@ -691,8 +801,9 @@ int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_
     if (!g_w.built) evpw_build(ice, p, m);
     if (!g_w.announced) {
         if (p->mype == 0) {
-            fprintf(stderr, "[fesom_speed] FESOM_SPEED_EVPWIDE = %d (R=%d rings, exact replay, "
-                            "EVP exchanges/step 120 -> %d+1)\n", K, g_w.R, 120 / K);
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_EVPWIDE = %d (R=K=%d rings, exact replay "
+                            "w/ per-window sigma refresh, EVP exchanges/step 120 -> %d+1)\n",
+                    K, g_w.R, 120 / K);
             fflush(stderr);
         }
         g_w.announced = true;
@@ -715,7 +826,15 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
     PackViews F;
     F.v[0]  = ice->uice_fld.d();
     F.v[1]  = ice->vice_fld.d();
-    if (nf > 2) {
+    if (nf == 6) {
+        /* selfcheck level 2: ship the owner's FINALIZED u_rhs/v_rhs + its inv_am/inv_m for
+         * comparison (compare-only — never unpacked). Splits gather-vs-finalize-input bugs. */
+        F.v[2] = ice->uice_rhs_fld.d();
+        F.v[3] = ice->vice_rhs_fld.d();
+        F.v[4] = ice->work.inv_areamass_fld.d();
+        F.v[5] = ice->work.inv_mass_fld.d();
+    }
+    if (nf > 6) {
         F.v[2]  = ice->data[FESOM_ICE_AICE].values_fld.d();
         F.v[3]  = ice->data[FESOM_ICE_MICE].values_fld.d();
         F.v[4]  = ice->data[FESOM_ICE_MSNOW].values_fld.d();
@@ -729,6 +848,10 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
 
     fesom_halo_prof_barrier(p);                 /* M5.17 split-instrumentation parity */
 
+    const bool sig = (nf <= 6);   /* the wide refresh re-baselines ghost SIGMA every window
+                                   * (design §2 corrected: velocity-only refresh is inexact
+                                   * for any finite R); the per-step 11-field ship does not
+                                   * (sigma is untouched on both sides between EVP calls). */
     {   /* pack owned values */
         auto sidx = S.sidx_d; auto sbuf = S.sbuf_d; const PackViews FF = F; const int nfl = nf;
         if (S.nsend > 0)
@@ -737,6 +860,19 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
                     const int n = sidx(i);
                     for (int f = 0; f < nfl; ++f) sbuf(i*nfl + f) = FF.v[f](n);
                 });
+    }
+    if (sig && S.nesend > 0) {   /* pack my (owner-clean) sigma for the requesters */
+        auto esidx = S.esidx_d; auto esbuf = S.esbuf_d;
+        auto s11 = ice->work.sigma11_fld.d();
+        auto s12 = ice->work.sigma12_fld.d();
+        auto s22 = ice->work.sigma22_fld.d();
+        Kokkos::parallel_for("fesom_evpwide_packsig", Kokkos::RangePolicy<>(0, S.nesend),
+            KOKKOS_LAMBDA(const int i) {
+                const int e = esidx(i);
+                esbuf(i*3 + 0) = s11(e);
+                esbuf(i*3 + 1) = s12(e);
+                esbuf(i*3 + 2) = s22(e);
+            });
     }
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf + re-posts rbuf (drains prev unpack) */
 
@@ -758,42 +894,241 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
             MPI_Isend(sp + (size_t)S.soff[q] * nf, sc, MPI_DOUBLE, S.partner[q], 2200,
                       p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
     }
+    if (sig) {   /* the sigma segment: second message per partner, tag 2205 */
+        real_t *esp = S.esbuf_d.data();
+        real_t *erp = S.erbuf_d.data();
+        for (size_t q = 0; q < S.partner.size(); ++q) {
+            const int rc = (S.eroff[q + 1] - S.eroff[q]) * 3;
+            if (rc > 0) {
+                MPI_Irecv(erp + (size_t)S.eroff[q] * 3, rc, MPI_DOUBLE, S.partner[q], 2205,
+                          p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+                bytes += (double)rc * sizeof(real_t);
+            }
+        }
+        for (size_t q = 0; q < S.partner.size(); ++q) {
+            const int sc = (S.esoff[q + 1] - S.esoff[q]) * 3;
+            if (sc > 0)
+                MPI_Isend(esp + (size_t)S.esoff[q] * 3, sc, MPI_DOUBLE, S.partner[q], 2205,
+                          p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+        }
+    }
     fesom_halo_prof_waitall(nreq, S.reqs.data());
     fesom_halo_prof_bytes(bytes);
 
-    /* selfcheck (nf==2 path): BEFORE unpack, refresh-vs-local on rings <= K-1.
-     * MUST be exactly 0 on Serial (the exact-replay contract); ~rounding on CUDA. */
-    if (nf == 2 && S.selfcheck) {
+    /* selfcheck, wide-refresh path (nf<=4): refresh-vs-local BEFORE unpack. With R=K +
+     * per-window sigma refresh, ghost state at window END is legitimately dirty (the dirt
+     * never reaches owned reads — design §2 corrected) => this is a DRIFT DIAGNOSTIC,
+     * expected small-but-NONZERO. The exact-zero certification is the FORCE_SERIAL
+     * diff_snap gate on owned bytes, plus the pre-step echo check below. */
+    if (nf <= 6 && S.selfcheck) {
         auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; auto flag = S.selff_d;
+        const PackViews FF = F; const int nfl = nf; const int Nlim = S.N;
+        double mx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        for (int f = 0; f < nf; ++f) {
+            double m1 = 0.0; const int fl = f;
+            Kokkos::parallel_reduce("fesom_evpwide_self", Kokkos::RangePolicy<>(0, S.nrecv),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    if (!flag(i)) return;
+                    const int s = ridx(i);
+                    if (fl >= 2 && s >= Nlim) return;      /* u_rhs is not extended */
+                    const double d = Kokkos::fabs((double)rbuf(i*nfl + fl) - (double)FF.v[fl](s));
+                    if (d > acc) acc = d;
+                }, Kokkos::Max<double>(m1));
+            mx[f] = m1;
+        }
+        if (nf == 6) {   /* debug split of the urhs mismatch by gather composition */
+            for (int cls = 1; cls <= 2; ++cls) {
+                double m1 = 0.0; const char want = (char)cls;
+                Kokkos::parallel_reduce("fesom_evpwide_self_cls", Kokkos::RangePolicy<>(0, S.nrecv),
+                    KOKKOS_LAMBDA(const int i, double &acc) {
+                        if (flag(i) != want) return;
+                        const int s = ridx(i);
+                        if (s >= Nlim) return;
+                        const double d = Kokkos::fabs((double)rbuf(i*nfl + 2) - (double)FF.v[2](s));
+                        if (d > acc) acc = d;
+                    }, Kokkos::Max<double>(m1));
+                mx[5 + cls] = m1;
+            }
+        }
+        double gmx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        MPI_Reduce(mx, gmx, 8, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+        if (p->mype == 0) {
+            if (nf == 2)
+                printf("[evpwide-self] exch %ld  ghost drift (end-clean set, expected 0 only if R>K) = %.3e\n",
+                       g_w.exch_count, gmx[0] > gmx[1] ? gmx[0] : gmx[1]);
+            else
+                printf("[evpwide-self] exch %ld  drift u=%.3e v=%.3e urhs=%.3e vrhs=%.3e "
+                       "invam=%.3e invm=%.3e | urhs[own-only]=%.3e urhs[with-ghost]=%.3e\n",
+                       g_w.exch_count, gmx[0], gmx[1], gmx[2], gmx[3], gmx[4], gmx[5], gmx[6], gmx[7]);
+            fflush(stdout);
+        }
+    }
+#ifndef KOKKOS_ENABLE_CUDA
+    /* selfcheck level 3 (Serial-only): dump the WORST urhs slot's full gather composition.
+     * All Views are host-resident on Serial — direct indexing. */
+    static bool s_dumped = false;
+    if (nf == 6 && S.selfcheck >= 3 && !s_dumped) {
+        s_dumped = true;
+        auto rbuf = S.rbuf_d; auto ridx = S.ridx_d; auto flag = S.selff_d;
+        int ndust = 0;
+        for (int i2 = 0; i2 < S.nrecv && ndust < 4; ++i2) {
+            if (!flag(i2)) continue;
+            const int s2 = ridx(i2);
+            if (s2 >= S.N) continue;
+            double dd = 0.0;
+            for (int f2 = 0; f2 < 4; ++f2) {
+                const double d2 = fabs(rbuf(i2*6 + f2) - (double)F.v[f2](s2));
+                if (d2 > dd) dd = d2;
+            }
+            if (dd <= 0.0) continue;
+            ++ndust;
+            const int wi = i2; const double wd = dd;
+        {
+            const int s = ridx(wi);
+            const FesomEvpwideDev &D = S.dev;
+            fprintf(stderr, "[evpw-dump] rank %d slot %d dist %d owner-urhs %.17g "
+                            "diff %.3e  invam %.17g rhs_a %.17g row [%d..%d):\n",
+                    p->mype, s, (int)S.dist[(size_t)s],
+                    rbuf(wi*6 + 2), wd,
+                    (double)ice->work.inv_areamass_fld.d()(s),
+                    (double)ice->data[FESOM_ICE_AICE].values_rhs_fld.d()(s),
+                    (int)D.gath_ptr(s), (int)D.gath_ptr(s + 1));
+            auto s11o = ice->work.sigma11_fld.d(); auto s12o = ice->work.sigma12_fld.d();
+            auto s22o = ice->work.sigma22_fld.d();
+            auto istro = ice->work.ice_strength_fld.d();
+            double sum = 0.0;
+            const real_t val3d = 1.0/3.0;
+            for (int q = D.gath_ptr(s); q < D.gath_ptr(s + 1); ++q) {
+                const int ue = D.gath_elem(q); const int kk = D.gath_k(q);
+                double istr_v, s11v, s12v, s22v, gsa, gsb, mfv, eav, cu = 0.0;
+                if (ue < S.E) {
+                    istr_v = istro(ue); s11v = s11o(ue); s12v = s12o(ue); s22v = s22o(ue);
+                    gsa = S.gs_h[6*ue + kk]; gsb = S.gs_h[6*ue + kk + 3];
+                    mfv = S.mf_h[ue]; eav = S.ea_h[ue];
+                } else {
+                    const int eg = ue - S.E;
+                    istr_v = D.istr_g(eg); s11v = D.s11_g(eg); s12v = D.s12_g(eg); s22v = D.s22_g(eg);
+                    gsa = D.gs_g(6*eg + kk); gsb = D.gs_g(6*eg + kk + 3);
+                    mfv = D.mf_g(eg); eav = D.ea_g(eg);
+                }
+                if (istr_v > 0.0)
+                    cu = -(eav*(s11v*gsa + s12v*gsb + s12v*val3d*mfv));
+                sum += cu;
+                double o11 = 0, o12 = 0, o22 = 0;   /* the OWNER's sigma (incoming refresh) */
+                if (ue >= S.E) {
+                    const int eg = ue - S.E;
+                    for (int z = 0; z < S.nerecv; ++z)
+                        if (S.eridx_d(z) == eg) {
+                            o11 = S.erbuf_d(z*3 + 0); o12 = S.erbuf_d(z*3 + 1); o22 = S.erbuf_d(z*3 + 2);
+                            break;
+                        }
+                }
+                fprintf(stderr, "  [%c] ue %d kk %d istr %.6g s11 %.10g s12 %.10g s22 %.10g "
+                                "gs %.10g/%.10g mf %.6g ea %.6g cu %.17g | own-sig %.10g %.10g %.10g\n",
+                        ue < S.E ? 'S' : 'G', ue, kk, istr_v, s11v, s12v, s22v, gsa, gsb, mfv, eav, cu,
+                        o11, o12, o22);
+                for (int z = 0; z < 3; ++z) {
+                    const int vs = (ue < S.E) ? -1 : (int)S.dev.en_g(3*(ue - S.E) + z);
+                    if (vs < 0) continue;
+                    const int vgid = (vs < S.N) ? p->myList_nod2D[vs] : S.ext_gid1[(size_t)(vs - S.N)];
+                    fprintf(stderr, "      v%d slot %d gid %d dist %d u %.10g v %.10g\n",
+                            z, vs, vgid, (int)S.dist[(size_t)vs],
+                            (double)F.v[0](vs), (double)F.v[1](vs));
+                }
+            }
+            const double invam = ice->work.inv_areamass_fld.d()(s);
+            const double rhsa  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d()(s);
+            fprintf(stderr, "[evpw-dump] sum %.17g -> final %.17g vs owner %.17g | my u/v %.17g %.17g "
+                            "own u/v %.17g %.17g coastx %d aice %.17g\n",
+                    sum, invam > 0.0 ? sum*invam + rhsa : 0.0, rbuf(wi*6 + 2),
+                    (double)F.v[0](s), (double)F.v[1](s), rbuf(wi*6 + 0), rbuf(wi*6 + 1),
+                    (int)S.dev.coastx(s), (double)ice->data[FESOM_ICE_AICE].values_fld.d()(s));
+            {   /* permutation probe: does ANY summation order of my contributions reproduce
+                 * the owner's finalized u_rhs? (order bug vs value bug discriminator) */
+                std::vector<double> cus;
+                for (int q = D.gath_ptr(s); q < D.gath_ptr(s + 1); ++q) {
+                    const int ue = D.gath_elem(q); const int kk = D.gath_k(q);
+                    double istr_v, s11v, s12v, gsa, gsb, mfv, eav;
+                    if (ue < S.E) {
+                        istr_v = ice->work.ice_strength_fld.d()(ue);
+                        s11v = ice->work.sigma11_fld.d()(ue); s12v = ice->work.sigma12_fld.d()(ue);
+                        gsa = S.gs_h[6*ue + kk]; gsb = S.gs_h[6*ue + kk + 3];
+                        mfv = S.mf_h[ue]; eav = S.ea_h[ue];
+                    } else {
+                        const int eg = ue - S.E;
+                        istr_v = D.istr_g(eg); s11v = D.s11_g(eg); s12v = D.s12_g(eg);
+                        gsa = D.gs_g(6*eg + kk); gsb = D.gs_g(6*eg + kk + 3);
+                        mfv = D.mf_g(eg); eav = D.ea_g(eg);
+                    }
+                    if (istr_v > 0.0)
+                        cus.push_back(-(eav*(s11v*gsa + s12v*gsb + s12v*val3d*mfv)));
+                }
+                const double target = rbuf(wi*6 + 2);
+                int hit = -1;
+                if (cus.size() <= 8) {
+                    std::vector<int> pi(cus.size());
+                    for (size_t z = 0; z < pi.size(); ++z) pi[z] = (int)z;
+                    int pidx = 0;
+                    do {
+                        double sp2 = 0.0;
+                        for (size_t z = 0; z < pi.size(); ++z) sp2 += cus[(size_t)pi[(size_t)z]];
+                        const double fin = invam > 0.0 ? sp2*invam + rhsa : 0.0;
+                        if (fin == target) { hit = pidx; break; }
+                        ++pidx;
+                    } while (std::next_permutation(pi.begin(), pi.end()));
+                }
+                fprintf(stderr, "[evpw-dump] permutation probe: n=%zu hit=%d (0=my order; -1=NO order matches)\n",
+                        cus.size(), hit);
+            }
+        }
+        }
+    }
+#endif
+    /* pre-step echo check (nf==11): uice/vice are modified ONLY by the EVP window loop, and
+     * the last window ends with a refresh => the incoming ghost bytes MUST equal what we
+     * already hold, EXACTLY, on every backend. A nonzero here = plumbing or an unexpected
+     * outside writer of uice/vice ghosts. */
+    if (nf == 11 && S.selfcheck) {
+        auto ridx = S.ridx_d; auto rbuf = S.rbuf_d;
         auto u = F.v[0]; auto v = F.v[1];
-        double mx = 0.0;
-        Kokkos::parallel_reduce("fesom_evpwide_self", Kokkos::RangePolicy<>(0, S.nrecv),
+        double mx0 = 0.0; const int nfl = nf;
+        Kokkos::parallel_reduce("fesom_evpwide_echo", Kokkos::RangePolicy<>(0, S.nrecv),
             KOKKOS_LAMBDA(const int i, double &acc) {
-                if (!flag(i)) return;
                 const int s = ridx(i);
-                double d = Kokkos::fabs((double)rbuf(i*2 + 0) - (double)u(s));
-                const double d2 = Kokkos::fabs((double)rbuf(i*2 + 1) - (double)v(s));
+                double d = Kokkos::fabs((double)rbuf(i*nfl + 0) - (double)u(s));
+                const double d2 = Kokkos::fabs((double)rbuf(i*nfl + 1) - (double)v(s));
                 if (d2 > d) d = d2;
                 if (d > acc) acc = d;
-            }, Kokkos::Max<double>(mx));
-        double gmx = 0.0;
-        MPI_Reduce(&mx, &gmx, 1, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+            }, Kokkos::Max<double>(mx0));
+        double gmx0 = 0.0;
+        MPI_Reduce(&mx0, &gmx0, 1, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
         if (p->mype == 0) {
-            printf("[evpwide-self] exch %ld  max|refresh-local| (rings<=K-1) = %.3e\n",
-                   g_w.exch_count, gmx);
+            printf("[evpwide-self] step-ship uv echo = %.3e (MUST be 0.000e+00)\n", gmx0);
             fflush(stdout);
         }
     }
     ++g_w.exch_count;
 
-    {   /* unpack into ghost slots */
+    {   /* unpack into ghost slots (fields >= 2 of the dbg nf==4 mode are compare-only) */
         auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; const PackViews FF = F; const int nfl = nf;
+        const int nun = (nf == 6) ? 2 : nf;      /* dbg fields are compare-only */
         if (S.nrecv > 0)
             Kokkos::parallel_for("fesom_evpwide_unpack", Kokkos::RangePolicy<>(0, S.nrecv),
                 KOKKOS_LAMBDA(const int i) {
                     const int s = ridx(i);
-                    for (int f = 0; f < nfl; ++f) FF.v[f](s) = rbuf(i*nfl + f);
+                    for (int f = 0; f < nun; ++f) FF.v[f](s) = rbuf(i*nfl + f);
                 });
+    }
+    if (sig && S.nerecv > 0) {   /* re-baseline ghost sigma to owner bytes */
+        auto eridx = S.eridx_d; auto erbuf = S.erbuf_d;
+        auto s11g = S.dev.s11_g; auto s12g = S.dev.s12_g; auto s22g = S.dev.s22_g;
+        Kokkos::parallel_for("fesom_evpwide_unpacksig", Kokkos::RangePolicy<>(0, S.nerecv),
+            KOKKOS_LAMBDA(const int i) {
+                const int eg = eridx(i);
+                s11g(eg) = erbuf(i*3 + 0);
+                s12g(eg) = erbuf(i*3 + 1);
+                s22g(eg) = erbuf(i*3 + 2);
+            });
     }
     /* no post-unpack fence: consumers are same-stream kernels; the pre-MPI fence of the NEXT
      * exchange drains this unpack before rbuf is re-posted (the cgpipe/NOFENCE2 audit). */
@@ -805,14 +1140,16 @@ void fesom_evpwide_prestep_exchange(struct fesom_ice *ice, struct fesom_partit *
 { evpw_exchange(ice, p, 11); }
 
 void fesom_evpwide_subcycle_exchange(struct fesom_ice *ice, struct fesom_partit *p)
-{ evpw_exchange(ice, p, 2); }
+{ evpw_exchange(ice, p, g_w.selfcheck >= 2 ? 6 : 2); }
 
 void fesom_evpwide_free(void)
 {
     EvpwState &S = g_w;
     S.dev = FesomEvpwideDev();
     S.sidx_d = Kokkos::View<int*>();  S.ridx_d = Kokkos::View<int*>();
+    S.esidx_d = Kokkos::View<int*>(); S.eridx_d = Kokkos::View<int*>();
     S.selff_d = Kokkos::View<char*>();
     S.sbuf_d = Kokkos::View<real_t*>(); S.rbuf_d = Kokkos::View<real_t*>();
+    S.esbuf_d = Kokkos::View<real_t*>(); S.erbuf_d = Kokkos::View<real_t*>();
     S.built = false;
 }

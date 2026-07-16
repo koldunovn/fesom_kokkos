@@ -1,5 +1,27 @@
 # E.EVP0/E.EVP1 — wide-halo EVP (`FESOM_SPEED_EVPWIDE=K`) audit + design + pre-registration
 
+> **⚠️ POST-IMPLEMENTATION CORRECTIONS (session 12, same day — the CORE2 gates falsified two
+> parts of §0/§2 as first written; the code implements the corrected design):**
+> 1. **Velocity-only refresh can NOT be byte-exact for ANY finite R.** The §2 induction below
+>    mis-granted cross-window cleanliness: carried ghost sigma is never re-baselined, elements
+>    maxring>R−K+1 need ring inputs that themselves need deeper clean elements — the recursion
+>    has no fixed point (observed: ~1e-5/window u_rhs drift reaching owned from window 2).
+>    **Fix: refresh ghost SIGMA (σ11/σ12/σ22, owner = first-vertex owner) in every wide
+>    exchange ⇒ the induction closes at R = K** (fewer rings than the 2K−1 below; the sigma
+>    segment rides the same Waitall as a 2nd message/partner, tag 2205).
+> 2. **`orient_cw` runs AFTER `scatter_mesh`** (fesom_mesh.cpp:1329): the scatter-time stash
+>    holds the PRE-orientation global vertex order ⇒ the build must REPLAY the orientation
+>    swap on ghost elements before geometry/kk mapping (done; ~half the ghost elements swap).
+> 3. **Residual: per-node summation-ORDER dust.** With 1+2 fixed, ghost sigma replays the
+>    owner's BIT-EXACTLY, and refresh-vs-local drift collapses to ONE node per window at ONE
+>    ULP (permutation probe: the owner's finalized u_rhs equals a different ORDER of my
+>    byte-identical contributions). K≥2 is therefore **rounding-class ("climate-close"), not
+>    byte-provable** — which is exactly the class the session-11 PROMPT scoped for this lever.
+>    Knob-OFF and K=1 (null rung) remain FORCE_SERIAL byte-proven (gates 26302361/63 PASS).
+>    Certification: CUDA fidelity + options ×3 + drift diagnostics + the user's 1-yr climate
+>    leg before promotion (rule 0.24). The selfcheck is a drift DIAGNOSTIC (expected nonzero);
+>    the pre-step uv echo check MUST print exactly 0.
+
 *Session 12 (Fable, 2026-07-16). The E.EVP0 deliverable per the session-12 PROMPT §2.2: the EVP
 data-flow table, the K-ring state contract, machinery inventory, implementation plan, gate
 ladder, and the pre-registration for E.EVP1. Sources read: `fesom_ice_evp.cpp` (whole file),

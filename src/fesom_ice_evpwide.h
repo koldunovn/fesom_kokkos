@@ -35,6 +35,7 @@ struct fesom_ice;
 struct FesomEvpwideDev {
     int K = 0;                     /* exchange period (subcycles) */
     int R = 0;                     /* ring depth = 2K-1 */
+    int dbg = 0;                   /* FESOM_EVPWIDE_SELFCHECK=2: ship+compare owner u_rhs/v_rhs */
     int next = 0;                  /* extended node slots appended at [N, N+next) */
     int Eg = 0;                    /* ghost elements (unified elem idx = E + eg) */
     int nUpd = 0;                  /* ghost-updatable node slots (rings 1..R-1) */

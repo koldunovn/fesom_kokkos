@@ -897,6 +897,9 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
                     ur = ur*inv_am(n) + rhs_a(n);
                     vr = vr*inv_am(n) + rhs_m(n);
                 } else { ur = 0.0; vr = 0.0; }
+                /* selfcheck level 2: expose the replayed finalized rhs for the owner-vs-local
+                 * compare (halo u_rhs slots are dead in the legacy path; ext slots not sized). */
+                if (W.dbg && n < N) { u_rhs(n) = ur; v_rhs(n) = vr; }
                 if (a_ice(n) >= 0.01) {
                     const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
                     const real_t umod = Kokkos::sqrt(du*du+dv*dv);
