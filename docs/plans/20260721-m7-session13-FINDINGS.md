@@ -233,3 +233,28 @@ partitioner balanced 2D vertices and ignored column depth entirely (nlvls 5–70
 partitions for NG5 dist_16/dist_64 — OFFLINE mesh tooling, no runtime code, full ladder =
 new dist files + fidelity + anchors both scales.** Ceiling from the proxies: up to ~35 ms
 @4N / ~20-25 ms @16N of straggler time, minus whatever the 2D/halo balance gives back.
+
+## 7. CUDA gate harvest (26313390-93) — 3 PASS + the FIRST options-mEVP incident of the campaign
+
+| gate | verdict |
+|---|---|
+| CUDA fidelity (SPEED=1 + CGPOLY=3) | ✅ **PASS** (worst 9.999e-02 = the Kv-class floor) |
+| options TKE | ✅ **PASS** (worst 9.998e-02) |
+| options zstar | ✅ **PASS** — the Kv control moved off 9.537e-02 in VALUE but held the ~1e-1 MAGNITUDE, exactly as pre-registered for a solver-class lever (§3) |
+| **options mEVP** | 🔴 **FAIL: T max\|Δ\|=6.602e-02 (ceil 1e-02) at 43 of 5,962,326 entries, COHERENT** |
+
+**The mEVP failure anatomy (the full field table):** the ICE state is essentially unperturbed
+(a_ice 1.5e-04, h_ice 4.6e-04, uice 6.8e-04, m_ice 5.3e-04 — all far under their ceilings);
+eta_n = 4.9e-05 (the solver-wiggle class, matches JAX's 2.3e-05 rel); u/v at 5-8e-03 under
+ceiling; ONLY T fails, at 43 cells. 43 is neither the staleness signature (domain-wide,
+thousands — L75) nor a ULP flip (1-2). Hypothesis: near-freezing THRESHOLD FLIPS at marginal
+ice-edge cells, driven by the (by-design) non-bit-identical solver trajectory, expressed
+through mEVP's known bistability (mEVP's own uice floor is 0.954). Note this is the FIRST
+solver-class lever the options matrix has ever seen — every prior lever was byte-class.
+
+**Discriminator submitted (26313804, `jobs/job_m7_cgpoly_mevp_probe`), reading
+pre-registered in the job header:** pure-Serial mEVP off/d3/d2 legs, fidelity-checker
+comparison off-vs-d3 (same ceilings/coherence). Serial reproduces the few-dozen-cell T
+pattern ⇒ deterministic physics-threshold sensitivity, lever not at fault (user decides
+acceptability + scheme note); Serial clean ⇒ real device-side problem, chase it. d2 pattern
+≠ d3 pattern ⇒ trajectory fingerprint. CUDA selfcheck 26313454 running.

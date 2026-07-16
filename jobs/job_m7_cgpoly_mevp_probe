@@ -1,0 +1,69 @@
+#!/bin/bash
+#SBATCH --job-name=m7_poly_mevp
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/polymevp.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/polymevp.%j.err
+#
+# E.CG2 mEVP-FAIL DISCRIMINATOR (gate 26313392: T 6.602e-02 @ 43 cells, ceil 1e-02, COHERENT;
+# ice fields ~1e-4 = unperturbed, eta_n 4.9e-05 = the solver-wiggle class).
+#
+# HYPOTHESIS UNDER TEST: the T cells are near-freezing THRESHOLD FLIPS driven by the
+# solver-tolerance-equivalent trajectory (CGPOLY is not byte-identical BY DESIGN), expressed
+# through mEVP's known ice-edge bistability (its own uice floor is 0.954). NOT device staleness.
+#
+# DISCRIMINATOR: pure-Serial legs (no CUDA anywhere) —
+#     off = mEVP alone | d3 = mEVP + FORCE_SERIAL + CGPOLY=3 | d2 = same, degree 2
+# then gpu_fidelity_check.py (SAME ceilings/coherence as the failing gate) on off-vs-d3 and
+# off-vs-d2.
+#
+# PRE-REGISTERED READING:
+#   - Serial off-vs-d3 shows T over-ceiling at a few-dozen-cell count (~43-class, ~5e-2): the
+#     CUDA FAIL is DETERMINISTIC PHYSICS-THRESHOLD sensitivity to the solver class ⇒ lever not
+#     at fault; options-mEVP needs a scheme-specific note (user decides acceptability).
+#   - Serial off-vs-d3 CLEAN on T: the CUDA leg has a real device-side problem ⇒ chase it.
+#   - d2 pattern differs from d3 ⇒ trajectory fingerprint (confirms sensitivity, not a bug).
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+FESOM=${BIN:-/work/ab0995/a270088/port2/m7/bin/cgpoly0/fesom_port_serial}
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+
+OUTB=/work/ab0995/a270088/port2/m7/polymevp_${M7_TAG:-$SLURM_JOB_ID}
+rm -rf "$OUTB"; mkdir -p "$OUTB"
+md5sum "$FESOM" | tee "$OUTB/BIN.md5"
+
+run_leg () {
+    local leg=$1; shift
+    local out="$OUTB/$leg"; mkdir -p "$out"
+    echo "--- leg $leg: $* ---"
+    ( for kv in "$@"; do export "$kv"; done
+      srun -l "$FESOM" "$MESH" "$out" 1800 20 10 "$PHC" 1958 \
+           > "$out/run.log" 2> "$out/run.err" )
+    echo "leg $leg rc=$?"
+}
+
+run_leg off FESOM_WHICH_EVP=1
+run_leg d3  FESOM_WHICH_EVP=1 FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_CGPOLY=3
+run_leg d2  FESOM_WHICH_EVP=1 FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_CGPOLY=2
+
+echo; echo "=== Serial off vs d3 (the discriminator) ==="
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$OUTB/off" "$OUTB/d3"
+echo "off-vs-d3 rc=$?"
+echo; echo "=== Serial off vs d2 (trajectory fingerprint) ==="
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$OUTB/off" "$OUTB/d2"
+echo "off-vs-d2 rc=$?"
+echo; echo "(rc semantics: this probe READS the T row + outlier counts; rc itself is not the verdict)"

@@ -1205,9 +1205,10 @@ class). Binaries `m7/bin/cgpoly0/`: CUDA **`ee2c4fdd`** / Serial `87392308`.
 | knob-OFF byte (CORE2 np8 Serial) | 26313389/off | ✅ **diff_snap rc=0** |
 | ring-replay selfcheck d2+d3 (FORCE_SERIAL np8) | 26313389 | ✅ **1939 applies, ALL 0.000e+00 — BITWISE** |
 | **E.3 kill-fast verify** (CORE2 dt1800 settled iters) | 26313389 | ✅ **off 128.8 → d2 51.6 (2.50×) → d3 40.1 (3.21×)** — JAX prior 127→55/42 CONFIRMED; λ=[0.0606,1.8165] ≈ JAX [0.0601,1.803] |
-| CUDA fidelity (SPEED=1+CGPOLY=3) | 26313390 | ⏳ |
-| options TKE / mEVP / zstar (CGPOLY=3) | 26313391/92/93 | ⏳ (zstar Kv pre-registered: ~9.5e-02 magnitude, NOT bit-equal — solver class) |
-| CUDA selfcheck leg | 26313454 | ⏳ |
+| CUDA fidelity (SPEED=1+CGPOLY=3) | 26313390 | ✅ PASS (worst 9.999e-02 = Kv floor) |
+| options TKE / zstar (CGPOLY=3) | 26313391/93 | ✅ PASS ×2 (zstar Kv moved off 9.537e-02 in value, held ~1e-1 magnitude — as pre-registered for solver class) |
+| **options mEVP (CGPOLY=3)** | 26313392 | 🔴 **FAIL — T 6.602e-02 @ 43/5.96M cells COHERENT; ice fields ~1e-4 (unperturbed), eta_n 4.9e-05 = solver-wiggle class ⇒ suspected near-freezing threshold flips under mEVP bistability (first-ever solver-class lever in the matrix). Discriminator probe 26313804 (Serial off/d3/d2) — verdict pending** |
+| CUDA selfcheck leg | 26313454 | ⏳ running |
 | **A/B 16N (off/d1/d2/d3, std300)** | 26313501 | ⏳ pre-reg central −8..10 % (0.2413 → 0.217-0.222) |
 | **A/B 4N (off/d1/d2/d3, std300)** | 26313502 | ⏳ pre-reg central −1.5..2.5 % (0.6382 → 0.622-0.629) |
 
