@@ -211,3 +211,25 @@ Serial AND CUDA).
 **Both far past the ≥1.8× bar ⇒ the A/Bs are earned.** The measured ratios sharpen the §3
 pre-reg (unchanged centrals): NG5 72 iters → ~29 (d2) / ~22.5 (d3); refined event model
 d3 ≈ −24 ms @16N (−9.8 %), ≈ −12 ms @4N (−1.9 %).
+
+## 6. Imbalance recon layer 1 (cheap track, prompt §2.3) — STATIC PROXIES, measured
+
+While the CUDA gates queued. NG5 partition statistics (`rpart.out` + `nlvls.out` +
+`nod2d.out`, /pool production mesh):
+
+| proxy | dist_16 (4N) | dist_64 (16N) | verdict |
+|---|---|---|---|
+| 2D verts/rank spread | 0.50 % (worst +0.26 %) | 0.96 % (worst +0.54 %) | **balanced — RULED OUT** (CG rows with it) |
+| **3D nodes/rank (Σ nlvls)** | **spread 22.2 %, worst +7.5 %** | **spread 51.1 %, worst +15.9 %** | **THE SMOKING GUN** |
+| polar (\|lat\|>50°) fraction/rank (ice-work proxy) | 0–83.5 % | 0–89.5 % (6/64 ranks >80 %, 10/64 <5 %) | the ice-phase skew source |
+
+Cross-check vs the measured pool (36.1 @4N / 53.0 ms @16N, session-11 E.split): at 4N,
+compute ≈ 550 ms × 7.5 % ≈ +41 ms — **column-depth skew alone explains the whole 4N
+imbalance pool**; at 16N ≈ 120 ms × 15.9 % ≈ +19 ms of the 53, the rest consistent with the
+ice concentration (a >80 %-polar rank does ~2.4× the mean ice work) + comm skew. The
+partitioner balanced 2D vertices and ignored column depth entirely (nlvls 5–70).
+
+**⇒ lever candidate E.PART (next session): nlvls-weighted (+ optionally ice-mask-weighted)
+partitions for NG5 dist_16/dist_64 — OFFLINE mesh tooling, no runtime code, full ladder =
+new dist files + fidelity + anchors both scales.** Ceiling from the proxies: up to ~35 ms
+@4N / ~20-25 ms @16N of straggler time, minus whatever the 2D/halo balance gives back.

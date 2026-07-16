@@ -1186,6 +1186,31 @@ options), not merely climate-close.** Stays OPT-IN (rule 0.24): a 1-yr climate l
 the user's promotion bar. Debug arsenal: `FESOM_EVPWIDE_SELFCHECK=1/2/3`, `FESOM_EVPWIDE_RINGS`;
 the pre-step uv echo MUST print exactly 0.000e+00.
 
+## E.CG2 — `FESOM_SPEED_CGPOLY=<d>` Chebyshev polynomial PCG (OPT-IN; session 13)
+
+The session-13 main lever (user 2026-07-16; the JAX port's CGPOLY results imported as priors —
+port_jax `00f6e3c`: iters 127→55/42 at d=2/3, A/Bs −20.7 %/−9.6 %/−3.6 %). Design + pre-reg:
+`docs/plans/20260721-m7-session13-FINDINGS.md` §2-3. Mechanism: the MITgcm M⁻¹ is replaced by
+`p_d(D̃⁻¹Ã)·D̃⁻¹` — d Chebyshev semi-iterations, ZERO dot products — on an **R=(d+1)-ring
+single-exchange PCG** (the cgpipe graph generalized round-by-round; frozen-Ã ship-once, so
+zstar-safe by the pr_values freeze precedent; λmax by distributed fixed-seed power iteration,
+κ=30 default via `FESOM_CGPOLY_KAPPA`). Per iteration: 1 fused R-ring exchange + 2 Allreduce
+calls (unchanged) — the lever cuts the ITERATION COUNT itself, the pool CGPIPE cannot touch.
+Fidelity class: **knob-OFF byte-identical; ON = solver-tolerance-equivalent** (same
+unpreconditioned tolerance, different Krylov trajectory — expect NOT bit-identical, the JAX
+class). Binaries `m7/bin/cgpoly0/`: CUDA **`ee2c4fdd`** / Serial `87392308`.
+
+| gate | job | verdict |
+|---|---|---|
+| knob-OFF byte (CORE2 np8 Serial) | 26313389/off | ✅ **diff_snap rc=0** |
+| ring-replay selfcheck d2+d3 (FORCE_SERIAL np8) | 26313389 | ✅ **1939 applies, ALL 0.000e+00 — BITWISE** |
+| **E.3 kill-fast verify** (CORE2 dt1800 settled iters) | 26313389 | ✅ **off 128.8 → d2 51.6 (2.50×) → d3 40.1 (3.21×)** — JAX prior 127→55/42 CONFIRMED; λ=[0.0606,1.8165] ≈ JAX [0.0601,1.803] |
+| CUDA fidelity (SPEED=1+CGPOLY=3) | 26313390 | ⏳ |
+| options TKE / mEVP / zstar (CGPOLY=3) | 26313391/92/93 | ⏳ (zstar Kv pre-registered: ~9.5e-02 magnitude, NOT bit-equal — solver class) |
+| CUDA selfcheck leg | 26313454 | ⏳ |
+| **A/B 16N (off/d1/d2/d3, std300)** | 26313501 | ⏳ pre-reg central −8..10 % (0.2413 → 0.217-0.222) |
+| **A/B 4N (off/d1/d2/d3, std300)** | 26313502 | ⏳ pre-reg central −1.5..2.5 % (0.6382 → 0.622-0.629) |
+
 ### E.EVP1 A/B HARVEST (26306420 4N · 26306419 16N; std300, min-of-2, same-alloc, evpw0 v3)
 
 | leg | 4N s/step | Δ4N | 16N s/step | Δ16N |
