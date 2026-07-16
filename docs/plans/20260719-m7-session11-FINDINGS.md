@@ -269,3 +269,16 @@ same-alloc, 300 steps, min of 2):**
   (`pp` before the fused SpMV·dot, `rr` after the axpy, because the Jacobi-ish preconditioner
   SpMV gathers rr at halo columns).
 - jra55 8-field fieldN fires EVERY step (measured 1.00 blk/st), not at the 3-h forcing cadence.
+
+## 8. USER DECISIONS (2026-07-16, mid-session)
+
+- **8× IS the target** (user: "the 8x is still a target, yes") — rule 0.17 resolved. With
+  CGPIPE counted, 8× at 4N = another −10.3 % (0.6381 → 0.5723); the measured shopping list:
+  EVP subcycle 25.3 ms → E.EVP1 wide-halo (approved option 2, next lever) · E.1 fuses ~7-8 ms ·
+  CG residual ~18 ms (E.4 transport, comm share proven 58 %) · rank-imbalance pool 36.1 ms
+  (partition lever). At 16N the same levers act on larger shares (EVP 31.6, imbalance 53.0).
+- **CGPIPE adoption into `FESOM_SPEED=1`**: explained to the user (one-line promotion `_exp`→
+  master-riding + re-certification + same-day anchors ⇒ official ratio becomes ~7.18×);
+  RECOMMENDED because the lever is byte-identical (the "default-safer" opt-in rationale
+  protects against changed results, and CGPIPE provably changes none). AWAITING the user's
+  word; until then every official number keeps the non-CGPIPE config.
