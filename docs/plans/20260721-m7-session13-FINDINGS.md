@@ -258,3 +258,29 @@ comparison off-vs-d3 (same ceilings/coherence). Serial reproduces the few-dozen-
 pattern ⇒ deterministic physics-threshold sensitivity, lever not at fault (user decides
 acceptability + scheme note); Serial clean ⇒ real device-side problem, chase it. d2 pattern
 ≠ d3 pattern ⇒ trajectory fingerprint. CUDA selfcheck 26313454 running.
+
+## 8. ⭐ The mEVP verdict (probe 26313804 harvest) — LEVER EXONERATED; a per-scheme
+## threshold-flip floor, deterministic and non-accumulating
+
+- **Serial off-vs-d3 reproduces the CUDA gate failure EXACTLY: T max\|Δ\| = 6.602e-02 at
+  exactly 43 of 5,962,326 entries** — same max to 4 significant digits, same count, with NO
+  CUDA anywhere. The T deltas are 100 % the solver trajectory; the CUDA backend adds nothing
+  visible at these cells.
+- **d2 fingerprint: 20 cells, max 4.744e-02** (+2 v entries) — a different degree gives a
+  different flip set, as a trajectory effect must.
+- **Geography (snap_000020): 40/43 cells poleward of ±50°** — Nares/NW-Greenland 78.1°N,
+  Weddell −71°, N-of-Svalbard 81.4°N = the classic bistable ice-edge cells; 3 equatorial
+  W-Pacific cells barely over ceiling (0.011-0.012, separate benign branch flip).
+- **Non-accumulating: max\|ΔT\| SHRINKS 4.18e-01 (step 10) → 6.60e-02 (step 20)** — flipped
+  cells re-cohere; the ice state stays unperturbed (~1e-4) throughout.
+- **CUDA selfcheck 26313454: PASS + 856/856 selfcheck lines = 0.000e+00, zero nonzero** —
+  the ring replay is BITWISE on the device too (CGPIPE-parity complete: Serial AND CUDA).
+
+**Reading:** the options-mEVP "FAIL" is the L79 family — mEVP has its own floor, and under
+the campaign's FIRST solver-class lever that floor includes a few dozen deterministic
+near-freezing branch flips at few-e-2 in T over a 20-step gate. Every prior lever was
+byte-class, so the matrix had never seen this. The machinery is fully certified (byte-off
+rc=0, selfchecks 0.000e+00 Serial+CUDA, fidelity/TKE/zstar PASS). **Certification record:
+options-mEVP = documented threshold-flip floor, formal PASS/FAIL redefinition for
+solver-class levers = the USER's call at review (with the A/B numbers; the 1-yr climate leg
+remains the real arbiter for any promotion, per standing policy).**

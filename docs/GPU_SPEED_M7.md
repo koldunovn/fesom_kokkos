@@ -1207,8 +1207,8 @@ class). Binaries `m7/bin/cgpoly0/`: CUDA **`ee2c4fdd`** / Serial `87392308`.
 | **E.3 kill-fast verify** (CORE2 dt1800 settled iters) | 26313389 | ✅ **off 128.8 → d2 51.6 (2.50×) → d3 40.1 (3.21×)** — JAX prior 127→55/42 CONFIRMED; λ=[0.0606,1.8165] ≈ JAX [0.0601,1.803] |
 | CUDA fidelity (SPEED=1+CGPOLY=3) | 26313390 | ✅ PASS (worst 9.999e-02 = Kv floor) |
 | options TKE / zstar (CGPOLY=3) | 26313391/93 | ✅ PASS ×2 (zstar Kv moved off 9.537e-02 in value, held ~1e-1 magnitude — as pre-registered for solver class) |
-| **options mEVP (CGPOLY=3)** | 26313392 | 🔴 **FAIL — T 6.602e-02 @ 43/5.96M cells COHERENT; ice fields ~1e-4 (unperturbed), eta_n 4.9e-05 = solver-wiggle class ⇒ suspected near-freezing threshold flips under mEVP bistability (first-ever solver-class lever in the matrix). Discriminator probe 26313804 (Serial off/d3/d2) — verdict pending** |
-| CUDA selfcheck leg | 26313454 | ⏳ running |
+| **options mEVP (CGPOLY=3)** | 26313392 | ⚠️ **formal FAIL, LEVER EXONERATED by probe 26313804: pure-Serial off-vs-d3 reproduces T 6.602e-02 @ EXACTLY 43 cells (no CUDA anywhere) — deterministic near-freezing branch flips at ice-edge cells (40/43 poleward of ±50°: Nares, Weddell, N-Svalbard), NON-accumulating (max shrinks 0.42→0.066 step 10→20), fingerprint changes with degree (d2: 20 cells). mEVP's per-scheme floor (L79 family) meeting the campaign's FIRST solver-class lever; PASS-criterion redefinition = user's call at review** |
+| CUDA selfcheck leg | 26313454 | ✅ PASS + **856/856 selfcheck = 0.000e+00 on CUDA** (CGPIPE parity: bitwise ring replay Serial AND CUDA) |
 | **A/B 16N (off/d1/d2/d3, std300)** | 26313501 | ⏳ pre-reg central −8..10 % (0.2413 → 0.217-0.222) |
 | **A/B 4N (off/d1/d2/d3, std300)** | 26313502 | ⏳ pre-reg central −1.5..2.5 % (0.6382 → 0.622-0.629) |
 
