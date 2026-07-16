@@ -1454,6 +1454,7 @@ skip_rest_state:
     fesom_evpwide_free();       // M7 E.EVP1: same — release the wide-halo EVP Views
     fesom_ice_maevp_free();     // M6.2: same — release the mEVP coastal-node mask View
     fesom_ssh_cgpipe_free();    // M7 E.CG1: same — CGPIPE comm lists/buffers/shipped CSR
+    fesom_ssh_cgpoly_free();    // M7 E.CG2: same — CGPOLY R-ring lists/frozen-Ã/cheb scratch
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;

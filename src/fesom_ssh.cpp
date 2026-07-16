@@ -1023,6 +1023,800 @@ void cgpipe_selfcheck_pp(fesom_solverinfo *si, fesom_partit *p, int iter)
                 iter, gmax, gmax == 0.0 ? "" : "  <-- MUST BE 0: BYTE-IDENTITY BROKEN");
 }
 
+/* ======================================================================= *
+ * M7 E.CG2 — FESOM_SPEED_CGPOLY=<d>: degree-d Chebyshev polynomial
+ * preconditioner on an R=(d+1)-ring single-exchange PCG (opt-in value knob;
+ * pre-registration: docs/plans/20260721-m7-session13-FINDINGS.md §3).
+ *
+ * WHY: post-CGPIPE the CG still pays ~72 iterations/step (1 fused exchange +
+ * 2 Allreduces each = 74+146 sync events, 18/24 ms halo + Allreduce pool at
+ * 4N/16N). CGPOLY attacks the ITERATION COUNT itself: the MITgcm M⁻¹ is
+ * replaced by M⁻¹ = p_d(D̃⁻¹Ã)·D̃⁻¹ — d Chebyshev semi-iterations (Saad
+ * Alg. 12.1), NO dot products — and the JAX port measured iters 127→55→42
+ * at d=2/3 (2.31×/3.02×) with this exact recurrence at equal
+ * unpreconditioned tolerance (port_jax 00f6e3c, its Task-E.3 clone).
+ *
+ * FROZEN OPERATOR (the ship-once property): Ã = the stiffness SNAPSHOT taken
+ * at build (device-authoritative deep_copy), D̃ = diag(Ã). Under linfs Ã ≡ A
+ * forever; under zstar A drifts from Ã exactly as it already drifts from the
+ * frozen pr_values — the SAME Fortran precedent (oce_ale.F90:3306 lfirst),
+ * so NOTHING is ever refreshed: ring rows/diagonals ship ONCE. The owned-row
+ * cheb SpMVs also read Ã (a mixed live/frozen M would be non-symmetric).
+ * The actual solve operator A·pp stays live at owned rows, untouched.
+ *
+ * RING THEOREM (the CGPIPE composition): producing zz on owned+ring1 (which
+ * keeps the pp recurrence alive and exch(pp) deleted) with d inner SpMVs
+ * needs rr on R = d+1 rings, Ã rows on rings 1..d, and D̃⁻¹ on all d+1
+ * rings; each semi-iteration's row extent shrinks by one ring (the EVPWIDE
+ * frontier argument applied to CG). d=1 degenerates to exactly the CGPIPE
+ * 2-ring graph. Discovery generalizes cgpipe round-by-round: every shipped
+ * CSR row's colind (gid, owner) pairs reveal the NEXT ring — BFS by
+ * row-shipping, no scatter_mesh hook needed. All ring data is shipped owner
+ * bytes VERBATIM in the owner's row order (rule 0.28: recompute nothing).
+ *
+ * BYTE CLASS: knob OFF = byte-identical (this code never runs). Knob ON is
+ * NOT byte-identical to the baseline — a different Krylov trajectory
+ * converging under the SAME unpreconditioned tolerance (the JAX class,
+ * iterates agree ~1e-5 rel). The FORCE_SERIAL structural gate is the
+ * SELFCHECK: the ring-extent apply must equal a reference apply that
+ * re-exchanges between semi-iterations, BITWISE (same kernel instantiation
+ * both paths + shipped owner bytes ⇒ max|Δ| MUST print 0.000e+00).
+ *
+ * Rule 0.27 byte-growth: the R-ring fused message grows ~×2 over CGPIPE's
+ * 2-ring while the event count drops ~×3 (the opposite exposure of the
+ * EVPWIDE wrong-high). The build prints worst-partner bytes; the
+ * pre-registered watch: if d2/d3 regress while d1 pays, suspect eager→rndv
+ * and run the UCX_RNDV_THRESH env-leg rescue.
+ * ======================================================================= */
+
+using RDV  = Kokkos::View<double*, Kokkos::LayoutRight>;   /* == Field::dev_view_t */
+using RIV  = Kokkos::View<int*,    Kokkos::LayoutRight>;   /* == IntField::dev_view_t */
+
+struct CgPolyState {
+    bool built = false;
+    int  d = 0, R = 0;                   /* degree, rings exchanged (= d+1) */
+    int  N = 0;
+    std::vector<int> nring;              /* [R]: nring[0]=ring1(=eDim), .. nring[R-1] */
+    int  next_total = 0;                 /* N + Σ nring — the exchanged extent */
+    std::vector<int> ext;                /* [d+1]: ext[0]=next_total, ext[j]=semi-j row extent, ext[d]=N+ring1 */
+    /* fused R-ring exchange (tag 2110; pattern = cgpipe_exchange_rr) */
+    int  nsend = 0, nrecv = 0;
+    std::vector<int> partner, soff, roff;
+    RIV sidx_d, ridx_d;
+    RDV sbuf_d, rbuf_d;
+    std::vector<MPI_Request> reqs;
+    /* frozen Ã: owned rows = av0 over S's CSR; ring rows 1..d = shipped CSR
+     * (ci = LOCAL slots, entries in the OWNER's row order — byte-identity). */
+    RDV av0_d;                           /* [nnz] frozen owned values */
+    int nring_rows = 0;                  /* ring rows = Σ nring[0..d-1] */
+    RIV rp_d, ci_d;
+    RDV av_d;
+    RDV invd_d, isq_d;                   /* [next_total] 1/diag(Ã), 1/sqrt(diag) */
+    double lam_min = 0.0, lam_max = 0.0, kappa = 30.0;
+    RDV f_d, za_d, zb_d, dd_d;           /* cheb scratch [next_total] */
+    RDV rf_d, rza_d, rzb_d, rdd_d;       /* selfcheck reference scratch (lazy) */
+    long solves = 0;
+};
+CgPolyState g_cgpoly;
+
+bool cgpoly_selfcheck_on()
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("FESOM_CGPOLY_SELFCHECK"); c = (e && e[0] == '1') ? 1 : 0; }
+    return c != 0;
+}
+
+/* The per-iteration fused R-ring exchange on a raw device view (rr in the
+ * solve; the power-iteration vector and the selfcheck reference reuse it).
+ * Fence discipline = cgpipe_exchange_rr (see its banner). */
+void cgpoly_exchange(RDV v, fesom_partit *p)
+{
+    CgPolyState &s = g_cgpoly;
+    if (!p || p->npes <= 1) return;
+    fesom_halo_prof_barrier(p);
+    {
+        auto sidx = s.sidx_d; auto sbuf = s.sbuf_d;
+        if (s.nsend > 0)
+            Kokkos::parallel_for("fesom_cgpoly_pack", Kokkos::RangePolicy<>(0, s.nsend),
+                KOKKOS_LAMBDA(const int i) { sbuf(i) = v(sidx(i)); });
+    }
+    Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d */
+
+    int nreq = 0;
+    double *sp = s.sbuf_d.data();
+    double *rp = s.rbuf_d.data();
+    for (size_t q = 0; q < s.partner.size(); ++q) {
+        const int rc = s.roff[q + 1] - s.roff[q];
+        if (rc > 0)
+            MPI_Irecv(rp + s.roff[q], rc, MPI_DOUBLE, s.partner[q], 2110,
+                      p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
+    }
+    for (size_t q = 0; q < s.partner.size(); ++q) {
+        const int sc = s.soff[q + 1] - s.soff[q];
+        if (sc > 0)
+            MPI_Isend(sp + s.soff[q], sc, MPI_DOUBLE, s.partner[q], 2110,
+                      p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
+    }
+    fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
+    fesom_halo_prof_waitall(nreq, s.reqs.data());
+
+    {
+        auto ridx = s.ridx_d; auto rbuf = s.rbuf_d;
+        if (s.nrecv > 0)
+            Kokkos::parallel_for("fesom_cgpoly_unpack", Kokkos::RangePolicy<>(0, s.nrecv),
+                KOKKOS_LAMBDA(const int i) { v(ridx(i)) = rbuf(i); });
+    }
+    /* no post-unpack fence — same NOFENCE2-audit parity as cgpipe. */
+}
+
+/* f = D̃⁻¹·rr ; z₀ = dd₀ = f/θ over [0, ext). ONE helper for the main apply
+ * and the selfcheck reference — same instantiation ⇒ same codegen ⇒ the
+ * bitwise-equality claim is about DATA (shipped owner bytes), not compiler
+ * whims. Division (not mul-by-inverse) for Saad/JAX faithfulness. */
+static void cgpoly_f0(RDV invd, RDV rr, RDV f, RDV z, RDV dd, double theta, int ext)
+{
+    const real_t th = (real_t)theta;
+    Kokkos::parallel_for("fesom_cgpoly_f0", Kokkos::RangePolicy<>(0, ext),
+        KOKKOS_LAMBDA(const int i) {
+            const real_t fi = invd(i) * rr(i);
+            f(i) = fi;
+            const real_t z0 = fi / th;
+            z(i) = z0; dd(i) = z0;
+        });
+}
+
+/* One Chebyshev semi-iteration over [0, ext): per row, s = (Ã·zin)(row) —
+ * owned rows read S's CSR + frozen av0, ring rows read the shipped CSR —
+ * then res = f − D̃⁻¹s ; dd = c1·dd + c2·res ; zout = zin + dd. zin/zout are
+ * double-buffered (the SpMV gathers zin cross-row while zout is written).
+ * The last semi-iteration writes zz directly (rows < N+ring1 by extent).
+ * dd is read/written only at its own row → in-place safe. Race-free gather,
+ * sequential inner sum → Serial bit-identical (the cg_spmv argument). */
+static void cgpoly_semi(IDV rowptr, IDV colind, RDV av0,
+                        RIV rp, RIV ci, RDV av,
+                        RDV invd, RDV f, RDV zin, RDV zout, RDV dd,
+                        DV zz, bool write_zz,
+                        double c1_, double c2_, int N, int ext)
+{
+    const real_t c1 = (real_t)c1_, c2 = (real_t)c2_;
+    Kokkos::parallel_for("fesom_cgpoly_semi", Kokkos::RangePolicy<>(0, ext),
+        KOKKOS_LAMBDA(const int i) {
+            real_t sacc = 0.0;
+            if (i < N) {
+                const int a = rowptr(i), e = rowptr(i + 1);
+                for (int n = a; n < e; ++n) sacc += av0(n) * zin(colind(n));
+            } else {
+                const int q = i - N;
+                const int a = rp(q), e = rp(q + 1);
+                for (int n = a; n < e; ++n) sacc += av(n) * zin(ci(n));
+            }
+            const real_t res = f(i) - invd(i) * sacc;
+            const real_t dn  = c1 * dd(i) + c2 * res;
+            const real_t zn  = zin(i) + dn;
+            dd(i) = dn;
+            if (write_zz) zz(i) = zn; else zout(i) = zn;
+        });
+}
+
+/* zz = M⁻¹·rr — the degree-d Chebyshev apply. rr must be R-ring-current
+ * (cgpoly_exchange). Output CONTRACT: zz valid on owned+ring1 (same as the
+ * cgpipe psolve+zz_ring1 pair it replaces); intermediates live on shrinking
+ * ring extents. Host recurrence scalars only — NO dot products, NO
+ * collectives (the point of the lever). */
+void cgpoly_apply(const fesom_ssh_stiff *S, DV rr, DV zz)
+{
+    CgPolyState &s = g_cgpoly;
+    const double theta  = 0.5 * (s.lam_max + s.lam_min);
+    const double delta  = 0.5 * (s.lam_max - s.lam_min);
+    const double sigma1 = theta / delta;
+    double rho = 1.0 / sigma1;
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    cgpoly_f0(s.invd_d, rr, s.f_d, s.za_d, s.dd_d, theta, s.ext[0]);
+    RDV zin = s.za_d, zout = s.zb_d;
+    for (int j = 1; j <= s.d; ++j) {
+        const double rho_new = 1.0 / (2.0 * sigma1 - rho);
+        const bool   last    = (j == s.d);
+        cgpoly_semi(rowptr, colind, s.av0_d, s.rp_d, s.ci_d, s.av_d,
+                    s.invd_d, s.f_d, zin, zout, s.dd_d, zz, last,
+                    rho_new * rho, 2.0 * rho_new / delta, s.N, s.ext[(size_t)j]);
+        rho = rho_new;
+        std::swap(zin, zout);
+    }
+}
+
+/* FESOM_CGPOLY_SELFCHECK=1 — the lever's structural byte gate. Reference
+ * path: SAME f0/semi kernels (same instantiation), but rows computed on
+ * OWNED extent only and the R-ring exchange re-run before every
+ * semi-iteration, so every ring value consumed is FRESH OWNER BYTES instead
+ * of the locally replayed ones. Claim under test: replayed ring rows ≡
+ * shipped owner computation, BITWISE, through all d semi-iterations
+ * (operands = shipped bytes; expression = same kernel; order = owner's row
+ * order) ⇒ max|zz − ref| over owned+ring1 MUST print 0.000e+00 on every
+ * backend (the exchange and the gather are deterministic — no atomics). */
+void cgpoly_selfcheck(const fesom_ssh_stiff *S, DV rr, DV zz,
+                      fesom_partit *p, int iter)
+{
+    CgPolyState &s = g_cgpoly;
+    if (s.rf_d.extent(0) == 0) {
+        s.rf_d  = RDV("cgpoly.rf",  (size_t)s.next_total);
+        s.rza_d = RDV("cgpoly.rza", (size_t)s.next_total);
+        s.rzb_d = RDV("cgpoly.rzb", (size_t)s.next_total);
+        s.rdd_d = RDV("cgpoly.rdd", (size_t)s.next_total);
+    }
+    const double theta  = 0.5 * (s.lam_max + s.lam_min);
+    const double delta  = 0.5 * (s.lam_max - s.lam_min);
+    const double sigma1 = theta / delta;
+    double rho = 1.0 / sigma1;
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    cgpoly_f0(s.invd_d, rr, s.rf_d, s.rza_d, s.rdd_d, theta, s.ext[0]);
+    RDV zin = s.rza_d, zout = s.rzb_d;
+    for (int j = 1; j <= s.d; ++j) {
+        const double rho_new = 1.0 / (2.0 * sigma1 - rho);
+        cgpoly_exchange(zin, p);              /* rings ← owner bytes, every step */
+        cgpoly_semi(rowptr, colind, s.av0_d, s.rp_d, s.ci_d, s.av_d,
+                    s.invd_d, s.rf_d, zin, zout, s.rdd_d, zz, false,
+                    rho_new * rho, 2.0 * rho_new / delta, s.N, s.N /* OWNED only */);
+        rho = rho_new;
+        std::swap(zin, zout);
+    }
+    cgpoly_exchange(zin, p);                  /* ring1 of the final ref ← owner bytes */
+
+    const int cmp = s.ext[(size_t)s.d];       /* owned + ring1 */
+    double maxd = 0.0;
+    {
+        RDV ref = zin;
+        Kokkos::parallel_reduce("fesom_cgpoly_selfcheck", Kokkos::RangePolicy<>(0, cmp),
+            KOKKOS_LAMBDA(const int i, double &l) {
+                const double dd_ = fabs((double)zz(i) - (double)ref(i));
+                if (dd_ > l) l = dd_;
+            }, Kokkos::Max<double>(maxd));
+    }
+    double gmax = maxd;
+    if (p && p->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, &gmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+    if (!p || p->mype == 0)
+        fprintf(stderr, "[cgpoly-selfcheck] iter %4d: max|apply - exchanged ref| = %.3e%s\n",
+                iter, gmax, gmax == 0.0 ? "" : "  <-- MUST BE 0: RING REPLAY BROKEN");
+}
+
+/* ---- the R-ring build: generalized cgpipe rounds -----------------------
+ * Round 1 (com-driven, the cgpipe part-A/B pattern): owners ship the FROZEN
+ * Ã CSR rows of their slist blocks; colind travels as (gid, owner) pairs.
+ * Rounds r = 2..d (want-driven): request the rows of ring-r nodes from
+ * their owners; every translate of an unknown gid registers a ring-(r+1)
+ * slot (BFS completeness: rings 1..r are fully known after round r-1, so an
+ * unknown neighbour of a ring-r node is ring r+1 exactly).
+ * Round R = d+1 (want-driven, diag only): ring-R nodes need only D̃.
+ * Then flat per-partner lists [ring1 | ring2 | ... | ringR] both sides,
+ * device pushes, the λmax power iteration, and the L80 announce. */
+void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                  const struct fesom_mesh *mesh, fesom_partit *p,
+                  int degree, double kappa)
+{
+    CgPolyState &s = g_cgpoly;
+    const int N    = mesh->myDim_nod2D;
+    const int eDim = mesh->eDim_nod2D;
+    const bool parallel = (p && p->npes > 1);
+    const int npes = parallel ? p->npes : 1;
+    MPI_Comm comm  = parallel ? p->MPI_COMM_FESOM : MPI_COMM_NULL;
+    s.d = degree; s.R = degree + 1; s.N = N; s.kappa = kappa;
+
+    /* Frozen Ã snapshot — DEVICE-authoritative (under zstar the host mirror
+     * of `values` can be stale; the device is always current). av0_h is the
+     * host copy the row shipping + invd build read. */
+    const int nnz = S->nnz;
+    s.av0_d = RDV("cgpoly.av0", (size_t)nnz);
+    Kokkos::deep_copy(s.av0_d, S->values_fld.d());
+    std::vector<double> av0_h((size_t)nnz);
+    {
+        auto m = Kokkos::create_mirror_view(s.av0_d);
+        Kokkos::deep_copy(m, s.av0_d);
+        for (int i = 0; i < nnz; ++i) av0_h[(size_t)i] = m(i);
+    }
+
+    /* slot registry: [0,N) owned | [N,N+eDim) ring1 (existing com order) |
+     * appended rings 2..R (registration order ⇒ contiguous ring blocks). */
+    std::unordered_map<int, int> g2l;
+    g2l.reserve((size_t)(N + eDim) * 2);
+    std::vector<int> slot_gid, slot_owner;                 /* slots >= N+eDim */
+    std::vector<std::vector<int>> ring_slots((size_t)s.R + 1);   /* [2..R] used */
+    std::vector<std::vector<int>> row_ci; std::vector<std::vector<double>> row_pv;
+    row_ci.resize((size_t)eDim); row_pv.resize((size_t)eDim);
+
+    const fesom_com_struct *cs = parallel ? &p->com_nod2D : NULL;
+    std::vector<int> owner_l((size_t)(N + eDim), parallel ? p->mype : 0);
+    if (parallel) {
+        for (int l = 0; l < N + eDim; ++l) g2l.emplace(p->myList_nod2D[l], l);
+        for (int k = 0; k < cs->rPEnum; ++k)
+            for (int j = cs->rptr[k] - 1; j < cs->rptr[k + 1] - 1; ++j)
+                owner_l[(size_t)(cs->rlist[j] - 1)] = cs->rPE[k];
+    }
+
+    auto reg = [&](int gid, int own, int ring) -> int {
+        auto it = g2l.find(gid);
+        if (it != g2l.end()) {
+            if (it->second >= N + eDim)
+                FESOM_CHECK(slot_owner[(size_t)(it->second - N - eDim)] == own,
+                            "cgpoly: gid %d shipped with conflicting owners %d/%d",
+                            gid, slot_owner[(size_t)(it->second - N - eDim)], own);
+            return it->second;
+        }
+        FESOM_CHECK(own != p->mype,
+                    "cgpoly: shipped gid %d claims MY ownership but is not local", gid);
+        FESOM_CHECK(ring >= 2 && ring <= s.R,
+                    "cgpoly: gid %d discovered outside the ring window (ring %d)", gid, ring);
+        const int slot = N + eDim + (int)slot_gid.size();
+        slot_gid.push_back(gid); slot_owner.push_back(own);
+        ring_slots[(size_t)ring].push_back(slot);
+        g2l.emplace(gid, slot);
+        return slot;
+    };
+
+    /* per-round send lists (owned idx, wantin order) for the flat build. */
+    std::vector<std::vector<std::vector<int>>> slist_r((size_t)s.R + 1,
+        std::vector<std::vector<int>>((size_t)npes));
+    /* per-round want gid lists per owner (my recv order per (partner,ring)). */
+    std::vector<std::vector<std::vector<int>>> want_r((size_t)s.R + 1,
+        std::vector<std::vector<int>>((size_t)npes));
+
+    std::vector<MPI_Request> rq;
+
+    if (parallel) {
+        /* ---- Round 1: com-driven Ã-row ship (cgpipe part A/B, values payload). */
+        struct Bundle { std::vector<int> ints; std::vector<double> dbls; int hdr[2]; };
+        std::vector<Bundle> sb((size_t)cs->sPEnum), rb((size_t)cs->rPEnum);
+        rq.reserve((size_t)(cs->sPEnum + cs->rPEnum) * 2);
+        for (int k = 0; k < cs->rPEnum; ++k) {
+            rq.push_back(MPI_Request());
+            MPI_Irecv(rb[(size_t)k].hdr, 2, MPI_INT, cs->rPE[k], 2121, comm, &rq.back());
+        }
+        for (int k = 0; k < cs->sPEnum; ++k) {
+            Bundle &b = sb[(size_t)k];
+            const int j0 = cs->sptr[k] - 1, j1 = cs->sptr[k + 1] - 1;
+            int nent = 0;
+            b.ints.push_back(j1 - j0);
+            for (int j = j0; j < j1; ++j) {
+                const int row = cs->slist[j] - 1;
+                b.ints.push_back(S->rowptr[row + 1] - S->rowptr[row]);
+                nent += S->rowptr[row + 1] - S->rowptr[row];
+            }
+            for (int j = j0; j < j1; ++j) {
+                const int row = cs->slist[j] - 1;
+                for (int n = S->rowptr[row]; n < S->rowptr[row + 1]; ++n) {
+                    const int col = S->colind[n];
+                    b.ints.push_back(p->myList_nod2D[col]);
+                    b.ints.push_back(owner_l[(size_t)col]);
+                    b.dbls.push_back(av0_h[(size_t)n]);          /* FROZEN Ã, row order */
+                }
+            }
+            b.hdr[0] = j1 - j0; b.hdr[1] = nent;
+            rq.push_back(MPI_Request());
+            MPI_Isend(b.hdr, 2, MPI_INT, cs->sPE[k], 2121, comm, &rq.back());
+        }
+        MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+        rq.clear();
+        for (int k = 0; k < cs->rPEnum; ++k) {
+            const int nrows_exp = (cs->rptr[k + 1] - 1) - (cs->rptr[k] - 1);
+            FESOM_CHECK(rb[(size_t)k].hdr[0] == nrows_exp,
+                        "cgpoly: provider %d shipped %d rows, expected %d",
+                        cs->rPE[k], rb[(size_t)k].hdr[0], nrows_exp);
+            rb[(size_t)k].ints.resize((size_t)1 + rb[(size_t)k].hdr[0] + 2 * (size_t)rb[(size_t)k].hdr[1]);
+            rb[(size_t)k].dbls.resize((size_t)rb[(size_t)k].hdr[1]);
+            rq.push_back(MPI_Request());
+            MPI_Irecv(rb[(size_t)k].ints.data(), (int)rb[(size_t)k].ints.size(), MPI_INT,    cs->rPE[k], 2122, comm, &rq.back());
+            rq.push_back(MPI_Request());
+            MPI_Irecv(rb[(size_t)k].dbls.data(), (int)rb[(size_t)k].dbls.size(), MPI_DOUBLE, cs->rPE[k], 2123, comm, &rq.back());
+        }
+        for (int k = 0; k < cs->sPEnum; ++k) {
+            rq.push_back(MPI_Request());
+            MPI_Isend(sb[(size_t)k].ints.data(), (int)sb[(size_t)k].ints.size(), MPI_INT,    cs->sPE[k], 2122, comm, &rq.back());
+            rq.push_back(MPI_Request());
+            MPI_Isend(sb[(size_t)k].dbls.data(), (int)sb[(size_t)k].dbls.size(), MPI_DOUBLE, cs->sPE[k], 2123, comm, &rq.back());
+        }
+        MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+        rq.clear();
+        sb.clear();
+        for (int k = 0; k < cs->rPEnum; ++k) {
+            const Bundle &b = rb[(size_t)k];
+            const int nrows = b.hdr[0];
+            size_t ip = (size_t)1 + nrows, dp = 0;
+            for (int j = 0; j < nrows; ++j) {
+                const int slot = cs->rlist[(cs->rptr[k] - 1) + j] - 1;
+                FESOM_CHECK(slot >= N && slot < N + eDim, "cgpoly: rlist slot %d outside ring1", slot);
+                const int r   = slot - N;
+                const int len = b.ints[(size_t)1 + j];
+                row_ci[(size_t)r].reserve((size_t)len); row_pv[(size_t)r].reserve((size_t)len);
+                for (int q = 0; q < len; ++q) {
+                    const int gid = b.ints[ip++];
+                    const int own = b.ints[ip++];
+                    row_ci[(size_t)r].push_back(reg(gid, own, 2));
+                    row_pv[(size_t)r].push_back(b.dbls[dp++]);
+                }
+            }
+            FESOM_CHECK(dp == b.dbls.size() && ip == b.ints.size(),
+                        "cgpoly: round-1 bundle from %d not fully consumed", cs->rPE[k]);
+        }
+        rb.clear();
+
+        /* ---- Rounds r = 2..d: want-driven Ã-row ship. */
+        for (int r = 2; r <= s.d; ++r) {
+            for (int slot : ring_slots[(size_t)r])
+                want_r[(size_t)r][(size_t)slot_owner[(size_t)(slot - N - eDim)]]
+                    .push_back(slot_gid[(size_t)(slot - N - eDim)]);
+            std::vector<int> scnt((size_t)npes, 0), rcnt((size_t)npes, 0);
+            for (int P = 0; P < npes; ++P) scnt[(size_t)P] = (int)want_r[(size_t)r][(size_t)P].size();
+            MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, comm);
+            std::vector<std::vector<int>> wantin((size_t)npes);
+            for (int Q = 0; Q < npes; ++Q) {
+                if (rcnt[(size_t)Q] > 0) {
+                    wantin[(size_t)Q].resize((size_t)rcnt[(size_t)Q]);
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(wantin[(size_t)Q].data(), rcnt[(size_t)Q], MPI_INT, Q, 2180 + r, comm, &rq.back());
+                }
+                if (scnt[(size_t)Q] > 0) {
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(want_r[(size_t)r][(size_t)Q].data(), scnt[(size_t)Q], MPI_INT, Q, 2180 + r, comm, &rq.back());
+                }
+            }
+            MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+            rq.clear();
+
+            /* replies: [len per row][(gid,owner)…] + [vals…]; header carries nent. */
+            std::vector<Bundle> rsb((size_t)npes), rrb((size_t)npes);
+            for (int Q = 0; Q < npes; ++Q) {
+                if (scnt[(size_t)Q] > 0) {                    /* I asked Q → header in */
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(rrb[(size_t)Q].hdr, 2, MPI_INT, Q, 2130 + r, comm, &rq.back());
+                }
+                if (rcnt[(size_t)Q] > 0) {                    /* Q asked me → build + header out */
+                    Bundle &b = rsb[(size_t)Q];
+                    int nent = 0;
+                    slist_r[(size_t)r][(size_t)Q].reserve(wantin[(size_t)Q].size());
+                    for (int gid : wantin[(size_t)Q]) {
+                        auto it = g2l.find(gid);
+                        FESOM_CHECK(it != g2l.end() && it->second < N,
+                                    "cgpoly: rank %d wants gid %d that is not my owned node", Q, gid);
+                        slist_r[(size_t)r][(size_t)Q].push_back(it->second);
+                        b.ints.push_back(S->rowptr[it->second + 1] - S->rowptr[it->second]);
+                        nent += S->rowptr[it->second + 1] - S->rowptr[it->second];
+                    }
+                    for (int l : slist_r[(size_t)r][(size_t)Q])
+                        for (int n = S->rowptr[l]; n < S->rowptr[l + 1]; ++n) {
+                            b.ints.push_back(p->myList_nod2D[S->colind[n]]);
+                            b.ints.push_back(owner_l[(size_t)S->colind[n]]);
+                            b.dbls.push_back(av0_h[(size_t)n]);
+                        }
+                    b.hdr[0] = (int)wantin[(size_t)Q].size(); b.hdr[1] = nent;
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(b.hdr, 2, MPI_INT, Q, 2130 + r, comm, &rq.back());
+                }
+            }
+            MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+            rq.clear();
+            for (int Q = 0; Q < npes; ++Q) {
+                if (scnt[(size_t)Q] > 0) {
+                    Bundle &b = rrb[(size_t)Q];
+                    FESOM_CHECK(b.hdr[0] == scnt[(size_t)Q],
+                                "cgpoly: round-%d reply from %d has %d rows, expected %d",
+                                r, Q, b.hdr[0], scnt[(size_t)Q]);
+                    b.ints.resize((size_t)b.hdr[0] + 2 * (size_t)b.hdr[1]);
+                    b.dbls.resize((size_t)b.hdr[1]);
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(b.ints.data(), (int)b.ints.size(), MPI_INT,    Q, 2140 + r, comm, &rq.back());
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(b.dbls.data(), (int)b.dbls.size(), MPI_DOUBLE, Q, 2150 + r, comm, &rq.back());
+                }
+                if (rcnt[(size_t)Q] > 0) {
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(rsb[(size_t)Q].ints.data(), (int)rsb[(size_t)Q].ints.size(), MPI_INT,    Q, 2140 + r, comm, &rq.back());
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(rsb[(size_t)Q].dbls.data(), (int)rsb[(size_t)Q].dbls.size(), MPI_DOUBLE, Q, 2150 + r, comm, &rq.back());
+                }
+            }
+            MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+            rq.clear();
+
+            row_ci.resize(row_ci.size() + ring_slots[(size_t)r].size());
+            row_pv.resize(row_pv.size() + ring_slots[(size_t)r].size());
+            for (int Q = 0; Q < npes; ++Q) {
+                if (scnt[(size_t)Q] == 0) continue;
+                const Bundle &b = rrb[(size_t)Q];
+                size_t ip = (size_t)b.hdr[0], dp = 0, wi = 0;
+                for (int gid : want_r[(size_t)r][(size_t)Q]) {
+                    const int slot = g2l.find(gid)->second;
+                    const int rr_  = slot - N;               /* ring-row index (rings are appended in order) */
+                    const int len  = b.ints[wi++];
+                    row_ci[(size_t)rr_].reserve((size_t)len); row_pv[(size_t)rr_].reserve((size_t)len);
+                    for (int q = 0; q < len; ++q) {
+                        const int cgid = b.ints[ip++];
+                        const int cown = b.ints[ip++];
+                        row_ci[(size_t)rr_].push_back(reg(cgid, cown, r + 1));
+                        row_pv[(size_t)rr_].push_back(b.dbls[dp++]);
+                    }
+                }
+                FESOM_CHECK(dp == b.dbls.size() && ip == b.ints.size(),
+                            "cgpoly: round-%d bundle from %d not fully consumed", r, Q);
+            }
+        }
+
+        /* ---- Round R = d+1: diag-only for the outermost ring. */
+        {
+            const int r = s.R;
+            for (int slot : ring_slots[(size_t)r])
+                want_r[(size_t)r][(size_t)slot_owner[(size_t)(slot - N - eDim)]]
+                    .push_back(slot_gid[(size_t)(slot - N - eDim)]);
+            std::vector<int> scnt((size_t)npes, 0), rcnt((size_t)npes, 0);
+            for (int P = 0; P < npes; ++P) scnt[(size_t)P] = (int)want_r[(size_t)r][(size_t)P].size();
+            MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, comm);
+            std::vector<std::vector<int>>    wantin((size_t)npes);
+            std::vector<std::vector<double>> dout((size_t)npes), din((size_t)npes);
+            for (int Q = 0; Q < npes; ++Q) {
+                if (rcnt[(size_t)Q] > 0) {
+                    wantin[(size_t)Q].resize((size_t)rcnt[(size_t)Q]);
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(wantin[(size_t)Q].data(), rcnt[(size_t)Q], MPI_INT, Q, 2180 + r, comm, &rq.back());
+                }
+                if (scnt[(size_t)Q] > 0) {
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(want_r[(size_t)r][(size_t)Q].data(), scnt[(size_t)Q], MPI_INT, Q, 2180 + r, comm, &rq.back());
+                }
+            }
+            MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+            rq.clear();
+            for (int Q = 0; Q < npes; ++Q) {
+                if (scnt[(size_t)Q] > 0) {
+                    din[(size_t)Q].resize((size_t)scnt[(size_t)Q]);
+                    rq.push_back(MPI_Request());
+                    MPI_Irecv(din[(size_t)Q].data(), scnt[(size_t)Q], MPI_DOUBLE, Q, 2160, comm, &rq.back());
+                }
+                if (rcnt[(size_t)Q] > 0) {
+                    dout[(size_t)Q].reserve(wantin[(size_t)Q].size());
+                    slist_r[(size_t)r][(size_t)Q].reserve(wantin[(size_t)Q].size());
+                    for (int gid : wantin[(size_t)Q]) {
+                        auto it = g2l.find(gid);
+                        FESOM_CHECK(it != g2l.end() && it->second < N,
+                                    "cgpoly: rank %d wants gid %d (diag) that is not my owned node", Q, gid);
+                        slist_r[(size_t)r][(size_t)Q].push_back(it->second);
+                        dout[(size_t)Q].push_back(av0_h[(size_t)S->rowptr[it->second]]);   /* diag = row's first entry */
+                    }
+                    rq.push_back(MPI_Request());
+                    MPI_Isend(dout[(size_t)Q].data(), rcnt[(size_t)Q], MPI_DOUBLE, Q, 2160, comm, &rq.back());
+                }
+            }
+            MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+            rq.clear();
+            /* ---- ring sizes + extents (din consumed for invd just below). */
+            s.nring.assign((size_t)s.R, 0);
+            s.nring[0] = eDim;
+            for (int r2 = 2; r2 <= s.R; ++r2) s.nring[(size_t)(r2 - 1)] = (int)ring_slots[(size_t)r2].size();
+            s.next_total = N; for (int q = 0; q < s.R; ++q) s.next_total += s.nring[(size_t)q];
+            s.ext.assign((size_t)s.d + 1, N);
+            s.ext[0] = s.next_total;
+            for (int j = 1; j <= s.d; ++j) {
+                int e = N;
+                for (int q = 0; q < s.R - j; ++q) e += s.nring[(size_t)q];
+                s.ext[(size_t)j] = e;
+            }
+            s.nring_rows = 0; for (int q = 0; q < s.d; ++q) s.nring_rows += s.nring[(size_t)q];
+
+            /* ---- invd/isq over [0, next_total): owned + ring rows (their shipped
+             * diag = first entry, the CSR builder puts the diagonal first) + ring-R
+             * shipped diagonals. Division of identical bytes is deterministic, so
+             * local 1/diag == the owner's 1/diag bitwise. */
+            std::vector<double> invd((size_t)s.next_total, 1.0);
+            for (int row = 0; row < N; ++row) {
+                FESOM_CHECK(av0_h[(size_t)S->rowptr[row]] > 0.0,
+                            "cgpoly: non-positive diagonal at owned row %d", row);
+                invd[(size_t)row] = 1.0 / av0_h[(size_t)S->rowptr[row]];
+            }
+            for (int rr_ = 0; rr_ < s.nring_rows; ++rr_) {
+                FESOM_CHECK(!row_pv[(size_t)rr_].empty() && row_pv[(size_t)rr_][0] > 0.0,
+                            "cgpoly: ring row %d has no positive diagonal", rr_);
+                invd[(size_t)(N + rr_)] = 1.0 / row_pv[(size_t)rr_][0];
+            }
+            {   /* ring-R diagonals arrive per owner in want order = slot order. */
+                std::vector<size_t> pos((size_t)npes, 0);
+                for (int slot : ring_slots[(size_t)s.R]) {
+                    const int own = slot_owner[(size_t)(slot - N - eDim)];
+                    const double dg = din[(size_t)own][pos[(size_t)own]++];
+                    FESOM_CHECK(dg > 0.0, "cgpoly: non-positive shipped diag for slot %d", slot);
+                    invd[(size_t)slot] = 1.0 / dg;
+                }
+            }
+            std::vector<double> isq((size_t)s.next_total);
+            for (int i = 0; i < s.next_total; ++i) isq[(size_t)i] = sqrt(invd[(size_t)i]);
+            auto push_d = [](const char *lbl, const std::vector<double> &v) {
+                RDV dv(std::string(lbl), v.size());
+                auto h = Kokkos::create_mirror_view(dv);
+                for (size_t i = 0; i < v.size(); ++i) h(i) = v[i];
+                Kokkos::deep_copy(dv, h);
+                return dv;
+            };
+            s.invd_d = push_d("cgpoly.invd", invd);
+            s.isq_d  = push_d("cgpoly.isq",  isq);
+        }
+    } else {
+        /* npes == 1: no rings, no exchange — the cheb math alone. */
+        s.nring.assign((size_t)s.R, 0);
+        s.next_total = N;
+        s.ext.assign((size_t)s.d + 1, N);
+        s.nring_rows = 0;
+        std::vector<double> invd((size_t)N), isq((size_t)N);
+        for (int row = 0; row < N; ++row) {
+            FESOM_CHECK(av0_h[(size_t)S->rowptr[row]] > 0.0,
+                        "cgpoly: non-positive diagonal at owned row %d", row);
+            invd[(size_t)row] = 1.0 / av0_h[(size_t)S->rowptr[row]];
+            isq[(size_t)row]  = sqrt(invd[(size_t)row]);
+        }
+        RDV dv("cgpoly.invd", (size_t)N), sv("cgpoly.isq", (size_t)N);
+        auto h1 = Kokkos::create_mirror_view(dv), h2 = Kokkos::create_mirror_view(sv);
+        for (int i = 0; i < N; ++i) { h1(i) = invd[(size_t)i]; h2(i) = isq[(size_t)i]; }
+        Kokkos::deep_copy(dv, h1); Kokkos::deep_copy(sv, h2);
+        s.invd_d = dv; s.isq_d = sv;
+    }
+
+    /* ---- ring CSR device push (rows for rings 1..d, LOCAL ci slots). */
+    {
+        std::vector<int> rp((size_t)s.nring_rows + 1, 0), ci;
+        std::vector<double> av;
+        for (int r = 0; r < s.nring_rows; ++r) {
+            rp[(size_t)r + 1] = rp[(size_t)r] + (int)row_ci[(size_t)r].size();
+            ci.insert(ci.end(), row_ci[(size_t)r].begin(), row_ci[(size_t)r].end());
+            av.insert(av.end(), row_pv[(size_t)r].begin(), row_pv[(size_t)r].end());
+        }
+        auto push_i = [](const char *lbl, const std::vector<int> &v) {
+            RIV d(std::string(lbl), v.size());
+            auto h = Kokkos::create_mirror_view(d);
+            for (size_t i = 0; i < v.size(); ++i) h(i) = v[i];
+            Kokkos::deep_copy(d, h);
+            return d;
+        };
+        s.rp_d = push_i("cgpoly.rp", rp);
+        s.ci_d = push_i("cgpoly.ci", ci);
+        RDV avd("cgpoly.av", av.size());
+        auto h = Kokkos::create_mirror_view(avd);
+        for (size_t i = 0; i < av.size(); ++i) h(i) = av[i];
+        Kokkos::deep_copy(avd, h);
+        s.av_d = avd;
+    }
+
+    /* ---- flat per-partner lists: [ring1 | ring2 | … | ringR] both sides. */
+    long worst_partner_bytes = 0;
+    if (parallel) {
+        std::vector<int> s1k((size_t)npes, -1), r1k((size_t)npes, -1);
+        for (int k = 0; k < cs->sPEnum; ++k) s1k[(size_t)cs->sPE[k]] = k;
+        for (int k = 0; k < cs->rPEnum; ++k) r1k[(size_t)cs->rPE[k]] = k;
+        s.partner.clear(); s.soff.assign(1, 0); s.roff.assign(1, 0);
+        std::vector<int> sidx, ridx;
+        /* per-ring recv slots grouped by owner, want order (== slot order). */
+        std::vector<std::vector<std::vector<int>>> rslot_r((size_t)s.R + 1,
+            std::vector<std::vector<int>>((size_t)npes));
+        for (int r = 2; r <= s.R; ++r)
+            for (int slot : ring_slots[(size_t)r])
+                rslot_r[(size_t)r][(size_t)slot_owner[(size_t)(slot - N - eDim)]].push_back(slot);
+        for (int P = 0; P < npes; ++P) {
+            bool has = s1k[(size_t)P] >= 0 || r1k[(size_t)P] >= 0;
+            for (int r = 2; r <= s.R && !has; ++r)
+                has = !slist_r[(size_t)r][(size_t)P].empty() || !rslot_r[(size_t)r][(size_t)P].empty();
+            if (!has) continue;
+            s.partner.push_back(P);
+            if (s1k[(size_t)P] >= 0) {
+                const int k = s1k[(size_t)P];
+                for (int j = cs->sptr[k] - 1; j < cs->sptr[k + 1] - 1; ++j)
+                    sidx.push_back(cs->slist[j] - 1);
+            }
+            for (int r = 2; r <= s.R; ++r)
+                for (int l : slist_r[(size_t)r][(size_t)P]) sidx.push_back(l);
+            if (r1k[(size_t)P] >= 0) {
+                const int k = r1k[(size_t)P];
+                for (int j = cs->rptr[k] - 1; j < cs->rptr[k + 1] - 1; ++j)
+                    ridx.push_back(cs->rlist[j] - 1);
+            }
+            for (int r = 2; r <= s.R; ++r)
+                for (int slot : rslot_r[(size_t)r][(size_t)P]) ridx.push_back(slot);
+            s.soff.push_back((int)sidx.size());
+            s.roff.push_back((int)ridx.size());
+            const long pb = 8L * ((long)(s.soff.back() - s.soff[s.soff.size() - 2])
+                                + (long)(s.roff.back() - s.roff[s.roff.size() - 2]));
+            if (pb > worst_partner_bytes) worst_partner_bytes = pb;
+        }
+        s.nsend = (int)sidx.size();
+        s.nrecv = (int)ridx.size();
+        s.reqs.assign(2 * s.partner.size(), MPI_Request());
+        auto push_i = [](const char *lbl, const std::vector<int> &v) {
+            RIV d(std::string(lbl), v.size());
+            auto h = Kokkos::create_mirror_view(d);
+            for (size_t i = 0; i < v.size(); ++i) h(i) = v[i];
+            Kokkos::deep_copy(d, h);
+            return d;
+        };
+        s.sidx_d = push_i("cgpoly.sidx", sidx);
+        s.ridx_d = push_i("cgpoly.ridx", ridx);
+        s.sbuf_d = RDV("cgpoly.sbuf", (size_t)s.nsend);
+        s.rbuf_d = RDV("cgpoly.rbuf", (size_t)s.nrecv);
+    }
+
+    /* rr gains the ring tail; every solve writes owned rr before the first
+     * exchange and rings are exchange-filled before any read (cgpipe rule). */
+    si->rr_fld.alloc("ssh.cg.rr", (size_t)s.next_total);
+    si->rr = si->rr_fld.h();
+
+    /* cheb scratch. */
+    s.f_d  = RDV("cgpoly.f",  (size_t)s.next_total);
+    s.za_d = RDV("cgpoly.za", (size_t)s.next_total);
+    s.zb_d = RDV("cgpoly.zb", (size_t)s.next_total);
+    s.dd_d = RDV("cgpoly.dd", (size_t)s.next_total);
+
+    /* ---- λmax of D̃^{-1/2}·Ã·D̃^{-1/2} by 100-iteration power iteration on
+     * the device (the JAX enable_cheb_precond clone, distributed). Start
+     * vector = splitmix64 of the 1-based GLOBAL id → decomposition-
+     * independent floats; norms Allreduce'd. λmax ×1.05 (power iteration
+     * converges from below); λmin = λmax/κ — κ tunes EFFICIENCY only, the
+     * polynomial stays SPD for any spectrum ≤ λmax. */
+    {
+        auto rrv = si->rr_fld.d();
+        auto h   = Kokkos::create_mirror_view(rrv);
+        for (int i = 0; i < s.next_total; ++i) h(i) = 0.0;
+        for (int i = 0; i < N; ++i) {
+            unsigned long long x = (unsigned long long)(parallel ? p->myList_nod2D[i] : i + 1);
+            x += 0x9e3779b97f4a7c15ULL;
+            x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+            x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+            x =  x ^ (x >> 31);
+            h(i) = (double)(x >> 11) * (1.0 / 9007199254740992.0) - 0.5;
+        }
+        Kokkos::deep_copy(rrv, h);
+        auto rowptr = S->rowptr_fld.d();
+        auto colind = S->colind_fld.d();
+        auto av0 = s.av0_d; auto isq = s.isq_d; auto w = s.za_d;
+        double lam = 1.0;
+        for (int it = 0; it < 100; ++it) {
+            cgpoly_exchange(rrv, p);
+            Kokkos::parallel_for("fesom_cgpoly_pow", Kokkos::RangePolicy<>(0, N),
+                KOKKOS_LAMBDA(const int row) {
+                    real_t sacc = 0.0;
+                    const int a = rowptr(row), e = rowptr(row + 1);
+                    for (int n = a; n < e; ++n) sacc += av0(n) * (isq(colind(n)) * rrv(colind(n)));
+                    w(row) = isq(row) * sacc;
+                });
+            real_t nn = 0.0;
+            Kokkos::parallel_reduce("fesom_cgpoly_nrm2", Kokkos::RangePolicy<>(0, N),
+                KOKKOS_LAMBDA(const int i, real_t &l) { l += w(i) * w(i); }, nn);
+            double nrm2 = (double)nn;
+            if (parallel) MPI_Allreduce(MPI_IN_PLACE, &nrm2, 1, MPI_DOUBLE, MPI_SUM, comm);
+            lam = sqrt(nrm2);
+            if (lam == 0.0) { lam = 1.0; break; }        /* degenerate — keep λ sane */
+            const real_t inv = (real_t)(1.0 / lam);
+            Kokkos::parallel_for("fesom_cgpoly_pscale", Kokkos::RangePolicy<>(0, N),
+                KOKKOS_LAMBDA(const int i) { rrv(i) = w(i) * inv; });
+        }
+        s.lam_max = lam * 1.05;
+        s.lam_min = s.lam_max / kappa;
+    }
+
+    /* ---- the L80 announce (fesom_speed_int is silent — say what runs). */
+    {
+        long loc[4] = { worst_partner_bytes, (long)s.partner.size(),
+                        (long)(s.next_total - N), (long)s.nring_rows };
+        long mx[4] = { loc[0], loc[1], loc[2], loc[3] };
+        if (parallel) MPI_Reduce(loc, mx, 4, MPI_LONG, MPI_MAX, 0, comm);
+        if (!parallel || p->mype == 0) {
+            fprintf(stderr, "[cgpoly] ACTIVE degree=%d kappa=%.4g lam=[%.6g, %.6g] rings=%d "
+                            "ring-slots(max)=%ld ring-rows(max)=%ld partners(max)=%ld "
+                            "worst-partner-KB(max)=%.1f — Chebyshev PCG, frozen-A ship-once "
+                            "(supersedes the CGPIPE path)\n",
+                    s.d, s.kappa, s.lam_min, s.lam_max, s.R,
+                    mx[2], mx[3], mx[1], (double)mx[0] / 1024.0);
+            fflush(stderr);
+        }
+    }
+    s.built = true;
+}
+
 } // namespace
 
 /* free the persistent CGPIPE Views BEFORE Kokkos::finalize() (fesom_main.cpp
@@ -1039,6 +1833,23 @@ void fesom_ssh_cgpipe_free(void)
     s.pv2_d  = Kokkos::View<double*>();
     s.reqs.clear();
     s.partner.clear(); s.soff.clear(); s.roff.clear();
+    s.built = false;
+}
+
+/* free the persistent CGPOLY Views BEFORE Kokkos::finalize() (same
+ * static-destruction hazard as CGPIPE above). */
+void fesom_ssh_cgpoly_free(void)
+{
+    CgPolyState &s = g_cgpoly;
+    s.sidx_d = RIV(); s.ridx_d = RIV();
+    s.sbuf_d = RDV(); s.rbuf_d = RDV();
+    s.av0_d  = RDV(); s.rp_d = RIV(); s.ci_d = RIV(); s.av_d = RDV();
+    s.invd_d = RDV(); s.isq_d = RDV();
+    s.f_d = RDV(); s.za_d = RDV(); s.zb_d = RDV(); s.dd_d = RDV();
+    s.rf_d = RDV(); s.rza_d = RDV(); s.rzb_d = RDV(); s.rdd_d = RDV();
+    s.reqs.clear();
+    s.partner.clear(); s.soff.clear(); s.roff.clear();
+    s.nring.clear(); s.ext.clear();
     s.built = false;
 }
 
@@ -1253,8 +2064,31 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
 #else
     const bool transport_ok = true;   /* Serial: host Views + host MPI (the FORCE_SERIAL proof) */
 #endif
-    const bool cgpipe = cgpipe_env && parallel && transport_ok;
-    if (cgpipe_env && !cgpipe) {
+    /* M7 E.CG2 — FESOM_SPEED_CGPOLY=<d> (opt-in value knob; the master never
+     * implies it; fesom_speed_int is SILENT so cgpoly_build announces, L80).
+     * When active it SUPERSEDES the CGPIPE path (its R-ring machinery is the
+     * cgpipe graph generalized; pr_values are not used at all). npes==1 is
+     * allowed (rings empty — login smokes exercise the cheb math). */
+    static int s_cgpoly = -2;
+    const int  cgpoly_d = fesom_speed_int("CGPOLY", 0, &s_cgpoly);
+    const bool cgpoly   = cgpoly_d >= 1 && transport_ok;
+    if (cgpoly_d >= 1 && !cgpoly) {
+        static bool warned_poly = false;
+        if (!warned_poly && (!partit || partit->mype == 0)) {
+            fprintf(stderr, "[cgpoly] !! FESOM_SPEED_CGPOLY requested but INACTIVE "
+                            "(FESOM_HOST_HALO=1?) — running the MITgcm preconditioner\n");
+            fflush(stderr);
+        }
+        warned_poly = true;
+    }
+    if (cgpoly) {
+        const char *v = getenv("FESOM_KK_VERIFY");
+        FESOM_CHECK(!(v && strcmp(v, "ssh") == 0),
+                    "cgpoly: FESOM_KK_VERIFY=ssh is incompatible with FESOM_SPEED_CGPOLY "
+                    "(the C twin runs the legacy solver; the iterates differ within tolerance)");
+    }
+    const bool cgpipe = cgpipe_env && parallel && transport_ok && !cgpoly;
+    if (cgpipe_env && !cgpipe && !cgpoly) {
         static bool warned = false;
         if (!warned && (!partit || partit->mype == 0)) {
             fprintf(stderr, "[cgpipe] !! FESOM_SPEED_CGPIPE requested but INACTIVE "
@@ -1262,6 +2096,15 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             fflush(stderr);
         }
         warned = true;
+    }
+    if (cgpoly && !g_cgpoly.built) {
+        static double kap = -1.0;
+        if (kap < 0.0) {
+            const char *e = getenv("FESOM_CGPOLY_KAPPA");
+            kap = e ? atof(e) : 30.0;
+            if (kap <= 1.0) kap = 30.0;                 /* λmin < λmax required */
+        }
+        cgpoly_build(S, si, mesh, partit, cgpoly_d, kap);
     }
     if (cgpipe && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
 
@@ -1314,14 +2157,21 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     cg_spmv(rowptr, colind, vals, X, rr, N);
     Kokkos::parallel_for("fesom_cg_r0", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
-    if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: ONE fused 2-ring exchange */
-    else        exch(si->rr_fld);                    /* solver.F90:424 EXCH(rr) */
+    if      (cgpoly) { cgpoly_exchange(rr, partit); si->rr_fld.modify_device(); }  /* E.CG2: R-ring */
+    else if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: ONE fused 2-ring exchange */
+    else             exch(si->rr_fld);               /* solver.F90:424 EXCH(rr) */
 
     /* z0 = M⁻¹ r0 ; pp = z0. E.CG1: zz + pp additionally at ring1 (owned rows
-     * byte-unchanged; ring1 rows from the shipped preconditioner CSR). */
-    cg_spmv(rowptr, colind, prvals, rr, zz, N);
-    if (cgpipe) cgpipe_zz_ring1(rr, zz);
-    const int Next = cgpipe ? N + mesh->eDim_nod2D : N;
+     * byte-unchanged; ring1 rows from the shipped preconditioner CSR).
+     * E.CG2: the Chebyshev apply produces zz on owned+ring1 directly. */
+    if (cgpoly) {
+        cgpoly_apply(S, rr, zz);
+        if (cgpoly_selfcheck_on()) cgpoly_selfcheck(S, rr, zz, partit, 0);
+    } else {
+        cg_spmv(rowptr, colind, prvals, rr, zz, N);
+        if (cgpipe) cgpipe_zz_ring1(rr, zz);
+    }
+    const int Next = (cgpipe || cgpoly) ? N + mesh->eDim_nod2D : N;
     Kokkos::parallel_for("fesom_cg_pp0", Kokkos::RangePolicy<>(0, Next),
         KOKKOS_LAMBDA(const int row) { pp(row) = zz(row); });
 
@@ -1336,8 +2186,8 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     double _cg_t0 = 0.0;
     if (cg_prof) { Kokkos::fence(); _cg_t0 = MPI_Wtime(); }   /* M5.2: opt-in CG-share timer (fences cost ~2-3%) */
     for (iter = 1; iter <= si->maxiter; ++iter) {
-        if (!cgpipe)                                 /* E.CG1: pp ring1 is maintained by the
-                                                      * recurrence — the exchange is DELETED */
+        if (!cgpipe && !cgpoly)                      /* E.CG1/E.CG2: pp ring1 is maintained by
+                                                      * the recurrence — the exchange is DELETED */
             exch(si->pp_fld);                        /* solver.F90:442 EXCH(pp) */
         /* M5.2: fuse SpMV (App=A·pp) with the dot (s_aux=Σ pp·App) into ONE
          * parallel_reduce — App(row) is computed and pp(row)·App(row) accumulated
@@ -1367,14 +2217,26 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                 X (row) += al * pp (row);
                 rr(row) -= al * App(row);
             });
-        if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: the iteration's ONLY exchange */
-        else        exch(si->rr_fld);                /* solver.F90:462 EXCH(rr) */
+        if      (cgpoly) { cgpoly_exchange(rr, partit); si->rr_fld.modify_device(); }  /* E.CG2 */
+        else if (cgpipe) cgpipe_exchange_rr(si->rr_fld, partit);   /* E.CG1: the iteration's ONLY exchange */
+        else             exch(si->rr_fld);           /* solver.F90:462 EXCH(rr) */
 
         /* M5.2: fuse the preconditioner SpMV (zz=M⁻¹·rr) with cg_dot2 (sp0=Σrr·zz,
          * sp1=Σrr·rr) into ONE parallel_reduce (row order → Serial bit-id), then ONE
          * 2-element MPI_Allreduce instead of two (same SUM per component, fewer
-         * blocking collectives → the per-iter sync count the GPU is latency-bound on). */
+         * blocking collectives → the per-iter sync count the GPU is latency-bound on).
+         * E.CG2: the Chebyshev apply replaces the psolve; the dots run separately
+         * (same row order, still ONE 2-element Allreduce). */
         real_t sp0 = 0.0, sp1 = 0.0;
+        if (cgpoly) {
+            cgpoly_apply(S, rr, zz);
+            if (cgpoly_selfcheck_on()) cgpoly_selfcheck(S, rr, zz, partit, iter);
+            Kokkos::parallel_reduce("fesom_cg_dot2", Kokkos::RangePolicy<>(0, N),
+                KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
+                    l0 += rr(row) * zz(row);
+                    l1 += rr(row) * rr(row);
+                }, sp0, sp1);
+        } else {
         Kokkos::parallel_reduce("fesom_cg_psolve_dot2", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
                 real_t s = 0.0;
@@ -1385,10 +2247,19 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                 l1 += rr(row) * rr(row);
             }, sp0, sp1);
         if (cgpipe) cgpipe_zz_ring1(rr, zz);         /* E.CG1: ring1 rows (dots stay owned-only) */
+        }
         if (parallel) {
             double sbuf[2] = { (double)sp0, (double)sp1 };
             MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
             sp0 = sbuf[0]; sp1 = sbuf[1];
+        }
+        if (cgpoly && sp0 < 0.0) {                   /* SPD M ⇒ rr·M⁻¹rr ≥ 0 always */
+            if (partit == NULL || partit->mype == 0) {
+                fprintf(stderr, "[cgpoly] ABORT at iter %d: rr·M⁻¹rr = %g < 0 — the Chebyshev "
+                        "preconditioner is indefinite (λmax bound broken?)\n", iter, (double)sp0);
+                fflush(stderr);
+            }
+            FESOM_DIE("cgpoly: preconditioner indefinite (rr·M⁻¹rr = %g)", (double)sp0);
         }
 
         real_t residual = sqrt(sp1 / (real_t)N_global);
@@ -1434,6 +2305,14 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
      * two are idempotent → bit-identical. X owned is device-current here; modify_device()
      * lets the driver sync_host() it before that halo. */
     dyn->d_eta_fld.modify_device();
+    if (cgpoly) {                                    /* the cert ladder's iteration-count log */
+        ++g_cgpoly.solves;
+        if ((partit == NULL || partit->mype == 0)
+            && (g_cgpoly.solves <= 3 || g_cgpoly.solves % 100 == 0)) {
+            fprintf(stderr, "[cgpoly] solve %ld: iters=%d\n", g_cgpoly.solves, iter);
+            fflush(stderr);
+        }
+    }
     si->last_iters = iter;
     #undef ALLREDUCE_SUM
     return iter;

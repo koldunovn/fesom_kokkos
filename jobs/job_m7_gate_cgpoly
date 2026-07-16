@@ -1,0 +1,101 @@
+#!/bin/bash
+#SBATCH --job-name=m7_gate_poly
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/gatepoly.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/gatepoly.%j.err
+#
+# M7 E.CG2 CGPOLY structural gate (Serial np8, CORE2 private mesh, dt=1800, 20 steps)
+# — three legs in one short job (a cheap gate must LOOK cheap to the scheduler):
+#
+#   leg off : all knobs unset            → diff_snap vs m6_baseline_serial MUST be rc=0
+#                                          (the knob-OFF byte gate) + baseline iters/step
+#   leg d2  : FORCE_SERIAL + CGPOLY=2 + SELFCHECK=1 → announce fired, selfcheck all
+#                                          0.000e+00, iters/step logged
+#   leg d3  : FORCE_SERIAL + CGPOLY=3 + SELFCHECK=1 → same
+#
+# VERDICTS printed at the end:
+#   1. knob-OFF byte gate PASS/FAIL (hard-fails the job)
+#   2. selfcheck zero PASS/FAIL (hard-fails the job)
+#   3. the E.3 kill-fast verify: settled iters(off)/iters(d2 or d3) >= 1.8x
+#      (REPORTED for the pre-reg decision; not a hard job failure)
+#
+# Usage: M7_TAG=cgpoly_gate sbatch jobs/job_m7_gate_cgpoly
+#        BIN=<serial binary> to pin a frozen build.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+
+MESH=/work/ab0995/a270088/port2/mesh/core2              # PRIVATE mesh (L73), never /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASELINE=/work/ab0995/a270088/port2/m6_baseline_serial
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+
+TAG=${M7_TAG:-cgpoly_$SLURM_JOB_ID}
+OUTB=/work/ab0995/a270088/port2/m7/gate_$TAG
+rm -rf "$OUTB"; mkdir -p "$OUTB"
+( cd "$ROOT" && git rev-parse HEAD ) > "$OUTB/SHA.txt"
+md5sum "$FESOM" | tee "$OUTB/BIN.md5"
+
+echo "=== M7 CGPOLY gate — tag=$TAG  HEAD=$(cd "$ROOT" && git rev-parse --short HEAD) ==="
+
+run_leg () {  # $1 leg name, $2.. env pairs
+    local leg=$1; shift
+    local out="$OUTB/$leg"; mkdir -p "$out"
+    echo "--- leg $leg: $* ---"
+    ( for kv in "$@"; do export "$kv"; done
+      srun -l "$FESOM" "$MESH" "$out" 1800 20 10 "$PHC" 1958 \
+           > "$out/run.log" 2> "$out/run.err" )
+    echo "leg $leg rc=$?"
+    grep -m1 "\[cgpoly\] ACTIVE" "$out/run.err" || true
+    # settled iters = mean of the last 10 steps' "done — N CG iters" prints
+    local iters
+    iters=$(grep -oE "done [^0-9]* ([0-9]+) CG iters" "$out/run.log" | grep -oE "[0-9]+ CG" | grep -oE "[0-9]+" | tail -10 | awk '{s+=$1; n++} END {if (n) printf "%.1f", s/n; else print "NA"}')
+    echo "leg $leg settled iters/step = $iters"
+    eval "ITERS_$leg=$iters"
+}
+
+run_leg off
+run_leg d2 FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_CGPOLY=2 FESOM_CGPOLY_SELFCHECK=1
+run_leg d3 FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_CGPOLY=3 FESOM_CGPOLY_SELFCHECK=1
+
+echo
+echo "=== 1. knob-OFF byte gate (diff_snap vs m6_baseline_serial) ==="
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASELINE" "$OUTB/off"
+RC_OFF=$?
+echo "diff_snap rc=$RC_OFF"
+
+echo
+echo "=== 2. selfcheck zeros (both ON legs) ==="
+BAD=$(grep -h "MUST BE 0" "$OUTB/d2/run.err" "$OUTB/d3/run.err" 2>/dev/null | wc -l)
+NCHK=$(grep -h "cgpoly-selfcheck" "$OUTB/d2/run.err" "$OUTB/d3/run.err" 2>/dev/null | wc -l)
+echo "selfcheck lines=$NCHK nonzero=$BAD"
+
+echo
+echo "=== 3. E.3 kill-fast verify (settled iters, off vs d2/d3; bar = 1.8x) ==="
+echo "iters: off=$ITERS_off  d2=$ITERS_d2  d3=$ITERS_d3"
+awk -v o="$ITERS_off" -v a="$ITERS_d2" -v b="$ITERS_d3" 'BEGIN {
+    if (o == "NA" || a == "NA" || b == "NA") { print "verify: MISSING ITERS"; exit }
+    printf "ratio d2 = %.2fx   ratio d3 = %.2fx   ", o/a, o/b;
+    if (o/a >= 1.8 || o/b >= 1.8) print "→ E.3 VERIFY PASS (>=1.8x)";
+    else                          print "→ E.3 VERIFY FAIL — kill-fast: do NOT spend the A/B";
+}'
+
+FAIL=0
+[ "$RC_OFF" -ne 0 ] && { echo "VERDICT: KNOB-OFF BYTE GATE FAIL"; FAIL=1; }
+[ "$BAD" -ne 0 ]    && { echo "VERDICT: SELFCHECK NONZERO — ring replay broken"; FAIL=1; }
+[ "$NCHK" -eq 0 ]   && { echo "VERDICT: SELFCHECK NEVER RAN — dead knob? (L80)"; FAIL=1; }
+[ "$FAIL" -eq 0 ] && echo "VERDICT: STRUCTURAL GATE PASS (byte-off + selfcheck); read the verify ratio above"
+exit $FAIL
