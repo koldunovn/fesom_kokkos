@@ -3,6 +3,7 @@
 #include "fesom_constants.h"
 #include "fesom_halo.h"
 #include "fesom_partit.h"
+#include "fesom_ice_evpwide.h"   /* M7 E.EVP1: scatter-time wide-halo discovery hook */
 
 #include <math.h>
 #include <mpi.h>
@@ -1250,6 +1251,11 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
              * code already handles -1 as "no neighbour". */
         }
     }
+
+    /* M7 E.EVP1: wide-halo EVP discovery (ring BFS, ghost elements, owner vector, coastal
+     * mask). MUST run here: it needs the GLOBAL arrays (released just below) plus the g2l
+     * maps. No-op unless FESOM_SPEED_EVPWIDE is set (and npes > 1). Collective. */
+    fesom_evpwide_mesh_hook(m, p, node_g2l, elem_g2l);
 
     free(node_g2l);
     free(elem_g2l);

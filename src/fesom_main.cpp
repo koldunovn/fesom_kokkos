@@ -13,6 +13,7 @@
 #include "fesom_ic.h"
 #include "fesom_ice.h"
 #include "fesom_ice_evp.h"   // M5.8: fesom_ice_evp_free() — release the EVP coastal mask pre-finalize
+#include "fesom_ice_evpwide.h"  // M7 E.EVP1: fesom_evpwide_free()
 #include "fesom_ice_maevp.h" // M6.2: fesom_ice_maevp_free() — same, for the mEVP mask
 #include "fesom_ice_coupling.h"
 #include "fesom_ice_fct.h"
@@ -1450,6 +1451,7 @@ skip_rest_state:
     fesom_mesh_free(&mesh);
     fesom_halo_device_free();   // device Views must not outlive Kokkos::finalize()
     fesom_ice_evp_free();       // M5.8: same — release the EVP coastal-node mask View
+    fesom_evpwide_free();       // M7 E.EVP1: same — release the wide-halo EVP Views
     fesom_ice_maevp_free();     // M6.2: same — release the mEVP coastal-node mask View
     fesom_ssh_cgpipe_free();    // M7 E.CG1: same — CGPIPE comm lists/buffers/shipped CSR
     Kokkos::finalize();

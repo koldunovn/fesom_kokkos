@@ -1,6 +1,7 @@
 #include "fesom_ice_evp.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
+#include "fesom_ice_evpwide.h"     /* M7 E.EVP1: wide-halo EVP (ghost twins live in THIS TU) */
 #include "fesom_halo_device.hpp"   // M5.8: GPU-aware-MPI on-device halo for the EVP subcycle
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -599,6 +600,49 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
     ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
     ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();
 
+    /* ---- M7 E.EVP1 (opt-in FESOM_SPEED_EVPWIDE=K): wide-halo EVP. The owned Steps 1-4 above
+     * are UNTOUCHED. One extended exchange ships the 11 per-step fields onto rings 1..R=2K-1
+     * as OWNER BYTES (uice, vice, a, m, ms, u_w, v_w, sax, say + the post-Step-4 rhs_a/rhs_m —
+     * the owner's rhs scatter is order-sensitive, so its RESULT is shipped, never recomputed),
+     * then the ghost Step-2/Step-3 replays below (pure maps of shipped bytes => byte-equal to
+     * the owner). The ghost kernel bodies live in THIS TU on purpose — same FMA contraction as
+     * the owned twins (the cgpipe byte-identity argument). Contract + the R=2K-1 proof:
+     * docs/plans/20260720-m7-evpwide-design.md §2. */
+    const int Kw = fesom_evpwide_K(ice, partit, mesh);
+    FesomEvpwideDev W;                       /* extent-0 views while the knob is off */
+    if (Kw) {
+        fesom_evpwide_prestep_exchange(ice, partit);
+        W = fesom_evpwide_dev();
+        /* ghost Step 2 — TWIN of "ice_evp_step2" per updatable ghost slot (rings 1..R-1);
+         * area(n,0) := owner-shipped W.area0x. ulevels==1 audited at build (no cavity guard).
+         * EDIT WITH ITS TWIN. */
+        Kokkos::parallel_for("ice_evp_step2_w", Kokkos::RangePolicy<>(0, W.nUpd),
+            KOKKOS_LAMBDA(const int i) {
+                const int n = W.upd_slots(i);
+                const real_t mpa = rhoice*m_ice(n) + rhosno*m_snw(n);
+                if (mpa > 1.0e-3) inv_am(n) = 1.0 / (W.area0x(n) * mpa);
+                else              inv_am(n) = 0.0;
+                if (a_ice(n) < 0.01) inv_m(n) = 0.0;
+                else {
+                    real_t m = mpa / a_ice(n);
+                    if (m < 9.0) m = 9.0;
+                    inv_m(n) = 1.0 / m;
+                }
+            });
+        /* ghost Step 3 — TWIN of the ice_strength part of "ice_evp_step3" (NO rhs scatter —
+         * ghost rhs_a/rhs_m arrived with the exchange). EDIT WITH ITS TWIN. */
+        Kokkos::parallel_for("ice_evp_step3_w", Kokkos::RangePolicy<>(0, W.Eg),
+            KOKKOS_LAMBDA(const int eg) {
+                W.istr_g(eg) = 0.0;
+                const int n0 = W.en_g(3*eg+0), n1 = W.en_g(3*eg+1), n2 = W.en_g(3*eg+2);
+                if (m_ice(n0)<=0.0||m_ice(n1)<=0.0||m_ice(n2)<=0.0
+                 || a_ice(n0)<=0.0||a_ice(n1)<=0.0||a_ice(n2)<=0.0) return;
+                const real_t msum = (m_ice(n0)+m_ice(n1)+m_ice(n2))/3.0;
+                const real_t asum = (a_ice(n0)+a_ice(n1)+a_ice(n2))/3.0;
+                W.istr_g(eg) = 0.5 * pstar * msum * Kokkos::exp(-c_pres*(1.0 - asum));
+            });
+    }
+
     /* M5.8: the coastal-node mask (built once) — captured by the on-device subcycle BC kernel. */
     auto coastal = evp_coastal_mask(partit, mesh);
 
@@ -630,7 +674,13 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
             KOKKOS_LAMBDA(const int n) { u_rhs(n)=0.0; v_rhs(n)=0.0; });
 
         /* K2: stress tensor (eps/sigma, sigma is read-modify-write across subcycles) FUSED with the
-         * rhs scatter. sigma is written to global (next subcycle + verify/IO) AND used in registers. */
+         * rhs scatter. sigma is written to global (next subcycle + verify/IO) AND used in registers.
+         * M7 E.EVP1: under EVPWIDE the ghost elements [E, E+W.Eg) are APPENDED to the same launch
+         * (Serial iterates owned 0..E-1 first, in order => every owned byte unchanged). The knob-off
+         * branch is the untouched original. The two element bodies are TWINS — the ghost one replays
+         * the arithmetic on the _g views with NO eps stores and NO scatter (ghost u_rhs is gathered
+         * in OWNER order inside K3). EDIT BOTH OR NEITHER. */
+        if (!Kw) {
         Kokkos::parallel_for("ice_evp_stress_scatter", Kokkos::RangePolicy<>(0, E),
             KOKKOS_LAMBDA(const int el) {
                 if (ulev(el) > 1)    return;     /* cavity */
@@ -667,13 +717,87 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
                     Kokkos::atomic_add(&v_rhs(n), -(a*(S12*gs(g+k) + S22*gs(g+k+3) - S11*val3*mfac)));
                 }
             });
+        } else {
+        Kokkos::parallel_for("ice_evp_stress_scatter_w", Kokkos::RangePolicy<>(0, E + W.Eg),
+            KOKKOS_LAMBDA(const int el) {
+                if (el < E) {
+                /* --- owned body: byte-twin of "ice_evp_stress_scatter" above --- */
+                if (ulev(el) > 1)    return;     /* cavity */
+                if (istr(el) <= 0.0) return;     /* ice-free */
+                const int n0 = en(3*el+0), n1 = en(3*el+1), n2 = en(3*el+2);
+                const int g = 6*el;
+                const real_t mfac = mf(el);
+                const real_t U0=u_ice(n0),U1=u_ice(n1),U2=u_ice(n2);
+                const real_t V0=v_ice(n0),V1=v_ice(n1),V2=v_ice(n2);
+                const real_t e11 = gs(g+0)*U0 + gs(g+1)*U1 + gs(g+2)*U2 - mfac*(V0+V1+V2)/3.0;
+                const real_t e22 = gs(g+3)*V0 + gs(g+4)*V1 + gs(g+5)*V2;
+                const real_t e12 = 0.5*( gs(g+3)*U0+gs(g+4)*U1+gs(g+5)*U2
+                                       + gs(g+0)*V0+gs(g+1)*V1+gs(g+2)*V2
+                                       + mfac*(U0+U1+U2)/3.0);
+                eps11(el)=e11; eps22(el)=e22; eps12(el)=e12;
+                const real_t delta = Kokkos::sqrt((e11*e11+e22*e22)*(1.0+vale)
+                                                 + 4.0*vale*e12*e12 + 2.0*e11*e22*(1.0-vale));
+                const real_t dmin = (delta > dmin_p) ? delta : dmin_p;
+                real_t zeta = istr(el)/dmin; zeta *= Tevp;
+                const real_t r1 = zeta*(e11+e22) - istr(el)*Tevp;
+                const real_t r2 = zeta*(e11-e22)*vale;
+                const real_t r3 = zeta*e12*vale;
+                const real_t si1 = det1*(s11(el)+s22(el)+rdt*r1);   /* reads OLD s11/s22 */
+                const real_t si2 = det1*(s11(el)-s22(el)+rdt*r2);
+                const real_t S12 = det1*(s12(el)+rdt*r3);           /* reads OLD s12 */
+                const real_t S11 = 0.5*(si1+si2);
+                const real_t S22 = 0.5*(si1-si2);
+                s12(el)=S12; s11(el)=S11; s22(el)=S22;              /* write NEW sigma */
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = en(3*el+k);
+                    Kokkos::atomic_add(&u_rhs(n), -(a*(S11*gs(g+k) + S12*gs(g+k+3) + S12*val3*mfac)));
+                    Kokkos::atomic_add(&v_rhs(n), -(a*(S12*gs(g+k) + S22*gs(g+k+3) - S11*val3*mfac)));
+                }
+                } else {
+                /* --- ghost twin: same rheology on the _g views; no eps stores, no scatter.
+                 * istr_g==0 marks ice-free; ulevels==1 audited at build (no cavity guard). */
+                const int eg = el - E;
+                if (W.istr_g(eg) <= 0.0) return;
+                const int n0 = W.en_g(3*eg+0), n1 = W.en_g(3*eg+1), n2 = W.en_g(3*eg+2);
+                const int g = 6*eg;
+                const real_t mfac = W.mf_g(eg);
+                const real_t U0=u_ice(n0),U1=u_ice(n1),U2=u_ice(n2);
+                const real_t V0=v_ice(n0),V1=v_ice(n1),V2=v_ice(n2);
+                const real_t e11 = W.gs_g(g+0)*U0 + W.gs_g(g+1)*U1 + W.gs_g(g+2)*U2 - mfac*(V0+V1+V2)/3.0;
+                const real_t e22 = W.gs_g(g+3)*V0 + W.gs_g(g+4)*V1 + W.gs_g(g+5)*V2;
+                const real_t e12 = 0.5*( W.gs_g(g+3)*U0+W.gs_g(g+4)*U1+W.gs_g(g+5)*U2
+                                       + W.gs_g(g+0)*V0+W.gs_g(g+1)*V1+W.gs_g(g+2)*V2
+                                       + mfac*(U0+U1+U2)/3.0);
+                const real_t delta = Kokkos::sqrt((e11*e11+e22*e22)*(1.0+vale)
+                                                 + 4.0*vale*e12*e12 + 2.0*e11*e22*(1.0-vale));
+                const real_t dmin = (delta > dmin_p) ? delta : dmin_p;
+                real_t zeta = W.istr_g(eg)/dmin; zeta *= Tevp;
+                const real_t r1 = zeta*(e11+e22) - W.istr_g(eg)*Tevp;
+                const real_t r2 = zeta*(e11-e22)*vale;
+                const real_t r3 = zeta*e12*vale;
+                const real_t si1 = det1*(W.s11_g(eg)+W.s22_g(eg)+rdt*r1);
+                const real_t si2 = det1*(W.s11_g(eg)-W.s22_g(eg)+rdt*r2);
+                const real_t S12 = det1*(W.s12_g(eg)+rdt*r3);
+                const real_t S11 = 0.5*(si1+si2);
+                const real_t S22 = 0.5*(si1-si2);
+                W.s12_g(eg)=S12; W.s11_g(eg)=S11; W.s22_g(eg)=S22;
+                }
+            });
+        }
         ice->work.eps11_fld.modify_device(); ice->work.eps12_fld.modify_device(); ice->work.eps22_fld.modify_device();
         ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device(); ice->work.sigma22_fld.modify_device();
         ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
 
         /* K3: rhs-finalise + save-old + velocity-update + coastal-BC, fused per node over ALL nodes.
          * final/velupd are OWNED-only (n<myDim); save-old/coastal are ALL — exactly matching the four
-         * original kernels' ranges. final writes u_rhs(n) which velupd(n) then reads (same node). */
+         * original kernels' ranges. final writes u_rhs(n) which velupd(n) then reads (same node).
+         * M7 E.EVP1: under EVPWIDE the launch extends over the ghost slots too. Owned nodes run the
+         * byte-twin of the original body; updatable ghost slots (rings 1..R-1) REPLAY the owner's
+         * per-node sequence — u_rhs gathered in the OWNER's element order (its Serial scatter order),
+         * finalize, velupd, owner-parity coastal — through ur/vr registers; frozen slots (ring R)
+         * keep their refreshed values. EDIT THE TWINS TOGETHER. */
+        if (!Kw) {
         Kokkos::parallel_for("ice_evp_node_update", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int n) {
                 const bool owned = (n < myDim);
@@ -704,6 +828,90 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
                 /* coastal BC (ALL): idempotent 0-write at coastal-mask nodes (M5.8). */
                 if (coastal(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
             });
+        } else {
+        Kokkos::parallel_for("ice_evp_node_update_w", Kokkos::RangePolicy<>(0, N + W.next),
+            KOKKOS_LAMBDA(const int n) {
+                if (n < myDim) {
+                    /* --- owned body: byte-twin of "ice_evp_node_update" above --- */
+                    if (ulev_n(n) <= 1) {
+                        if (inv_am(n) > 0.0) {
+                            u_rhs(n) = u_rhs(n)*inv_am(n) + rhs_a(n);
+                            v_rhs(n) = v_rhs(n)*inv_am(n) + rhs_m(n);
+                        } else { u_rhs(n)=0.0; v_rhs(n)=0.0; }
+                    }
+                    u_old(n)=u_ice(n); v_old(n)=v_ice(n);
+                    if (ulev_n(n) <= 1) {
+                        if (a_ice(n) >= 0.01) {
+                            const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
+                            const real_t umod = Kokkos::sqrt(du*du+dv*dv);
+                            const real_t drag = cd*umod*rho0*inv_m(n);
+                            const real_t rhsu = u_ice(n)+rdt*(drag*(ax*u_w(n)-ay*v_w(n))+inv_m(n)*sax(n)+u_rhs(n));
+                            const real_t rhsv = v_ice(n)+rdt*(drag*(ax*v_w(n)+ay*u_w(n))+inv_m(n)*say(n)+v_rhs(n));
+                            const real_t r_a = 1.0 + ax*drag*rdt;
+                            const real_t r_b = rdt*(cor(n)+ay*drag);
+                            const real_t det = 1.0/(r_a*r_a+r_b*r_b);
+                            u_ice(n) = det*(r_a*rhsu+r_b*rhsv);
+                            v_ice(n) = det*(r_a*rhsv-r_b*rhsu);
+                        } else { u_ice(n)=0.0; v_ice(n)=0.0; }
+                    }
+                    if (coastal(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
+                    return;
+                }
+                if (n < N) {
+                    /* dist-file halo slot: save-old exactly as the legacy body did. */
+                    u_old(n)=u_ice(n); v_old(n)=v_ice(n);
+                }
+                const int q0 = W.gath_ptr(n), q1 = W.gath_ptr(n+1);
+                if (q0 == q1) {
+                    /* frozen slot (ring R / beyond): legacy coastal zero on [myDim, N) only —
+                     * harmless (overwritten by the next refresh), keeps the K=1 null rung
+                     * byte-identical to the legacy path. */
+                    if (n < N && coastal(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
+                    return;
+                }
+                /* --- ghost replay (rings 1..R-1): OWNER-order u_rhs gather -> finalize ->
+                 * velupd -> owner-parity coastal. The contribution is computed into an explicit
+                 * temp and ADDED (never folded into the sum: an FMA there would change bytes);
+                 * the temp's expression text == the owned K2 scatter argument. --- */
+                real_t ur = 0.0, vr = 0.0;
+                for (int q = q0; q < q1; ++q) {
+                    const int ue = W.gath_elem(q); const int kk = W.gath_k(q);
+                    if (ue < E) {
+                        if (istr(ue) <= 0.0) continue;        /* same skips as the owner loop */
+                        const int g = 6*ue;
+                        const real_t mfac = mf(ue), a = ea(ue);
+                        const real_t cu = -(a*(s11(ue)*gs(g+kk) + s12(ue)*gs(g+kk+3) + s12(ue)*val3*mfac));
+                        const real_t cv = -(a*(s12(ue)*gs(g+kk) + s22(ue)*gs(g+kk+3) - s11(ue)*val3*mfac));
+                        ur += cu; vr += cv;
+                    } else {
+                        const int eg = ue - E;
+                        if (W.istr_g(eg) <= 0.0) continue;
+                        const int g = 6*eg;
+                        const real_t mfac = W.mf_g(eg), a = W.ea_g(eg);
+                        const real_t cu = -(a*(W.s11_g(eg)*W.gs_g(g+kk) + W.s12_g(eg)*W.gs_g(g+kk+3) + W.s12_g(eg)*val3*mfac));
+                        const real_t cv = -(a*(W.s12_g(eg)*W.gs_g(g+kk) + W.s22_g(eg)*W.gs_g(g+kk+3) - W.s11_g(eg)*val3*mfac));
+                        ur += cu; vr += cv;
+                    }
+                }
+                if (inv_am(n) > 0.0) {
+                    ur = ur*inv_am(n) + rhs_a(n);
+                    vr = vr*inv_am(n) + rhs_m(n);
+                } else { ur = 0.0; vr = 0.0; }
+                if (a_ice(n) >= 0.01) {
+                    const real_t du=u_ice(n)-u_w(n), dv=v_ice(n)-v_w(n);
+                    const real_t umod = Kokkos::sqrt(du*du+dv*dv);
+                    const real_t drag = cd*umod*rho0*inv_m(n);
+                    const real_t rhsu = u_ice(n)+rdt*(drag*(ax*u_w(n)-ay*v_w(n))+inv_m(n)*sax(n)+ur);
+                    const real_t rhsv = v_ice(n)+rdt*(drag*(ax*v_w(n)+ay*u_w(n))+inv_m(n)*say(n)+vr);
+                    const real_t r_a = 1.0 + ax*drag*rdt;
+                    const real_t r_b = rdt*(W.corx(n)+ay*drag);
+                    const real_t det = 1.0/(r_a*r_a+r_b*r_b);
+                    u_ice(n) = det*(r_a*rhsu+r_b*rhsv);
+                    v_ice(n) = det*(r_a*rhsv-r_b*rhsu);
+                } else { u_ice(n)=0.0; v_ice(n)=0.0; }
+                if (W.coastx(n)) { u_ice(n) = 0.0; v_ice(n) = 0.0; }
+            });
+        }
         ice->uice_rhs_fld.modify_device(); ice->vice_rhs_fld.modify_device();
         ice->uice_old_fld.modify_device(); ice->vice_old_fld.modify_device();
         ice->uice_fld.modify_device();     ice->vice_fld.modify_device();
@@ -712,8 +920,15 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
          * fesom_ice.cpp pulls them once for FCT / I/O / the next step.
          * M5.23 (L1): uice+vice are same-kind (NOD2D nc=1) and adjacent (no compute between) →
          * one FUSED message/neighbour instead of two (240→120 halo msgs/step, the #1 message-count
-         * contributor). Bit-identical: the bytes landing in each field's halo are unchanged. */
-        fesom_halo_field2(ice->uice_fld, ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+         * contributor). Bit-identical: the bytes landing in each field's halo are unchanged.
+         * M7 E.EVP1: under EVPWIDE the ring-1 exchange is replaced by the WIDE refresh — (uice,
+         * vice) on rings 1..R from their owners, every K-th subcycle only. 120 % K is enforced,
+         * so the LAST subcycle always refreshes: post-EVP ring-1 bytes match the legacy path. */
+        if (!Kw) {
+            fesom_halo_field2(ice->uice_fld, ice->vice_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+        } else if ((sub + 1) % Kw == 0) {
+            fesom_evpwide_subcycle_exchange(ice, partit);
+        }
     }
 }
 
