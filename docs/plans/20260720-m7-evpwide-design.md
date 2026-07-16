@@ -12,15 +12,20 @@
 > 2. **`orient_cw` runs AFTER `scatter_mesh`** (fesom_mesh.cpp:1329): the scatter-time stash
 >    holds the PRE-orientation global vertex order ⇒ the build must REPLAY the orientation
 >    swap on ghost elements before geometry/kk mapping (done; ~half the ghost elements swap).
-> 3. **Residual: per-node summation-ORDER dust.** With 1+2 fixed, ghost sigma replays the
->    owner's BIT-EXACTLY, and refresh-vs-local drift collapses to ONE node per window at ONE
->    ULP (permutation probe: the owner's finalized u_rhs equals a different ORDER of my
->    byte-identical contributions). K≥2 is therefore **rounding-class ("climate-close"), not
->    byte-provable** — which is exactly the class the session-11 PROMPT scoped for this lever.
->    Knob-OFF and K=1 (null rung) remain FORCE_SERIAL byte-proven (gates 26302361/63 PASS).
->    Certification: CUDA fidelity + options ×3 + drift diagnostics + the user's 1-yr climate
->    leg before promotion (rule 0.24). The selfcheck is a drift DIAGNOSTIC (expected nonzero);
->    the pre-step uv echo check MUST print exactly 0.
+> 3. **[SUPERSEDED by 4]** the "one-ulp summation-order dust" diagnosis — the permutation-probe
+>    "match" was a coincidence; the true cause was correction 4's class.
+> 4. **🔴 THE LIBMVEC LESSON (the day's biggest): local recompute of ANYTHING transcendental
+>    can never be byte-safe.** gcc -O3 auto-vectorizes the mesh geometry loops (SIMD libmvec
+>    cos/tan differ from scalar calls in the last bit on unlucky inputs); a byte-parity
+>    cross-check that samples 64 elements passes on one mesh and aborts on another (NG5 elem
+>    48; NG5's element file is also 100 % CCW ⇒ orient_cw swaps everything). **Fix = the
+>    cgpipe rule applied without exception: SHIP owner bytes for gradient_sca/elem_area/
+>    metric_factor (element reply, tag 2206) and coriolis_node (node reply widened to
+>    (area0, cor)); recompute NOTHING the owner also computes.** With that, **K≥2 IS
+>    FORCE_SERIAL BYTE-PROVABLE after all**: CORE2 np8 20-step K=2 is BIT-IDENTICAL to the
+>    certified baseline (login; SLURM regate fleet 26306409-18 = knob-off + K2/4/8 byte +
+>    fidelity + options ×3 on `evpw0` v3 `9c900b4f`/`21cea692`). The drift diagnostic is
+>    expected ~0 in the end-clean set; the pre-step uv echo MUST print exactly 0.
 
 *Session 12 (Fable, 2026-07-16). The E.EVP0 deliverable per the session-12 PROMPT §2.2: the EVP
 data-flow table, the K-ring state contract, machinery inventory, implementation plan, gate
