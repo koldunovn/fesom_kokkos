@@ -86,74 +86,13 @@ struct EvpwState {
 };
 EvpwState g_w;
 
-/* ---- verbatim geometry formulas (fesom_mesh.cpp mirrors; see :763 elem_area,
- * :843 elem_center_xy, :909 elem_cos/metric_factor, :1019 gradient_sca).
- * Pure per-element functions of the 3 vertex coords => byte-equal to the mesh build for
- * identical input doubles. Cross-checked at build against mesh values on owned elements. */
-struct XY { const real_t *c; };   /* unified coord accessor built at build time */
-
-static real_t f_elem_area(const real_t xy[6])
-{
-    const real_t cyc      = FESOM_CYCLIC_LENGTH_RAD;
-    const real_t half_cyc = 0.5 * cyc;
-    const real_t r2       = (real_t)FESOM_R_EARTH * (real_t)FESOM_R_EARTH;
-    real_t ay = (xy[1] + xy[3] + xy[5]) / 3.0;
-    ay = cos(ay);
-    real_t ax  = xy[2] - xy[0];
-    real_t aly = xy[3] - xy[1];
-    real_t bx  = xy[4] - xy[0];
-    real_t bly = xy[5] - xy[1];
-    if (ax >  half_cyc) ax -= cyc;
-    if (ax < -half_cyc) ax += cyc;
-    if (bx >  half_cyc) bx -= cyc;
-    if (bx < -half_cyc) bx += cyc;
-    ax *= ay;
-    bx *= ay;
-    real_t cross = ax * bly - bx * aly;
-    if (cross < 0) cross = -cross;
-    return (0.5 * cross) * r2;                 /* area computed in rad², then *r2 — matches
-                                                  the two-loop sequence at :798/:801 */
-}
-
-static void f_elem_center(const real_t xy[6], real_t *cx, real_t *cy)
-{
-    const real_t cyc      = FESOM_CYCLIC_LENGTH_RAD;
-    const real_t half_cyc = 0.5 * cyc;
-    real_t ax[3] = { xy[0], xy[2], xy[4] };
-    real_t amin = ax[0];
-    if (ax[1] < amin) amin = ax[1];
-    if (ax[2] < amin) amin = ax[2];
-    for (int k = 0; k < 3; ++k) {
-        if (ax[k] - amin >=  half_cyc) ax[k] -= cyc;
-        if (ax[k] - amin <  -half_cyc) ax[k] += cyc;
-    }
-    *cx = (ax[0] + ax[1] + ax[2]) / 3.0;
-    *cy = (xy[1] + xy[3] + xy[5]) / 3.0;
-}
-
-static void f_gradient_sca(const real_t xy[6], real_t elem_cos, real_t elem_area, real_t gs[6])
-{
-    const real_t cyc      = FESOM_CYCLIC_LENGTH_RAD;
-    const real_t half_cyc = 0.5 * cyc;
-    const real_t r_earth  = (real_t)FESOM_R_EARTH;
-    real_t dX31 = xy[4] - xy[0];
-    if (dX31 >  half_cyc) dX31 -= cyc;
-    if (dX31 < -half_cyc) dX31 += cyc;
-    dX31 *= elem_cos;
-    real_t dX21 = xy[2] - xy[0];
-    if (dX21 >  half_cyc) dX21 -= cyc;
-    if (dX21 < -half_cyc) dX21 += cyc;
-    dX21 *= elem_cos;
-    real_t dY31 = xy[5] - xy[1];
-    real_t dY21 = xy[3] - xy[1];
-    real_t dfactor = -0.5 * r_earth / elem_area;
-    gs[0] = (-dY31 + dY21) * dfactor;
-    gs[1] = ( dY31)        * dfactor;
-    gs[2] = (-dY21)        * dfactor;
-    gs[3] = ( dX31 - dX21) * dfactor;
-    gs[4] = (-dX31)        * dfactor;
-    gs[5] = ( dX21)        * dfactor;
-}
+/* Geometry (gradient_sca/elem_area/metric_factor) and coriolis_node for the ghost zone are
+ * SHIPPED from the owners at build — never recomputed locally. First NG5 run falsified the
+ * "pure formula => byte-equal" assumption for anything transcendental: gcc -O3 vectorizes the
+ * mesh's geometry loops (libmvec SIMD cos/tan), a scalar recompute in a different loop shape
+ * differs in the last bit on unlucky inputs (CORE2's checked elements were lucky, NG5's
+ * elem 48 was not — caught by the build cross-check). The cgpipe rule stands: ship owner
+ * bytes for EVERYTHING the replay consumes. */
 
 template <typename T>
 Kokkos::View<T*> push_dev(const char *lbl, const std::vector<T> &v)
@@ -406,44 +345,12 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             fprintf(stderr, "[evpwide] ghost orient_cw replay: swapped(max) %ld ghost elems\n", mxsw);
     }
 
-    /* ghost geometry (verbatim formulas) + the formula cross-check on owned elements. */
-    {
-        for (int e = 0; e < E && e < 64; ++e) {
-            real_t xy[6];
-            for (int k = 0; k < 3; ++k) {
-                const int s = m->elem_nodes[3*e + k];
-                slot_xy(s, &xy[2*k], &xy[2*k + 1]);
-            }
-            const real_t ea = f_elem_area(xy);
-            real_t cx, cy;  f_elem_center(xy, &cx, &cy);
-            const real_t ec = cos(cy);
-            real_t gs[6];   f_gradient_sca(xy, ec, ea, gs);
-            FESOM_CHECK(ea == m->elem_area[e] && ec == m->elem_cos[e],
-                        "evpwide: geometry formula drift at owned elem %d (area %.17g vs %.17g)",
-                        e, ea, m->elem_area[e]);
-            for (int q = 0; q < 6; ++q)
-                FESOM_CHECK(gs[q] == m->gradient_sca[6*e + q],
-                            "evpwide: gradient_sca formula drift at owned elem %d[%d]", e, q);
-        }
-    }
+    /* ghost geometry is SHIPPED (see the banner at the top of this file: the libmvec
+     * vectorization lesson) — filled from the element-owner reply (tag 2206) below. */
     std::vector<real_t> gs_g((size_t)Eg * 6), ea_g((size_t)Eg), mf_g((size_t)Eg);
-    {
-        const real_t r_earth = (real_t)FESOM_R_EARTH;
-        for (int eg = 0; eg < Eg; ++eg) {
-            real_t xy[6];
-            for (int k = 0; k < 3; ++k)
-                slot_xy(S.eg_vert[(size_t)3*eg + k], &xy[2*k], &xy[2*k + 1]);
-            const real_t ea = f_elem_area(xy);
-            real_t cx, cy;  f_elem_center(xy, &cx, &cy);
-            const real_t ec = cos(cy);
-            ea_g[(size_t)eg] = ea;
-            mf_g[(size_t)eg] = tan(cy) / r_earth;   /* metric_factor, fesom_mesh.cpp:882 */
-            f_gradient_sca(xy, ec, ea, &gs_g[(size_t)6*eg]);
-        }
-    }
 
-    /* -------- handshake: wants grouped by owner; replies carry area0 + owner-order
-     * incident-element gid lists for updatable slots. Tags 2201/2202/2203. */
+    /* -------- handshake: wants grouped by owner; replies carry (area0, coriolis_node) +
+     * owner-order incident-element gid lists for updatable slots. Tags 2201/2202/2203. */
     const int nGhost = S.eDim + next;                 /* all refreshed slots */
     std::vector<int> slot_of((size_t)nGhost), owner_of((size_t)nGhost);
     for (int i = 0; i < S.eDim; ++i) { slot_of[(size_t)i] = myDim + i; owner_of[(size_t)i] = S.halo_owner[(size_t)i]; }
@@ -518,6 +425,7 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             const int n = it->second;
             slist[(size_t)q].push_back(n);
             rep_d[(size_t)q].push_back(m->area[(size_t)n * (size_t)nl + 0]);
+            rep_d[(size_t)q].push_back(m->coriolis_node[n]);   /* shipped, not recomputed */
             if (need) {
                 rep_i[(size_t)q].push_back(adj_ptr[(size_t)n + 1] - adj_ptr[(size_t)n]);
                 for (int a = adj_ptr[(size_t)n]; a < adj_ptr[(size_t)n + 1]; ++a)
@@ -536,9 +444,9 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     for (int q = 0; q < npes; ++q) {
         const int nw = (int)wslot[(size_t)q].size();
         if (nw > 0) {
-            ind[(size_t)q].resize((size_t)nw);
+            ind[(size_t)q].resize((size_t)nw * 2);            /* (area0, cor) per want */
             rq.push_back(MPI_Request());
-            MPI_Irecv(ind[(size_t)q].data(), nw, MPI_DOUBLE, q, 2202, comm, &rq.back());
+            MPI_Irecv(ind[(size_t)q].data(), nw * 2, MPI_DOUBLE, q, 2202, comm, &rq.back());
         }
         if (ricnt[(size_t)q] > 0) {
             ini[(size_t)q].resize((size_t)ricnt[(size_t)q]);
@@ -599,6 +507,42 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             }
         }
     }
+    /* one-time GEOMETRY reply per wanted element (tag 2206): [gs0..gs5, elem_area,
+     * metric_factor] — the OWNER's mesh bytes, exactly what its kernels use. */
+    {
+        std::vector<std::vector<real_t>> rep_e((size_t)npes), ine((size_t)npes);
+        for (int q = 0; q < npes; ++q) {
+            rep_e[(size_t)q].reserve(eslist[(size_t)q].size() * 8);
+            for (int e : eslist[(size_t)q]) {
+                for (int g = 0; g < 6; ++g) rep_e[(size_t)q].push_back(m->gradient_sca[6*e + g]);
+                rep_e[(size_t)q].push_back(m->elem_area[e]);
+                rep_e[(size_t)q].push_back(m->metric_factor[e]);
+            }
+        }
+        for (int q = 0; q < npes; ++q) {
+            const int nwE = (int)ewslot[(size_t)q].size();
+            if (nwE > 0) {
+                ine[(size_t)q].resize((size_t)nwE * 8);
+                rq.push_back(MPI_Request());
+                MPI_Irecv(ine[(size_t)q].data(), nwE * 8, MPI_DOUBLE, q, 2206, comm, &rq.back());
+            }
+            if (!rep_e[(size_t)q].empty()) {
+                rq.push_back(MPI_Request());
+                MPI_Isend(rep_e[(size_t)q].data(), (int)rep_e[(size_t)q].size(), MPI_DOUBLE, q, 2206,
+                          comm, &rq.back());
+            }
+        }
+        MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
+        rq.clear();
+        for (int q = 0; q < npes; ++q)
+            for (size_t j = 0; j < ewslot[(size_t)q].size(); ++j) {
+                const int eg = ewslot[(size_t)q][j];
+                for (int g = 0; g < 6; ++g) gs_g[(size_t)6*eg + g] = ine[(size_t)q][8*j + g];
+                ea_g[(size_t)eg] = ine[(size_t)q][8*j + 6];
+                mf_g[(size_t)eg] = ine[(size_t)q][8*j + 7];
+                FESOM_CHECK(ea_g[(size_t)eg] > 0.0, "evpwide: shipped elem_area <= 0 (ghost %d)", eg);
+            }
+    }
 
     /* -------- unified statics + gather CSR. */
     std::vector<real_t> area0x((size_t)(N + next), 0.0), corx((size_t)(N + next), 0.0);
@@ -608,10 +552,10 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
         corx  [(size_t)n] = m->coriolis_node[n];
         coastx[(size_t)n] = S.gcoast[(size_t)n];
     }
-    for (int t = 0; t < next; ++t) {
-        corx  [(size_t)(N + t)] = 2.0 * (real_t)FESOM_OMEGA * sin(S.ext_geolat[(size_t)t]);
+    for (int t = 0; t < next; ++t)
         coastx[(size_t)(N + t)] = S.gcoast[(size_t)(N + t)];
-    }
+    /* corx for ALL ghost slots (>= myDim) is overwritten by the shipped owner bytes in the
+     * reply-consumption walk below — never recomputed (libmvec lesson). */
 
     std::unordered_map<int, int> eg2u;                 /* elem gid1 -> unified idx */
     eg2u.reserve((size_t)(E + Eg) * 2);
@@ -637,11 +581,12 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
                  * over interior+halo locally), so it differs from the owner's in last bits.
                  * The replay must use what the OWNER's Step 2 used. (First smoke caught
                  * exactly this: max ulp-level diffs on ring-1 cluster areas.) */
-                if (s < N && ind[(size_t)q][j] != area0x[(size_t)s]) {
-                    const double d = fabs(ind[(size_t)q][j] - area0x[(size_t)s]);
+                if (s < N && ind[(size_t)q][2*j] != area0x[(size_t)s]) {
+                    const double d = fabs(ind[(size_t)q][2*j] - area0x[(size_t)s]);
                     if (d > area0_maxdiff) area0_maxdiff = d;
                 }
-                area0x[(size_t)s] = ind[(size_t)q][j];
+                area0x[(size_t)s] = ind[(size_t)q][2*j];
+                corx  [(size_t)s] = ind[(size_t)q][2*j + 1];   /* owner bytes (libmvec lesson) */
                 if (!upd_of_slot(s)) continue;
                 FESOM_CHECK(ip < ini[(size_t)q].size(), "evpwide: adjacency stream underrun (rank %d)", q);
                 const int cnt = ini[(size_t)q][ip++];
