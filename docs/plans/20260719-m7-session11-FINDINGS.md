@@ -205,7 +205,59 @@ the code.** Refrozen CUDA `ef86c3c9` (verified: the stale string is absent from 
 **Non-goals:** EVP untouched (next lever); host CG and Serial builds untouched (CUDA-only
 lever); no promotion into `FESOM_SPEED=1` — explicitly opt-in until the user decides otherwise.
 
-## 6. Machinery + corrections log
+## 6. ⭐⭐ RESULTS (2026-07-16 early) — E.split lands; CGPIPE −1.41 % @4N / −8.07 % @16N
+
+**E.split (h16 `470ead46` ✓ both, same-alloc A/B, 300 steps, pure a100_80):**
+
+| | 4N (26285953) | 16N (26285954) |
+|---|---|---|
+| prof-leg Waitall (rank min/mean/max ms/step) | 53.2 / **63.0** / 69.2 | 54.3 / **71.8** / 87.0 |
+| barrier split of (barrier+waitall) | **imbalance 42 % (36.1 ms) · comm 58 % (50.3 ms)** | **imbalance 51 % (53.0 ms) · comm 49 % (50.2 ms)** |
+| barrier-leg overhead (iii) | +0.37 % ✓ (≤6 %) | +2.10 % ✓ |
+| syncstats exchanges/step (i) | 361.7 | 361.8 |
+
+- **Decision rule §4(ii) OUTCOME: the comm branch fires at BOTH scales (58 %/49 % ≥ 40 %)** ⇒
+  E.3/E.4 transport levers and E.2 overlap are LIVE at roughly half-to-full pool share.
+  **M5.17's 79 %-imbalance verdict is CONFIRMED STALE** on today's regime (79 → 42-51 %).
+- **A NEW measured pool: rank imbalance 36.1 / 53.0 ms/step** — partition/work-balance
+  (Lever-D class) is now a first-class, E-sized target, especially at 16N where it is the
+  LARGER half.
+- Cross-check (i), recorded honestly: the exchange COUNT confirms the census exactly-in-class
+  (361.7 ≈ 349 steady + startup/jra55 extras; Waitall calls/step 366). The ms BAND as
+  pre-registered (census MPI-covered 89/116 ±20 %) was mis-specified, not the measurement:
+  census "MPI-covered" includes Allreduces inside GPU-idle gaps; the prof timer counts halo
+  Waitalls only but INCLUDING time when the GPU is busy — different projections of the same
+  object (63/72 measured). The census halo-pool (97/125) remains the sizing of record.
+- Transport note: 4N runs `tag(rc_mlx5)`, 16N runs `tag(dc_mlx5)` — UCX switches to
+  dynamic-connect at 64 ranks (E.4-relevant: DC has different latency characteristics).
+
+**CGPIPE A/Bs (cgpipe0 `ef86c3c9` ✓ both, `FESOM_SPEED=1` vs `+FESOM_SPEED_CGPIPE=1`,
+same-alloc, 300 steps, min of 2):**
+
+| | 4N (26288442) | 16N (26288443) |
+|---|---|---|
+| off | 0.6472 (h16 anchor 0.6467 ✓ 0.08 %) | 0.2626 (ledger 0.2629 ✓) |
+| **cgpipe** | **0.6381** | **0.2414** |
+| Δ | **−1.41 % = −9.1 ms** | **−8.07 % = −21.2 ms** |
+| vs pre-reg (§5) | −8…−13 ms, central −10: **HIT** | −12…−19 ms, central −15: **BEAT THE CEILING by 2.2 ms** |
+
+- The 16N over-run is the campaign's 5th consecutive wrong-LOW (L93 entanglement: deleting
+  72 sync points/step also recovers skew absorption + downstream launch gaps the per-event
+  arithmetic can't see).
+- CG iteration counts IDENTICAL ON-vs-OFF across all 20 gate steps ✓ (byte-identity corollary).
+- **Implied, IF the user adopts CGPIPE into the benchmark config** (it stays OPT-IN per the
+  standing decision — no promotion into `FESOM_SPEED=1`): 4N 0.6381 ⇒ **ratio 7.18×**;
+  16N 0.2414 ⇒ 16N ratio ≈ **5.09×**, **Stage-2 SYPD@dt240 ≈ 2.65** (from 2.43). Ledger-grade
+  numbers require same-day anchors at adoption time (these A/B legs already cross-check the
+  ledger to 0.1 %).
+- **The 8× arithmetic, updated for the user (rule 0.17):** with CGPIPE counted, 8× at 4N needs
+  another −10.3 % (0.6381 → 0.5723). The measured 4N pools still on the table: EVP subcycle
+  25.3 ms (E.EVP1 wide-halo, approved as option 2), E.1 coalescing ceiling ~7-8 ms, CG residual
+  ~18 ms (74 remaining events — E.4 transport now proven ~58 % comm), 3D-site transport share,
+  and the newly-priced 36.1 ms imbalance pool. At 16N the same levers act on larger shares.
+  Reachability improved again; the endpoint decision remains the user's.
+
+## 7. Machinery + corrections log
 
 - **NEW `scripts/m7_halo_sites.py`** — site attribution for the halo pool from any nsys sqlite;
   reuses m7_gap_census loaders; window/threshold conventions identical. This is the tool that
