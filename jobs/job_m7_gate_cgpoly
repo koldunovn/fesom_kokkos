@@ -60,9 +60,10 @@ run_leg () {  # $1 leg name, $2.. env pairs
            > "$out/run.log" 2> "$out/run.err" )
     echo "leg $leg rc=$?"
     grep -m1 "\[cgpoly\] ACTIVE" "$out/run.err" || true
-    # settled iters = mean of the last 10 steps' "done — N CG iters" prints
+    # settled iters = mean of the last 10 steps' "done — N CG iters" prints.
+    # ⚠️ the step prints land on STDERR (run.err), with the srun -l rank prefix.
     local iters
-    iters=$(grep -oE "done [^0-9]* ([0-9]+) CG iters" "$out/run.log" | grep -oE "[0-9]+ CG" | grep -oE "[0-9]+" | tail -10 | awk '{s+=$1; n++} END {if (n) printf "%.1f", s/n; else print "NA"}')
+    iters=$(grep -hoE "done [^0-9]* ([0-9]+) CG iters" "$out/run.err" | grep -oE "[0-9]+ CG" | grep -oE "[0-9]+" | tail -10 | awk '{s+=$1; n++} END {if (n) printf "%.1f", s/n; else print "NA"}')
     echo "leg $leg settled iters/step = $iters"
     eval "ITERS_$leg=$iters"
 }

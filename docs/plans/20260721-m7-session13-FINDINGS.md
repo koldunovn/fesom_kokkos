@@ -188,4 +188,26 @@ Allreduce; sp0<0 indefinite-M abort; KK_VERIFY=ssh abort guard; per-solve iters 
 26313389 serial 3-leg gate (knob-off byte diff + selfcheck zeros + the E.3 ≥1.8× iters
 verify at CORE2 dt1800) · 26313390 CUDA fidelity (SPEED=1+CGPOLY=3) · 26313391/92/93
 options TKE/mEVP/zstar (each vs its own M6 oracle; zstar Kv expected ~9.5e-02 magnitude,
-NOT bit-equal — pre-registered §3).
+NOT bit-equal — pre-registered §3) · 26313454 CUDA selfcheck leg (CGPIPE parity: zeros on
+Serial AND CUDA).
+
+## 5. E.CG2.3 — serial gate 26313389 HARVEST: ⭐ ALL THREE VERDICTS GREEN
+
+| check | result |
+|---|---|
+| knob-OFF byte gate (CORE2 np8 vs m6_baseline_serial) | ✅ **diff_snap rc=0** |
+| selfcheck (d2+d3 legs, every apply) | ✅ **1939 lines, 0 nonzero — ring replay BITWISE** |
+| λ bounds on CORE2 | **[0.0606, 1.8165]** — vs JAX CORE2 [0.0601, 1.803]: the spectrum estimate transfers |
+| worst-partner bytes | d2 6.1 KB · d3 8.3 KB @ CORE2 np8 (0.27 watch armed for NG5) |
+
+**E.3 kill-fast verify (settled iters/step, CORE2 dt1800, extraction fixed to run.err):**
+
+| leg | iters | ratio | JAX prior |
+|---|--:|--:|--:|
+| off | **128.8** | — | 127 |
+| d2 | **51.6** | **2.50×** | 55 (2.31×) |
+| d3 | **40.1** | **3.21×** | 42 (3.02×) |
+
+**Both far past the ≥1.8× bar ⇒ the A/Bs are earned.** The measured ratios sharpen the §3
+pre-reg (unchanged centrals): NG5 72 iters → ~29 (d2) / ~22.5 (d3); refined event model
+d3 ≈ −24 ms @16N (−9.8 %), ≈ −12 ms @4N (−1.9 %).
