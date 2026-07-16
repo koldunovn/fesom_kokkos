@@ -1185,3 +1185,29 @@ Serial `21cea692`.
 options), not merely climate-close.** Stays OPT-IN (rule 0.24): a 1-yr climate leg is still
 the user's promotion bar. Debug arsenal: `FESOM_EVPWIDE_SELFCHECK=1/2/3`, `FESOM_EVPWIDE_RINGS`;
 the pre-step uv echo MUST print exactly 0.000e+00.
+
+### E.EVP1 A/B HARVEST (26306420 4N · 26306419 16N; std300, min-of-2, same-alloc, evpw0 v3)
+
+| leg | 4N s/step | Δ4N | 16N s/step | Δ16N |
+|---|--:|--:|--:|--:|
+| off | 0.6380 | — | 0.2412 | — |
+| K=2 | 0.6506 | **+2.0 %** | 0.2495 | **+3.4 %** |
+| K=4 | 0.6468 | **+1.4 %** | 0.2452 | **+1.7 %** |
+| **K=8** | **0.6341** | **−0.6 % (−3.9 ms)** | **0.2358** | **−2.2 % (−5.4 ms)** |
+
+(off legs reproduce the h17 anchors 0.6382/0.2413 ✓ — v3 knob-off = h17.)
+
+**Verdict per the pre-registered rule: K\* = 8** (argmax 16N, 4N non-regressing). **The pre-reg
+MISSED WRONG-HIGH for the first time after five wrong-LOWs** (K=4 central −15 ms @16N,
+measured +4.0): the event-count model silently assumed the payload stays eager/latency-class,
+but the wide refresh multiplies bytes ×K (+ the sigma segment, 2 msgs/partner) — widest msg
+122 KB @16N K=4, 95 KB @4N K=2 ⇒ rendezvous/pinned-bounce regime, per-refresh cost ate the
+count saving. 🔴 LESSON (ledger-grade): **the 2D-latency pool is only fungible against event
+count while messages STAY EAGER — size byte growth against UCX_RNDV_THRESH before pricing any
+event-reduction lever.**
+
+Implied IF ADOPTED at K=8 (opt-in, user's call): 4N 0.6341 ⇒ **7.22×**; 16N 0.2358 ⇒
+**5.21×, Stage-2 SYPD ≈ 2.71**. Pre-registered rescue candidates before any promotion talk:
+(a) E.4 `UCX_RNDV_THRESH` bump so the wide messages stay eager (could unlock the modeled
+−15/−23 ms at K=4), (b) fuse node+sigma segments into ONE message/partner, (c) E.2
+interior/boundary overlap. The knob + certification are DONE either way (byte-proven at every K).
