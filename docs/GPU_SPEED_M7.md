@@ -1143,3 +1143,42 @@ The all-knobs run scoring *lower* than FORCEDEV-alone confirms these are run-to-
 the CUDA floor, not a systematic D.1 effect.
 
 **A/B (job 26249153) still queued at session end — see `docs/plans/20260714-m7-HANDOFF-D1.md` §1.**
+
+---
+
+## h17 — CGPIPE ADOPTED into `FESOM_SPEED=1` (session 12 harvest, 2026-07-16) ⭐ THE ROW OF RECORD
+
+h17 = h16 + the one-line `_exp`→master promotion (user decision 2026-07-16). Binaries
+`m7/bin/h17/`: CUDA **`f8384e86`** / Serial `5c3c90fc`. Full cert **4/4**:
+
+| gate / anchor | job | verdict |
+|---|---|---|
+| knob-OFF byte gate | 26299411 | ✅ rc=0 |
+| CUDA fidelity, bare `FESOM_SPEED=1` | 26299412 | ✅ PASS (worst 5.281e-03) **+ `FESOM_SPEED_CGPIPE = ON` fired — the L80 adoption check** |
+| **4N anchor (std300, min-of-2)** | 26299413 | **0.6382 s/step** (0.6382/0.6393) — pre-reg 0.6381 HIT +0.02% ⇒ **ratio 4.5785/0.6382 = 7.17×** |
+| **16N anchor (std300, min-of-2)** | 26299414 | **0.2413 s/step** (0.2414/0.2413) — pre-reg 0.2414 HIT −0.04% ⇒ **16N ratio ≈ 5.09×, Stage-2 SYPD@dt240 ≈ 2.65** |
+
+**NG5@4N: 7.17× · NG5@16N: 5.09× · SYPD 2.65.** 8× @4N = another −10.3% (0.6382 → 0.5723).
+
+## E.EVP1 — `FESOM_SPEED_EVPWIDE=K` wide-halo EVP (OPT-IN, built + certified session 12)
+
+Design + the corrected theory: `docs/plans/20260720-m7-evpwide-design.md` (**read its correction
+header**: velocity-only refresh is inexact for ANY ring depth — the wide refresh ships ghost
+SIGMA too, R=K; the scatter-time stash must replay `orient_cw`; residual = ONE node/window at
+ONE ULP of the u_rhs summation order ⇒ **K≥2 is rounding-class, exactly as scoped in session 11**;
+knob-OFF and K=1 are FORCE_SERIAL byte-proven). Binaries `m7/bin/evpw0/` v2: CUDA `f5e64514` /
+Serial `a2c41cb4`. EVP exchanges/step 120 → 120/K + 1 (each refresh = node msg + sigma msg per
+partner, same Waitall).
+
+| gate | job | verdict |
+|---|---|---|
+| knob-OFF byte | 26303233 | ✅ rc=0 |
+| K=1 null-rung FORCE_SERIAL byte proof | 26303234 | ✅ rc=0 (new exchange path byte-exact) |
+| CUDA fidelity K=4 | 26303236 | ✅ PASS (worst 1.094e-02) + announce fired |
+| options TKE / mEVP / zstar (K=4 set) | 26303237/38/39 | ✅ 3× PASS; zstar `Kv 9.537e-02` = the L79 control, exact; mEVP = certified no-op (loud announce added post-freeze, `7d89f0c`) |
+| **A/B K-sweep 16N (off/2/4/8)** | 26303240 | ⏳ queued at write time — pre-reg §6: K=4 ceiling −23.4 ms, central −15 |
+| **A/B K-sweep 4N (off/2/4/8)** | 26303241 | ⏳ queued — ceiling −18.8 ms, central −12 |
+
+Debug arsenal (documented in the design doc): `FESOM_EVPWIDE_SELFCHECK=1/2/3` (drift diag /
+owner-urhs ship / Serial dump + permutation probe), `FESOM_EVPWIDE_RINGS` override. The
+pre-step uv echo check MUST print exactly 0.000e+00.
