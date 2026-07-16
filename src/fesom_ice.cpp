@@ -747,6 +747,21 @@ void fesom_ice_step(int                            step,
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
             }
+            /* M7 E.EVP1 + L80: EVPWIDE's resolve lives in the std-EVP path, which this branch
+             * never reaches — without this line, FESOM_SPEED_EVPWIDE + mEVP would be a SILENT
+             * no-op (correct but mute; the dead-knob trap). Announce loudly, once. */
+            {
+                static int s_warned = 0;
+                if (!s_warned && fesom_evpwide_env_K() > 0) {
+                    s_warned = 1;
+                    if (partit->mype == 0) {
+                        fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE requested but "
+                                        "whichEVP=1 (mEVP has its own subcycle exchange) — the "
+                                        "lever is NOT running.\n");
+                        fflush(stderr);
+                    }
+                }
+            }
             fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
             if (!icerails) {
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
