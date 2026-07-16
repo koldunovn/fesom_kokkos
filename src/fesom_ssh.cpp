@@ -1236,13 +1236,18 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     const int     parallel = (partit && partit->npes > 1);
     const int     N_global = parallel ? mesh->nod2D : N;
 
-    /* M7 E.CG1 — FESOM_SPEED_CGPIPE (opt-in _exp; see the banner above cg_dot).
+    /* M7 E.CG1 — FESOM_SPEED_CGPIPE (see the banner above cg_dot). ADOPTED into
+     * the FESOM_SPEED=1 blessed set 2026-07-16 (user decision) after the full
+     * ladder: FORCE_SERIAL byte proof (bit-identical to the certified baseline),
+     * 2x2627 selfchecks all 0.000e+00 (Serial AND CUDA), options x3, A/B
+     * -1.41% @4N / -8.07% @16N (jobs 26288442/43). Per-lever override
+     * FESOM_SPEED_CGPIPE=0 still forces it off under the master.
      * Resolve FIRST (announces itself, L80), then the activity conjunction; a
      * requested-but-inactive knob warns loudly instead of dying silent. The
      * one-time setup re-allocs rr_fld (ring2 tail) so it MUST run before the
      * device views are taken below. */
     static int s_cgpipe = -1;
-    const bool cgpipe_env = fesom_speed_on_exp("CGPIPE", &s_cgpipe);
+    const bool cgpipe_env = fesom_speed_on("CGPIPE", &s_cgpipe);
 #ifdef KOKKOS_ENABLE_CUDA
     const bool transport_ok = fesom_halo_device_active();   /* keep the debug toggle coherent */
 #else
