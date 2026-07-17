@@ -322,3 +322,47 @@ remains the real arbiter for any promotion, per standing policy).**
   composition (untested; naive additivity ⇒ 16N ~0.226, SYPD ~2.83-2.87).
 - **CGPOLY stays OPT-IN** (`FESOM_SPEED_CGPOLY=3`): adoption/promotion = the user's call
   with these numbers + the §8 mEVP note; climate leg = user's call.
+
+## 10. USER DECISIONS (2026-07-17 morning) + session-14 phase start
+
+1. **Push approved** — sessions-13 commits pushed (`99e2a4d..c9f1749`).
+2. **1-yr CUDA climate leg approved** (documentation, NOT a promotion gate) — submitted
+   26323301 (`FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3`, BIN=cgpoly0, the M5.23 bar refs).
+3. **The options matrix STAYS STRICT** — no solver-class amendment. Consequence (user):
+   **CGPOLY is a MANUAL KNOB PERMANENTLY; it never joins `FESOM_SPEED=1`.** (Clarified for
+   the record: the non-bit-identity is on BOTH backends by design — ON-vs-OFF differs on
+   Serial and CUDA alike; knob-OFF is bit-identical everywhere; Serial+ON remains
+   deterministic run-to-run.)
+4. **Next lever = E.PART** with the user's partitioner setup
+   (`/home/a/a270088/fesom_part/fesom2/work_part`), under a NEW STANDING RULE (memory
+   `feedback-mesh-copies-never-pool`): **repartitioned meshes are COPIES under /work; never
+   touch /pool.**
+5. The parallel session's literature survey (`20260717-m7-LITERATURE-gpu-optimization.md`)
+   read: its #1 = E.PART (validates §6), #2 launch/fence+CUDA-graphs, #3 GPUDirect probes,
+   then solver leftovers (P-CSI pocketed for ≥64N per lesson 0.31). Do-not-chase list noted.
+
+## 11. E.PART.0 — partitioner audit (the E.0 discipline) + partition generation
+
+- **The dual 2D+3D weight is BUILT and WORKING in the user's tooling:** `fort_part.c`
+  wgt_type=2 under `-DPART_WEIGHTED` (set in `mesh_part/CMakeLists.txt:81`), ncon=2 METIS
+  with per-node weights (1, nlevels+100) — the +100 softens the 3D criterion for cut
+  quality. The Fortran passes `nlevels_nod2D` as the weight (`fvom_init.F90:1792`).
+- **Proof it works: the user's June FORCA20 run** (2.1M nodes, nl=70, 16 parts, METIS 5.1.0,
+  this exact binary): prints `Distribution weight: 2D and 3D nodes`; balance report **2D
+  99.801–100.207 %, 3D 99.486–100.650 %** — ±0.65 % 3D balance. ⇒ the /pool NG5 dists
+  (3D spread 22 %/51 %) are old 2D-only vintage; zero tooling changes needed.
+- Safety notes: the partitioner never overwrites existing nlvls/elvls/edge files (guarded,
+  `fvom_init.F90:996/663`) ⇒ concurrent dist_16+dist_64 generation in one mesh copy is
+  race-free, and the copy's level files stay byte-identical to /pool (physics unchanged).
+- **Mesh copy made:** `/work/ab0995/a270088/port2/mesh/ng5_w3d/` (nod2d, elem2d, aux3d,
+  nlvls, elvls, edge caches; README_PROVENANCE.txt; statics byte-identical to /pool).
+  🔴 The private CORE2 mesh's dist_8 is NEVER regenerated — every FORCE_SERIAL byte
+  baseline is tied to that exact decomposition.
+- **Partition jobs submitted:** 26323500 (dist_16) + 26323501 (dist_64), single-rank
+  compute jobs in `/work/ab0995/a270088/port2/m7/epart/gen{16,64}/`.
+- **Pre-registered probe expectation (before any model run):** the Σnlvls/rank spread drops
+  from **22.2 % → ≲2-3 % (dist_16)** and **51.1 % → ≲3-5 % (dist_64)** (FORCA20 achieved
+  1.2 % total spread at 16 parts; more parts = slightly looser). 2D spread allowed to open
+  up to a few % (multi-constraint trade) and edgecut/halo to grow somewhat — the model
+  anchors are the arbiter. Model-run pre-reg (ceilings/centrals) comes AFTER the spread
+  probe, per the E.0 discipline.
