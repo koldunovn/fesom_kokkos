@@ -319,3 +319,49 @@ ICE_DYN/ICE_ADV sub-phases), legs bar / barknobs(+CGPOLY=3+EVPWIDE=8), std300,
   the dead volume-weighting; the knob pair already converts most of the ice/cg share.
 - Ride-along numbers: bar 0.6401 (≈ morning phstbar 0.6412 ✓); barknobs 0.6241 =
   knobs −2.50 % under barrier+phasestats (consistent with the knob A/Bs).
+
+## 12. E.T1 — HPC-X / per-message-toll probes (user go-ahead; PRE-REGISTERED before
+## submission; jobs/job_m7_hpcx, BIN=h17, std300, legs ref/sysgdr/hpcx/hpcxgdr)
+
+Rationale from §11: the toll (~30-40 µs/partner/exchange) is the root of the
+partner-skew (~24 ms) + a slice of the flat comm pool + the staging class. The two
+untried shots: the WHOLE-STACK swap (HPC-X 2.19 from NVHPC's comm_libs — own
+OpenMPI+UCX+hcoll, the ICON-class +10 % precedent) and explicit proto-v2 + GDR-RDMA
+engagement on both stacks (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes`).
+- **Central: hpcx −0..3 % @4N, −0..4 % @16N; sysgdr −0..2 %; far tail = the ICON +10 %
+  class; A.3-style regressions entirely possible** (hcoll on, different rndv defaults).
+- Decision rule: best leg ≥ −2 % @4N or ≥ −3 % @16N ⇒ escalate (CUDA fidelity gate +
+  options ×3 under that env, then the adoption ladder). All legs ∈ (−2..+2) ⇒ the
+  toll is not env-reachable on Levante ⇒ the lever moves to CODE (E.1 fuses +
+  persistent requests) and partition (comm-balance objective). Catastrophic leg ⇒
+  document + close (the A.3 family grows).
+- L80 armor: per-leg `ldd` of libmpi/libucp under the leg env + `mpirun --version`
+  logged; a failed launch records FAIL, not silence.
+
+## 13. E.1 FUSE AUDIT (the E.0 discipline; source = the FRESH s14_nsys_4n trace,
+## `m7_halo_sites.py`, steady window, h17 config)
+
+Non-CG halo pool @4N: **201 events/step, 66.5 ms wait** (the walker excludes cgpipe's
+own fused exchange). Of that, **EVP = 119 ev / 24.5 ms @ 206 µs/ex** — owned by the
+EVPWIDE knob (119→~15 when opted in), NOT E.1's to count. The E.1 candidate ledger
+(the remaining ~82 ev / ~42 ms):
+
+| family | sites (pred→succ digest) | ev/step | wait ms | fuse idea | deletable ev |
+|---|---|--:|--:|---|--:|
+| **FCT T+S internals** | tracer_advect_one_fct ×3 brackets × {T,S} | 6 | 5.5 | co-pack T+S per bracket (fesom_halo_field2/N pattern; fields independent between brackets) | 3 |
+| **KPP smoother chains** | smooth_nod3D x6/x2 rows (+kpp_mixing brackets) | ~12 | ~4.7 | ring-ize: 3 smoothing sweeps on an R=3 ring = ONE exchange (CGPOLY ring machinery reusable) | ~8 |
+| **Redi/GM pipeline** | diff_part_hor_redi, diff_ver_part_redi_expl, neutral_slope→init_redi_gm, fer_* chain, sigma_xy | ~10 | ~9.5 | co-pack adjacent independent same-kind pairs (needs per-pair dependency read at build time) | ~4-5 |
+| **ice FCT solver** | ice_solve_high/low_order, ice_fem_fct chains | ~17 | ~3.6 | co-pack the 3 ice tracers' iterations where not already | ~6-8 |
+| singles (momentum/ALE/pressure chain) | ~15 rows ≤1 ms | ~20 | ~12 | mostly REAL dependencies — not fusable; leave | 0 |
+
+**Pre-registration for the session-15 build (0.31-discounted — the marginal DECAYS):**
+- E.1a (FCT T+S co-pack) + E.1c (Redi/GM pair co-packs): **central −3..5 ms @4N,
+  −5..8 ms @16N**; byte-class (same values, co-packed transport), FORCE_SERIAL byte
+  proof required per pair.
+- E.1b (smoother ring-ization): **central −2..3 ms @4N**; byte-certifiable via the
+  cgpoly selfcheck pattern (ring replay ≡ re-exchanged reference); second wave.
+- Honest ceiling stays the ledger's 7-8 ms @4N / 12-13 @16N; wrong-high history says
+  land ~60 % of central.
+- NOTE the composition: on the KNOBBED config (EVPWIDE in), E.1's families are the
+  TOP remaining halo sites — E.1 is the natural knobbed-config companion, and every
+  deleted event also deletes partner-skew (§11).

@@ -1,0 +1,117 @@
+#!/bin/bash
+#SBATCH --job-name=m7hpcx
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/hpcx.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/hpcx.%j.err
+#
+# M7 E.T1 — HPC-X / per-message-toll transport probe (session-14 §12).
+#
+# The E.IMB.1 mechanism result: each halo message carries a ~30-40 µs/partner fixed
+# toll (partner-count orders the ice/cg imbalance; knob legs collapse it in proportion
+# to deleted exchanges). This job swaps the WHOLE MPI/UCX stack under the SAME frozen
+# binary to attack the toll itself:
+#   ref       standard stack (openmpi/4.1.5-nvhpc-24.7 + system UCX 1.18), srun
+#   sysgdr    standard stack + UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes
+#   hpcx      NVHPC's HPC-X 2.19 (own OpenMPI+UCX+hcoll), ITS defaults, mpirun
+#   hpcxgdr   HPC-X + UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes
+#
+# 🔴 L80 discipline: every leg logs `ldd` resolution of libmpi/libucp UNDER THE LEG
+# ENV + mpirun --version, so "no effect" can never mean "the swap silently didn't
+# happen". A leg that fails to launch records FAIL and the job continues.
+# ⚠️ MEASUREMENT ONLY: a winning stack is NOT adoptable from timing — it must pass
+# the CUDA fidelity gate + options ×3 under the same env first (A.3 precedent).
+#
+# Submit: sbatch -N4 --ntasks=16 --export=ALL,MESH=$NG5,DT=180,NSTEPS=300,TAG=...,BIN=... jobs/job_m7_hpcx
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export FESOM_PRINT_EVERY=999
+HPCX_DIR=/sw/spack-levante/nvhpc-24.7-py26uc/Linux_x86_64/24.7/comm_libs/12.5/hpcx/hpcx-2.19
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+PPN=$SLURM_NTASKS_PER_NODE
+FESOM=${BIN:?BIN required}
+m7_provenance "$OUT" "$FESOM"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+echo "=== M7 HPC-X probe  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?} nsteps=${NSTEPS:-300} ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+echo "hpcx:  $HPCX_DIR"
+
+extract() { grep 'loop timing' "$1" 2>/dev/null | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/'; }
+
+run_std() {  # run_std <label> <extra 'k=v;k=v' or ''>  — standard stack via srun
+    local label=$1 extra=$2
+    (
+        export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+        export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+        export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+        export FESOM_SPEED=1
+        if [ -n "$extra" ]; then IFS=';' read -ra KV <<< "$extra"; for kv in "${KV[@]}"; do export "$kv"; echo "    env: $kv"; done; fi
+        echo "    ldd(libmpi/libucp): $(ldd "$FESOM" | grep -E 'libmpi\.|libucp' | awk '{print $3}' | tr '\n' ' ')"
+        for rep in a b; do
+            srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
+                > "$OUT/log_${label}_${rep}.txt" 2>&1
+        done
+    )
+    echo "  $label: $(extract "$OUT/log_${label}_a.txt")  $(extract "$OUT/log_${label}_b.txt")"
+}
+
+run_hpcx() {  # run_hpcx <label> <extra 'k=v;k=v' or ''>  — HPC-X stack via its mpirun
+    local label=$1 extra=$2
+    (
+        # strip the Levante-stack tuning so HPC-X's OWN defaults rule the leg
+        unset OMPI_MCA_pml OMPI_MCA_btl OMPI_MCA_coll_hcoll_enable OMPI_MCA_io
+        unset UCX_NET_DEVICES UCX_MEMTYPE_CACHE UCX_TLS
+        export HDF5_USE_FILE_LOCKING=FALSE FESOM_SPEED=1
+        XARGS=()
+        if [ -n "$extra" ]; then IFS=';' read -ra KV <<< "$extra"; for kv in "${KV[@]}"; do
+            export "$kv"; XARGS+=(-x "${kv%%=*}"); echo "    env: $kv"; done; fi
+        source "$HPCX_DIR/hpcx-init-ompi.sh" && hpcx_load
+        echo "    mpirun: $(command -v mpirun)"
+        mpirun --version 2>/dev/null | head -1 | sed 's/^/    /'
+        echo "    ldd(libmpi/libucp): $(ldd "$FESOM" | grep -E 'libmpi\.|libucp' | awk '{print $3}' | tr '\n' ' ')"
+        for rep in a b; do
+            mpirun -np "$NPES" --map-by "ppr:${PPN}:node" --bind-to none \
+                   -x FESOM_SPEED -x FESOM_PRINT_EVERY -x HDF5_USE_FILE_LOCKING "${XARGS[@]}" \
+                   "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
+                > "$OUT/log_${label}_${rep}.txt" 2>&1 || echo "    (mpirun rc=$? rep $rep)"
+        done
+    )
+    echo "  $label: $(extract "$OUT/log_${label}_a.txt")  $(extract "$OUT/log_${label}_b.txt")"
+}
+
+echo "--- leg ref (standard stack) ---";     run_std  ref     ""
+echo "--- leg sysgdr (proto-v2 + GDR RDMA on system UCX) ---"
+run_std  sysgdr  "UCX_PROTO_ENABLE=y;UCX_IB_GPU_DIRECT_RDMA=yes"
+echo "--- leg hpcx (HPC-X 2.19 defaults) ---"; run_hpcx hpcx    ""
+echo "--- leg hpcxgdr (HPC-X + proto-v2 + GDR RDMA) ---"
+run_hpcx hpcxgdr "UCX_PROTO_ENABLE=y;UCX_IB_GPU_DIRECT_RDMA=yes"
+
+echo
+echo "########################## HPC-X PROBE RESULT — $TAG ##########################"
+ref=""
+for label in ref sysgdr hpcx hpcxgdr; do
+    r1=$(extract "$OUT/log_${label}_a.txt"); r2=$(extract "$OUT/log_${label}_b.txt")
+    m=$(awk -v a="${r1:-inf}" -v b="${r2:-inf}" 'BEGIN{print (a<b)?a:b}')
+    if [ -z "$ref" ]; then ref=$m; echo "  $label : $m s/step  (reference)"
+    else awk -v m="$m" -v r="$ref" -v l="$label" \
+        'BEGIN{ if (m=="inf") printf "  %s : FAILED\n", l; else printf "  %s : %s s/step  (%+.2f%% vs ref)\n", l, m, 100*(m-r)/r }'
+    fi
+done
+echo "  (same allocation; min of 2 reps; legs differ by MPI stack / UCX env only)"
+echo "###############################################################################"
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true
+echo "=== done: $OUT ==="
