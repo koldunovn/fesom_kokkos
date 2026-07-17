@@ -206,8 +206,11 @@ through the MPI-wait pool: ~74 ms at the exchanges = E.split's ~36 imbalance + ~
   the leg (announce ✓). Documented, dropped; no further RNDV legs at 4N.
 - **cg3ew8 rep a: −0.69 % vs cg3, dead-center in the pre-reg central (−0.3..0.8 %)**,
   both announces fired ([cgpoly] d3 λ=[0.0549,1.6482] + [evpwide] K=8 R=8, widest msg
-  ~395 KB). Single-rep ⇒ NOT protocol; the 26325395 2-leg pair (cg3+cg3ew8, 40 min)
-  completes min-of-2. Knobbed-config 4N best would be ≈ 0.6176 ⇒ ratio ~7.41×.
+  ~395 KB). Single-rep ⇒ NOT protocol; resubmitted.
+- **✅ RESUBMIT 26325395 HARVESTED (min-of-2, same-alloc l[50106,50112,50136,50172],
+  announces ✓): cg3 0.6212 / cg3ew8 0.6164 = −0.77 % — pre-reg central HIT.** The two
+  opt-in knobs STACK at 4N. **Knobbed-config 4N best of record: 0.6164 s/step ⇒ ~7.42×**
+  (cg3 reproduced 3rd time: 0.6219/0.6212 vs session-13's 0.6213).
 - Ops note: legs with CGPOLY+EVPWIDE init (λ power iteration + ring build) need ~2 min
   more per rep than plain legs — the 50-min 3-leg × 2-rep walltime was undersized; the
   slow rndv legs (+30 s each) finished the job off.
@@ -285,3 +288,34 @@ ICE_DYN/ICE_ADV sub-phases), legs bar / barknobs(+CGPOLY=3+EVPWIDE=8), std300,
   with node identity ⇒ a100_80 silicon lottery (would need an L94-extension rule and
   changes nothing in code).
 - (iv) mpiprof rides along (barrier legs) for the E.split continuity check.
+
+## 11. ⭐⭐ E.IMB.1 DISCRIMINATOR HARVESTED (26326817, phst1 `c06d…` gates 3/3 green,
+## fresh nodes l[50100,50106,50112,50163] — DISJOINT from the morning set) — THE 4N
+## MECHANISM IS MEASURED
+
+**Scored vs the §10 pre-registrations:**
+
+| pre-reg | prediction | measured | verdict |
+|---|---|---|---|
+| (i) sub-phase | icedyn ≥ 70 % of ice-family spread; ice/iceadv ≤ 3 ms | **icedyn 16.5 ms of 19.2 (86 %)**; ice 0.6, iceadv 2.1 | **HIT** |
+| (i) partner corr | icedyn vs nPart ≥ +0.7 | **+0.75** (iceadv +0.96!) | **HIT** |
+| (ii) knob collapse, cg | ~3× shrink (exch 72→23) | **7.4 → 3.2 ms (2.3×)**, mean −8.2 ms | **HIT** (≈) |
+| (ii) knob collapse, icedyn | ≥ 60 % collapse (exch 120→16) | **−42 %** (16.5→9.5); residual re-correlates elem/ghost (+0.65) not nPart (+0.43); mean +4.5 ms | **PARTIAL — mechanistically confirmed**: the exchange-driven spread died; what remains is EVPWIDE's OWN ghost-compute imbalance (ring extent ∝ perimeter), a different, known cost |
+| (iii) ocean hardware-vs-data | corr ≥ +0.9 across disjoint allocations ⇒ data | **+0.970** (per-rank to ~1 ms; argmax r13 both; ice +0.999, cg +0.997) | **DATA — hardware EXONERATED** (small ±5-9 ms one-rank residue only) |
+
+**THE 4N IMBALANCE MECHANISM (attribution of record):**
+1. **Ice-dyn + CG spread (~24 ms combined): PER-EXCHANGE/PER-PARTNER OVERHEAD** —
+   lives exactly in the exchange-dense sub-phases, ordered by partner count (3→7
+   partners ≈ 2.4× icedyn busy), collapses when exchanges are deleted. NOT physics,
+   NOT ice cover, NOT element counts.
+2. **Ocean spread (23-33 ms): deterministic rank-workload imbalance** correlated with
+   n2d/myElem (r≈+0.7) at 5× leverage — NOT hardware, NOT 3D volume (0.77 % balanced).
+   n2d/nPart/rank-index remain confounded at 16 ranks → named by the 16N table.
+3. Everything reproduces across hardware (r ≥ 0.97) ⇒ partition-property-driven ⇒
+   predictable and in-principle fixable.
+- Consequences for the bench: **E.1 fuses gain a SECOND rationale** (every deleted
+  exchange deletes its partner-skew too); a partition objective that BALANCES MAX
+  PARTNER COUNT (comm-balance METIS objective) is a NEW lever candidate distinct from
+  the dead volume-weighting; the knob pair already converts most of the ice/cg share.
+- Ride-along numbers: bar 0.6401 (≈ morning phstbar 0.6412 ✓); barknobs 0.6241 =
+  knobs −2.50 % under barrier+phasestats (consistent with the knob A/Bs).
