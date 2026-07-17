@@ -76,7 +76,8 @@ void fesom_phasestats_report(int timed_steps, fesom_partit *p)
                0, p->MPI_COMM_FESOM);
     if (me != 0) return;
 
-    static const char *nm[FESOM_PH_N] = {"force", "ice", "coupl", "ocean", "cg", "other"};
+    static const char *nm[FESOM_PH_N] = {"force", "ice", "icedyn", "iceadv",
+                                         "coupl", "ocean", "cg", "other"};
     const double ms = 1e3 / (double)timed_steps;   /* s over window -> ms/step */
 
     printf("[phasestats] steps=%d ranks=%d  (ms/step; busy = wall - MPI-wait; @r = argmax rank)\n",
@@ -110,7 +111,8 @@ void fesom_phasestats_report(int timed_steps, fesom_partit *p)
            "busy spread names the straggler phase, wait shows who absorbs it)\n");
 
     /* Full per-rank table — the polar-fraction correlation needs rank identity. */
-    printf("[phasestats-rank]  rk |   busy: force    ice  coupl  ocean     cg  other |   wait: force    ice  coupl  ocean     cg  other\n");
+    printf("[phasestats-rank]  rk |   busy: force    ice icedyn iceadv  coupl  ocean     cg  other"
+           " |   wait: force    ice icedyn iceadv  coupl  ocean     cg  other\n");
     for (int r = 0; r < npes; ++r) {
         const double *row = all + (size_t)r * 3 * FESOM_PH_N;
         printf("[phasestats-rank] %3d |       ", r);

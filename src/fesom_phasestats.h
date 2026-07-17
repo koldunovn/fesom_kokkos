@@ -33,7 +33,12 @@
 
 enum fesom_ps_phase {
     FESOM_PH_FORCE = 0,   /* jra55 read + bulk + sss/runoff                */
-    FESOM_PH_ICE,         /* fesom_ice_step (dyn EVP + advect + thermo)    */
+    FESOM_PH_ICE,         /* ice-step remainder: ocean2ice + cut_off +
+                           * thermodynamics + oce_fluxes + h_diag (NO
+                           * halo exchanges live here — the discriminator
+                           * bucket vs ICE_DYN's ~100+)                    */
+    FESOM_PH_ICE_DYN,     /* EVP/mEVP dynamics incl. its rails/exchanges   */
+    FESOM_PH_ICE_ADV,     /* FCT advection solve (tg_rhs + fct_solve)      */
     FESOM_PH_COUPL,       /* oce_fluxes_mom + shortwave penetration        */
     FESOM_PH_OCEAN,       /* fesom_timestep minus the CG solve             */
     FESOM_PH_CG,          /* fesom_ssh_solve_cg_kk (carved out of ocean)   */

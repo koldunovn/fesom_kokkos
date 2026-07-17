@@ -8,6 +8,7 @@
 #include "fesom_ice_evpwide.h"   /* M7 E.EVP1: extended-slot tails for the wide-halo EVP */
 #include "fesom_ice_fct.h"
 #include "fesom_ice_thermo.h"
+#include "fesom_phasestats.h"   /* M7 E.IMB.1: ICE_DYN / ICE_ADV sub-phase marks */
 #include "fesom_forcing.h"   // M4.3d-a: forcing->{runoff,Ch_atm_oce,Ce_atm_oce}_fld IN-rail push
 #include "fesom_jra55.h"     // M4.3d-a: the 8 jra physics Fields IN-rail push
 #include "fesom_halo.h"
@@ -672,6 +673,7 @@ void fesom_ice_step(int                            step,
          * host-current after its halo — L30 re-push), stress_atmice_x/y (forcing producers),
          * uice/vice + sigma11/12/22 (the RMW rheology state from the prev step's EVP). OUT:
          * sync_host(uice/vice/sigma) so the host FCT (uice/vice) + next step's IN rail see them. */
+        fesom_phasestats_mark(FESOM_PH_ICE_DYN);   /* M7 E.IMB.1 */
         if (ice->whichEVP == 0) {
             const int Nn = mesh->myDim_nod2D + mesh->eDim_nod2D;
             const int Eo = mesh->myDim_elem2D;
@@ -783,6 +785,7 @@ void fesom_ice_step(int                            step,
      * the set-once fct_massmatrix + the ssh_stiff CSR are device-current from their one-shot pushes.
      * OUT: sync_host(data[*].values) for the host cut_off + thermo. capture-before (L26) the 3
      * values. The FCT-internal values_rhs/valuesl/dvalues/fct_* are fully recomputed → not pushed. */
+    fesom_phasestats_mark(FESOM_PH_ICE_ADV);   /* M7 E.IMB.1: closes ICE_DYN */
     if (!s_no_ice_adv && stiff) {
         std::vector<real_t> fa, fm, fms;
         if (s_verify_icefct) {
@@ -809,6 +812,7 @@ void fesom_ice_step(int                            step,
         }
         if (s_verify_icefct) fesom_ice_fct_verify(ice, stiff, partit, mesh, step, fa, fm, fms);
     }
+    fesom_phasestats_mark(FESOM_PH_ICE);   /* M7 E.IMB.1: closes ICE_ADV; cut_off/thermo/fluxes = "ice" */
     /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics regardless of
      * NO_ICE_ADV. M4.3a: ON THE DEVICE. IN: push the ice tracer values (host EVP/FCT wrote
      * them via the raw alias, L14). capture-before (RMW clamp) if verify. OUT: sync_host for

@@ -180,8 +180,14 @@ through the MPI-wait pool: ~74 ms at the exchanges = E.split's ~36 imbalance + ~
   is a bad spec on multi-rank-per-node machines — worth reporting back to the survey).
 - Note the baseline had UCX_TLS UNSET = every transport (incl. gdr_copy) already
   available to UCX's own selection logic — gdrh ≈ ref is consistent with "UCX default
-  was already optimal @4N". Whether gdr_copy ever ENGAGES is the gdrdiag job's question
-  (26324742 pending; L80-class check). The §2.3 decision stays with the 16N leg.
+  was already optimal @4N". The §2.3 decision stays with the 16N leg.
+- **Engagement diag 26324742 (3-step legs, UCX_LOG_LEVEL=info) closes the L80 hole:**
+  gdr_copy + cuda_copy INITIALIZE in both forced legs (48/64 mentions; cuda_copy in the
+  ep lanes; gdrs lanes = rc_mlx5-only as forced, gdrh lanes = sysv/xpmem/cma + rc_mlx5).
+  ⇒ the gdrh null is a REAL null ("transport present, no benefit to forcing it"), not a
+  dead knob: **on Levante stock UCX there is no free UCX_TLS win — the default already
+  uses the cuda paths it wants.** Remaining GPUDirect lever = the HPC-X module swap
+  (different UCX defaults entirely) and, further out, device-initiated (lit-#8).
 
 ## 8. 4N knob job 26324351 (cgpoly0 ✓, same-alloc l[50072,50106,50109,50127]) —
 ## TIMEOUT at 50:18 after 2⅚ of 3 legs; 2 verdicts + 1 provisional
@@ -245,3 +251,35 @@ wait windows):**
   16 nodes) decorrelates node from geometry — WAIT FOR IT before naming this pool.
 - cg busy spread 7.4 (r7 again) — the straggler rank is compound (max in ice+cg+high
   ocean), consistent with one systematically-loaded subdomain.
+
+## 10. E.IMB.1 — the mechanism hunt (user request: "find what actually causes it")
+
+**Free joins done first (offline, no runs):**
+1. **REAL ice mask vs ice busy: r = −0.21 (ANTI-correlated) ⇒ ice-concentration is
+   DEFINITIVELY DEAD as the driver.** Source: the `a_ice` NG5 monthly that the
+   timed-out 26324351 left behind (= the ice state of the exact measurement window).
+   Rank 13 = 48 % ice-covered (222,874 ice nodes) → busy 17.2 (below mean); rank 6 =
+   59 ice nodes → busy 22.6 (above mean); rank 11 = ZERO ice → mean busy. The ice
+   kernels do ~uniform work over the domain regardless of mask.
+2. **Partner count vs ice busy: r = +0.80.** All four 7-partner ranks (6/7/8/9) are the
+   top-4 ice-busy; the two 3-partner ranks (1/10) are the two cheapest. And **the
+   ice-busy rank pattern repeats in cg busy (r = +0.74)** — the two exchange-dense
+   phases (ice ~120 exch/step, cg 72) share stragglers ⇒ LEAD SUSPECT: per-exchange /
+   per-partner overhead (posts, pack/unpack, fence-drain serialization), NOT physics.
+3. Ocean busy vs owned-elem count r = +0.78 — but myElem spreads only 0.93 % vs busy
+   4.6 % (≈5× leverage) and stays confounded with node index at 4N.
+
+**Discriminator (pre-registered BEFORE submission; job = 4N, BIN=phst1 (adds
+ICE_DYN/ICE_ADV sub-phases), legs bar / barknobs(+CGPOLY=3+EVPWIDE=8), std300,
+`-x` the 26324579 nodes = FRESH allocation):**
+- (i) If per-exchange overhead drives the ice spread: it concentrates in **icedyn**
+  (≥ 70 % of the ice-family spread; `ice` (thermo/cutoff/fluxes, ~0 exchanges) and
+  `iceadv` spreads ≤ 3 ms each), and partner-count correlation of icedyn busy ≥ +0.7.
+- (ii) The knob leg cuts exchanges (ice 120→~16 via EVPWIDE=8; cg 72→~23 via CGPOLY=3):
+  **icedyn busy spread must COLLAPSE ≥ 60 %, cg spread shrink ~3×.** If the spreads
+  survive the exchange-count cut → the overhead story is WRONG → locality/hardware.
+- (iii) Ocean hardware-vs-data: per-rank ocean busy on the FRESH allocation vs today's
+  per-rank vector — corr ≥ +0.9 ⇒ rank/geometry-driven (data); pattern reshuffling
+  with node identity ⇒ a100_80 silicon lottery (would need an L94-extension rule and
+  changes nothing in code).
+- (iv) mpiprof rides along (barrier legs) for the E.split continuity check.
