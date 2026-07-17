@@ -1217,9 +1217,18 @@ class). Binaries `m7/bin/cgpoly0/`: CUDA **`ee2c4fdd`** / Serial `87392308`.
 
 **NG5@4N: 0.6213 s/step ⇒ 7.37× · NG5@16N: 0.2314 s/step ⇒ 5.31×, SYPD@dt240 ≈ 2.76**
 (×1.03 correction now over-conservative — CGPOLY shrinks the CG share ~3×, true correction
-≈ 1.01 ⇒ SYPD ≈ 2.81; re-derive at the next E.5-style close). CGPOLY stays **OPT-IN**
-(`FESOM_SPEED_CGPOLY=3`); adoption/promotion + climate leg = user decisions (see the
-options-mEVP threshold-flip note above). 8× @4N: another −7.9 % (0.6213 → 0.5723).
+≈ 1.01 ⇒ SYPD ≈ 2.81; re-derive at the next E.5-style close). 8× @4N: another −7.9 %
+(0.6213 → 0.5723).
+
+**USER DECISIONS (2026-07-17): (a) the options matrix STAYS STRICT — no solver-class
+amendment to the PASS criterion; the mEVP row stands as a formal FAIL (mechanism documented
+above, lever exonerated). (b) Consequently CGPOLY is a MANUAL KNOB PERMANENTLY — it never
+joins `FESOM_SPEED=1` (this supersedes any promotion path; non-bit-identity is on BOTH
+backends by design: ON-vs-OFF differs on Serial and CUDA alike; knob-OFF is bit-identical
+everywhere). (c) 1-yr CUDA climate leg approved and submitted (documentation, not a
+promotion gate). (d) Next lever: E.PART via the user's partitioner setup
+(`/home/a/a270088/fesom_part/fesom2/work_part`) — 🔴 STANDING RULE: repartitioned meshes are
+COPIES under /work; NEVER modify anything on /pool.**
 
 ### E.EVP1 A/B HARVEST (26306420 4N · 26306419 16N; std300, min-of-2, same-alloc, evpw0 v3)
 
