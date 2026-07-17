@@ -31,15 +31,17 @@ def main():
         n = int(np_s)
         rank_of, cnt = load_ranks(base, n)
         print(f"# dist_{n}  (mesh {base}, nod2D={lat.size})")
-        print("# rank\tn2d\tn3d\tpolar50%\tpolar60%\tmean|lat|")
+        print("# rank\tn2d\tn3d\tpolar50%\tpolar60%\tNH50%\tSH50%\tmean|lat|")
         p50 = p60 = 0
         for r in range(n):
             m = rank_of == r
             f50 = 100.0 * np.mean(alat[m] > 50.0)
             f60 = 100.0 * np.mean(alat[m] > 60.0)
+            nh = 100.0 * np.mean(lat[m] > 50.0)    # January ice lives here
+            sh = 100.0 * np.mean(lat[m] < -50.0)
             p50 += f50 > 80.0
             p60 += f50 < 2.0
-            print(f"{r}\t{int(cnt[r])}\t{int(nlvls[m].sum())}\t{f50:.1f}\t{f60:.1f}\t{np.mean(alat[m]):.1f}")
+            print(f"{r}\t{int(cnt[r])}\t{int(nlvls[m].sum())}\t{f50:.1f}\t{f60:.1f}\t{nh:.1f}\t{sh:.1f}\t{np.mean(alat[m]):.1f}")
         print(f"# summary dist_{n}: {p50}/{n} ranks >80% polar50, {p60}/{n} ranks <2% polar50 (≈ice-free)")
 
 

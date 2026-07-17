@@ -96,6 +96,8 @@ only, which needs gdrdrv; both absent ⇒ expect the strict UCX_TLS legs to fail
 | 2.6 | gate: CUDA fidelity (FESOM_SPEED=1+PHASESTATS) | 26324578 | submitted |
 | 2.6 | PHASESTATS legs 4N (ref/phst/phstbar, BIN=phst0 `c06d4094`) | 26324579 | submitted |
 | 2.6 | PHASESTATS legs 16N (same) | 26324580 | submitted |
+| 2.3 | GDR engagement diag 4N (3 steps, UCX_LOG_LEVEL=info in legs) | 26324742 | submitted |
+| 2.2 | 4N composition resubmit (cg3/cg3ew8 pair; 26324351 TIMEOUT after 2⅚ legs) | 26325395 | submitted |
 
 ## 4. E.IMB.0 PHASESTATS — BUILT + SMOKED (commit 20af279, frozen `m7/bin/phst0`)
 
@@ -114,6 +116,12 @@ per-phase busy(=wall−wait)/wait rank-min/mean/max + argmax rank + full per-ran
   the phstbar leg (BARRIER implies mpiprof) reproduces the E.split methodology and
   splits the absorbed skew BY PHASE.
 - phst0: CUDA `c06d4094` / Serial `e0d69fdf`.
+- **GATE LADDER ALL GREEN (all three, ~verbatim SYNCSTATS-class but stronger):**
+  26324576 knob-OFF byte = BIT-IDENTICAL rc=0 · 26324577 knob-ON byte
+  (FORCE_SERIAL+PHASESTATS) = **knob FIRED + report printed + STILL BIT-IDENTICAL rc=0**
+  (the pure-timer claim proven at byte level, with the L80 announce check) · 26324578
+  CUDA fidelity (FESOM_SPEED=1+PHASESTATS=1) = PASS at the floor (worst h_ice 8.725e-03
+  vs ceil 1e-01), announce + [phasestats] report fired on the CUDA path.
 
 ## 5. ⭐ GPUDirect capability probe 26324356 (l50069, a100_80): THE PATH IS OPEN
 
@@ -132,3 +140,108 @@ per-phase busy(=wall−wait)/wait rank-min/mean/max + argmax rank + full per-ran
   both ship in NVHPC 24.7 comm_libs and peermem is loaded. Still L-effort, still gated
   on the env legs + fidelity; goes on the session-15+ bench only if the imbalance/census
   pools don't spend the budget first.
+
+## 6. ⭐ Census refresh @4N HARVESTED (26324354, h17 `f8384e86` ✓, 35 steps, steady
+## window 11-34, rank 0): THE LAUNCH/FENCE POOL HAS COLLAPSED — lit-#2 DEPRIORITIZED
+
+Stall budget (step 643.4 ms in-trace): GPU busy **86.98 %** (kernels 84.08 + memcpy
+2.90 = 18.6 ms staging); **GPU idle 83.8 ms/step**, attributed: **MPI wait 65.7 ms
+(10.2 %)** · launch gap 7.6 ms (1.19 %) · fence spin 3.2 ms (0.49 %) · host segment
+7.2 ms · other API 0.08. Our fences: 308/step (291.6 = mandatory pre-MPI pack; spin
+3.03 ms). MPI's own device syncs: 2268/step (in the MPI bucket — the gdr/latency class).
+
+Gap census (`--min-gap-ms 0.1`, L98): gaps 87.5 ms/step in 298.8 gaps/step; victims =
+the exchange sites themselves (halo device2 34.9 + device 30.4 + cgpipe_rr 13.5 +
+deviceN 2.5 ≈ **81 ms, MPI-covered ~74 ms, PCIe-covered ~15 ms**); every non-comm
+victim ≤ 3.2 ms (ice_thermo PCIe rail 1.8, jra55 host 1.0).
+
+**Scored vs pre-reg §2.4: launch+fence = 10.8 ms/step (1.7 %) — BELOW the 25-40 ms
+central AND below the 15-20 ms decision threshold** (the h8-era 33 ms pool was real
+then; h16/h17's fence deletions + CGPIPE's exchange fusion already spent it). Wrong
+side of the central = the 7th wrong-high; the census-as-floor rule (L93) can't rescue
+it — the pool measured is one THIRD of the threshold. **⇒ CUDA-graph capture (lit-#2)
+is OFF the session-15 bench for the 4N target** (16N leg pending, but the 8× target is
+@4N and even a perfect capture buys ≤ 10.8 of the needed 49 ms). The 8× path runs
+through the MPI-wait pool: ~74 ms at the exchanges = E.split's ~36 imbalance + ~50 comm
+(rank-0 view) — exactly what E.IMB.0 + the GDR/transport legs are measuring.
+
+## 7. GDR env A/B @4N HARVESTED (26324352, h17 `f8384e86` ✓, std300 min-of-2,
+## nodes l[50057,50060,50100,50166] all a100_80)
+
+| leg | s/step | Δ vs ref | reps |
+|---|--:|--:|---|
+| ref (FESOM_SPEED=1) | 0.6371 | — | 0.6371/0.6372 |
+| gdrs (`UCX_TLS=rc_x,cuda_copy,gdr_copy`) | 0.6653 | **+4.43 %** | 0.6653/0.6653 |
+| gdrh (`…rc_x,sm,self,cuda_copy,gdr_copy`) | 0.6369 | **−0.03 %** | 0.6369/0.6384 |
+
+- ref reproduces the h17 anchor (0.6371 vs 0.6382, −0.17 % — same-day ✓).
+- **Scored vs pre-reg §2.3 (central gdrh −0..2 % @4N): NULL at 4N.** gdrh−gdrs = −4.46 %
+  isolates the sm/self loss as the strict leg's whole regression (the lit-§7 strict spec
+  is a bad spec on multi-rank-per-node machines — worth reporting back to the survey).
+- Note the baseline had UCX_TLS UNSET = every transport (incl. gdr_copy) already
+  available to UCX's own selection logic — gdrh ≈ ref is consistent with "UCX default
+  was already optimal @4N". Whether gdr_copy ever ENGAGES is the gdrdiag job's question
+  (26324742 pending; L80-class check). The §2.3 decision stays with the 16N leg.
+
+## 8. 4N knob job 26324351 (cgpoly0 ✓, same-alloc l[50072,50106,50109,50127]) —
+## TIMEOUT at 50:18 after 2⅚ of 3 legs; 2 verdicts + 1 provisional
+
+| leg | s/step (min) | Δ vs cg3 | status |
+|---|--:|--:|---|
+| cg3 | 0.6219 (0.6219/0.6219) | — | ✓ reproduces session-13's 0.6213 (+0.10 %) |
+| cg3rndv (`UCX_RNDV_THRESH=256k`) | 0.6788 (0.6816/0.6788) | **+9.15 %** | **CLOSED: regression** |
+| cg3ew8 | 0.6176 (single rep a) | **−0.69 %** | provisional — resubmitted 26325395 |
+
+- **RNDV verdict (pre-reg §2.2): the threshold bump is an A.3-family catastrophe in the
+  other direction** — forcing every ≤256 KB message eager (incl. EVPWIDE-class/3D-halo
+  sizes) costs +9.15 %. The knob PROVABLY engaged (effect size) and cgpoly was ACTIVE in
+  the leg (announce ✓). Documented, dropped; no further RNDV legs at 4N.
+- **cg3ew8 rep a: −0.69 % vs cg3, dead-center in the pre-reg central (−0.3..0.8 %)**,
+  both announces fired ([cgpoly] d3 λ=[0.0549,1.6482] + [evpwide] K=8 R=8, widest msg
+  ~395 KB). Single-rep ⇒ NOT protocol; the 26325395 2-leg pair (cg3+cg3ew8, 40 min)
+  completes min-of-2. Knobbed-config 4N best would be ≈ 0.6176 ⇒ ratio ~7.41×.
+- Ops note: legs with CGPOLY+EVPWIDE init (λ power iteration + ring build) need ~2 min
+  more per rep than plain legs — the 50-min 3-leg × 2-rep walltime was undersized; the
+  slow rndv legs (+30 s each) finished the job off.
+
+## 9. ⭐⭐ E.IMB.0 @4N HARVESTED (26324579, phst0 `c06d4094` ✓, std300, all-a100_80) —
+## THE 4N IMBALANCE IS COMPOSITE AND THE ICE-CONCENTRATION HYPOTHESIS IS REJECTED AT 4N
+
+**Instrument validation (all pre-regs §2.6 HIT):** ref 0.6379 = the anchor (0.6382,
+−0.05 %) · phst +0.17 % (≤ ±0.5 % ✓ non-perturbing) · phstbar +0.52 % (the known
+barrier class ✓) · accounting closes (busy 573.9 + wait 65.1 = 639.0 ms vs loop 639.0)
+· per-rank TOTAL busy+wait = step wall on every rank (lockstep ✓) · **the barrier leg's
+[halo-mpi-prof] REPRODUCES session-11 E.split to 0.2 ms: imbalance 35.9 ms (42 %) /
+comm 48.6 (58 %) vs 36.1/50.3** · instruments reconcile (barrier +35.9 = waitall −14.6
++ net wait +21.3 ✓ = phasestats' +21.9).
+
+**Attribution of record (BARRIER leg per-phase busy — the clean per-rank compute; the
+natural leg under-counts stragglers because victims' GPU backlog drains inside their
+wait windows):**
+
+| phase | busy min/mean/max (ms/step) | spread | rep-to-rep corr |
+|---|---|--:|--:|
+| force | 7.2 / 7.9 / 9.1 | 1.9 | 0.953 |
+| **ice** | **13.7 / 19.6 / 33.0 @r7** | **19.3 (2.4×)** | **0.999** |
+| **ocean** | **497.4 / 509.3 / 520.6 @r13** | **23.2 (4.6 %)** | **0.998** |
+| cg | 15.2 / 17.1 / 22.6 @r7 | 7.4 | 0.999 |
+| TOTAL | 539.6 / 555.6 / 582.1 @r7 | 42.6 | (b: 43.1) |
+
+- **Deterministic, not noise** (rep-to-rep 0.998-0.999, spreads reproduce to 0.2 ms).
+- **No phase carries ≥ 60 % (pre-reg rule): ice ≈ 45 %, ocean ≈ 55 % of the spread
+  budget — the pool is COMPOSITE.** (coupl attributes ~0: its async kernels drain
+  inside ocean — known smear, coupl work is small.)
+- **Ice-concentration REJECTED as the rank predictor @4N**: top ice-busy ranks 7/8/6/9
+  have NH50 = 13.3/10.8/31.4/24.4 % (mid-latitude), while the Arctic/Antarctic-heavy
+  ranks (r12 86.6 % SH, r14 67.7 % SH, r13 48.1 % NH) sit at MEAN ice busy. No polar
+  feature correlates (|r| < 0.35). The 2.4× ice-busy spread is real but its driver is
+  NOT polar fraction (candidates: marginal-ice-zone rheology cost, FCT limiter
+  activity, coastal density — needs the 16N table before theorizing).
+- **Ocean busy spread 23.2 ms on a 0.77 % 3D-volume balance = a ~6× leverage anomaly**;
+  correlates with n2d (r=+0.76) but n2d spans only 0.5 % — and ocean busy is
+  NODE-MONOTONE (per-node means 501.2/509.0/510.8/515.7) while n2d also grows with
+  rank index ⇒ **n2d / rank-index / node-index are confounded; a100_80 silicon-lottery
+  clock spread is a live alternative to a data-driven cause.** The 16N leg (64 ranks,
+  16 nodes) decorrelates node from geometry — WAIT FOR IT before naming this pool.
+- cg busy spread 7.4 (r7 again) — the straggler rank is compound (max in ice+cg+high
+  ocean), consistent with one systematically-loaded subdomain.
