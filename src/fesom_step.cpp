@@ -17,6 +17,7 @@
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.4: flip ocean halos to GPU-aware-MPI (fesom_halo_field)
 #include "fesom_profile.hpp"       // M5.6: per-substep host+device timing (FESOM_STEP_PROFILE)
+#include "fesom_phasestats.h"      // M7 E.IMB.0: CG carved out of the ocean phase
 #include "fesom_ice.h"
 #include "fesom_kpp.h"
 #include "fesom_tke.h"
@@ -755,7 +756,9 @@ int fesom_timestep(int                          step_n,
 
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
+    fesom_phasestats_mark(FESOM_PH_CG);      /* M7 E.IMB.0: the solve is its own phase */
     int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
+    fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
          * reads and the next step's CG warm start both read exactly this copy. The sync_host,

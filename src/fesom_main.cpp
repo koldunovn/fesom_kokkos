@@ -21,6 +21,7 @@
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"   // M5.1 GPU-aware-MPI on-device halo
 #include "fesom_profile.hpp"       // M5.6 per-substep timing (FESOM_STEP_PROFILE)
+#include "fesom_phasestats.h"      // M7 E.IMB.0: per-rank per-phase busy/wait (FESOM_SPEED_PHASESTATS)
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_sss_runoff.h"
@@ -1078,7 +1079,9 @@ skip_rest_state:
                 g_fesom_cg_wall = 0.0; g_fesom_cg_iters = 0;   /* measure CG over the timed window */
                 tp_force = tp_ice = tp_coupl = tp_ocean = 0.0;
                 fesom_prof::reset();   /* M5.6: per-substep timers over the timed window */
+                fesom_phasestats_open();   /* M7 E.IMB.0: arm per-rank phase walls, window-aligned */
             }
+            fesom_phasestats_mark(FESOM_PH_FORCE);   /* closes prev step's OTHER */
             TP_BEG();
             if (use_jra) {
                 /* Calendar crosses year boundaries cleanly now that
@@ -1152,6 +1155,7 @@ skip_rest_state:
              *   4. oce_fluxes — overwrites heat_flux/water_flux/virtual_salt/relax_salt
              *      from the ice-mediated fluxes (Phase C2).
              * The ocean step that follows then sees the updated forcing. */
+            fesom_phasestats_mark(FESOM_PH_ICE);
             TP_BEG();
             fesom_ice_step(n, &ice, &mpi, &mesh,
                            &dyn, &tracers, &forcing,
@@ -1159,6 +1163,7 @@ skip_rest_state:
                            use_sr  ? &sr  : NULL,
                            &stiff);
             TP_END(tp_ice);
+            fesom_phasestats_mark(FESOM_PH_COUPL);
             TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
 
             /* Phase D5 — ice-mediated surface momentum flux. Must be after
@@ -1227,10 +1232,12 @@ skip_rest_state:
             /* M1.5: sync the ocean step's forcing inputs to the device first (no-op in production). */
             forcing_synccheck_roundtrip(&forcing);
 #endif
+            fesom_phasestats_mark(FESOM_PH_OCEAN);
             TP_BEG();
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
             TP_END(tp_ocean);
+            fesom_phasestats_mark(FESOM_PH_OTHER);   /* io/calendar/snapshot tail of the step */
             if (mpi.mype == 0) {
                 fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
             }
@@ -1397,6 +1404,7 @@ skip_rest_state:
         }
         {   /* M5.1 perf: report startup-free per-step wall (see time_warmup above). */
             Kokkos::fence();
+            fesom_phasestats_close();   /* M7 E.IMB.0: before the barrier — end skew is not a wait */
             MPI_Barrier(MPI_COMM_WORLD);
             double t_loop_end = MPI_Wtime();
             int    timed      = nsteps - time_warmup;
@@ -1424,6 +1432,7 @@ skip_rest_state:
             }
             fesom_halo_mpi_report(timed, &mpi);   /* M5.17: per-rank halo MPI split — COLLECTIVE, all ranks */
             fesom_halo_syncstats_report(timed, &mpi); /* M7 0.3: sync/fence counters — COLLECTIVE, all ranks */
+            fesom_phasestats_report(timed, &mpi);     /* M7 E.IMB.0: phase busy/wait table — COLLECTIVE */
         }
         #undef TP_BEG
         #undef TP_END

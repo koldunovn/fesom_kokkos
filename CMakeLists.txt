@@ -66,7 +66,7 @@ set(FESOM_SRC
   src/fesom_constants.cpp   src/fesom_phc.cpp         src/fesom_jra55.cpp
   src/fesom_bulk.cpp        src/fesom_tracer_diff.cpp src/fesom_sss_runoff.cpp
   src/fesom_partit.cpp      src/fesom_halo.cpp        src/fesom_ice.cpp
-  src/fesom_halo_device.cpp src/fesom_profile.cpp
+  src/fesom_halo_device.cpp src/fesom_profile.cpp   src/fesom_phasestats.cpp
   src/fesom_ice_thermo.cpp  src/fesom_ice_coupling.cpp src/fesom_ice_evp.cpp
   src/fesom_ice_evpwide.cpp
   src/fesom_ice_fct.cpp     src/fesom_gm.cpp          src/fesom_kpp.cpp
