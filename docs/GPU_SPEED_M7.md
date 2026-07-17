@@ -1226,9 +1226,15 @@ above, lever exonerated). (b) Consequently CGPOLY is a MANUAL KNOB PERMANENTLY �
 joins `FESOM_SPEED=1` (this supersedes any promotion path; non-bit-identity is on BOTH
 backends by design: ON-vs-OFF differs on Serial and CUDA alike; knob-OFF is bit-identical
 everywhere). (c) 1-yr CUDA climate leg approved and submitted (documentation, not a
-promotion gate). (d) Next lever: E.PART via the user's partitioner setup
+promotion gate). (d) Next lever WAS E.PART via the user's partitioner setup
 (`/home/a/a270088/fesom_part/fesom2/work_part`) — 🔴 STANDING RULE: repartitioned meshes are
-COPIES under /work; NEVER modify anything on /pool.**
+COPIES under /work; NEVER modify anything on /pool.
+🔴 (e) E.PART RESOLUTION (hours later, session-13 findings §12): the probe KILLED the lever —
+the "22 %/51 % 3D imbalance" was an rpart.out format misreading (the file is a gid→new-index
+permutation; rule 0.36). TRUE /pool NG5 3D spread: 0.77 %/1.33 % — already dual-weighted.
+The 36/53 ms runtime imbalance pool is real but UNATTRIBUTED again; the surviving static
+hypothesis is ice concentration (polar fraction 0–100 %/rank at dist_64). Next: runtime
+per-rank phase attribution before any partition work.**
 
 ### E.EVP1 A/B HARVEST (26306420 4N · 26306419 16N; std300, min-of-2, same-alloc, evpw0 v3)
 

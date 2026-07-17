@@ -33,6 +33,12 @@ section (`docs/GPU_SPEED_M7.md`) → the literature survey
 - **0.35 Ring sizes GROW with ring number** (~linearly, 2D perimeter): the session-13 byte
   pre-estimate assumed constant rings and undershot ×2 (worst-partner R=4: 81.1 KB @4N,
   41.8 KB @16N — printed by the `[cgpoly]` announce). Fold into every 0.27 check.
+- **0.36 🔴 NEVER build a conclusion on a parsed file format without cross-checking the
+  parse against the producer's own accounting of the same quantity.** The session-13 §6
+  recon read `rpart.out`'s tail as rank-major gid lists; it is a **gid → new-index
+  permutation** — the misread manufactured a phantom "22 %/51 % 3D imbalance" and a whole
+  lever (E.PART) on top of it. `check_partitioning`'s own numbers (one grep away) refuted
+  it to the digit. `scripts/m7_part_spread.py` now implements the VERIFIED format.
 
 **Binaries** `m7/bin/…`: ✅ **`h17` = the adopted master** (CUDA `f8384e86` / Serial
 `5c3c90fc`; 4N 0.6382 ⇒ 7.17×, 16N 0.2413 ⇒ 5.09×, SYPD 2.65). **`cgpoly0`** = CGPOLY
@@ -68,52 +74,44 @@ anchors). `evpw0` v3 = EVPWIDE lever (`9c900b4f`/`21cea692`). 🔴 `h3` broken, 
    · ssh 1.00000 · a_ice 0.99997** (refs in the job header; solver-class ⇒ expect the same
    magnitudes, exact repetition NOT required). Write the result into the ledger E.CG2
    section + findings.
-2. **26323500 / 26323501 — NG5 weighted partitions dist_16 / dist_64** (single-rank
-   compute jobs; FORCA20 took 92 s at 2.1M nodes, NG5 = 7.4M ⇒ expect ≲30 min; outputs
-   `/work/ab0995/a270088/port2/m7/epart/gen{16,64}/fesom_meshpart.out` + the dist dirs in
-   `/work/ab0995/a270088/port2/mesh/ng5_w3d/`). Harvest = (a) the job's own
-   `LOAD BALANCING` block (2D + 3D percent lines), (b) the probe of record:
-   `python scripts/m7_part_spread.py /work/ab0995/a270088/port2/mesh/ng5_w3d 16 64`
-   (nereus python). **Pre-registered expectation (findings §11): 3D spread 22.2 % → ≲2-3 %
-   (dist_16), 51.1 % → ≲3-5 % (dist_64); 2D spread may open a few %; verify
-   `Distribution weight: 2D and 3D nodes` printed.** If the spread does NOT collapse,
-   STOP and re-audit (wrong binary / wrong weights) before any model run.
+2. ~~26323500/501 NG5 weighted partitions~~ — **HARVESTED + RESOLVED IN-SESSION: the lever
+   is DEAD (findings §12).** The generated dists came back BYTE-IDENTICAL to /pool's; the
+   §6 "22 %/51 % 3D imbalance" was an rpart.out format misreading (rule 0.36). TRUE /pool
+   NG5 balance: 2D 0.50 %/0.96 %, **3D 0.77 %/1.33 %** — already dual-weighted (the user
+   made those dists with this partitioner on May 29). The STOP-rule fired as designed;
+   no model runs were spent. `ng5_w3d` copy kept (statics + identical dists, README notes
+   the resolution) — reusable only if an ice-weighted variant is ever built.
 
-## 3. SESSION-14 SHAPE — E.PART model phase (the main lever; lit-survey rank #1)
+## 3. SESSION-14 SHAPE — the imbalance pool needs RE-ATTRIBUTION (E.PART's replacement)
 
-1. **E.PART.1 — pre-register THE MODEL NUMBERS** (only after the §2.2 probe): the honest
-   model from §1 pools with 0.31 humility applied — straggler-time removal is not
-   event-deletion, but do NOT assume the full 36/53 ms converts. Suggested pre-reg shape:
-   4N ceiling ≈ −30 ms (the 3D-skew share), central −15..25 ms (0.6382 → ~0.613-0.623 on
-   the master config); 16N ceiling ≈ −20 ms, central −8..14 ms (0.2413 → ~0.227-0.233);
-   floors 0 (multi-constraint partitions worsen edgecut/halo — the announce/partner stats
-   will show it). WRITE IT BEFORE SUBMITTING.
-2. **E.PART.2 — the mesh A/Bs** (machinery READY: `jobs/job_m7_ab_mesh`, per-leg MESH
-   paths, KNOBS applies to all legs):
-   ```
-   sbatch -N16 --ntasks=64 --export=ALL,DT=180,NSTEPS=300,TAG=epart_ab_16n,\
-     BIN=/work/ab0995/a270088/port2/m7/bin/cgpoly0/fesom_port_cuda,KNOBS="FESOM_SPEED=1",\
-     LEG1="old::/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5",\
-     LEG2="w3d::/work/ab0995/a270088/port2/mesh/ng5_w3d" jobs/job_m7_ab_mesh
-   ```
-   + the same at `-N4 --ntasks=16` with TAG=epart_ab_4n. Two more legs are free — consider
-   LEG3/LEG4 = the same two meshes with `KNOBS` extended… NO: KNOBS is job-global; run a
-   SECOND pair with `KNOBS="FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3"` to measure the
-   partition×CGPOLY composition (the knobbed config is where 16N's remaining imbalance
-   share is largest). Off-leg (old mesh) must reproduce the h17/cgpoly anchors same-day.
-3. **E.PART.3 — validation/cert design (decomposition-class, NOT byte-class):** a
-   partition change reorders Allreduces/atomics ⇒ same class as changing the rank count
-   (routinely done in the scaling campaigns). Gates: the run's own bench-finite health +
-   fields sane + the A/B anchors + (if adopted for production benches) a fidelity-style
-   NG5 short-run cross-check old-vs-new partition (climate-close floors). NO FORCE_SERIAL
-   byte claim exists or is needed. Adoption of `ng5_w3d` as the BENCHMARK mesh = the
-   user's call with the A/B numbers (it changes every future anchor's decomposition!).
-4. **Watch items:** partner counts + halo bytes on the new partition (cgpipe/cgpoly
-   announces print them; the E.split instruments if needed); the ice-concentration axis is
-   NOT addressed (0–90 % polar fraction — an ice-mask second constraint would need
-   partitioner source changes; second-order, separate lever); dist_16 node counts CHANGED
-   per rank ⇒ per-rank memory shifts slightly (NG5@4N was ~41 GiB peak on 40 GB cards in
-   the JAX runs — OUR runs fit fine at 4N, just note it).
+The 36.1/53.0 ms/step rank-imbalance pool (session-11 E.split, runtime-measured) is REAL
+but now unattributed: every static volume proxy is FLAT (2D, 3D, CG rows). Surviving
+hypotheses, in order:
+
+1. **Ice-work concentration** (the only surviving static signal, recomputed under the
+   correct format): polar-fraction/rank **0.2–91 % @dist_16, 0–100 % @dist_64** (11/64
+   ranks >80 % polar, 17/64 essentially ice-free). Ice work (EVP subcycles, thermo, FCT)
+   is proportional to ice cover ⇒ the ice PHASE has a built-in ~2.7× straggler.
+2. **L94 hardware heterogeneity contamination:** re-check whether the session-11 E.split
+   measurement jobs were `-C a100_80`-pinned — an unpinned mixed allocation fakes up to
+   ~3.4 % as "imbalance".
+3. Comm-topology skew (partner counts/halo sizes per rank — the announces print maxima;
+   per-rank spread needs a small print or the E.split instruments).
+
+**The honest next step (E.IMB.0): runtime per-rank per-phase attribution.** Design: a
+cheap opt-in diagnostic (e.g. `FESOM_SPEED_PHASESTATS=1`-style, or extend the E.split
+instrument) that prints per-rank busy/wait per phase (ice / ocean-compute / CG / halo) as
+rank-min/mean/max over a 300-step window at 4N+16N — ONE ab_env-style leg per scale, no
+code risk (diagnostic only, follows the SYNCSTATS pattern: never rides the master switch).
+THEN pick the lever: ice-weighted partition (needs partitioner source change — a third
+METIS constraint or ice-mask weights; `jobs/job_m7_ab_mesh` + the `ng5_w3d` copy are ready
+machinery for exactly that A/B), ICELAG-style overlap (plan Task F.1, user-approved as
+experiment long ago), or EVPCOMPACT (Task E.4) — sized against what the attribution shows.
+
+Also viable session-14 alternatives if the user prefers (lit-survey §0, each with its own
+E.0 audit first): #2 launch/fence + CUDA-graph capture (census refresh first — h8-era
+numbers are stale), #3 GPUDirect probe chain (S-effort env legs), E.1 fuses (7-8/12-13 ms
+ceilings, byte-class).
 
 ## 4. AFTER E.PART (the lit-survey ranking, each needs its own E.0 audit + pre-reg)
 

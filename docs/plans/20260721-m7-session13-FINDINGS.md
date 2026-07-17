@@ -212,7 +212,10 @@ Serial AND CUDA).
 pre-reg (unchanged centrals): NG5 72 iters → ~29 (d2) / ~22.5 (d3); refined event model
 d3 ≈ −24 ms @16N (−9.8 %), ≈ −12 ms @4N (−1.9 %).
 
-## 6. Imbalance recon layer 1 (cheap track, prompt §2.3) — STATIC PROXIES, measured
+## 6. Imbalance recon layer 1 — 🔴 SUPERSEDED BY §12: the 3D-imbalance "smoking gun" was an
+## rpart.out FORMAT MISREADING (the file is a gid→new-index permutation, NOT rank-blocked
+## gid lists). TRUE 3D spread: 0.77 %/1.33 % — /pool NG5 was dual-weighted all along. The
+## ice-concentration row survives (recomputed §12); everything else in this section is void.
 
 While the CUDA gates queued. NG5 partition statistics (`rpart.out` + `nlvls.out` +
 `nod2d.out`, /pool production mesh):
@@ -366,3 +369,38 @@ remains the real arbiter for any promotion, per standing policy).**
   up to a few % (multi-constraint trade) and edgecut/halo to grow somewhat — the model
   anchors are the arbiter. Model-run pre-reg (ceilings/centrals) comes AFTER the spread
   probe, per the E.0 discipline.
+
+## 12. 🔴 E.PART.0 RESOLUTION — THE PROBE KILLED THE LEVER, AND THE STOP-RULE WORKED
+
+The partition jobs came back **byte-identical to /pool's dists**, with the partitioner's own
+`check_partitioning` reporting 3D balance 0.77 %/1.33 % — contradicting the §6 probe (22 %/
+51 %) on the SAME assignment. Chasing the contradiction to ground:
+
+- **rpart.out's tail is a gid → NEW-INDEX PERMUTATION** (entry g−1 = the partition-sorted
+  new index of gid g), NOT rank-major gid lists. Proven by computing both readings against
+  `check_partitioning`'s own numbers (`fvom_init.F90:1844-1856` — literally
+  `sum(nlevels_nod2D, part==i)`): reading B matches **to the digit** (3D 25,919,695/
+  26,120,378; 2D 461,571/463,872); reading A (the §6 assumption) produces the phantom 22 %.
+- **TRUE static balance of /pool NG5 (probe of record, script FIXED):** 2D 0.50 %/0.96 %,
+  **3D 0.77 % (dist_16) / 1.33 % (dist_64)** — the user generated these dists on May 29
+  with THIS dual-weighted partitioner. **There is no 3D-volume imbalance to fix; E.PART as
+  motivated is DEAD.** The ng5_w3d copy's dists are byte-identical to /pool's (kept, noted
+  in its README — reusable if an ice-weighted variant is ever built).
+- **What survives:** (a) the 36.1/53.0 ms rank-imbalance pool (session-11 E.split) is a
+  RUNTIME measurement — real, but now UNATTRIBUTED again; (b) the ice-concentration proxy,
+  recomputed under the correct format, is even starker: polar-fraction/rank **0.2–91 %
+  (dist_16), 0–100 % (dist_64; 11/64 ranks >80 % polar, 17/64 essentially ice-free)** —
+  the only surviving static hypothesis.
+- **Cost of the wrong turn:** two 6-minute single-rank jobs + a 2 GB mesh copy. The
+  pre-registered STOP-rule ("if the spread does not collapse, STOP and re-audit before any
+  model run") fired exactly as designed — no GPU hours were spent on the phantom.
+- **NEW RULE 0.36: never build a conclusion on a parsed file format without cross-checking
+  the parse against the producer's own accounting of the same quantity.** The §6 recon had
+  a "measure, don't guess" pedigree — but the measurement's FORMAT ASSUMPTION was itself a
+  guess. check_partitioning's numbers were one grep away the whole time.
+- **Next honest step for the imbalance pool (session 14): runtime per-rank attribution** —
+  which PHASE's straggler carries the 36/53 ms (ice vs ocean vs comm topology), e.g.
+  per-rank busy/wait from the E.split instruments or a per-phase rank-max/min print; also
+  re-verify the E.split measurement jobs were `-C a100_80`-pinned (L94 heterogeneity can
+  fake several % of "imbalance"). THEN decide between ice-weighted partitioning (partitioner
+  source change), ICELAG-style overlap, or accepting the pool.
