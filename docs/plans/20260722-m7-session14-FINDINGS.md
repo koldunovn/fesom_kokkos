@@ -91,3 +91,44 @@ only, which needs gdrdrv; both absent ⇒ expect the strict UCX_TLS legs to fail
 | 2.4 | census nsys 4N (h17, 35 steps, `-C a100_80` CLI) | 26324354 | submitted |
 | 2.4 | census nsys 16N | 26324355 | submitted |
 | 2.5 | peermem/gdrdrv probe (1 node, 6 min) | 26324356 | submitted |
+| 2.6 | gate: knob-OFF byte (gate_serial) | 26324576 | submitted |
+| 2.6 | gate: knob-ON byte (FORCE_SERIAL+PHASESTATS) | 26324577 | submitted |
+| 2.6 | gate: CUDA fidelity (FESOM_SPEED=1+PHASESTATS) | 26324578 | submitted |
+| 2.6 | PHASESTATS legs 4N (ref/phst/phstbar, BIN=phst0 `c06d4094`) | 26324579 | submitted |
+| 2.6 | PHASESTATS legs 16N (same) | 26324580 | submitted |
+
+## 4. E.IMB.0 PHASESTATS — BUILT + SMOKED (commit 20af279, frozen `m7/bin/phst0`)
+
+`FESOM_SPEED_PHASESTATS=1` (opt-in, `fesom_speed_on_exp` — never rides the master switch).
+No-fence phase marks {force, ice, coupl, ocean, cg, other} in the main loop + a CG
+carve-out around `fesom_ssh_solve_cg_kk`; MPI-wait attributed to the CURRENT phase by
+PMPI interposition (Wait/Waitall/Barrier/Allreduce/Reduce/Bcast/Alltoall(v)/Gather(v)/
+Scatterv/Allgather(v) — strong symbols over OpenMPI's weak aliases, straight PMPI
+pass-through, zero model arithmetic); armed only inside the timed window. Report:
+per-phase busy(=wall−wait)/wait rank-min/mean/max + argmax rank + full per-rank table.
+- np2 CORE2 login smoke: **TOTAL busy+wait = 5515.8 ms/step vs loop timer 5515.9 — the
+  accounting closes to 0.1 ms**; CG carved (562 MPI calls/step in-solve at np2); waits
+  behave as designed (rank 0's +309 ms ocean busy ↔ rank 1's +323 ms ocean wait).
+- phst legs carry `FESOM_HALO_MPI_PROF=1` so the OLD E.split instrument rides the SAME
+  run — `[halo-mpi-prof]` Waitall vs my per-phase wait sums is an in-run cross-check;
+  the phstbar leg (BARRIER implies mpiprof) reproduces the E.split methodology and
+  splits the absorbed skew BY PHASE.
+- phst0: CUDA `c06d4094` / Serial `e0d69fdf`.
+
+## 5. ⭐ GPUDirect capability probe 26324356 (l50069, a100_80): THE PATH IS OPEN
+
+- **`nvidia_peermem` LOADED** (wired into ib_uverbs) ⇒ GPUDirect RDMA is kernel-enabled.
+- **`gdrdrv` LOADED + `/dev/gdrdrv` present (world-rw)** ⇒ UCX `gdr_copy` usable.
+- Runtime UCX = system 1.18.0 (`/lib64/libucs.so.0` — NVHPC's ucx_info binary but the
+  1.18 system library at run time), transports include **gdr_copy, cuda_copy, cuda_ipc**,
+  rc/dc/ud over mlx5_0 + mlx5_1.
+- Topology (1 GPU visible): GPU0↔NIC0 = NODE, GPU0↔NIC1 = SYS ⇒ NIC affinity matters
+  for far-NUMA GPUs (the job env pins `UCX_NET_DEVICES=mlx5_0:1` for ALL ranks — a
+  possible refinement lever of its own).
+- Consequences: (a) the A.3-era "GPUDirect RDMA unavailable" verdict is FALSE at the
+  kernel level — the +35 % get_zcopy catastrophe was a rendezvous-forcing effect, not
+  missing capability (matches lit-§3's re-reading); (b) the §2.3 env legs are LIVE
+  experiments; (c) lit-#8 (NVSHMEM/NCCL-GIN device-initiated halo) is REAL on Levante —
+  both ship in NVHPC 24.7 comm_libs and peermem is loaded. Still L-effort, still gated
+  on the env legs + fidelity; goes on the session-15+ bench only if the imbalance/census
+  pools don't spend the budget first.
