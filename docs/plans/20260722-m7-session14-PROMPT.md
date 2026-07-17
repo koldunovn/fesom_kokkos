@@ -80,53 +80,68 @@ anchors). `evpw0` v3 = EVPWIDE lever (`9c900b4f`/`21cea692`). 🔴 `h3` broken, 
    no model runs were spent. `ng5_w3d` copy kept (statics + identical dists, README notes
    the resolution) — reusable only if an ice-weighted variant is ever built.
 
-## 3. SESSION-14 SHAPE — the imbalance pool needs RE-ATTRIBUTION (E.PART's replacement)
+## 3. SESSION-14 SHAPE — A PURE MEASUREMENT SESSION (recommendation, user-endorsed shape
+## 2026-07-17: "update handoff with your recommendation")
 
-The 36.1/53.0 ms/step rank-imbalance pool (session-11 E.split, runtime-measured) is REAL
-but now unattributed: every static volume proxy is FLAT (2D, 3D, CG rows). Surviving
-hypotheses, in order:
+**Why measurement-first: the two biggest remaining numbers are respectively UNATTRIBUTED
+and STALE.** The board (4N / 16N): rank imbalance **36.1 / 53.0 ms** (runtime-real, cause
+unknown — every static volume proxy is FLAT; ice concentration is the surviving suspect);
+launch gap + fence spin **~33 ms @4N but h8-era** (the step was 0.87 s then, 0.62 now — the
+fraction likely GREW); staging/PCIe 16.5 ms + per-event latency (untouched); E.1 fuses
+7-8/12-13 ms (known, byte-class); solver remnants (guess extrapolation −1..3 ms @16N).
+The 8× gap is −49 ms @4N — reachable if two of the top three pools convert. Do NOT build
+until these are measured; the build lever then picks itself (the same discipline that
+caught the E.PART phantom at zero GPU cost).
 
-1. **Ice-work concentration** (the only surviving static signal, recomputed under the
-   correct format): polar-fraction/rank **0.2–91 % @dist_16, 0–100 % @dist_64** (11/64
-   ranks >80 % polar, 17/64 essentially ice-free). Ice work (EVP subcycles, thermo, FCT)
-   is proportional to ice cover ⇒ the ice PHASE has a built-in ~2.7× straggler.
-2. **L94 hardware heterogeneity contamination:** re-check whether the session-11 E.split
-   measurement jobs were `-C a100_80`-pinned — an unpinned mixed allocation fakes up to
-   ~3.4 % as "imbalance".
-3. Comm-topology skew (partner counts/halo sizes per rank — the announces print maxima;
-   per-rank spread needs a small print or the E.split instruments).
+**The fleet (run 1-4 in parallel; only #1 involves code, and it is SYNCSTATS-class):**
 
-**The honest next step (E.IMB.0): runtime per-rank per-phase attribution.** Design: a
-cheap opt-in diagnostic (e.g. `FESOM_SPEED_PHASESTATS=1`-style, or extend the E.split
-instrument) that prints per-rank busy/wait per phase (ice / ocean-compute / CG / halo) as
-rank-min/mean/max over a 300-step window at 4N+16N — ONE ab_env-style leg per scale, no
-code risk (diagnostic only, follows the SYNCSTATS pattern: never rides the master switch).
-THEN pick the lever: ice-weighted partition (needs partitioner source change — a third
-METIS constraint or ice-mask weights; `jobs/job_m7_ab_mesh` + the `ng5_w3d` copy are ready
-machinery for exactly that A/B), ICELAG-style overlap (plan Task F.1, user-approved as
-experiment long ago), or EVPCOMPACT (Task E.4) — sized against what the attribution shows.
+1. **E.IMB.0 — per-rank per-phase attribution (the centerpiece).** A cheap opt-in
+   diagnostic (`FESOM_SPEED_PHASESTATS=1`-style; follows the SYNCSTATS pattern — a counter
+   NEVER rides the master switch, L91/0.19): per-rank busy/wait wall per phase {ice,
+   ocean-compute, CG, halo-wait} accumulated over the timed window, reduced to
+   rank-min/mean/max (+argmax rank id) and printed once at the end by rank 0. Run
+   `job_m7_ab_env`-style single legs at 4N + 16N (std300, BIN=frozen, `-C a100_80`).
+   READ: which phase carries the 36/53 ms straggler.
+   - Hypotheses it discriminates: (a) ice concentration (polar-fraction/rank 0.2–91 %
+     @dist_16, 0–100 % @dist_64; 11/64 ranks >80 % polar, 17/64 ice-free ⇒ the ice phase
+     has a built-in ~2.7× straggler) → lever = ice-weighted partition
+     (`jobs/job_m7_ab_mesh` + the `ng5_w3d` copy are ready; needs a partitioner source
+     change for the third constraint) or ICELAG (Task F.1, user-approved experiment) or
+     EVPCOMPACT (Task E.4); (b) comm-topology skew → different levers; (c) neither →
+     re-examine.
+   - ALSO re-check the original session-11 E.split jobs were `-C a100_80`-pinned — an
+     unpinned mixed allocation fakes up to ~3.4 % as "imbalance" (L94).
+2. **Launch/fence census refresh** on h17 at both scales (`scripts/m7_gap_census.py
+   --min-gap-ms 0.1`, the setting of record L98) — prices lit-#2 (CUDA-graph capture of
+   the CG iteration body + EVPWIDE window + KPP sweeps; Kokkos 4.4.01 has
+   `Kokkos::Experimental::Graph` on CUDA) honestly before any graph work.
+3. **GPUDirect probe chain** (lit-#3, all env-only on the frozen binary, A.3 caution —
+   fidelity gate before ANY adoption): (a) on a gpu node: `lsmod | grep -iE
+   'nvidia_peermem|nv_peer_mem'` + `ucx_info -d | grep -iE 'gdr|cuda'`; (b) ab_env leg
+   `UCX_TLS=rc_x,cuda_copy,gdr_copy` vs baseline at both scales; (c) HPC-X leg (NVHPC
+   24.7 `comm_libs/hpcx` module swap, same binary).
+4. **Ride-along A/B (one job, no code): CGPOLY=3 + EVPWIDE=8 composition** — do the two
+   opt-in knobs stack for knobbed-config users? Naive additivity ⇒ 16N ~0.226, SYPD ~2.87.
+   Legs: off / CGPOLY=3 / EVPWIDE=8 / both (BIN=cgpoly0 — it contains BOTH levers).
+   Optional 5th probe if queue is friendly: the RNDV env leg for CGPOLY's 81 KB @4N
+   messages (`UCX_RNDV_THRESH=256k` leg vs baseline, both with CGPOLY=3).
 
-Also viable session-14 alternatives if the user prefers (lit-survey §0, each with its own
-E.0 audit first): #2 launch/fence + CUDA-graph capture (census refresh first — h8-era
-numbers are stale), #3 GPUDirect probe chain (S-effort env legs), E.1 fuses (7-8/12-13 ms
-ceilings, byte-class).
+**Exit criterion for the session: a table naming each pool's cause + the ONE build lever
+for session 15, pre-registered.** (If E.IMB.0 lands early and points clearly at ice, the
+ICELAG audit (F.1) can start in the same session — it is the user-approved experiment with
+the largest prize if the ice phase is the straggler.)
 
-## 4. AFTER E.PART (the lit-survey ranking, each needs its own E.0 audit + pre-reg)
+## 4. AFTER THE MEASUREMENT SESSION (build levers, each needs its own E.0 audit + pre-reg)
 
-- **#2 Launch/fence hygiene + CUDA-graph capture** (EVPWIDE K-window, CGPOLY iteration
-  body, KPP sweeps): FIRST re-measure the stall budget on h17 at both scales
-  (`m7_gap_census.py --min-gap-ms 0.1`) — the 16.8+16.1 ms numbers are h8-era.
-- **#3 GPUDirect probe chain** (all S-effort, pre-registered in lit-doc §7): peermem lsmod
-  on a gpu node → gdr_copy env leg (`UCX_TLS=rc_x,cuda_copy,gdr_copy`) → HPC-X module leg.
-  A.3 precedent: transport swaps can be catastrophic — ab_env legs only, fidelity gate
-  before any adoption.
-- **Solver leftovers:** initial-guess extrapolation (−1..3 ms @16N, S-effort); P-CSI
-  pocketed for ≥64N (0.31). **Optional:** RNDV env-leg for CGPOLY's 81 KB @4N messages;
-  CGPOLY+EVPWIDE=8 composition A/B (untested; both knobs opt-in).
-- E.1 fuses (7-8/12-13 ms ceilings) remain on the table; the do-not-chase list is
-  lit-doc §9 (split-explicit rewrite, AMG, pipelined-CG, MPI-4 GPU-triggered, FP64
-  compression, implicit-VP-GPU, coloring-vs-atomics, cuSPARSE TDMA, Kokkos 5.0, packs,
-  mixed precision BANNED).
+Pick per the §3 exit table. The bench: **ice-side** (ice-weighted partition / ICELAG F.1 /
+EVPCOMPACT E.4 — whichever the attribution names), **#2 CUDA-graph capture** (if the census
+refresh confirms a ≥15-20 ms launch/fence pool), **#3 GPU-direct transport** (only if the
+probes open the path AND the env legs pay — fidelity gate before adoption), **E.1 fuses**
+(byte-class, always available as the safe filler), **initial-guess extrapolation** (small,
+composes with CGPOLY). P-CSI pocketed for ≥64N (0.31). The do-not-chase list is lit-doc §9
+(split-explicit rewrite, AMG, pipelined-CG, MPI-4 GPU-triggered, FP64 compression,
+implicit-VP-GPU, coloring-vs-atomics, cuSPARSE TDMA, Kokkos 5.0, packs, mixed precision
+BANNED).
 
 ## 5. STANDING MACHINERY (additions this session)
 
