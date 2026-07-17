@@ -98,6 +98,8 @@ only, which needs gdrdrv; both absent ⇒ expect the strict UCX_TLS legs to fail
 | 2.6 | PHASESTATS legs 16N (same) | 26324580 | submitted |
 | 2.3 | GDR engagement diag 4N (3 steps, UCX_LOG_LEVEL=info in legs) | 26324742 | submitted |
 | 2.2 | 4N composition resubmit (cg3/cg3ew8 pair; 26324351 TIMEOUT after 2⅚ legs) | 26325395 | submitted |
+| §10 | phst1 gates (off-byte / on-byte / gpu fidelity) | 26326814-16 | submitted |
+| §10 | E.IMB.1 discriminator 4N (bar/barknobs, BIN=phst1, fresh nodes `-x l[50063,50066,50075,50081]`) | 26326817 | submitted |
 
 ## 4. E.IMB.0 PHASESTATS — BUILT + SMOKED (commit 20af279, frozen `m7/bin/phst0`)
 

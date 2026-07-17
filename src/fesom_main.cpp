@@ -878,9 +878,15 @@ skip_rest_state:
         fesom_jra55_init(&jra, &mesh);
         fesom_jra55_open_year(&jra, &mesh, jra55_year);
         use_jra = 1;
-        /* Phase 3 step 25 paths from work_core/namelist.forcing. */
-        const char *sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
-        const char *runoff_path = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
+        /* Phase 3 step 25 paths from work_core/namelist.forcing. Directory
+         * overridable via FESOM_FORCING_DIR (same knob as the JRA55 reader —
+         * one dir holds the 8 JRA fields + these two); default = the
+         * historical /pool literal, byte-for-byte. */
+        const char *fdir = getenv("FESOM_FORCING_DIR");
+        if (!fdir || !fdir[0]) fdir = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0";
+        static char sss_path[1024], runoff_path[1024];
+        snprintf(sss_path,    sizeof sss_path,    "%s/PHC2_salx.nc",    fdir);
+        snprintf(runoff_path, sizeof runoff_path, "%s/CORE2_runoff.nc", fdir);
         fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
         use_sr = 1;
         printf("[fesom_port] SSS restoring: %s\n", sss_path);
