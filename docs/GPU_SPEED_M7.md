@@ -1209,8 +1209,17 @@ class). Binaries `m7/bin/cgpoly0/`: CUDA **`ee2c4fdd`** / Serial `87392308`.
 | options TKE / zstar (CGPOLY=3) | 26313391/93 | ✅ PASS ×2 (zstar Kv moved off 9.537e-02 in value, held ~1e-1 magnitude — as pre-registered for solver class) |
 | **options mEVP (CGPOLY=3)** | 26313392 | ⚠️ **formal FAIL, LEVER EXONERATED by probe 26313804: pure-Serial off-vs-d3 reproduces T 6.602e-02 @ EXACTLY 43 cells (no CUDA anywhere) — deterministic near-freezing branch flips at ice-edge cells (40/43 poleward of ±50°: Nares, Weddell, N-Svalbard), NON-accumulating (max shrinks 0.42→0.066 step 10→20), fingerprint changes with degree (d2: 20 cells). mEVP's per-scheme floor (L79 family) meeting the campaign's FIRST solver-class lever; PASS-criterion redefinition = user's call at review** |
 | CUDA selfcheck leg | 26313454 | ✅ PASS + **856/856 selfcheck = 0.000e+00 on CUDA** (CGPIPE parity: bitwise ring replay Serial AND CUDA) |
-| **A/B 16N (off/d1/d2/d3, std300)** | 26313501 | ⏳ pre-reg central −8..10 % (0.2413 → 0.217-0.222) |
-| **A/B 4N (off/d1/d2/d3, std300)** | 26313502 | ⏳ pre-reg central −1.5..2.5 % (0.6382 → 0.622-0.629) |
+| **A/B 16N (off/d1/d2/d3, std300)** | 26313501 | ✅ **off 0.2417 (h17 anchor ✓) · d1 −3.19 % · d2 −3.68 % · d3 −4.26 % → 0.2314** — pre-reg central −8..10 % ⇒ the 2nd wrong-HIGH (marginal-cost decay, findings §9 lesson 0.31) |
+| **A/B 4N (off/d1/d2/d3, std300)** | 26313502 | ✅ **off 0.6379 (h17 anchor ✓) · d1 −1.61 % · d2 −2.05 % · d3 −2.60 % → 0.6213** — pre-reg ceiling −2.5 % ⇒ the 6th wrong-LOW |
+
+### E.CG2 RESULT (d\* = 3; monotone sweep both scales — no rendezvous signature despite
+### worst-partner 81.1 KB @4N / 41.8 KB @16N; settled iters 23 = the model's 22.4)
+
+**NG5@4N: 0.6213 s/step ⇒ 7.37× · NG5@16N: 0.2314 s/step ⇒ 5.31×, SYPD@dt240 ≈ 2.76**
+(×1.03 correction now over-conservative — CGPOLY shrinks the CG share ~3×, true correction
+≈ 1.01 ⇒ SYPD ≈ 2.81; re-derive at the next E.5-style close). CGPOLY stays **OPT-IN**
+(`FESOM_SPEED_CGPOLY=3`); adoption/promotion + climate leg = user decisions (see the
+options-mEVP threshold-flip note above). 8× @4N: another −7.9 % (0.6213 → 0.5723).
 
 ### E.EVP1 A/B HARVEST (26306420 4N · 26306419 16N; std300, min-of-2, same-alloc, evpw0 v3)
 

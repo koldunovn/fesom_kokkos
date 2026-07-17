@@ -284,3 +284,41 @@ rc=0, selfchecks 0.000e+00 Serial+CUDA, fidelity/TKE/zstar PASS). **Certificatio
 options-mEVP = documented threshold-flip floor, formal PASS/FAIL redefinition for
 solver-class levers = the USER's call at review (with the A/B numbers; the 1-yr climate leg
 remains the real arbiter for any promotion, per standing policy).**
+
+## 9. ⭐⭐ A/B HARVEST (26313502 4N · 26313501 16N; std300, min-of-2, same-alloc, cgpoly0
+## `ee2c4fdd` verified in provenance) — d\*=3, MONOTONE SWEEP, NO RENDEZVOUS SIGNATURE
+
+| leg | 4N s/step | Δ4N | 16N s/step | Δ16N |
+|---|--:|--:|--:|--:|
+| off | 0.6379 | — | 0.2417 | — |
+| d1 | 0.6276 | −1.61 % | 0.2340 | −3.19 % |
+| d2 | 0.6248 | −2.05 % | 0.2328 | −3.68 % |
+| **d3** | **0.6213** | **−2.60 %** | **0.2314** | **−4.26 %** |
+
+- **Harvest checks ALL PASS:** binary md5 `ee2c4fdd` (provenance line) · `[cgpoly] ACTIVE`
+  fired in all 6 ON legs (L80) · **off-legs reproduce the h17 anchors** (0.6379 vs 0.6382 =
+  −0.05 %; 0.2417 vs 0.2413 = +0.17 %) · settled iters d3 = **23** at BOTH scales (model
+  22.4 — the iteration model is exact) · λ NG5 = [0.0549, 1.6482].
+- **d\* = 3** (argmax 16N; 4N also max — no veto). Monotone d1→d3 at both scales ⇒ **no
+  eager→rndv cliff** despite worst-partner bytes 81.1 KB @4N / 41.8 KB @16N (R=4).
+- **⇒ NG5@4N 0.6213 = ratio 7.37× · NG5@16N 0.2314 = ratio 5.31×, SYPD@dt240 ≈ 2.76**
+  (standard ×1.03 correction; with CGPOLY the CG share shrinks ~3× so the true correction is
+  ~1.01 ⇒ SYPD ≈ 2.81 — the E.5 re-derivation now matters, +0.05 SYPD for free).
+- **vs pre-reg: 4N −2.60 % vs central −1.5..2.5 (ceiling −2.5) — the 6th wrong-LOW (barely
+  past the ceiling, in the good direction). 16N −4.26 % vs central −8..10 — the 2nd
+  wrong-HIGH, ~half the central.** Diagnosis: even d1 (R=2 = ZERO byte growth over the
+  certified cgpipe graph) delivered −3.19 % vs its ~−5.3 % model ⇒ the miss is NOT byte
+  growth (and the sweep shape rules out rendezvous) but the marginal-cost transfer: the
+  295 µs/event marginal was measured on CGPIPE deleting the FIRST 72 events of the site;
+  deleting FURTHER events at the same site buys less per event (the surviving
+  exchange/Allreduce overlap better — the pool's tail is cheaper than its head).
+  **NEW LESSON (rule 0.31 candidate): a site's measured marginal cost per deleted event
+  DECAYS as the site shrinks — never price a second-round deletion at the first round's
+  marginal.** (Also: ring sizes GROW with ring number — the pre-reg byte estimate assumed
+  ~constant rings and undershot ×2; harmless here, but fold into the 0.27 checklist.)
+- **Campaign position: 8× @4N needs another −7.9 % (0.6213 → 0.5723).** On the table:
+  E.PART (the §6 recon — the biggest measured pool), E.1 fuses, optional RNDV env-leg
+  (81 KB @4N is in the regime where a threshold bump might pay), CGPOLY+EVPWIDE=8
+  composition (untested; naive additivity ⇒ 16N ~0.226, SYPD ~2.83-2.87).
+- **CGPOLY stays OPT-IN** (`FESOM_SPEED_CGPOLY=3`): adoption/promotion = the user's call
+  with these numbers + the §8 mEVP note; climate leg = user's call.
