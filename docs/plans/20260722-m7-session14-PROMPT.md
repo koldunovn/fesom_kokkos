@@ -67,13 +67,11 @@ anchors). `evpw0` v3 = EVPWIDE lever (`9c900b4f`/`21cea692`). 🔴 `h3` broken, 
 
 ## 2. IN FLIGHT AT HANDOFF — HARVEST THESE FIRST (no monitors survive the session)
 
-1. **26323301 — CGPOLY 1-yr CUDA climate leg** (user-approved, documentation only; ~3 h
-   from 2026-07-17 ~09:50; `KNOBS="FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3"`, BIN=cgpoly0).
-   Output `/work/ab0995/a270088/port2/m7/t1_1yr.26323301.out` — the job template computes
-   the comparison itself (Task-1.5 pattern); **the bar = M5.23's sst 1.00000 · sss 0.99996
-   · ssh 1.00000 · a_ice 0.99997** (refs in the job header; solver-class ⇒ expect the same
-   magnitudes, exact repetition NOT required). Write the result into the ledger E.CG2
-   section + findings.
+1. ~~26323301 CGPOLY 1-yr climate leg~~ — **HARVESTED IN-SESSION: ✅ PASS AT THE BAR
+   EXACTLY** (sst 1.00000 · sss 0.99996 · ssh 1.00000 · a_ice 0.99997 vs BOTH refs =
+   the M5.23 bar to every printed decimal). CGPOLY's record is COMPLETE: built, certified,
+   measured (7.37×/5.31×), climate-documented — permanent manual knob per rule 0.33.
+   **⇒ session 14 has NO pending harvests; start directly at §3 (E.IMB.0).**
 2. ~~26323500/501 NG5 weighted partitions~~ — **HARVESTED + RESOLVED IN-SESSION: the lever
    is DEAD (findings §12).** The generated dists came back BYTE-IDENTICAL to /pool's; the
    §6 "22 %/51 % 3D imbalance" was an rpart.out format misreading (rule 0.36). TRUE /pool

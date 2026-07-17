@@ -1229,6 +1229,12 @@ everywhere). (c) 1-yr CUDA climate leg approved and submitted (documentation, no
 promotion gate). (d) Next lever WAS E.PART via the user's partitioner setup
 (`/home/a/a270088/fesom_part/fesom2/work_part`) — 🔴 STANDING RULE: repartitioned meshes are
 COPIES under /work; NEVER modify anything on /pool.
+✅ (f) **1-yr CUDA climate leg HARVESTED (26323301): PASS AT THE BAR EXACTLY** —
+`FESOM_SPEED=1 + FESOM_SPEED_CGPOLY=3`, full 1958: **sst 1.00000 · sss 0.99996 ·
+ssh 1.00000 · a_ice 0.99997 vs BOTH Fortran and the C oracle — identical to the M5.23 bar
+to every printed decimal** (biases 1e-5..5e-4, non-growing). The solver-tolerance class is
+climatically invisible at these metrics; the CGPOLY documentation record is COMPLETE
+(remains a manual knob per (a)/(b)).
 🔴 (e) E.PART RESOLUTION (hours later, session-13 findings §12): the probe KILLED the lever —
 the "22 %/51 % 3D imbalance" was an rpart.out format misreading (the file is a gid→new-index
 permutation; rule 0.36). TRUE /pool NG5 3D spread: 0.77 %/1.33 % — already dual-weighted.
