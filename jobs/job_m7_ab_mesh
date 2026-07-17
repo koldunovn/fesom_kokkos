@@ -1,0 +1,84 @@
+#!/bin/bash
+#SBATCH --job-name=m7abmesh
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+# L94: the gpu partition is heterogeneous; anchors need -C a100_80. An A/B is
+# node-immune, but this job doubles as the anchor pair, so it pins.
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/abmesh.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/abmesh.%j.err
+#
+# M7 same-allocation MESH A/B (E.PART): like job_m7_ab_env, but the legs differ by MESH
+# PATH (partition variant), not env. Same binary, same env, same nodes — only the dist
+# files change. Up to 4 legs via LEG1..LEG4, each "label::/path/to/mesh". KNOBS (optional,
+# semicolon-separated) applies to ALL legs. 2 reps per leg, min reported; leg 1 = reference.
+#
+# E.PART usage (old /pool partition vs the /work weighted copy):
+#   sbatch -N16 --ntasks=64 --export=ALL,DT=180,NSTEPS=300,TAG=epart_ab_16n,\
+#     BIN=...,KNOBS="FESOM_SPEED=1",\
+#     LEG1="old::/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5",\
+#     LEG2="w3d::/work/ab0995/a270088/port2/mesh/ng5_w3d" jobs/job_m7_ab_mesh
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m7/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:?BIN required — pin the frozen binary}
+m7_provenance "$OUT" "$FESOM"
+
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob(all legs): $kv"; done; fi
+
+echo "=== M7 MESH A/B  $TAG  nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?DT required} knobs=${KNOBS:-none} ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+
+run_leg() {  # run_leg <label> <meshpath>
+    local label=$1 mesh=$2
+    [ -d "$mesh/dist_$NPES" ] || { echo "  $label: ERROR $mesh/dist_$NPES missing"; echo "inf inf" > "$OUT/result_$label"; return; }
+    for rep in a b; do
+        srun "$FESOM" "$mesh" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
+            > "$OUT/log_${label}_${rep}.txt" 2>&1
+    done
+    local r1 r2
+    r1=$(grep 'loop timing' "$OUT/log_${label}_a.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+    r2=$(grep 'loop timing' "$OUT/log_${label}_b.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+    echo "  $label ($mesh): ${r1:-FAIL}  ${r2:-FAIL}"
+    echo "${r1:-inf} ${r2:-inf}" > "$OUT/result_$label"
+}
+
+LABELS=()
+for i in 1 2 3 4; do
+    var="LEG$i"; spec="${!var:-}"
+    [ -z "$spec" ] && continue
+    label="${spec%%::*}"; mesh="${spec#*::}"
+    echo "--- leg $label mesh=$mesh ---"
+    run_leg "$label" "$mesh"
+    LABELS+=("$label")
+done
+
+echo
+echo "########################## MESH A/B RESULT — $TAG ##########################"
+ref=""
+for label in "${LABELS[@]}"; do
+    read -r r1 r2 < "$OUT/result_$label"
+    m=$(awk -v a="$r1" -v b="$r2" 'BEGIN{print (a<b)?a:b}')
+    if [ -z "$ref" ]; then ref=$m; echo "  $label : $m s/step  (reference)"
+    else awk -v m="$m" -v r="$ref" -v l="$label" \
+        'BEGIN{printf "  %s : %s s/step  (%+.2f%% vs ref)\n", l, m, 100*(m-r)/r}'
+    fi
+done
+echo "  (same allocation, same nodes, same binary, same env — only the MESH/partition differs)"
+echo "############################################################################"
