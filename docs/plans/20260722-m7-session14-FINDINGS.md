@@ -157,7 +157,14 @@ the exchange sites themselves (halo device2 34.9 + device 30.4 + cgpipe_rr 13.5 
 deviceN 2.5 ≈ **81 ms, MPI-covered ~74 ms, PCIe-covered ~15 ms**); every non-comm
 victim ≤ 3.2 ms (ice_thermo PCIe rail 1.8, jra55 host 1.0).
 
-**Scored vs pre-reg §2.4: launch+fence = 10.8 ms/step (1.7 %) — BELOW the 25-40 ms
+**16N census HARVESTED TOO (26324355, `f8384e86` ✓): GPU busy 59.1 % (kernels 53.2 +
+staging 15.3 ms); GPU idle 105.9 ms/step (40.9 %) = MPI wait 87.9 (34.0 %!) + launch
+8.2 + fence 1.8 + host 7.8; victims: halo 44.5+39.7 + cgpipe 18.3 ms. Launch+fence
+@16N = 10.0 ms — below the §2.4 central AGAIN ⇒ lit-#2 CUDA graphs OFF the bench at
+BOTH scales.** At 16N the whole frontier is the exchange pool: toll + imbalance +
+latency — precisely what E.T1/E.1/partner-balance attack.
+
+**Scored vs pre-reg §2.4 (4N): launch+fence = 10.8 ms/step (1.7 %) — BELOW the 25-40 ms
 central AND below the 15-20 ms decision threshold** (the h8-era 33 ms pool was real
 then; h16/h17's fence deletions + CGPIPE's exchange fusion already spent it). Wrong
 side of the central = the 7th wrong-high; the census-as-floor rule (L93) can't rescue
@@ -183,6 +190,12 @@ through the MPI-wait pool: ~74 ms at the exchanges = E.split's ~36 imbalance + ~
 - Note the baseline had UCX_TLS UNSET = every transport (incl. gdr_copy) already
   available to UCX's own selection logic — gdrh ≈ ref is consistent with "UCX default
   was already optimal @4N". The §2.3 decision stays with the 16N leg.
+- **16N legs HARVESTED (26324353, all-l5xxxx, ref = anchor 0.2412 ✓): gdrh −0.70 %,
+  gdrs +5.31 %.** Scored vs §2.3: gdrh in-central but **BELOW the −1.5 % escalation
+  bar ⇒ the UCX_TLS chain CLOSES — no adoption** (the −0.70 % hints that a trimmed
+  transport list helps slightly at scale, consistent with the toll story, but not
+  enough to buy a fidelity ladder). The strict lit-§7 spec is confirmed harmful at
+  both scales (sm/self loss). Remaining transport lever = the §12 HPC-X probes.
 - **Engagement diag 26324742 (3-step legs, UCX_LOG_LEVEL=info) closes the L80 hole:**
   gdr_copy + cuda_copy INITIALIZE in both forced legs (48/64 mentions; cuda_copy in the
   ep lanes; gdrs lanes = rc_mlx5-only as forced, gdrh lanes = sysv/xpmem/cma + rc_mlx5).
@@ -365,3 +378,57 @@ EVPWIDE knob (119→~15 when opted in), NOT E.1's to count. The E.1 candidate le
 - NOTE the composition: on the KNOBBED config (EVPWIDE in), E.1's families are the
   TOP remaining halo sites — E.1 is the natural knobbed-config companion, and every
   deleted event also deletes partner-skew (§11).
+
+## 14. ⭐ COMPOSITION A/B @16N HARVESTED (26324350, cgpoly0 ✓, std300, all-l5xxxx;
+## announces per-leg correct)
+
+| leg | s/step | Δ vs off |
+|---|--:|--:|
+| off | 0.2414 | — (anchor 0.2413 ✓) |
+| cg3 | 0.2316 | −4.06 % (s13: −4.26 % ✓) |
+| ew8 | 0.2358 | −2.32 % (s12: −2.2 % ✓) |
+| **both** | **0.2257** | **−6.50 %** |
+
+**Scored vs §2.1: ADDITIVITY EXACT** (naive 0.2260; measured 0.2257, a hair better —
+the 0.31 haircut was not needed; landed just past the good edge of the band).
+**The two opt-in knobs STACK at both scales. Knobbed-config numbers of record:
+4N 0.6164 ⇒ 7.42× · 16N 0.2257 ⇒ 5.44×, SYPD@dt240 ≈ 2.88.** Recommendation for
+knobbed users: `FESOM_SPEED_CGPOLY=3;FESOM_SPEED_EVPWIDE=8` is the pair (subject to
+rule 0.33: both remain permanent manual knobs).
+
+## 15. ⭐⭐ E.IMB @16N HARVESTED (26324580, phst0, std300) — OCEAN'S "ANOMALY" WAS
+## PARTNER COUNT ALL ALONG; THE EXIT TABLE
+
+Validation: ref 0.2414 = anchor ✓ · phst +0.04 % ✓ · phstbar +1.45 % (s11 class ✓) ·
+mpiprof reproduces E.split: imbalance 50.8 ms (53 %) / comm 45.9 (47 %) vs s11's
+53.0/50.2 ✓.
+
+**Barrier-leg attribution (64 ranks): TOTAL busy spread 63.0 ms; ocean 52.3 (83 % of
+it), ice 11.8, cg 2.5.** Feature join at 64 ranks (n2d/nPart/node DECORRELATED):
+**busy_ice vs nPart r = +0.96 · busy_ocean vs nPart r = +0.74** (n2d only +0.38,
+myElem +0.50) · cg +0.49 · force +0.76. The 4N "ocean anomaly" (5× leverage on n2d)
+resolves: n2d was a 16-rank proxy for partner count. **ONE mechanism spans every
+phase: the per-exchange per-partner toll.** (Causality is knob-PROVEN for ice/cg
+(§11); for ocean it is correlational until E.1 deletes ocean events — that check is
+pre-registered below.)
+
+### THE EXIT TABLE (the session-14 contract: every pool named + the session-15 lever)
+
+| pool (4N / 16N ms/step) | cause (MEASURED) | lever |
+|---|---|---|
+| rank imbalance (busy spread 43 / 63; barrier-absorbed 36 / 51) | **per-exchange per-partner toll** (~30-50 µs/partner/exchange; ice r=+0.96, ocean +0.74 @64r; knob-collapse causal proof for ice/cg) + EVPWIDE ghost-extent residual on the knobbed config | E.1 fuses (fewer events) → E.T1 stack (cheaper events) → partner-balance partition (equal counts) |
+| flat comm ~49 / 46 | the same toll × mean partner count + the 2D latency floor | same three, same order |
+| staging 18.6 / 15.3 | UCX cuda host-staging pipeline (GDR kernel path open, UCX_TLS forcing null/harmful) | HPC-X if §12 bar cleared; JUPITER C2C erases it natively |
+| launch+fence 10.8 / 10.0 | ALREADY SPENT by h16/h17 fence deletions + CGPIPE | none — CUDA graphs OFF the bench (both scales measured) |
+| CG remnant (knobbed: ~9 busy + ~13 wait @16N) | 23 iters × (1 exch + 2 Allreduce) | pocketed P-CSI/guess-extrap for ≥64N = JUPITER D4 |
+| kernels 541 / 138 | memory-bound compute (74.6 % class) | TDMA/layout family — the post-comm frontier, M-L effort |
+
+**THE ONE SESSION-15 BUILD LEVER (pre-registered): E.1a+c — FCT T+S co-pack +
+Redi/GM adjacent co-packs** (§13 pre-reg: central −3..5 ms @4N, −5..8 ms @16N,
+byte-class, FORCE_SERIAL proof per pair). **Attribution-validation rider: the ocean
+busy spread must shrink ∝ deleted ocean events** (the causal test the correlation
+still owes us). Env-side track (NOT a build): if the §12 HPC-X bar clears → fidelity
+gate + options ×3 under the winning env before any adoption. Partition-side
+(user's call, offline tooling): a partner-balancing METIS objective is now justified
+by r=+0.74..0.96 across EVERY phase — proposed as the E.PART2 audit, mesh copies
+under /work per rule 0.32.
