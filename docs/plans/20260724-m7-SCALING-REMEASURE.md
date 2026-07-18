@@ -10,8 +10,9 @@ the M5.24 campaign table (`docs/SCALING_M524.md`, 2026-05-31) — that table is 
 - **Figure A — bit-identical class:** configs whose CPU/serial twin is bit-identical
   to the C reference; GPU runs sit at the SAME documented climate-close floor as the
   unoptimized CUDA build. Config: `FESOM_SPEED=1` + `FESOM_SPEED_EVPWIDE=8`
-  (byte-certified). `SLURM_CPU_BIND=none` joins figure A iff its byte+fidelity gates
-  come back clean (submitted with this fleet), else it belongs to B.
+  (byte-certified) **+ `SLURM_CPU_BIND=none` — GATES GREEN 2026-07-18: serial byte
+  gate BIT-IDENTICAL (26351255) + CUDA fidelity PASS (26351256) ⇒ unbind is
+  figure-A certified; figure A plots the Au legs.**
 - **Figure B — climate-identical class (solver-tolerance):** + `FESOM_SPEED_CGPOLY=3`
   + the env package (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes
   UCX_NET_DEVICES=all`), 1-yr certified at the M5.23 bar EXACTLY (26351019).
@@ -71,8 +72,16 @@ GM on by default ✓. Fortran reference ON DISK: `/work/ab0995/a270088/fesom2_co
 
 | run | config (all + `FESOM_MIX_SCHEME=TKE;FESOM_WHICH_EVP=1;FESOM_ALE=zstar`) | class |
 |---|---|---|
-| **63A** | `FESOM_SPEED=1` + `EVPWIDE=8` (+unbind if gates green) | bit-identical (M6 all3 combined twin = the serial proof) |
+| **63A** | `FESOM_SPEED=1` + `EVPWIDE=8` + `SLURM_CPU_BIND=none` (unbind gates GREEN) | bit-identical (M6 all3 combined twin = the serial proof) |
 | **63B** | 63A + `CGPOLY=3` + env package | climate-identical; the mEVP×CGPOLY threshold-flip floor (s13 §8) gets its strongest arbiter |
+
+**NODE COUNT: 2 (user decision 2026-07-18** after the core2 fleet points showed 2N
+fastest for every config — 4N costs ~7-8 % of the years; the sizing table lives in
+the harvest). Launch = `sbatch -N2 --ntasks=8 jobs/job_m7_climate63` with
+OUTDIR=/work/ab0995/a270088/port2/climate63/{63A,63B}, BIN=cgpoly0, full NSTEPS;
+fires MANUALLY once 26351395/96 (combined gates) show PASS text + 26351397 (2-yr
+rollover smoke) is clean — no sbatch-dependency automation (a FAILed gate can still
+exit 0; the PASS text is the criterion).
 
 **Sizing rules (user, 2026-07-18):**
 - **IO-adjusted sizing**: the fleet's std300 legs never cross a month boundary ⇒ they
