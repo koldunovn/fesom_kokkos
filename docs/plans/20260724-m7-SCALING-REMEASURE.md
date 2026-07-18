@@ -156,7 +156,20 @@ on dars. No recertification is needed anywhere.
 **Consequence for the matrix:** dars legs move to a smaller measurement dt (probes in
 flight: dt120 GPU g2n 26353796, dt90 g2n 26353797, dt120 CPU c1n 26353798, all 300
 steps). **dt=120 is the JAX port's dars timestep (user, 2026-07-18) — the precedent
-says it should hold; the probe is the confirmation, not the search.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+says it should hold; the probe is the confirmation, not the search.**
+
+**PROBE VERDICT (2026-07-19 早): dt120 GREEN everywhere — GPU 300×4 legs×2 reps 0 aborts
+(dt90 also green = margin; s/step dt-independent, 0.374 vs 0.377), CPU c1n 300×2 reps
+0 aborts (5.9386/5.9389). Full dars ladders re-run at dt120: GPU 26354132-36
+(sc_dars_g{2,4,8,16,32}n) · CPU 26354471-76 (sc_dars_c{1,2,4,8,16,32}n, ALL SIX GREEN:
+5.947/3.031/1.583/0.839/0.413/0.201 s/step c1→c32).**
+
+**Rule 0.41 second strike — NG5 c32n (dist_4096, dt180): died step ~242 of 300 —
+M5.24's own table predicted this partition blows ~155 (uv-guard) at dt180. All other
+NG5 points (c4-c16 = dist_512-2048, GPU g2-g32 = dist_8-128) completed 300 clean and
+STAND at dt180. The ONE point remeasures at dt120 (26355103), footnoted — s/step
+dt-independence keeps it comparable; the ≤1-3 % CG-share flattering is within node
+noise.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
