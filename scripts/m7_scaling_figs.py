@@ -12,8 +12,8 @@ via paper_jax/scripts/common.py):
 usage: m7_scaling_figs.py [--outdir /work/ab0995/a270088/port2/m7/scaling_figs]
 Missing fleet points are simply absent from the curves (re-run as jobs land).
 SYPD = dt_prod/(365*sstep) at production dt (core2 1800, farc 900, dars/NG5 240);
-dars/NG5 measured at dt180 — the CG-iteration dt-correction (~1-3 %) is NOT applied
-in this first version (footnoted on the figure).
+NG5 measured at dt180, dars at dt120 (rule 0.41) — the CG-iteration dt-correction
+(~1-3 %) is NOT applied in this first version (footnoted on the figure).
 """
 import argparse
 import glob
@@ -32,7 +32,7 @@ import common  # noqa: E402  (the paper's style: MESH_COLOR/MESH_LABEL/set_style
 
 M7 = "/work/ab0995/a270088/port2/m7"
 DT_PROD = {"core2": 1800.0, "farc": 900.0, "dars": 240.0, "ng5": 240.0}
-DT_RUN = {"core2": 1800.0, "farc": 900.0, "dars": 180.0, "ng5": 180.0}
+DT_RUN = {"core2": 1800.0, "farc": 900.0, "dars": 120.0, "ng5": 180.0}  # dars: rule 0.41 (dt180 cold-start-unstable past ~35 steps; 120 = the JAX dars dt)
 
 
 def harvest():
@@ -145,7 +145,7 @@ def fig_scaling(df, cls, fname, ylims):
     axC.set_ylim(0, ylims["large"])
     axC.set_title("(c) throughput, multi-million-node meshes")
     fig.tight_layout()
-    fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt180 runs (CG dt-correction not applied)",
+    fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt120/dt180 runs (CG dt-correction not applied)",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
     plt.close(fig)
