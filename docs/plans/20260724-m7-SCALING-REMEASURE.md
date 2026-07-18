@@ -22,7 +22,7 @@ the M5.24 campaign table (`docs/SCALING_M524.md`, 2026-05-31) — that table is 
 
 300 steps, min-of-2 same-alloc, `BIN=cgpoly0` (`ee2c4fdd`, knob-off ≡ h17 proven),
 GPU `-C a100_80`, CPU knob-free `build-m7serial`-class binary (bit-identical certified),
-per-mesh dt as M5.24 (CORE2 1800 · farc 900 · dars 180 · NG5 180), private CORE2 mesh
+per-mesh dt as M5.24 (CORE2 1800 · farc 900 · **dars → dt120/90, rule 0.41 below** · NG5 180), private CORE2 mesh
 (L73), provenance md5 per job, L80 announce checks per leg at harvest.
 
 **GPU points: ONE ab_env job per (mesh, N), 4 same-alloc legs:**
@@ -131,3 +131,33 @@ comparison convention was at fault.**
   only complete months compare.
 - The 63-yr jobs' NSTEPS (63×17280 = 62.1 real yr) is unreachable behind the 12-h
   walltime — harmless; the harvest rule handles the tail either way.
+
+## ⚠️ RULE 0.41 (2026-07-18 late): a stability verdict is only as long as its
+## measurement window — the dars "bug" was the M5.24 cold-start CFLz class, not code
+
+The whole dars fleet (every GPU leg incl. `CGPIPE=0`, AND the knob-free legacy CPU
+points) dies with the same `CG_kk abort: pp·App = nan` at dt=180 within 300 steps:
+GPU at **step 38** (all 4 legs, both reps, two different allocations), CPU legacy at
+**steps 189/194/203** (c1/c2/c8n). Config-independent, backend-independent ⇒ NOT a
+lever/port bug but the **cold-start CFL blowup M5.24 already documented** ("dt=240 is
+CFL-unstable from the cold PHC start on BOTH dars and NG5"; NG5 at dt180 blew at steps
+85–160 on fine partitions, root-caused to genuine CFLz≈3 at Gibraltar which the port
+rides less robustly than Fortran — `docs/SCALING_M524.md`). "dt180 stable" was only
+ever a **35-step statement**; the std300 protocol re-opened it, and dars fails it.
+The onset step is roundoff-seeded (CUDA atomics vs serial order, rank count), which is
+why every 35-step M5.24 leg, the 35-step discriminator (26353463 — all 4 legs PASS,
+speed 0.4005 / ew 0.3949), and the 3-step serial reproducer sat under the wall.
+My interim "CGPIPE ring builder breaks on dars" reading is **retracted** (mid-flight
+misread of a half-finished discriminator). Byproduct worth keeping: the serial
+reproducer (26353625) ran the CGPIPE bitwise selfcheck on dars dist_8 —
+**0.000e+00 across all iterations, 3 steps** — the ring machinery is bitwise-correct
+on dars. No recertification is needed anywhere.
+
+**Consequence for the matrix:** dars legs move to a smaller measurement dt (probes in
+flight: dt120 GPU g2n 26353796, dt90 g2n 26353797, dt120 CPU c1n 26353798, all 300
+steps). On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
+measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
+so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
+Fallback if even dt90 blows: dars at 35-step legs, footnoted (the M5.24 "before" is
+35-step too — internally consistent).
