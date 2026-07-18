@@ -434,6 +434,33 @@ proto +1..3 % (regression), pkg ≈ unbind (proto neutralized-to-harmful at 4N) 
 if so the package is adopted SCALE-CONDITIONALLY (16N headers only) or split
 (unbind everywhere, proto ≥16N); user's call at review.
 
+### 4N CONFIRM HARVESTED (26350091) — pre-reg 3/3 HIT: SPLIT ADOPTION SHAPE
+
+ref 0.6383 ✓ · **unbind −1.35 % (0.6297)** [pre-reg −1..2 % ✓ — binding was the WHOLE
+4N launcher story] · proto +3.84 % [+1..3 pre-reg, direction ✓] · pkg +1.58 % [≈ sum].
+**⇒ the adoption proposal for the user: `SLURM_CPU_BIND=none` at ALL scales; proto-v2
++ GDR + rail-all at 16N-class scale only.** (0.33-spirit caveat below applies to the
+proto part; unbind alone is transport-neutral — bit-transparency of unbind-only can
+be byte-gated separately if wanted.)
+
+**ENV×KNOB COMPOSITION FINALS (pre-registered, submitted): 4N ref/unbind/unbind+knobs
+central 0.608 (±0.5 %) ⇒ ~7.53×; 16N ref/pkg/pkg+knobs central 0.203-0.208 (knob
+−6.5 % on 0.2169, sub-additive risk: the package already ate latency the knobs also
+target, 0.31 class) ⇒ ~5.9-6.1×, SYPD ≈ 3.1-3.2.**
+
+### LADDER HARVEST: ALL FOUR GATES PASS — with one classification finding
+
+26350087 fidelity PASS (worst 1.059e-02) · TKE PASS (1.501e-01, its own floor) ·
+mEVP PASS (1.506e-03) · zstar PASS (9.869e-02). **⚠️ Classification: the zstar Kv
+floor moved off the byte-class control value (9.537e-02 → 9.869e-02) = the
+SOLVER-CLASS signature.** Reading: proto-v2 changes collective algorithms ⇒
+Allreduce summation ORDER shifts ⇒ the CG dots differ bitwise ⇒ trajectory
+divergence inside the climate-close floor. **The env package is fidelity-clean but
+NOT bit-transparent** — same class as CGPOLY. Per the 0.33 spirit this makes its
+status the USER's call: job-header adoption (env, not code — 0.33 formally governs
+`FESOM_SPEED=1` levers) vs documented-recommended-env. The 1-yr climate leg is the
+arbiter if promoted to default practice.
+
 ## 13. E.1 FUSE AUDIT (the E.0 discipline; source = the FRESH s14_nsys_4n trace,
 ## `m7_halo_sites.py`, steady window, h17 config)
 
