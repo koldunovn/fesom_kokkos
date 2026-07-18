@@ -474,6 +474,33 @@ ref 0.6375 ✓ · unbind −1.07 % (0.6307) · **unbindknobs 0.6109 = −4.17 % 
 8× @4N from 0.6109: −6.3 % (−38.6 ms) — E.1 (−3..5 ms) + partner-balance partition
 + TDMA are the remaining rungs. At 16N the campaign is ahead of every projection.
 
+### USER DECISIONS (2026-07-18) + the climate leg
+
+1. **Env package = DOCUMENTED RECOMMENDATION ONLY, never joins the fast set / job
+   headers** (user: "as it's not bit identical … like CGPOLY") — the 0.33 rule
+   extended to env packages. The recommended fast configs stay MANUAL:
+   4N: knobs + `SLURM_CPU_BIND=none` → 0.6109 (7.49×);
+   16N: knobs + full package → 0.1995 (6.16×, SYPD ≈3.26).
+2. **Push approved + done: `4b68892..048dbf3` on origin/m7-speed.**
+3. **E.PART2 partner-balance partition: NO-GO — the campaign result is ACCEPTED at
+   7.49× / 6.16×** (user: "we are done, the 7.5 speedup and 6.2 16N result is fine").
+   E.1 fuse build: parked pending the user's word (explanation re-delivered).
+4. **1-yr climate leg under the FULL recommended config SUBMITTED** (job below;
+   CORE2, tier1_cuda_1yr template, BIN=cgpoly0,
+   KNOBS = FESOM_SPEED=1 + CGPOLY=3 + EVPWIDE=8 + the env package).
+   **Pre-reg: PASS AT THE M5.23 BAR (sst 1.00000 · sss 0.99996 · ssh 1.00000 ·
+   a_ice 0.99997)** — CGPOLY-only hit it exactly; EVPWIDE is byte-class; the package's
+   solver-class perturbation is the same family as CGPOLY's ⇒ the bar should hold.
+   Below-bar ⇒ user review (solver-class precedent), not auto-fail.
+   **✅ HARVESTED (26351019): PASS AT THE BAR EXACTLY** — sst 1.00000 · sss 0.99996 ·
+   ssh 1.00000 · a_ice 0.99997 (+ m_ice 0.99997/8, uice/vice 0.9997) vs BOTH refs =
+   every printed decimal of the bar, = the CGPOLY-only leg. **The recommended fast
+   config (knobs + env package) is climate-certified end to end.**
+   **⭐ TIMING RECALIBRATION: the full year ran in 13:57 on 2 GPU nodes (0.046 s/step
+   CORE2 @8 ranks under the recommended config) ⇒ 63 years ≈ 14.7 h — a 63-yr CORE2
+   run may fit ONE 12-h job at 16 ranks (needs one 35-step timing probe), i.e. the
+   restart-I/O prerequisite may be avoidable for the paper run.**
+
 ### LADDER HARVEST: ALL FOUR GATES PASS — with one classification finding
 
 26350087 fidelity PASS (worst 1.059e-02) · TKE PASS (1.501e-01, its own floor) ·
