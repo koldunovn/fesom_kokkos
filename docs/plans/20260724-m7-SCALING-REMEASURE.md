@@ -1,0 +1,65 @@
+# M7 scaling RE-MEASUREMENT campaign (the paper-figure update)
+
+*2026-07-18, session 14 tail; user directive: "remeasure everything — from 1 node
+(CORE2) to 32 nodes for meshes where it makes sense." Baseline of comparison =
+the M5.24 campaign table (`docs/SCALING_M524.md`, 2026-05-31) — that table is the
+"before"; this campaign is the "after" with the M7 optimizations.*
+
+## The two figures (user decision, 2026-07-18)
+
+- **Figure A — bit-identical class:** configs whose CPU/serial twin is bit-identical
+  to the C reference; GPU runs sit at the SAME documented climate-close floor as the
+  unoptimized CUDA build. Config: `FESOM_SPEED=1` + `FESOM_SPEED_EVPWIDE=8`
+  (byte-certified). `SLURM_CPU_BIND=none` joins figure A iff its byte+fidelity gates
+  come back clean (submitted with this fleet), else it belongs to B.
+- **Figure B — climate-identical class (solver-tolerance):** + `FESOM_SPEED_CGPOLY=3`
+  + the env package (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes
+  UCX_NET_DEVICES=all`), 1-yr certified at the M5.23 bar EXACTLY (26351019).
+  Permanent manual knobs / documented recommendation — never the default set.
+
+## Protocol (rule-1 std300, upgraded from M5.24's 35-step)
+
+300 steps, min-of-2 same-alloc, `BIN=cgpoly0` (`ee2c4fdd`, knob-off ≡ h17 proven),
+GPU `-C a100_80`, CPU knob-free `build-m7serial`-class binary (bit-identical certified),
+per-mesh dt as M5.24 (CORE2 1800 · farc 900 · dars 180 · NG5 180), private CORE2 mesh
+(L73), provenance md5 per job, L80 announce checks per leg at harvest.
+
+**GPU points: ONE ab_env job per (mesh, N), 4 same-alloc legs:**
+`A` = SPEED=1+EVPWIDE=8 · `Au` = A + unbind · `B` = Au + CGPOLY=3 · `Bp` = B + proto
+pkg. (Figure A plots A (or Au if gates pass); figure B plots best(B, Bp) with the
+per-scale env noted honestly.)
+
+**CPU points: job_m7_scale_cpu (one config, knobs structurally off, NSTEPS=300).**
+
+## The matrix (ranks = 4×N GPU, 128×N CPU; all dists verified present)
+
+| mesh | GPU N | CPU N | notes |
+|---|---|---|---|
+| CORE2 (private) | 1 2 4 8 | 1 2 4 | GPU-favored ≤2N historically; 8N = the over-decomp tail |
+| farc | 1 2 4 8 16 32 | 1 2 4 8 16 | 32N GPU = documented over-decomposition point (keep for honesty) |
+| dars | 2 4 8 16 32 | 1 2 4 8 16 32 | 1N GPU impossible (memory) |
+| NG5 | 2 4 8 16 32 | 4 8 16 32 | 1N GPU impossible; CPU <4N not run (M5.24 precedent) |
+
+M5.24 baselines to beat (s/step, GPU): CORE2 0.117/0.095/0.112/0.111 · farc
+0.309/0.244/0.210/0.190/0.177/0.256 · dars 0.814/0.475/0.344/0.237/0.211 · NG5
+2.335/1.273/0.810/0.492/0.374. Expectation (stated before harvest): class A ≈ ×1.9-2.1
+faster than M5.24 at NG5/dars mid-scales (the h17-vs-M5.24 factor), less at CORE2/farc
+small-N (compute-bound, the levers are comm-side); class B adds the knob+env gains
+measured in session 14 (−4..−17 % depending on scale). SYPD@production-dt re-derived
+at harvest per the M5.24 method.
+
+## Also in this fleet
+
+- **unbind classification gates**: serial byte gate (SLURM_CPU_BIND=none, knob-free,
+  diff vs m6_baseline_serial must be rc=0) + CUDA fidelity gate (FESOM_SPEED=1 +
+  unbind). Clean ⇒ unbind is figure-A eligible.
+- The CORE2 GPU 4N point doubles as the **63-yr sizing probe** (year wall-time = 
+  s/step × 17280; 1-yr @2N recommended-config measured 13:57 ⇒ 63 yr ≈ 15.4 h @2N).
+
+## 63-yr CORE2 plan (next step after this fleet)
+
+Match the JAX-port 63-yr protocol (dt/forcing cycle/outputs — to be read from
+port_jax docs before submission). Config = figure-A (and the figure-B twin as a
+second run if the user wants the strong claim). Chunking: fits 1-2 jobs at 2-4N
+per the sizing probe; restart I/O NOT needed if ≤1 job, else the restart work item
+revives.
