@@ -56,10 +56,32 @@ at harvest per the M5.24 method.
 - The CORE2 GPU 4N point doubles as the **63-yr sizing probe** (year wall-time = 
   s/step × 17280; 1-yr @2N recommended-config measured 13:57 ⇒ 63 yr ≈ 15.4 h @2N).
 
-## 63-yr CORE2 plan (next step after this fleet)
+## 63-yr CORE2 runs (user decision 2026-07-18: TWO runs — bit-identical + all-opts)
 
-Match the JAX-port 63-yr protocol (dt/forcing cycle/outputs — to be read from
-port_jax docs before submission). Config = figure-A (and the figure-B twin as a
-second run if the user wants the strong claim). Chunking: fits 1-2 jobs at 2-4N
-per the sizing probe; restart I/O NOT needed if ≤1 job, else the restart work item
-revives.
+**Protocol match VERIFIED against the JAX/Fortran pair (port_jax
+`CORE2_FORTRAN_SPEC.md` + `HANDOFF-20260630`):** 1958–2020 (63 yr, 1,088,640 steps),
+**dt=1800 constant**, JRA55-do v1.4.0 (files through 2020 ✓ on /pool), PHC IC,
+CORE2 mesh (our private copy = the pre-corruption original both refs used, L73 ✓),
+monthly streams. **⚠️ The R2/JAX physics is the OPTIONS config, not our default:
+`zstar + cvmix_TKE + mEVP` (+ GM ON).** Parameter audit — ALL MATCH our port:
+ice_diff=10.0 ✓ · alpha=beta_evp=250 ✓ · evp_rheol_steps=120 ✓ · ice_gamma_fct=0.5 ✓
+· GM K_GM_max=1000/resscalorder=2/… ✓ (fesom_gm.cpp block mirrors namelist.oce) ·
+GM on by default ✓. Fortran reference ON DISK: `/work/ab0995/a270088/fesom2_core2/`
+(819 GB, 1450 files, 22 streams × 63 yr ✓ verified).
+
+| run | config (all + `FESOM_MIX_SCHEME=TKE;FESOM_WHICH_EVP=1;FESOM_ALE=zstar`) | class |
+|---|---|---|
+| **63A** | `FESOM_SPEED=1` + `EVPWIDE=8` (+unbind if gates green) | bit-identical (M6 all3 combined twin = the serial proof) |
+| **63B** | 63A + `CGPOLY=3` + env package | climate-identical; the mEVP×CGPOLY threshold-flip floor (s13 §8) gets its strongest arbiter |
+
+**Prerequisites before launch (in order):**
+1. **Combined-options × speed gates** (never certified TOGETHER; L91): gpu_gate ×2
+   with the 63A and 63B knob sets, SREF = the M6 `all3_bitid` combined serial ref.
+2. **Sizing from the fleet's CORE2 GPU points**: pick N so ONE job ≤ 12 h (no restart
+   I/O exists!). 1-yr @2N recommended-config = 13:57 ⇒ 63 yr ≈ 14.7 h @2N — 4N or 8N
+   likely fits; the fleet's core2 g4n/g8n legs give the exact per-config s/step.
+   If nothing fits 12 h ⇒ long-QOS request or the restart-I/O work item revives.
+3. **2-yr smoke under the exact 63A config** (year-rollover + combined-options +
+   speed path de-risk; ~40-60 min) before burning a 12-h job.
+4. **Storage check**: R2 = 819 GB ⇒ ours ≈ 0.8 TB × 2 runs — verify /work quota
+   headroom BEFORE launch (user visibility).
