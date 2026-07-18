@@ -26,7 +26,9 @@ from netCDF4 import Dataset
 
 def month_data(path, var):
     with Dataset(path) as nc:
-        return np.array(nc.variables[var][:])   # (12, nod) expected
+        v = nc.variables[var][:]                # (12, nod); Fortran files mask no-ice/land
+    fill = 0.0 if var == "a_ice" else np.nan    # missing ice IS zero ice; else NaN-out
+    return np.ma.filled(np.ma.masked_invalid(v), fill)
 
 
 def tri_panel(lon, lat, a, b, title_a, title_b, fname, units=""):
