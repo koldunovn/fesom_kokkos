@@ -351,6 +351,58 @@ engagement on both stacks (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes`).
 - L80 armor: per-leg `ldd` of libmpi/libucp under the leg env + `mpirun --version`
   logged; a failed launch records FAIL, not silence.
 
+### §12 HARVEST @4N (26335623) — THE ARMOR FIRED: the stack swap DID NOT HAPPEN
+
+| leg | s/step | Δ | stack proof |
+|---|--:|--:|---|
+| ref | 0.6372 | — | 4.1.5 libmpi (srun) ✓ |
+| sysgdr | 0.6520 | +2.32 % | 4.1.5 + proto-v2/GDR env |
+| hpcx | 0.6286 | **−1.35 %** | **⚠️ 4.1.5 libmpi STILL (RPATH!) under HPC-X mpirun 4.1.7a1** |
+| hpcxgdr | 0.6558 | +2.92 % | same frankenstack + proto/GDR |
+
+- **The binary carries DT_RPATH with the openmpi-4.1.5 lib dir baked in — RPATH beats
+  LD_LIBRARY_PATH, so `hpcx_load` swapped the LAUNCHER + ENV but NOT the libraries.**
+  (readelf-verified. A true HPC-X swap needs LD_PRELOAD of hpcx's libmpi or a rebuild
+  against it.) The ldd-proof requirement caught it — a "null/positive HPC-X result"
+  would otherwise have been fiction. NEW LESSON candidate: *an env-swapped library
+  test is only as real as the binary's RPATH allows — readelf the binary FIRST, ldd
+  under the leg env ALWAYS.*
+- What the "hpcx" leg REALLY measured: the SAME stack minus our env pins (no
+  `UCX_NET_DEVICES=mlx5_0:1`, no `UCX_MEMTYPE_CACHE=n`, hcoll not forced off, hpcx
+  mpirun defaults) ⇒ **−1.35 % from env/launcher deltas alone — the leading suspect
+  is the single-rail NIC pin (Levante nodes have mlx5_0 AND mlx5_1; our pin forces
+  one rail).** proto-v2+GDR forcing = +2.3..2.9 % ⇒ that sub-chain CLOSED on this UCX.
+- **Decomposition A/B SUBMITTED (26347748, 4N, pre-registered): ref / rail2
+  (`UCX_NET_DEVICES=all`) / hcollon / mcache(`=y`).** Centrals: rail2 −0.5..1.5 %
+  (the candidate carrier), hcollon −0.5..+0.5 %, mcache ±0.3 %. Decision: winner
+  ≥ −1 % ⇒ env-adoption ladder (fidelity + options ×3 under that env, then job-header
+  change); none reproduces −1.35 % ⇒ the delta is launcher-side (mapping/binding) ⇒
+  document + optional LD_PRELOAD true-swap probe next session.
+
+### ⭐⭐ §12 HARVEST @16N (26335624) — THE HEADLINE OF THE SESSION: −10.15 % FROM
+### ENV/LAUNCHER ALONE (same frankenstack confirmed: all legs on 4.1.5 libs, ldd ✓)
+
+| leg | s/step | Δ vs ref | note |
+|---|--:|--:|---|
+| ref | 0.2413 | — | = the anchor ✓ |
+| sysgdr | 0.2283 | **−5.39 %** | proto-v2+GDR env: +2.3 % @4N → **−5.4 % @16N** (scale sign-flip) |
+| **hpcx** | **0.2168** | **−10.15 %** | HPC-X mpirun + UNPINNED env, SAME libs |
+| hpcxgdr | 0.2170 | −10.07 % | GDR forcing neutral on top |
+
+- **0.2168 @16N master config ⇒ 5.67×**; if the knob pair composes (~−6.5 %):
+  ~0.203 ⇒ ~6.1×, SYPD@dt240 ≈ 3.2 — a candidate step change. ALL SUBJECT TO the
+  env-adoption ladder (fidelity + options ×3): nothing is adopted from timing.
+- **The §12 decision bar (≥ −3 % @16N) is CLEARED decisively ⇒ ESCALATION.** The
+  effect grows with scale exactly as a toll/latency lever should (the pools §15
+  names are ~46-51 ms @16N; −24.5 ms recovered here fits inside them).
+- **16N decomposition SUBMITTED (26348379, pre-registered BEFORE run): ref / rail2 /
+  railproto(+PROTO+GDR) / unbound(+SLURM_CPU_BIND=none)** — isolate the carriers
+  UNDER SRUN. Centrals: rail2 −2..6 %; railproto −4..8 %; unbound −0..3 further.
+  If the srun combo reproduces ~−10 % ⇒ the adoptable env package exists without any
+  launcher change ⇒ fidelity gate + options ×3 under it next; if it caps ≈ −6..7 % ⇒
+  the launcher/binding carries the rest (mpirun mapping, orted progress) → next-session
+  probe (mpirun adoption or srun binding variants).
+
 ## 13. E.1 FUSE AUDIT (the E.0 discipline; source = the FRESH s14_nsys_4n trace,
 ## `m7_halo_sites.py`, steady window, h17 config)
 
