@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH --job-name=m7clim63
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+#SBATCH --time=12:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m7/clim63.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m7/clim63.%j.err
+#
+# M7 — the 63-yr CORE2 hindcast runs (1958-2020) for the paper figures.
+# Matches the JAX/Fortran R2 protocol (docs/plans/20260724-m7-SCALING-REMEASURE.md):
+# options physics zstar+TKE+mEVP (+GM default-on), dt=1800, JRA55-do v1.4.0, PHC IC,
+# monthly streams (sst/sss/temp/salt/a_ice + 12 more = every var the paper figures
+# consume, verified vs the F2/F4/F7 figure set 2026-07-18).
+#
+# 🔴 OUTPUT-PROTECTION RULES (this is an ~800 GB irreplaceable run):
+#   - OUTDIR is REQUIRED and ABSOLUTE; the job REFUSES to start if it already
+#     contains data (no rm -rf anywhere — unlike the 1-yr template).
+#   - Nothing is deleted at the end; monthly files are THE DELIVERABLE.
+#   - Reference peer on disk: Fortran R2 /work/ab0995/a270088/fesom2_core2 (819 GB).
+#
+# env: OUTDIR (required) · KNOBS (required — the 63A or 63B set) · BIN (required,
+#      frozen binary) · NSTEPS (default 1088640 = 63 yr @ dt1800).
+# Submit at the node count the sizing decided (sbatch -N/--ntasks); dist must exist.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=1000
+
+MESH=/work/ab0995/a270088/port2/mesh/core2      # private mesh (L73) = the pre-corruption
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${NSTEPS:-1088640}    # 63 yr × 17280 steps/yr
+SNAP_EVERY=-1                # no snapshots — monthly streams only (the deliverable)
+YEAR=1958
+
+# clean knob slate, then the run's KNOBS (63A or 63B set — REQUIRED, no default)
+unset FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_ALE FESOM_ALE_DUMP_DIR
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+IFS=';' read -ra KV <<< "${KNOBS:?KNOBS required (the 63A/63B config set)}"
+for kv in "${KV[@]}"; do export "$kv"; done
+
+OUT=${OUTDIR:?OUTDIR required (absolute, dedicated)}
+case "$OUT" in /*) ;; *) echo "ERROR: OUTDIR must be absolute"; exit 2;; esac
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+    echo "ERROR: $OUT exists and is NON-EMPTY — refusing to clobber a climate run."
+    echo "       (Pick a fresh OUTDIR; this job never deletes anything.)"
+    exit 3
+fi
+mkdir -p "$OUT"
+FESOM=${BIN:?BIN required (frozen binary path)}
+m7_provenance "$OUT" "$FESOM"
+{ echo "KNOBS=$KNOBS"; echo "NSTEPS=$NSTEPS DT=$DT YEAR=$YEAR"; echo "nodes=$SLURM_JOB_NODELIST"; \
+  echo "submitted=$(date -Is) jobid=$SLURM_JOB_ID"; } >> "$OUT/PROVENANCE.txt"
+
+echo "=== M7 63-yr CORE2 hindcast  out=$OUT  nodes=$SLURM_JOB_NODELIST ntasks=$SLURM_NTASKS ==="
+echo "knobs: $KNOBS"
+[ -d "$MESH/dist_$SLURM_NTASKS" ] || { echo "ERROR: dist_$SLURM_NTASKS missing"; exit 2; }
+
+srun -l "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date -Is) — exit $EC ==="
+echo "--- last heartbeat ---"; tail -2 "$OUT/run.err"
+echo "--- nan/blowup check ---"; grep -icE "nan|blowup" "$OUT/run.err" || true
+echo "--- yearly monthly files written ---"; ls "$OUT"/temp.fesom.*.monthly.nc 2>/dev/null | wc -l
+echo "--- size ---"; du -sh "$OUT"
+exit $EC
