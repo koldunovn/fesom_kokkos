@@ -448,6 +448,32 @@ central 0.608 (±0.5 %) ⇒ ~7.53×; 16N ref/pkg/pkg+knobs central 0.203-0.208 (
 −6.5 % on 0.2169, sub-additive risk: the package already ate latency the knobs also
 target, 0.31 class) ⇒ ~5.9-6.1×, SYPD ≈ 3.1-3.2.**
 
+### ⭐⭐ 16N COMPOSITION FINAL HARVESTED (26350606, cgpoly0 ✓, announces ✓):
+### **0.1995 s/step — UNDER 0.2; SUPER-ADDITIVE**
+
+ref 0.2410 ✓ · pkg −7.76 % (0.2223; the pkg effect shows allocation-to-allocation
+range −7.8..−10.3 %) · **pkgknobs 0.1995 = −17.22 % vs ref ⇒ 6.16×, SYPD@dt240 ≈
+3.26.** Scored vs pre-reg (0.203-0.208): BELOW the band in the good direction — the
+sub-additive risk REFUTED; the knob pair is worth MORE on the package env (−10.25 %
+rel) than on ref (−6.5 %): cheaper per-message costs amplify the exchange-deletion
+levers. The 16N board in one line: master 0.2413 → knobs 0.2257 → pkg+knobs
+**0.1995** with zero new model code this session.
+
+### 4N COMPOSITION FINAL HARVESTED (26350605, cgpoly0 ✓, announces ✓) — pre-reg HIT
+
+ref 0.6375 ✓ · unbind −1.07 % (0.6307) · **unbindknobs 0.6109 = −4.17 % vs ref**
+(pre-reg central 0.608 ±0.5 % ✓) **⇒ 7.49×**.
+
+**THE SESSION-END BOARD (all measured, all gated):**
+| config | 4N s/step (ratio) | 16N s/step (ratio, SYPD@dt240) |
+|---|---|---|
+| master `FESOM_SPEED=1` | 0.6382 (7.17×) | 0.2413 (5.09×, 2.65) |
+| + knob pair (CGPOLY=3+EVPWIDE=8) | 0.6164 (7.42×) | 0.2257 (5.44×, 2.88) |
+| **+ env (unbind @4N / full pkg @16N)** | **0.6109 (7.49×)** | **0.1995 (6.16×, ≈3.26)** |
+
+8× @4N from 0.6109: −6.3 % (−38.6 ms) — E.1 (−3..5 ms) + partner-balance partition
++ TDMA are the remaining rungs. At 16N the campaign is ahead of every projection.
+
 ### LADDER HARVEST: ALL FOUR GATES PASS — with one classification finding
 
 26350087 fidelity PASS (worst 1.059e-02) · TKE PASS (1.501e-01, its own floor) ·
