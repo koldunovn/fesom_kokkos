@@ -74,6 +74,22 @@ GM on by default ✓. Fortran reference ON DISK: `/work/ab0995/a270088/fesom2_co
 | **63A** | `FESOM_SPEED=1` + `EVPWIDE=8` (+unbind if gates green) | bit-identical (M6 all3 combined twin = the serial proof) |
 | **63B** | 63A + `CGPOLY=3` + env package | climate-identical; the mEVP×CGPOLY threshold-flip floor (s13 §8) gets its strongest arbiter |
 
+**Sizing rules (user, 2026-07-18):**
+- **IO-adjusted sizing**: the fleet's std300 legs never cross a month boundary ⇒ they
+  EXCLUDE the monthly-write cost. The anchor of record is the 1-yr leg's loop timing
+  — **0.0464 s/step @2N Bp-config INCLUDING all 12 monthly writes of 17 streams**
+  (801.5 s/yr; init 36 s). Sizing = this anchor × the fleet's (config, N) RATIOS,
+  + 10 % margin.
+- **Partial-run policy: NO long-QOS, NO restart I/O — submit the FULL 63 yr
+  (NSTEPS=1088640) at 12 h walltime and keep whatever completed.** Per-year monthly
+  files close at year rollover, so every finished year is valid on disk; only the
+  in-flight year at SIGKILL is lost (the 2-yr smoke also validates the rollover file
+  handling). Expected @2N Bp: ~52-53 yr; 63A slower ⇒ fewer.
+- **⚠️ Planning constraint: the paper's SST/SSS RMSE window is 1980-2009 ⇒ ≥52
+  completed years strongly preferred.** Pick N to MAXIMIZE COMPLETED YEARS (not
+  raw s/step) from the fleet's core2 points — if M7's comm gains moved the old
+  "2N-is-fastest" verdict to 4N, the full 63 may fit outright.
+
 **Prerequisites before launch (in order):**
 1. **Combined-options × speed gates** (never certified TOGETHER; L91): gpu_gate ×2
    with the 63A and 63B knob sets, SREF = the M6 `all3_bitid` combined serial ref.
