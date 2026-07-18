@@ -167,9 +167,20 @@ says it should hold; the probe is the confirmation, not the search.**
 **Rule 0.41 second strike — NG5 c32n (dist_4096, dt180): died step ~242 of 300 —
 M5.24's own table predicted this partition blows ~155 (uv-guard) at dt180. All other
 NG5 points (c4-c16 = dist_512-2048, GPU g2-g32 = dist_8-128) completed 300 clean and
-STAND at dt180. The ONE point remeasures at dt120 (26355103), footnoted — s/step
-dt-independence keeps it comparable; the ≤1-3 % CG-share flattering is within node
-noise.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+STAND at dt180.**
+
+**dt120 remeasure (26355103) FAILED rc=99 — and the failure mode is DIAGNOSTIC: both
+reps COMPLETED 300 steps but ended at uv=6.39 (guard fires post-loop, before the
+timing print). Model-time analysis: the uv≈5 crossing sits at ~8 model HOURS at BOTH
+dt180 (step ~155-242) and dt120 (step ~250+) ⇒ the dist_4096 instability is a
+COLD-START-ADJUSTMENT phenomenon in model time, NOT a per-step CFL that dt cures —
+unlike dars, where dt120 genuinely stabilized the full 10-model-hour window (uv sane
+through step 300, rc=0). A dt60 attempt (26355306) is in flight but can only "pass"
+by SHRINKING the window to 5 model h, i.e. measuring a mid-ramp state — number
+collected for completeness; whether to plot it or drop the 32N NG5 CPU point (and
+its speedup partner) with a footnote is a figure-review decision. Likely honest
+outcome: NG5 speedup curve ends at 16N; the M5.24 "before" c32n number was a 35-step
+measurement and cannot be mixed in under rule 1.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
