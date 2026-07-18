@@ -175,12 +175,13 @@ timing print). Model-time analysis: the uv≈5 crossing sits at ~8 model HOURS a
 dt180 (step ~155-242) and dt120 (step ~250+) ⇒ the dist_4096 instability is a
 COLD-START-ADJUSTMENT phenomenon in model time, NOT a per-step CFL that dt cures —
 unlike dars, where dt120 genuinely stabilized the full 10-model-hour window (uv sane
-through step 300, rc=0). A dt60 attempt (26355306) is in flight but can only "pass"
-by SHRINKING the window to 5 model h, i.e. measuring a mid-ramp state — number
-collected for completeness; whether to plot it or drop the 32N NG5 CPU point (and
-its speedup partner) with a footnote is a figure-review decision. Likely honest
-outcome: NG5 speedup curve ends at 16N; the M5.24 "before" c32n number was a 35-step
-measurement and cannot be mixed in under rule 1.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+through step 300, rc=0). The dt60 attempt (26355306) COMPLETED as predicted — **0.6183/0.6176 s/step, rc=0,
+final state uv=3.25 climbing (mid-ramp, would blow ~step 480) and CG it=23
+(dt-flattered)**. The number is banked in sc_ng5_c32n with these caveats; whether to
+plot it (footnoted "dt60, first 5 model h; CPU flattered ⇒ 32N speedup conservative")
+or end the NG5 speedup curve at 16N is a **figure-review decision for the user**. The
+M5.24 "before" c32n number was a 35-step measurement and cannot be mixed in under
+rule 1.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
