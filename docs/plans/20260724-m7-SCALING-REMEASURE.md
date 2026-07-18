@@ -110,3 +110,24 @@ exit 0; the PASS text is the criterion).
    speed path de-risk; ~40-60 min) before burning a 12-h job.
 4. **Storage check**: R2 = 819 GB ⇒ ours ≈ 0.8 TB × 2 runs — verify /work quota
    headroom BEFORE launch (user visibility).
+
+## ⚠️ RULE 0.40 (found by the USER's eye on the smoke figures, 2026-07-18): the
+## 17280-step "year" is 360 DAYS, and a truncated run's final monthly record is a
+## PARTIAL-MONTH mean — never compare it against a full-calendar reference
+
+The 2-yr smoke (NSTEPS=2×17280) ended 1959-12-22; its "December 1959" monthly file
+averages Dec 1-21. vs Fortran's full December that manufactured a hemispherically
+ANTISYMMETRIC SST bias (+0.15 NH/−0.23 SH — winter-cooling/summer-warming trends
+half-sampled, ice signs flipping likewise) that dominated the 1959 ANNUAL diff map.
+All 23 complete months sit at ±0.002-0.009 K (weather noise); excluding the partial
+December: NH −0.0005 / SH +0.0023 K, RMS 0.0137. **The model is exonerated; the
+comparison convention was at fault.**
+- **HARVEST RULE for 63A/63B (and any walltime-guillotined run): DROP the final
+  partial month (and treat the final year as partial) before any climatology or
+  comparison.** `m7_climate_check_plots.py --trim-final-month K` implements it.
+- Footnote: every historical "1-yr" leg (17280 steps) carries a Dec-1-26-partial
+  December — internally consistent across the whole M5-M7 record (all legs + the
+  C-port refs share the convention), but vs REAL-calendar references (Fortran R2)
+  only complete months compare.
+- The 63-yr jobs' NSTEPS (63×17280 = 62.1 real yr) is unreachable behind the 12-h
+  walltime — harmless; the harvest rule handles the tail either way.

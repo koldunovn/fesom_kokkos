@@ -75,6 +75,10 @@ def main():
     ap.add_argument("--years", nargs="+", type=int, default=[1958, 1959])
     ap.add_argument("--fref", default="/work/ab0995/a270088/fesom2_core2")
     ap.add_argument("--mesh", default="/work/ab0995/a270088/port2/mesh/core2")
+    ap.add_argument("--trim-final-month", type=int, default=0, metavar="K",
+                    help="drop the last K months of the FINAL year (a run truncated "
+                         "mid-month leaves a partial monthly mean — never compare it "
+                         "against a full-calendar reference)")
     a = ap.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
 
@@ -84,19 +88,23 @@ def main():
 
     series = {k: {"ours": [], "fort": []} for k in ("sst", "sss", "aice_nh", "aice_sh")}
     for yr in a.years:
-        ours = {v: month_data(f"{a.run_dir}/{v}.fesom.{yr}.monthly.nc", v)
+        nmon = 12 - (a.trim_final_month if yr == a.years[-1] else 0)
+        lbl = f"{yr}" if nmon == 12 else f"{yr} (mon 1-{nmon})"
+        ours = {v: month_data(f"{a.run_dir}/{v}.fesom.{yr}.monthly.nc", v)[:nmon]
                 for v in ("sst", "sss", "a_ice")}
-        fort = {v: month_data(f"{a.fref}/{v}.fesom.{yr}.nc", v)
+        fort = {v: month_data(f"{a.fref}/{v}.fesom.{yr}.nc", v)[:nmon]
                 for v in ("sst", "sss", "a_ice")}
         for v, units in (("sst", "degC"), ("sss", "psu")):
             tri_panel(lon, lat, ours[v].mean(0), fort[v].mean(0),
-                      f"Kokkos {v} {yr}", f"Fortran {v} {yr}",
+                      f"Kokkos {v} {lbl}", f"Fortran {v} {lbl}",
                       f"{a.outdir}/{v}_{yr}.png", units, var=v)
         for mi, mon in ((2, "March"), (8, "September")):
+            if mi >= nmon:
+                continue
             tri_panel(lon, lat, ours["a_ice"][mi], fort["a_ice"][mi],
                       f"Kokkos a_ice {mon} {yr}", f"Fortran a_ice {mon} {yr}",
                       f"{a.outdir}/aice_{mon.lower()[:3]}_{yr}.png", "frac", var="a_ice")
-        for m in range(12):
+        for m in range(nmon):
             series["sst"]["ours"].append(ours["sst"][m].mean());  series["sst"]["fort"].append(fort["sst"][m].mean())
             series["sss"]["ours"].append(ours["sss"][m].mean());  series["sss"]["fort"].append(fort["sss"][m].mean())
             series["aice_nh"]["ours"].append(ours["a_ice"][m][nh].mean()); series["aice_nh"]["fort"].append(fort["a_ice"][m][nh].mean())
