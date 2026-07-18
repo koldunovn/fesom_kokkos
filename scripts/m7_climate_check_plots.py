@@ -19,9 +19,16 @@ import os
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from netCDF4 import Dataset
+
+import nereus as nr   # the JAX-paper plotting pipeline — same look, comparable figures
+
+# fixed diff scales per variable (paper convention: tight, FIXED — never autoscaled)
+DIFF_LIM = {"sst": 0.25, "sss": 0.10, "a_ice": 0.20}
+_INTERP = [None]   # nereus interpolator, built once and reused across every panel
 
 
 def month_data(path, var):
@@ -31,24 +38,31 @@ def month_data(path, var):
     return np.ma.filled(np.ma.masked_invalid(v), fill)
 
 
-def tri_panel(lon, lat, a, b, title_a, title_b, fname, units=""):
+def tri_panel(lon, lat, a, b, title_a, title_b, fname, units="", var="sst"):
     d = a - b
-    fig, axs = plt.subplots(3, 1, figsize=(9, 12), constrained_layout=True)
-    for ax, fld, ttl, cmap, sym in (
-        (axs[0], a, title_a, "viridis", False),
-        (axs[1], b, title_b, "viridis", False),
-        (axs[2], d, f"{title_a} − {title_b}", "RdBu_r", True),
+    rms = float(np.sqrt(np.nanmean(d * d)))
+    dmax = float(np.nanmax(np.abs(d)))
+    dlim = DIFF_LIM.get(var, max(rms * 5, 1e-6))
+    vmin, vmax = np.nanpercentile(np.concatenate([a, b]), [1, 99])
+    proj = nr.plotting.get_projection("rob")
+    fig, axs = plt.subplots(3, 1, figsize=(7.2, 12),
+                            subplot_kw={"projection": proj}, constrained_layout=True)
+    for ax, fld, ttl, cmap, vmi, vma in (
+        (axs[0], a, title_a, "viridis", vmin, vmax),
+        (axs[1], b, title_b, "viridis", vmin, vmax),
+        (axs[2], d, f"{title_a} − {title_b}", "RdBu_r", -dlim, dlim),
     ):
-        if sym:
-            lim = np.nanpercentile(np.abs(fld), 99) or 1e-6
-            vmin, vmax = -lim, lim
-        else:
-            vmin, vmax = np.nanpercentile(fld, [1, 99])
-        s = ax.scatter(lon, lat, c=fld, s=0.6, cmap=cmap, vmin=vmin, vmax=vmax,
-                       rasterized=True, linewidths=0)
+        _, _, _INTERP[0] = nr.plot(fld, lon, lat, projection="rob", method="linear",
+                                   ax=ax, interpolator=_INTERP[0], colorbar=False,
+                                   cmap=cmap, vmin=vmi, vmax=vma,
+                                   land=True, coastlines=True)
         ax.set_title(ttl, fontsize=10)
-        ax.set_xlim(-180, 180); ax.set_ylim(-90, 90)
-        fig.colorbar(s, ax=ax, shrink=0.8, label=units)
+    axs[2].text(0.5, -0.06, f"RMS = {rms:.4f} {units}   max|d| = {dmax:.3f}",
+                transform=axs[2].transAxes, ha="center", va="top", fontsize=9)
+    sm = mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(vmin, vmax), cmap="viridis")
+    fig.colorbar(sm, ax=[axs[0], axs[1]], shrink=0.8, pad=0.02, label=units)
+    smd = mpl.cm.ScalarMappable(norm=mpl.colors.Normalize(-dlim, dlim), cmap="RdBu_r")
+    fig.colorbar(smd, ax=axs[2], shrink=0.8, pad=0.02, label=units)
     fig.savefig(fname, dpi=110)
     plt.close(fig)
     print("wrote", fname)
@@ -77,11 +91,11 @@ def main():
         for v, units in (("sst", "degC"), ("sss", "psu")):
             tri_panel(lon, lat, ours[v].mean(0), fort[v].mean(0),
                       f"Kokkos {v} {yr}", f"Fortran {v} {yr}",
-                      f"{a.outdir}/{v}_{yr}.png", units)
+                      f"{a.outdir}/{v}_{yr}.png", units, var=v)
         for mi, mon in ((2, "March"), (8, "September")):
             tri_panel(lon, lat, ours["a_ice"][mi], fort["a_ice"][mi],
                       f"Kokkos a_ice {mon} {yr}", f"Fortran a_ice {mon} {yr}",
-                      f"{a.outdir}/aice_{mon.lower()[:3]}_{yr}.png", "frac")
+                      f"{a.outdir}/aice_{mon.lower()[:3]}_{yr}.png", "frac", var="a_ice")
         for m in range(12):
             series["sst"]["ours"].append(ours["sst"][m].mean());  series["sst"]["fort"].append(fort["sst"][m].mean())
             series["sss"]["ours"].append(ours["sss"][m].mean());  series["sss"]["fort"].append(fort["sss"][m].mean())
