@@ -80,38 +80,71 @@ def gpu_class(df, cls):
     return best
 
 
-def fig_scaling(df, cls, fname):
+def gpu_axis(ax, counts):
+    ax.set_xscale("log", base=2)
+    counts = sorted(set(int(c) for c in counts))
+    ax.set_xticks(counts)
+    ax.set_xticklabels([str(c) for c in counts])
+    ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+    ax.set_xlabel("number of GPUs (A100)")
+
+
+def decimal_log_yaxis(ax, lo, hi):
+    """log y-scale but PLAIN decimal tick labels (no powers of 10)."""
+    ticks = [t for t in (0.02, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5)
+             if lo * 0.95 <= t <= hi * 1.05]
+    ax.set_yticks(ticks)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%g"))
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.set_ylim(lo * 0.9, hi * 1.1)
+
+
+def fig_scaling(df, cls, fname, ylims):
+    """Mirror of the paper's fig10 layout: (a) s/step vs #GPUs (log-y, dotted 1/N),
+    (b) SYPD linear for CORE2 & farc, (c) SYPD linear for the multi-million-node
+    meshes. GPU-only, exactly like the original; the CPU comparison lives in the
+    speedup figure. `ylims` is shared between the class-A and class-B figures so
+    the two are directly comparable."""
     common.set_style()
-    fig, (axA, axB) = plt.subplots(1, 2, figsize=(9.0, 3.9), constrained_layout=True)
+    fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(12.5, 3.9))
     gc = gpu_class(df, cls)
-    cpu = df[df.backend == "cpu"]
-    counts = []
-    for mesh in [m for m in common.MESH_ORDER if m in set(df.mesh)]:
+    gc = gc.assign(ngpu=gc.ranks)
+    meshes = [m for m in common.MESH_ORDER if m in set(gc.mesh)]
+    small = [m for m in meshes if m in ("core2", "farc")]
+    large = [m for m in meshes if m not in ("core2", "farc")]
+    ca = cb = cc = []
+    for mesh in meshes:
         col = common.MESH_COLOR.get(mesh, "k")
-        g = gc[gc.mesh == mesh].sort_values("nodes")
-        c = cpu[cpu.mesh == mesh].sort_values("nodes")
-        if len(g):
-            axA.plot(g.nodes, g.sstep, marker="o", ms=4, ls="-", color=col,
-                     label=common.MESH_LABEL.get(mesh, mesh))
-            axB.plot(g.nodes, g.sypd, marker="o", ms=4, ls="-", color=col)
-            counts += g.nodes.tolist()
-        if len(c):
-            axA.plot(c.nodes, c.sstep, marker="s", ms=3, ls="--", color=col, alpha=0.45)
-            axB.plot(c.nodes, c.sypd, marker="s", ms=3, ls="--", color=col, alpha=0.45)
-            counts += c.nodes.tolist()
-        if len(g) >= 2:   # ideal 1/N anchored at the first GPU point
-            gg = np.array(sorted(g.nodes))
-            axA.plot(gg, g.sstep.iloc[0] * g.nodes.iloc[0] / gg, ls=":", lw=0.8,
-                     color=col, alpha=0.4)
+        g = gc[gc.mesh == mesh].sort_values("ngpu")
+        if not len(g):
+            continue
+        axA.plot(g.ngpu, g.sstep, marker="o", ms=4, ls="-", color=col,
+                 label=common.MESH_LABEL.get(mesh, mesh))
+        ca = ca + g.ngpu.tolist()
+        gg = np.array(sorted(g.ngpu))
+        axA.plot(gg, g.sstep.iloc[0] * g.ngpu.iloc[0] / gg, ls=":", lw=0.8,
+                 color=col, alpha=0.4)
+        ax = axB if mesh in small else axC
+        ax.plot(g.ngpu, g.sypd, marker="o", ms=4, ls="-", color=col)
+        if mesh in small:
+            cb = cb + g.ngpu.tolist()
+        else:
+            cc = cc + g.ngpu.tolist()
     axA.set_yscale("log")
-    node_axis(axA, counts); node_axis(axB, counts)
+    decimal_log_yaxis(axA, *ylims["sstep"])
+    gpu_axis(axA, ca)
     axA.set_ylabel("time per step  [s]")
-    axA.set_title(f"(a) strong scaling — class {cls}  (solid GPU, dashed CPU, dotted 1/N)")
-    axB.set_ylabel("SYPD @ production dt")
-    axB.set_title("(b) throughput")
-    axB.set_yscale("log")
+    axA.set_title(f"(a) strong scaling, class {cls}  (dotted = ideal 1/N)")
     axA.legend(fontsize=6, loc="lower left")
-    fig.suptitle("", fontsize=1)
+    gpu_axis(axB, cb)
+    axB.set_ylabel("SYPD  (simulated yr / wall day)")
+    axB.set_ylim(0, ylims["small"])
+    axB.set_title("(b) throughput, CORE2 & farc")
+    gpu_axis(axC, cc)
+    axC.set_ylabel("SYPD  (simulated yr / wall day)")
+    axC.set_ylim(0, ylims["large"])
+    axC.set_title("(c) throughput, multi-million-node meshes")
+    fig.tight_layout()
     fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt180 runs (CG dt-correction not applied)",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
@@ -156,8 +189,14 @@ def main():
     df.to_csv(f"{a.outdir}/m7_scaling.csv", index=False)
     print(f"harvested {len(df)} rows -> {a.outdir}/m7_scaling.csv")
     print(df.groupby(["mesh", "backend"]).nodes.apply(lambda s: sorted(set(s))).to_string())
-    fig_scaling(df, "A", f"{a.outdir}/fig_m7_scaling_A.png")
-    fig_scaling(df, "B", f"{a.outdir}/fig_m7_scaling_B.png")
+    both = pd.concat([gpu_class(df, "A"), gpu_class(df, "B")])
+    ylims = {
+        "sstep": (both.sstep.min(), both.sstep.max()),
+        "small": 1.10 * both[both.mesh.isin(["core2", "farc"])].sypd.max(),
+        "large": 1.10 * both[~both.mesh.isin(["core2", "farc"])].sypd.max(),
+    }
+    fig_scaling(df, "A", f"{a.outdir}/fig_m7_scaling_A.png", ylims)
+    fig_scaling(df, "B", f"{a.outdir}/fig_m7_scaling_B.png", ylims)
     fig_speedup(df, f"{a.outdir}/fig_m7_speedup.png")
 
 
