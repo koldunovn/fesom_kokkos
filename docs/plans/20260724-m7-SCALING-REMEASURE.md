@@ -155,7 +155,8 @@ on dars. No recertification is needed anywhere.
 
 **Consequence for the matrix:** dars legs move to a smaller measurement dt (probes in
 flight: dt120 GPU g2n 26353796, dt90 g2n 26353797, dt120 CPU c1n 26353798, all 300
-steps). On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+steps). **dt=120 is the JAX port's dars timestep (user, 2026-07-18) — the precedent
+says it should hold; the probe is the confirmation, not the search.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
