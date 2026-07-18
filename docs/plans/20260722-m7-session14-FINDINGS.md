@@ -379,6 +379,12 @@ engagement on both stacks (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes`).
   change); none reproduces −1.35 % ⇒ the delta is launcher-side (mapping/binding) ⇒
   document + optional LD_PRELOAD true-swap probe next session.
 
+### §12 decomposition @4N HARVESTED (26347748): ALL THREE PINS NULL at 4N
+(rail2 −0.02 % · hcollon +0.14 % · mcache −0.06 % vs ref 0.6370) ⇒ per the pre-reg
+fallback, the 4N −1.35 % was LAUNCHER-side (mpirun mapping/binding or hpcx_load's
+additional defaults), not these env vars. The 16N decomposition (railproto + the
+SLURM_CPU_BIND=none leg) is the decisive one — it chases a 7× larger effect.
+
 ### ⭐⭐ §12 HARVEST @16N (26335624) — THE HEADLINE OF THE SESSION: −10.15 % FROM
 ### ENV/LAUNCHER ALONE (same frankenstack confirmed: all legs on 4.1.5 libs, ldd ✓)
 
@@ -402,6 +408,31 @@ engagement on both stacks (`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes`).
   launcher change ⇒ fidelity gate + options ×3 under it next; if it caps ≈ −6..7 % ⇒
   the launcher/binding carries the rest (mpirun mapping, orted progress) → next-session
   probe (mpirun adoption or srun binding variants).
+
+### ⭐⭐ 16N DECOMPOSITION HARVESTED (26348379): THE FULL −10 % REPRODUCES UNDER SRUN
+### — THE ADOPTABLE PACKAGE IS IDENTIFIED
+
+| leg | s/step | Δ | reading |
+|---|--:|--:|---|
+| ref | 0.2418 | — | anchor ✓ |
+| rail2 (`NET_DEVICES=all` alone) | FAILED | — | tasks SIGKILLed (OOM-class) — dual-rail on the OLD proto path is broken; `all` REQUIRES proto v2 |
+| railproto (all + PROTO+GDR) | 0.2290 | −5.29 % | ≈ sysgdr −5.39 % — the proto-v2 cuda path carries ~−5.3 % |
+| **unbound (+ SLURM_CPU_BIND=none)** | **0.2169** | **−10.30 %** | **= the hpcx leg (0.2168) EXACTLY** |
+
+**THE PACKAGE (pure env, plain srun, no library/launcher change):
+`UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes UCX_NET_DEVICES=all
+SLURM_CPU_BIND=none` = −10.3 % @16N.** Two stacked mechanisms: the modern UCX proto-v2
+cuda protocol (~−5.3 %) + releasing srun's CPU binding (~−5.0 % — srun's core binding
+was strangling the UCX/driver progress engine; retroactively explains the 4N
+"launcher-side" −1.35 % = mpirun's `--bind-to none`). Scale-flip documented: proto
++2.3 % @4N → −5.4 % @16N.
+
+**ADOPTION LADDER SUBMITTED (nothing adopts from timing): 26350087 fidelity +
+26350088/89/90 options TKE/mEVP/zstar (per-option SREF) under the package +
+26350091 = 4N confirm A/B (ref/proto/unbind/pkg).** Pre-reg 4N: unbind −1..2 %,
+proto +1..3 % (regression), pkg ≈ unbind (proto neutralized-to-harmful at 4N) —
+if so the package is adopted SCALE-CONDITIONALLY (16N headers only) or split
+(unbind everywhere, proto ≥16N); user's call at review.
 
 ## 13. E.1 FUSE AUDIT (the E.0 discipline; source = the FRESH s14_nsys_4n trace,
 ## `m7_halo_sites.py`, steady window, h17 config)
