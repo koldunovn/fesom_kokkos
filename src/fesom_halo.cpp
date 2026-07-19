@@ -168,7 +168,7 @@ void fesom_halo_exchange(real_t          *field,
         int    nseg  = cs->rptr[k + 1] - cs->rptr[k];
         size_t off   = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
         int    nelem = nseg * stride;
-        MPI_CHECK(MPI_Irecv(sc->recv_buf + off, nelem, MPI_DOUBLE,
+        MPI_CHECK(MPI_Irecv(sc->recv_buf + off, nelem, FESOM_MPI_REAL,
                             cs->rPE[k], tag,
                             p->MPI_COMM_FESOM, &sc->reqs[n_reqs++]));
     }
@@ -184,7 +184,7 @@ void fesom_halo_exchange(real_t          *field,
             const real_t *src = field + (size_t)local_idx * stride;
             memcpy(dst + (size_t)j * stride, src, (size_t)stride * sizeof(real_t));
         }
-        MPI_CHECK(MPI_Isend(sc->send_buf + off, nelem, MPI_DOUBLE,
+        MPI_CHECK(MPI_Isend(sc->send_buf + off, nelem, FESOM_MPI_REAL,
                             cs->sPE[k], tag,
                             p->MPI_COMM_FESOM, &sc->reqs[n_reqs++]));
     }
