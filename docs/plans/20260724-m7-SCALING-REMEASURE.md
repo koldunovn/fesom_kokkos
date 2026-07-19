@@ -177,11 +177,37 @@ COLD-START-ADJUSTMENT phenomenon in model time, NOT a per-step CFL that dt cures
 unlike dars, where dt120 genuinely stabilized the full 10-model-hour window (uv sane
 through step 300, rc=0). The dt60 attempt (26355306) COMPLETED as predicted — **0.6183/0.6176 s/step, rc=0,
 final state uv=3.25 climbing (mid-ramp, would blow ~step 480) and CG it=23
-(dt-flattered)**. The number is banked in sc_ng5_c32n with these caveats; whether to
-plot it (footnoted "dt60, first 5 model h; CPU flattered ⇒ 32N speedup conservative")
-or end the NG5 speedup curve at 16N is a **figure-review decision for the user**. The
-M5.24 "before" c32n number was a 35-step measurement and cannot be mixed in under
-rule 1.** On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+(dt-flattered)**. **USER DECISION (2026-07-19): "we need 32 nodes, add it" — the dt60
+point IS the 32N NG5 CPU number**, footnoted on the speedup figure (biases run
+conservative: dt-flattered CPU ⇒ 32N speedup understated). Sanity: 0.6176 vs 16N's
+1.2096 = 2 % off perfect halving — on-curve. The M5.24 "before" c32n number was a
+35-step measurement and cannot be mixed in under rule 1.**
+
+## Work item (pre-JUPITER): fix the cold-start vertical-robustness gap (wsplit)
+
+*User 2026-07-19: "would be nice to diagnose the error and fix it." Not blocking the
+paper figures; becomes IMPORTANT before JUPITER (GH200 scale-out ⇒ finer partitions ⇒
+this wall everywhere at cold start).*
+
+- **The diagnosis largely EXISTS (M5.24):** cold PHC start drives genuine CFLz≈3 at
+  the Gibraltar/Med outflow (glon/glat −4.81/36.01, from ~step 4). Fortran
+  (wsplit=.false.) rides it and completes; the port under identical CFLz ramps uv→>5
+  and dies; the port's wsplit implementation does NOT help (near-identical ramp then
+  CG NaN ~step 85 — the fesom_ale.c:88 signature) and is disabled ("wsplit on
+  diverged the C from the stable Fortran path", fesom_constants.h:54). Partition
+  fineness is the AMPLIFIER (dist_2048 clean / dist_4096 ~155-242 / dist_8192 ~10),
+  not the cause. ⇒ the gap is in the port's implicit vertical advection / wsplit
+  path vs Fortran's.
+- **Fix shape:** repair the port's wsplit to actually match Fortran's algorithm;
+  ship as an OPT-IN knob (OFF = today's bit-identical path untouched — no recert of
+  the existing matrix); certify against a Fortran wsplit-ON reference run; then
+  cold-start NG5/dars at production dt should complete like Fortran R2 does (its
+  205-step dist_4096 proof exists). Full options ×3 ladder for the knob per L91.
+- **Iteration is CHEAP (measured 2026-07-19):** 32-node compute jobs at short
+  walltime started after 14 s / 11 min / 7 min queue wait; one rep to the dt180
+  blowup ≈ 8 min wall (4 min init + 3 min to step ~242). CPU-side reproducible —
+  no GPU queue needed. Optional cheaper still: oversubscribe dist_4096 on 8-16
+  nodes for correctness-only iterations. On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
