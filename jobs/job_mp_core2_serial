@@ -1,0 +1,29 @@
+#!/bin/bash
+#SBATCH --job-name=mp_core2_ser
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+# M8 Task-5 CORE2 Serial gate leg (also reused for SP smokes in Task 6+).
+# Parameterized via --export: BIN (pinned binary — ALWAYS set, multi-srun re-execs),
+# OUT (output dir), optionally DT/NSTEPS/SNAP (default = the house gate shape:
+# dt1800, 20 steps, snaps @10 — job_core2_serial_ref lineage).
+# Mesh = the PRIVATE core2 copy (L73: validation never uses /pool core2).
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos_mp/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+: "${BIN:?set BIN=/path/to/fesom_port (pin the binary!)}"
+: "${OUT:?set OUT=/work/.../outdir}"
+DT=${DT:-1800}; NSTEPS=${NSTEPS:-20}; SNAP=${SNAP:-10}
+rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$OUT/log" 2>&1
+rc=$?
+echo "[mp_core2_ser] rc=$rc ; $(grep -E 'loop timing' "$OUT/log" | head -1)"
+grep -m1 "PRECISION" "$OUT/log" || echo "[mp_core2_ser] WARNING: no precision banner"
+exit $rc

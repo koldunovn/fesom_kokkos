@@ -300,12 +300,12 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
     int iter_outer = 0;
     while (iter_outer < 200) {
         ++iter_outer;
-        real_t loc_max = arr[FESOM_NODE3D(0, 0, nl)];
+        dbl_t loc_max = arr[FESOM_NODE3D(0, 0, nl)];   /* M8: dbl_t temps keep MPI_DOUBLE coherent */
         for (int n = 1; n < N; ++n) {
-            real_t v = arr[FESOM_NODE3D(n, 0, nl)];
+            dbl_t v = arr[FESOM_NODE3D(n, 0, nl)];
             if (v > loc_max) loc_max = v;
         }
-        real_t glob_max = loc_max;
+        dbl_t glob_max = loc_max;
         if (partit && partit->npes > 1) {
             MPI_Allreduce(&loc_max, &glob_max, 1, MPI_DOUBLE, MPI_MAX,
                           partit->MPI_COMM_FESOM);

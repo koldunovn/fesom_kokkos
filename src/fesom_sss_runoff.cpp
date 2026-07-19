@@ -268,14 +268,14 @@ void fesom_read_other_NetCDF(const char *file,
  * integrate_nod_2D — gen_support.F90:318-351                               *
  * Local sum over interior nodes only, then global Allreduce on multi-rank. *
  * ------------------------------------------------------------------------ */
-static real_t integrate_nod_2D(const real_t *data,
-                               const struct fesom_mesh *mesh,
-                               struct fesom_partit     *partit)
+static dbl_t integrate_nod_2D(const real_t *data,
+                              const struct fesom_mesh *mesh,
+                              struct fesom_partit     *partit)
 {
-    real_t lval = 0.0;
+    dbl_t lval = 0.0;   /* M8 island: global area-weighted sum accumulates FP64 */
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int ul = mesh->ulevels_nod2D[n] - 1;   /* 0-based */
-        lval += data[n] * mesh->areasvol[FESOM_NODE3D(n, ul, mesh->nl)];
+        lval += (dbl_t)data[n] * (dbl_t)mesh->areasvol[FESOM_NODE3D(n, ul, mesh->nl)];
     }
     if (partit && partit->npes > 1) {
         MPI_Allreduce(MPI_IN_PLACE, &lval, 1, MPI_DOUBLE, MPI_SUM,

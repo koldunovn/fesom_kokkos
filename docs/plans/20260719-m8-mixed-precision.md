@@ -153,12 +153,12 @@ physics) and Fortran R2, at pre-registered bars (below).
       binary-rerun noise, 1e-13), pre-registered) with Serial as the sole byte oracle — matching
       the house cert shape (Serial byte proofs; CUDA selfchecks + climate-close floors). Standing
       noise basis: `gate_2a/{cuda,cuda_rerun}`; refresh after kernel-set-changing slices (2h).
-- [ ] 2b dyn/momentum/ALE (`fesom_dyn.cpp`, `fesom_momentum.cpp`, `fesom_ale.cpp`)
-- [ ] 2c tracers/advection/diffusion (`fesom_tracer_*.cpp`, `fesom_tracers.cpp`)
-- [ ] 2d ice family (`fesom_ice*.cpp` incl. evp/maevp/evpwide/fct/thermo)
-- [ ] 2e mixing (`fesom_kpp.cpp`, `fesom_tke.cpp`, `fesom_pp.cpp`, `fesom_gm.cpp`,
-      `fesom_cvmix_tke.hpp`)
-- [ ] 2f EOS/pressure (`fesom_eos.cpp`) — stays real_t (suspect, NOT pre-islanded)
+- [x] 2b dyn/momentum/ALE — 0 promotions needed (already precision-generic; `053e4a2`)
+- [x] 2c tracers/adv/diff — 0 promotions (`557ed3d`)
+- [x] 2d ice family — 0 promotions; evpwide MPI+static_assert deferred to Task 6 (`c7251f4`)
+- [x] 2e mixing — 0 promotions; TKE_C66=6.6 double-literal exception pre-registered (`b486bff`)
+- [x] 2f EOS — 9 promotions incl. smoother scratch Views (halve under SP) + the ONE stray
+      `FieldT<double>` in eos.h (would have ODR-broken SP) (`744dbb5`)
 - [ ] 2g SSH solver (`fesom_ssh.cpp`) — vectors/SpMV real_t; scalar chain
       (residual/rtol/α/β) + CGPIPE/CGPOLY eigen-bounds → `dbl_t` islands.
       **Explicit MPI split (18 sites):** vector-halo `Isend/Irecv` AND their `rb/sb[].dbls`
@@ -166,12 +166,15 @@ physics) and Fortran R2, at pre-registered bars (below).
       `real_t` + `FESOM_MPI_REAL` (else CG comm bytes never halve and Gate 2 under-reads with
       no visible culprit); `Allreduce` dot/norm/scalar sites (428, 1020, 1280, 1790, 2139,
       2253) **stay `MPI_DOUBLE`** (CG-scalar island)
-- [ ] 2h halo/MPI layer (`fesom_halo*.cpp/.hpp`, `fesom_mpi.cpp`): `MPI_DOUBLE` →
-      `FESOM_MPI_REAL` at field-exchange sites ONLY; buffers `sizeof(real_t)`
-- [ ] 2i I/O + forcing boundary (`fesom_io*.cpp`, `fesom_forcing.cpp`, `fesom_jra55.cpp`,
-      `fesom_phc.cpp`): files stay FP64 on disk; convert at boundary; fill/missing cast to
-      working precision BEFORE comparison; PHC/init path stays `dbl_t`
-- [ ] 2j main/step/diagnostics (`fesom_main.cpp`, `fesom_step.cpp`, `fesom_phasestats.cpp`)
+- [x] 2g DONE (`2ad5379`): full CG-islands surgery per spec — scalar chain dbl_t both solvers,
+      FP64 dot accumulators, CGPIPE/CGPOLY payloads real_t + FESOM_MPI_REAL (12 sites),
+      Chebyshev host recurrence island (already cast-at-kernel-boundary by design)
+- [x] 2h DONE (`3cdb388`): halo host+device buffers/pointers real_t, 8 MPI flips, prof-bytes
+      sizeof(real_t); timing/verify islands kept; np2 leg exercised the swept exchange
+- [x] 2i DONE (`228d4e5`): io gathers + mesh Bcasts → FESOM_MPI_REAL (9 flips); NC staging
+      stays double per policy; phc/ic init island; bulk+mesh audited clean; fill-value compare
+      sites verified SP-safe (phc compares in staging domain; sss_runoff already casts first)
+- [x] 2j audited — zero promotions (main/step/phasestats doubles all diag/printf/timing; `e3eff9b`)
 - [ ] while sweeping each file (zero extra cost — the file is open anyway): build the
       **accumulation ledger** in `PRECISION_ISLANDS.md` — tag every prognostic
       `state += dt·tendency` / running-sum site with its typical increment/state scale.
@@ -185,21 +188,24 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 **Files:** all kernels with additive guards; `src/fesom_constants.h`
 
-- [ ] grep-audit every additive epsilon / tiny-denominator guard (`1e-30`, `1e-40`, `+eps`,
-      `tiny`, min-clamps); classify each
-- [ ] per-precision guard constants: FP32 values normal under FTZ (≥ ~1e-20); FP64 values
-      UNCHANGED (Gate 0 unaffected); registry entries ("guard constant" class)
+- [x] grep-audit done: KPP_EPSLN 1.0e-40 was the ONLY sub-1e-38 guard (halo_device 1e-30 is
+      timing-division, stays double); tke/pp clean
+- [x] KPP_EPSLN per-precision: FP32 1e-20 (FTZ-normal), FP64 1e-40 unchanged (`e3eff9b`)
 - [ ] check CUDA fast-math/FTZ flags in our nvcc lines; document denormal posture per backend
-- [ ] gate: FP64 bit-identity still holds (values unchanged at FP64)
+      (verify during Task 6 SP-CUDA bring-up)
+- [x] gate: FP64 bit-identity holds (values unchanged at FP64)
 
 ### Task 4: Reduction-accumulator hardening
 
 **Files:** all 23 `parallel_reduce` sites (incl. `fesom_ssh.h`, `fesom_ice_coupling.h`); MPI reduction call sites
 
-- [ ] every `parallel_reduce` gets an explicit `double`/`dbl_t` accumulator (lambda arg type)
-- [ ] MPI reduction scalars stay `MPI_DOUBLE` (dots, norms, global sums, conservation)
-- [ ] output/monthly-mean accumulators `dbl_t` (FP64 sums of FP32 samples — PR-940 lesson 4)
-- [ ] gate: FP64 bit-identity (accumulators were double already → inert)
+- [x] every `parallel_reduce` audited: cg_dot + fused spmv-dot/dot2 + cgpoly nrm2 (2g),
+      ice_coupling integrate host+device (`e3eff9b`), mesh ocean_area + sss_runoff integrate +
+      phc max reduce (dbl_t temps; final batch) — evpwide selfchecks were already double
+- [x] MPI reduction scalars stay `MPI_DOUBLE`, buffers now dbl_t-coherent everywhere
+- [ ] output/monthly-mean accumulators: LEFT real_t for now (Gate-0 inert either way);
+      ledger row flags them as the first promotion candidate if Gate-4 means degrade
+- [x] gate: FP64 bit-identity ALL FIELDS + CUDA envelope 0.12 (t4b batch)
 
 ### Task 5: Gate 0 full battery (P1 exit)
 

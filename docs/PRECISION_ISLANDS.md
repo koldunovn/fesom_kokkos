@@ -46,7 +46,18 @@ variables (parked M9 track; user proposal 2026-07-19).
 
 | Site | Quantity | typical Δ/state per step | Notes |
 |---|---|---|---|
-| *(filled slice-by-slice during Task 2)* | | | |
+| `fesom_momentum.cpp:1106/1154` | uv (horiz. velocity) | O(dt·rhs) | `uv += uv_rhs + F` (dt-scaled tendency + ssh gradient); C/KK twins |
+| `fesom_momentum.cpp:1676/1779` + `fesom_ale.cpp:788` | hbar / eta_n (SSH) | O(dt·rhs/area) | `hbar = hbar_old + ssh_rhs_old·dt/area`; time-filter blend |
+| `fesom_tracer_adv.cpp:812/1888` | T,S advection | O(dt) | `del_ttf += T·(hnode_old−hnode_new); T += del_ttf/hnode_new` |
+| `fesom_tracer_diff.cpp:344/648` (+304/614 BC, 320/627 SW) | T,S vert-diff | O(dt) | TDMA increment apply; shortwave `+= (top−bot·ar)·dt` |
+| `fesom_ice_evp.cpp:824/853` | uice,vice | O(rdt) | EVP subcycle implicit-drag update |
+| `fesom_ice_fct.cpp:513,521/918+` | m_ice,a_ice,m_snow | O(flux) | FCT low-order + limited-flux apply |
+| `fesom_ice_thermo.cpp:270/722, 390/784, 44/667, 367-368/769-770, 471/845` | ice thermo | mixed | Newton `t += res/deriv`; `hsn += snowfall·dt`; flood; growth sums; fw flux |
+| `fesom_cvmix_tke.hpp:326,330,363` | TKE energy | O(dt) | forc[] assembly + implicit TDMA tke_new |
+| `fesom_gm.cpp:775/2067` | GM tracer apply | O(dt) | `values += skew-flux div · dt/(av·hn)` |
+| `fesom_eos.cpp:250/406` | hpressure | depth recurrence | deep-column running sum — classic FP32 hazard class (not time-accumulation) |
+| `fesom_io.cpp:713-819/834-997` + `fesom_io_stream.cpp:367` | output means | O(1/nsamples) | `out[i] += src[i]` into real_t accumulators then `*= inv` — **candidate dbl_t promotion if Gate-4 means look degraded** |
+| `fesom_mesh.cpp` compute_node_areas | ocean_area local sum | init-once | local area sum accumulates in real_t before the (now dbl_t) Allreduce — flag: promote local sum to dbl_t during Task 6 if inspection confirms |
 
 ## Promotion log
 

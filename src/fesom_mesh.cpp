@@ -1434,11 +1434,13 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
     compute_Z_3d_n(m);            // M6.3 (zstar): per-node mid-layer depths (== static Z under linfs)
     compute_bottom_thickness(m);  // M6.3 (zstar): nominal bottom thickness + dhe (zeroed)
 
-    /* ocean_area: local sum (computed in compute_node_areas) → MPI_Allreduce. */
+    /* ocean_area: local sum (computed in compute_node_areas) → MPI_Allreduce.
+     * M8 island: reduce in FP64 (dbl_t temps keep MPI_DOUBLE coherent under SP). */
     if (partit->npes > 1) {
-        real_t local = m->ocean_area;
-        MPI_CHECK(MPI_Allreduce(&local, &m->ocean_area, 1, MPI_DOUBLE,
+        dbl_t local = m->ocean_area, global = 0.0;
+        MPI_CHECK(MPI_Allreduce(&local, &global, 1, MPI_DOUBLE,
                                 MPI_SUM, partit->MPI_COMM_FESOM));
+        m->ocean_area = (real_t)global;
     }
 
     /* MFCT: per-edge up/down-wind triangle (oce_muscl_adv.F90:185-333). */
