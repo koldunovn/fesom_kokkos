@@ -75,6 +75,9 @@ def main():
     ap.add_argument("--years", nargs="+", type=int, default=[1958, 1959])
     ap.add_argument("--fref", default="/work/ab0995/a270088/fesom2_core2")
     ap.add_argument("--mesh", default="/work/ab0995/a270088/port2/mesh/core2")
+    ap.add_argument("--map-years", nargs="*", type=int, default=None,
+                    help="render the per-year map panels only for these years (the "
+                         "series always covers every --years year); default: all")
     ap.add_argument("--trim-final-month", type=int, default=0, metavar="K",
                     help="drop the last K months of the FINAL year (a run truncated "
                          "mid-month leaves a partial monthly mean — never compare it "
@@ -94,16 +97,17 @@ def main():
                 for v in ("sst", "sss", "a_ice")}
         fort = {v: month_data(f"{a.fref}/{v}.fesom.{yr}.nc", v)[:nmon]
                 for v in ("sst", "sss", "a_ice")}
-        for v, units in (("sst", "degC"), ("sss", "psu")):
-            tri_panel(lon, lat, ours[v].mean(0), fort[v].mean(0),
-                      f"Kokkos {v} {lbl}", f"Fortran {v} {lbl}",
-                      f"{a.outdir}/{v}_{yr}.png", units, var=v)
-        for mi, mon in ((2, "March"), (8, "September")):
-            if mi >= nmon:
-                continue
-            tri_panel(lon, lat, ours["a_ice"][mi], fort["a_ice"][mi],
-                      f"Kokkos a_ice {mon} {yr}", f"Fortran a_ice {mon} {yr}",
-                      f"{a.outdir}/aice_{mon.lower()[:3]}_{yr}.png", "frac", var="a_ice")
+        if a.map_years is None or yr in a.map_years:
+            for v, units in (("sst", "degC"), ("sss", "psu")):
+                tri_panel(lon, lat, ours[v].mean(0), fort[v].mean(0),
+                          f"Kokkos {v} {lbl}", f"Fortran {v} {lbl}",
+                          f"{a.outdir}/{v}_{yr}.png", units, var=v)
+            for mi, mon in ((2, "March"), (8, "September")):
+                if mi >= nmon:
+                    continue
+                tri_panel(lon, lat, ours["a_ice"][mi], fort["a_ice"][mi],
+                          f"Kokkos a_ice {mon} {yr}", f"Fortran a_ice {mon} {yr}",
+                          f"{a.outdir}/aice_{mon.lower()[:3]}_{yr}.png", "frac", var="a_ice")
         for m in range(nmon):
             series["sst"]["ours"].append(ours["sst"][m].mean());  series["sst"]["fort"].append(fort["sst"][m].mean())
             series["sss"]["ours"].append(ours["sss"][m].mean());  series["sss"]["fort"].append(fort["sss"][m].mean())
