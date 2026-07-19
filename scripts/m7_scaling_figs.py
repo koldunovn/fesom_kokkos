@@ -5,8 +5,7 @@ Harvests the fleet's job logs (GPU 4-leg ab_env points + CPU scale points) into 
 tidy CSV, then renders, in the JAX-paper fig_scaling style (same mesh colors/labels
 via paper_jax/scripts/common.py):
 
-  fig_m7_scaling_A.png   (a) s/step vs NODES, CPU + GPU class-A(u)   (b) SYPD
-  fig_m7_scaling_B.png   same with GPU class-B = best(B, Bp) per point
+  fig_m7_scaling.png     3-panel fig10 mirror, classes A+B overlaid (A solid/circles, B dashed/triangles)
   fig_m7_speedup.png     node-for-node speedup CPU/GPU vs nodes, classes A + B
 
 usage: m7_scaling_figs.py [--outdir /work/ab0995/a270088/port2/m7/scaling_figs]
@@ -99,43 +98,48 @@ def decimal_log_yaxis(ax, lo, hi):
     ax.set_ylim(lo * 0.9, hi * 1.1)
 
 
-def fig_scaling(df, cls, fname, ylims):
-    """Mirror of the paper's fig10 layout: (a) s/step vs #GPUs (log-y, dotted 1/N),
-    (b) SYPD linear for CORE2 & farc, (c) SYPD linear for the multi-million-node
-    meshes. GPU-only, exactly like the original; the CPU comparison lives in the
-    speedup figure. `ylims` is shared between the class-A and class-B figures so
-    the two are directly comparable."""
+def fig_scaling(df, fname, ylims):
+    """Mirror of the paper's fig10 layout, both GPU classes in ONE figure (same
+    convention as the speedup plot — A solid/circles, B dashed/triangles):
+    (a) s/step vs #GPUs (log-y, dotted 1/N off the A anchor), (b) SYPD linear for
+    CORE2 & farc, (c) SYPD linear for the multi-million-node meshes. GPU-only;
+    the CPU comparison lives in the speedup figure."""
+    from matplotlib.lines import Line2D
     common.set_style()
     fig, (axA, axB, axC) = plt.subplots(1, 3, figsize=(12.5, 3.9))
-    gc = gpu_class(df, cls)
-    gc = gc.assign(ngpu=gc.ranks)
-    meshes = [m for m in common.MESH_ORDER if m in set(gc.mesh)]
-    small = [m for m in meshes if m in ("core2", "farc")]
-    large = [m for m in meshes if m not in ("core2", "farc")]
     ca = cb = cc = []
-    for mesh in meshes:
-        col = common.MESH_COLOR.get(mesh, "k")
-        g = gc[gc.mesh == mesh].sort_values("ngpu")
-        if not len(g):
-            continue
-        axA.plot(g.ngpu, g.sstep, marker="o", ms=4, ls="-", color=col,
-                 label=common.MESH_LABEL.get(mesh, mesh))
-        ca = ca + g.ngpu.tolist()
-        gg = np.array(sorted(g.ngpu))
-        axA.plot(gg, g.sstep.iloc[0] * g.ngpu.iloc[0] / gg, ls=":", lw=0.8,
-                 color=col, alpha=0.4)
-        ax = axB if mesh in small else axC
-        ax.plot(g.ngpu, g.sypd, marker="o", ms=4, ls="-", color=col)
-        if mesh in small:
-            cb = cb + g.ngpu.tolist()
-        else:
-            cc = cc + g.ngpu.tolist()
+    meshes_seen = []
+    for cls, ls, marker in (("A", "-", "o"), ("B", "--", "^")):
+        gc = gpu_class(df, cls)
+        gc = gc.assign(ngpu=gc.ranks)
+        for mesh in [m for m in common.MESH_ORDER if m in set(gc.mesh)]:
+            col = common.MESH_COLOR.get(mesh, "k")
+            g = gc[gc.mesh == mesh].sort_values("ngpu")
+            if not len(g):
+                continue
+            axA.plot(g.ngpu, g.sstep, marker=marker, ms=4, ls=ls, color=col,
+                     label=common.MESH_LABEL.get(mesh, mesh) if cls == "A" else None)
+            ca = ca + g.ngpu.tolist()
+            if cls == "A":
+                meshes_seen.append(mesh)
+                gg = np.array(sorted(g.ngpu))
+                axA.plot(gg, g.sstep.iloc[0] * g.ngpu.iloc[0] / gg, ls=":", lw=0.8,
+                         color=col, alpha=0.4)
+            ax = axB if mesh in ("core2", "farc") else axC
+            ax.plot(g.ngpu, g.sypd, marker=marker, ms=4, ls=ls, color=col)
+            if mesh in ("core2", "farc"):
+                cb = cb + g.ngpu.tolist()
+            else:
+                cc = cc + g.ngpu.tolist()
     axA.set_yscale("log")
     decimal_log_yaxis(axA, *ylims["sstep"])
     gpu_axis(axA, ca)
     axA.set_ylabel("time per step  [s]")
-    axA.set_title(f"(a) strong scaling, class {cls}  (dotted = ideal 1/N)")
-    axA.legend(fontsize=6, loc="lower left")
+    axA.set_title("(a) strong scaling  (dotted = ideal 1/N)")
+    handles = axA.get_legend_handles_labels()[0] + [
+        Line2D([], [], color="0.35", ls="-", marker="o", ms=4, label="bit-identical (A)"),
+        Line2D([], [], color="0.35", ls="--", marker="^", ms=4, label="climate-identical (B)")]
+    axA.legend(handles=handles, fontsize=6, loc="lower left")
     gpu_axis(axB, cb)
     axB.set_ylabel("SYPD  (simulated yr / wall day)")
     axB.set_ylim(0, ylims["small"])
@@ -197,8 +201,7 @@ def main():
         "small": 1.10 * both[both.mesh.isin(["core2", "farc"])].sypd.max(),
         "large": 1.10 * both[~both.mesh.isin(["core2", "farc"])].sypd.max(),
     }
-    fig_scaling(df, "A", f"{a.outdir}/fig_m7_scaling_A.png", ylims)
-    fig_scaling(df, "B", f"{a.outdir}/fig_m7_scaling_B.png", ylims)
+    fig_scaling(df, f"{a.outdir}/fig_m7_scaling.png", ylims)
     fig_speedup(df, f"{a.outdir}/fig_m7_speedup.png")
 
 
