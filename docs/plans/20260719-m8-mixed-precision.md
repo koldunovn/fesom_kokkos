@@ -314,9 +314,23 @@ physics) and Fortran R2, at pre-registered bars (below).
       ratio≫1-with-both-tiny is the predicted regime, shape verdict needs saturation)
 - [ ] **Gate 3k:** FP32 × speed-knob re-certification — SPEED=1/CGPIPE, CGPOLY d3, EVPWIDE,
       options config, both backends (these were certified at FP64 only)
-- [ ] verdicts vs pre-registered criteria; island promotions per failure protocol if needed
-      (EOS/PGF first; cvmix_TKE = highest-probability candidate); registry + re-measure after
-      each promotion
+- [x] **3k CPU verdicts (k2 fleet, FORCE_SERIAL, knob-fired banners verified — SP10):**
+      **CGPIPE selfcheck 0.000e+00 at every iter AT SP** (the recurrence≡exchange claim is
+      algebraic — survives FP32 exactly). **CGPOLY d3 at SP: selfcheck 0.000e+00, iters
+      120.2→40.2 (FP64 twin 39.6)** — the certified d3 class reproduces; "Chebyshev bounds
+      rounding-fragile" worry measured away. **EVPWIDE: N/A under mEVP** — the code refuses
+      the lever at whichEVP=1 (own banner), so it was inert in 63A ITSELF; effective 63A
+      posture = SPEED=1(+unbind) on mEVP. No SP cert needed for the endgame path (re-open
+      only if standard-EVP configs go SP)
+- [x] **Gate 3a FORMAL VERDICT: PASS (mature 30-d envelope, `gate3a_mature.{csv,png}`).**
+      Every field's sp/envelope ratio DECREASED step 100→1440 as the 3-seed envelope matured
+      (T 14→4.8 · S 66→6.4 · eta 37→13 · pgf ~770→14-16 · w 652→64 · density 71→7.2);
+      chaos-saturated fields already at 1-2× the envelope (a_ice 1.40, uice 1.26, m_snow
+      1.20, h_ice Linf BELOW envelope); no jumps, no shape departure, no runaway. The
+      residual ≫1 ratios on smooth fields = continuous re-seeding (SP injects ~6e-8 relative
+      noise per operation; a one-time-seed ensemble lags by construction) with a bounded,
+      decaying multiple. **GATE 3 PASSES IN FULL — ZERO ISLAND PROMOTIONS NEEDED** (EOS/PGF
+      and cvmix_TKE suspects all cleared at FP32 on the endgame config)
 
 ### Task 10: Gate 4 — 1-yr climate leg
 

@@ -68,3 +68,19 @@ byte oracle; refresh the noise basis after kernel-set-changing edits.
 (bit-identity at FP64) proves refactor inertness but CANNOT see over/under-sweeping — those
 surface only at the SP flip (pointer mismatches: 35 compile errors, all boundary seams) and in SP
 runs. Budget the flip as its own debugging phase, not a formality.
+
+**SP10 — A posture string can carry a dead knob; the effective posture is what the BANNER says.**
+Two same-day strikes (both L80 flavors): (a) the first Gate-3k fleet passed
+`FESOM_SPEED=1`+selfcheck envs but lacked `FESOM_SPEED_FORCE_SERIAL=1` — on the Serial backend NO
+lever fired, no selfcheck printed, CGPOLY iters stayed at knobs-off values, and the "bit-identical
+ON≡OFF" diffs were vacuous; (b) 63A's own recorded KNOBS include `FESOM_SPEED_EVPWIDE=8`, but the
+code refuses it under mEVP (`whichEVP=1 … the lever is NOT running`) — the lever was equally inert
+in 63A itself, so the effective 63A posture is SPEED=1(+unbind) on mEVP. Certify a knob only after
+grepping its fired-banner AND its effect (iteration drop / selfcheck lines), and read scheme-
+compatibility warnings before porting a posture across configs.
+
+**SP11 — Read the printf format before grepping a number.** The step-diag writes `it=%3d`, so
+iters < 100 render as `it= 91` and `grep -o "it=[0-9]*"` silently extracts an empty match → means
+computed over only the ≥100-iter steps (b-leg "mean 13.6" was garbage; padding-safe
+`grep -o "it= *[0-9]*" | tr -d ' '` gives 90.83). A wrong-but-plausible statistic from a
+format-blind grep survives review far longer than a crash.
