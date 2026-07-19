@@ -3,6 +3,7 @@
  * No sea ice — Phase 3 ocean-only.
  */
 #include "fesom_bulk.h"
+#include "fesom_step.h"      // M8: fesom_mp_nanscan_enabled (forensic flag)
 #include "fesom_speed.hpp"   // M7 Task 1.2: FESOM_SPEED_SWSKIP
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -680,6 +681,7 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
 
     /* Per-surface-node MAP over [0,N) (halo included — the C bound; eDim computed from halo-
      * consistent inputs keeps Ch/Ce consistent there for the ice thermo). Race-free, no scatter. */
+    const int mp_dbg = fesom_mp_nanscan_enabled();   /* M8 forensic flag (captured by value) */
     Kokkos::parallel_for("fesom_bulk_compute", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int n) {
             if (ulev(n) > 1) {                          /* cavity — fluxes 0 (Ch/Ce left untouched, as C) */
@@ -707,6 +709,15 @@ void fesom_bulk_compute_kk(const struct fesom_jra55  *jra,
 
             hf(n) = qns - qsr;
             wf(n) = evap - pr - ps;
+            /* M8 forensic (FESOM_MP_NANSCAN=1, Serial): dump the culprit node's raw
+             * inputs the moment the bulk produces NaN — names the broken operand. */
+            if (mp_dbg && (hf(n) != hf(n) || wf(n) != wf(n))) {
+                Kokkos::printf("[bulk-nan] n=%d T_oc=%g ua=%g va=%g u_w=%g v_w=%g ta=%g qa=%g "
+                               "cd=%g ch=%g ce=%g qns=%g qsr=%g evap=%g\n",
+                               n, (double)T_oc, (double)ua, (double)va, (double)u_w, (double)v_w,
+                               (double)ta, (double)qa, (double)cd, (double)ch, (double)ce,
+                               (double)qns, (double)qsr, (double)evap);
+            }
 
             const real_t dux = ua - u_w, dvy = va - v_w;
             const real_t mag = Kokkos::sqrt(dux*dux + dvy*dvy) * BULK_RHOAIR;

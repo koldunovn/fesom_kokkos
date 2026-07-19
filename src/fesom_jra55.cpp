@@ -71,6 +71,32 @@ int fesom_jra_julday(int yyyy, int mm, int dd, const char *calendar)
  * (Mirrors Fortran semantics: ind starts as `right` after loop exhausts;   *
  * when value > all, `right == length` so ind == length).                   *
  * ------------------------------------------------------------------------ */
+/* M8: faithful dbl_t twin of fesom_jra_binarysearch below — SAME algorithm
+ * (Fortran nint bisection + 1e-9 snap) so the FP64 build's bracket choice is
+ * bit-identical to pre-M8; only the operand type is promoted (time island). */
+static int fesom_jra_binarysearch_d(int length, const dbl_t *array, dbl_t value)
+{
+    const dbl_t d = 1e-9;
+    int left  = 1;        /* 1-based */
+    int right = length;
+    int ind   = right;
+    while (1) {
+        if (left > right) break;
+        int middle = (int)floor((left + right) / 2.0 + 0.5);  /* Fortran nint() */
+        dbl_t am = array[middle - 1];
+        if (fabs(am - value) <= d) {
+            return middle;
+        }
+        if (am > value) {
+            right = middle - 1;
+        } else {
+            left = middle + 1;
+        }
+    }
+    ind = right;
+    return ind;  /* 0 if value < array[0]; length if value > array[length-1] */
+}
+
 int fesom_jra_binarysearch(int length, const real_t *array, real_t value)
 {
     const real_t d = 1e-9;
@@ -165,7 +191,7 @@ static void nc_read_time_grid(fesom_jra55 *jra,
         flf->nc_lat = (decltype(flf->nc_lat))malloc((size_t)flf->Nlat * sizeof(real_t));
     }
     if (flf->nc_time) free(flf->nc_time);
-    flf->nc_time = (decltype(flf->nc_time))malloc((size_t)flf->Ntime * sizeof(real_t));
+    flf->nc_time = (decltype(flf->nc_time))malloc((size_t)flf->Ntime * sizeof(dbl_t));
     FESOM_CHECK(flf->nc_lon && flf->nc_lat && flf->nc_time,
                 "fesom_jra55: nc_lon/lat/time alloc failed");
 
@@ -404,7 +430,7 @@ static bool m7_jra_nocoefcache()
 
 static void getcoeffld(fesom_jra55_field *flf,
                        const struct fesom_mesh *mesh,
-                       real_t rdate)
+                       dbl_t rdate)
 {
     int Nlon = flf->Nlon;
     int Nlat = flf->Nlat;
@@ -421,9 +447,9 @@ static void getcoeffld(fesom_jra55_field *flf,
     }
 
     /* Find t_indx via binary search. */
-    int t_indx    = fesom_jra_binarysearch(Ntime, flf->nc_time, rdate);
+    int t_indx    = fesom_jra_binarysearch_d(Ntime, flf->nc_time, rdate);
     int t_indx_p1;
-    real_t delta_t;
+    dbl_t delta_t;
     if (t_indx < Ntime && t_indx > 0) {
         t_indx_p1 = t_indx + 1;
         delta_t   = flf->nc_time[t_indx_p1 - 1] - flf->nc_time[t_indx - 1];
@@ -715,7 +741,7 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
         }
     }
     /* After year change, prefetch first slice + coef_a/coef_b at start-of-year. */
-    real_t rdate = (real_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar);
+    dbl_t rdate = (dbl_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar);
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         getcoeffld(&jra->fld[f], mesh, rdate);
     }
@@ -746,15 +772,15 @@ static bool m7_jra_need_trig()
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit,
-                      int yearnew, int daynew, real_t timenew)
+                      int yearnew, int daynew, dbl_t timenew)
 {
     /* FESOM_DIAG_COEF — see the block in the refresh loop below. */
     static int s_coef_diag = (getenv("FESOM_DIAG_COEF") != nullptr);
     static int s_coef_call = 0;
 
     /* Fortran sbc_do (line 1500-ish): rdate = julday(yearnew,1,1) + (daynew-1) + timenew/86400 */
-    real_t rdate = (real_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar)
-                 + (real_t)(daynew - 1)
+    dbl_t rdate = (dbl_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar)
+                 + (dbl_t)(daynew - 1)
                  + timenew / 86400.0;
 
     /* Refresh data + coefs whenever rdate has crossed t_indx_p1 in any field.
@@ -765,8 +791,8 @@ void fesom_jra55_step(fesom_jra55 *jra,
         int need_refresh = 0;
         if (flf->t_indx <= 0) need_refresh = 1;
         else {
-            real_t lo = flf->nc_time[flf->t_indx    - 1];
-            real_t hi = flf->nc_time[flf->t_indx_p1 - 1];
+            dbl_t lo = flf->nc_time[flf->t_indx    - 1];
+            dbl_t hi = flf->nc_time[flf->t_indx_p1 - 1];
             if (rdate < lo || rdate > hi) need_refresh = 1;
         }
         /* 🔴 FESOM_DIAG_COEF — why does the refresh fire EVERY step? (M7 package H)
@@ -777,8 +803,8 @@ void fesom_jra55_step(fesom_jra55 *jra,
          * between rdate's Julian Day and nc_time's days-since-1900) were each checked and each DIED.
          * So: print the actual numbers instead of reasoning about them. */
         if (s_coef_diag && partit && partit->mype == 0 && s_coef_call <= 3 * FESOM_JRA_NFLD) {
-            real_t lo_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx    - 1] : -1.0;
-            real_t hi_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx_p1 - 1] : -1.0;
+            dbl_t lo_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx    - 1] : -1.0;
+            dbl_t hi_d = (flf->t_indx > 0) ? flf->nc_time[flf->t_indx_p1 - 1] : -1.0;
             fprintf(stderr, "[COEF] call=%d f=%d t_indx=%d t_indx_p1=%d Ntime=%d "
                             "rdate=%.9f lo=%.9f hi=%.9f  rdate-lo=%.3e hi-rdate=%.3e  REFRESH=%d\n",
                     s_coef_call, f, flf->t_indx, flf->t_indx_p1, flf->Ntime,
@@ -865,7 +891,7 @@ void fesom_jra55_step(fesom_jra55 *jra,
         auto lw = jra->longwave_fld.d();  auto ta = jra->Tair_fld.d();
         auto pr = jra->prec_rain_fld.d(); auto sn = jra->prec_snow_fld.d();
         auto tr = jra->rot_trig_fld.d();
-        const real_t rd = rdate;
+        const dbl_t rd = rdate;
 
         /* The rotation matrix is a run-time constant; capture the 9 scalars by value
          * (build_rotation_matrix is host-only and unreachable from a device lambda). */
@@ -930,22 +956,22 @@ void fesom_jra55_step(fesom_jra55 *jra,
 
     /* data_timeinterp + distribution to physics arrays. */
     for (int n = 0; n < N; ++n) {
-        real_t a_xw  = jra->fld[FESOM_JRA_XWIND].coef_a[n];
-        real_t b_xw  = jra->fld[FESOM_JRA_XWIND].coef_b[n];
-        real_t a_yw  = jra->fld[FESOM_JRA_YWIND].coef_a[n];
-        real_t b_yw  = jra->fld[FESOM_JRA_YWIND].coef_b[n];
-        real_t a_sh  = jra->fld[FESOM_JRA_HUMI ].coef_a[n];
-        real_t b_sh  = jra->fld[FESOM_JRA_HUMI ].coef_b[n];
-        real_t a_sw  = jra->fld[FESOM_JRA_QSR  ].coef_a[n];
-        real_t b_sw  = jra->fld[FESOM_JRA_QSR  ].coef_b[n];
-        real_t a_lw  = jra->fld[FESOM_JRA_QLW  ].coef_a[n];
-        real_t b_lw  = jra->fld[FESOM_JRA_QLW  ].coef_b[n];
-        real_t a_ta  = jra->fld[FESOM_JRA_TAIR ].coef_a[n];
-        real_t b_ta  = jra->fld[FESOM_JRA_TAIR ].coef_b[n];
-        real_t a_pr  = jra->fld[FESOM_JRA_PREC ].coef_a[n];
-        real_t b_pr  = jra->fld[FESOM_JRA_PREC ].coef_b[n];
-        real_t a_sn  = jra->fld[FESOM_JRA_SNOW ].coef_a[n];
-        real_t b_sn  = jra->fld[FESOM_JRA_SNOW ].coef_b[n];
+        dbl_t  a_xw  = jra->fld[FESOM_JRA_XWIND].coef_a[n];
+        dbl_t  b_xw  = jra->fld[FESOM_JRA_XWIND].coef_b[n];
+        dbl_t  a_yw  = jra->fld[FESOM_JRA_YWIND].coef_a[n];
+        dbl_t  b_yw  = jra->fld[FESOM_JRA_YWIND].coef_b[n];
+        dbl_t  a_sh  = jra->fld[FESOM_JRA_HUMI ].coef_a[n];
+        dbl_t  b_sh  = jra->fld[FESOM_JRA_HUMI ].coef_b[n];
+        dbl_t  a_sw  = jra->fld[FESOM_JRA_QSR  ].coef_a[n];
+        dbl_t  b_sw  = jra->fld[FESOM_JRA_QSR  ].coef_b[n];
+        dbl_t  a_lw  = jra->fld[FESOM_JRA_QLW  ].coef_a[n];
+        dbl_t  b_lw  = jra->fld[FESOM_JRA_QLW  ].coef_b[n];
+        dbl_t  a_ta  = jra->fld[FESOM_JRA_TAIR ].coef_a[n];
+        dbl_t  b_ta  = jra->fld[FESOM_JRA_TAIR ].coef_b[n];
+        dbl_t  a_pr  = jra->fld[FESOM_JRA_PREC ].coef_a[n];
+        dbl_t  b_pr  = jra->fld[FESOM_JRA_PREC ].coef_b[n];
+        dbl_t  a_sn  = jra->fld[FESOM_JRA_SNOW ].coef_a[n];
+        dbl_t  b_sn  = jra->fld[FESOM_JRA_SNOW ].coef_b[n];
 
         jra->u_wind   [n] = rdate * a_xw + b_xw;
         jra->v_wind   [n] = rdate * a_yw + b_yw;
@@ -1021,7 +1047,7 @@ void fesom_jra55_step_cal(fesom_jra55 *jra,
     }
 
     int daynew  = fesom_calendar_day_of_year(cal);
-    real_t timenew = (real_t)((double)cal->hour * 3600.0
+    dbl_t timenew = (dbl_t)((double)cal->hour * 3600.0
                             + (double)cal->minute * 60.0
                             + cal->second);
     fesom_jra55_step(jra, mesh, partit, yearnew, daynew, timenew);

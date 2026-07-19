@@ -1117,6 +1117,8 @@ skip_rest_state:
                  * same host-authoritative forcing/ice state the C twin did, so the ice step + coupling are
                  * unchanged. The single-threaded host loop (blmc/L49 trap, ~16% of the NG5 step) is gone. */
                 FPROF_BEG(_tb); fesom_bulk_compute_kk(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
+                fesom_mp_nanscan("bulk(hf)", forcing.heat_flux,
+                                 (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n);
                 if (verify_bulk) {
                     /* C twin reads SST + uvnode on the HOST → make them host-current first (no-op on
                      * Serial, where device==host; on the CUDA print-only path it refreshes the host copy). */
@@ -1183,6 +1185,8 @@ skip_rest_state:
                            use_sr  ? &sr  : NULL,
                            &stiff);
             TP_END(tp_ice);
+            fesom_mp_nanscan("ice-step(hf)", forcing.heat_flux,
+                             (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n);
             fesom_phasestats_mark(FESOM_PH_COUPL);
             TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
 

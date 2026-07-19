@@ -79,17 +79,17 @@ typedef struct fesom_jra55_field {
     int        Ntime;            /* nc_Ntime */
     real_t    *nc_lon;           /* [Nlon] (degrees east, halo at [0] and [Nlon-1]) */
     real_t    *nc_lat;           /* [Nlat] (degrees north, possibly flipped) */
-    real_t    *nc_time;          /* [Ntime] (julian days since year 0001 of yearnew) */
+    dbl_t     *nc_time;         /* M8 island: absolute Julian days — float ulp(2.4e6 d) = 6 h > 3-h record spacing */          /* [Ntime] (julian days since year 0001 of yearnew) */
     int        flip_lat;         /* 1 if file stores -90→90 (need to flip data rows) */
     char       calendar[24];     /* e.g. "gregorian" */
     int       *bilin_i;          /* [nod2D] longitude bracket index (1-based, like Fortran) */
     int       *bilin_j;          /* [nod2D] latitude bracket index */
-    real_t    *coef_a;           /* [nod2D] linear-interp slope */
-    real_t    *coef_b;           /* [nod2D] linear-interp intercept */
+    dbl_t     *coef_a;          /* M8 island: affine-in-absolute-date interpolant (catastrophic in float) */           /* [nod2D] linear-interp slope */
+    dbl_t     *coef_b;           /* [nod2D] linear-interp intercept */
     /* M7 D.1: Field-owned so the device producer can read them. getcoeffld still fills them
      * on the HOST (it runs ~1 step in 60 — the netCDF read + bilinear interp stay host-side
      * exactly as they are); it pushes host→device right after, so the per-step H2D is ~0. */
-    fesom::Field coef_a_fld, coef_b_fld;
+    fesom::FieldT<dbl_t> coef_a_fld, coef_b_fld;   /* M8: per-field dbl_t promotion */
     real_t    *sbcdata1;         /* [Nlon*Nlat] snapshot at t_indx (with cyclic halo) */
     real_t    *sbcdata2;         /* [Nlon*Nlat] snapshot at t_indx_p1 */
     int        sbcdata1_t_index; /* -1 if not yet filled */
@@ -216,7 +216,7 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit,
-                      int yearnew, int daynew, real_t timenew);
+                      int yearnew, int daynew, dbl_t timenew);
 
 /* Calendar-driven adapter for fesom_jra55_step. Extracts year/day-of-year/
  * seconds-in-day from the model calendar and delegates to fesom_jra55_step.
