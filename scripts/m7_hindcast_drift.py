@@ -163,8 +163,18 @@ def figure(ncpath, figpath):
     common.set_style()
     ds = xr.open_dataset(ncpath)
     z = ds["z"].values
-    T = {r: ds[f"time_{r}"].values for r in ("a63", "b63", "fortran")}
-    spans = {r: f"{int(t[0])}–{int(t[-1])}" for r, t in T.items()}
+    # COMMON WINDOW: every run truncated to the smallest shared last year, so all
+    # panels (and especially the end−start profiles) compare identical months —
+    # different end years would put different interannual states into the upper
+    # ocean and masquerade as model differences.
+    ycom = min(int(ds[f"time_{r}"].values[-1]) for r in ("a63", "b63", "fortran"))
+    T, D = {}, {}
+    for r in ("a63", "b63", "fortran"):
+        t = ds[f"time_{r}"].values
+        m = t < ycom + 1
+        T[r] = t[m]
+        D[r] = {k: ds[f"{k}_{r}"].values[m]
+                for k in ("sst", "sss", "tbar", "tbar700", "sbar", "ohc", "tz", "sz")}
     MODELS = [("a63", C63A, "Kokkos A (bit-id)"), ("b63", C63B, "Kokkos B (all opts)"),
               ("fortran", CFOR, "Fortran R2")]
 
@@ -173,10 +183,13 @@ def figure(ncpath, figpath):
     axT, axS, axO = (fig.add_subplot(gs[0, i]) for i in range(3))
     axHT, axHS, axP = (fig.add_subplot(gs[1, i]) for i in range(3))
 
-    # (a) volume-mean T: colour = model, solid = full depth, dashed = 0-700 m
-    for r, c, lab in MODELS:
-        axT.plot(T[r], ds[f"tbar_{r}"].values, color=c, lw=1.4)
-        axT.plot(T[r], ds[f"tbar700_{r}"].values, color=c, ls="--", lw=1.0)
+    # (a) volume-mean T: colour = model, solid = full depth, dashed = 0-700 m.
+    # Draw order thick-to-thin (Fortran under, Kokkos over) so identical curves
+    # read as a layered line instead of one model hiding the others.
+    LW = {"fortran": 2.4, "a63": 1.4, "b63": 0.8}
+    for r, c, lab in reversed(MODELS):
+        axT.plot(T[r], D[r]["tbar"], color=c, lw=LW[r])
+        axT.plot(T[r], D[r]["tbar700"], color=c, ls="--", lw=LW[r] * 0.8)
     axT.set_ylabel("volume-mean T [°C]"); axT.set_xlabel("year")
     axT.set_title("(a) global mean ocean temperature")
     axT.legend(handles=[Line2D([], [], color=c, label=lab) for _, c, lab in MODELS] +
@@ -189,10 +202,10 @@ def figure(ncpath, figpath):
              transform=axT.transAxes, ha="right", va="bottom", fontsize=7, color="0.3")
 
     # (b) volume-mean S (fixed ±0.01 psu window — flat at the honest scale)
-    for r, c, lab in MODELS:
-        axS.plot(T[r], ds[f"sbar_{r}"].values, color=c, lw=0.6, alpha=0.25)
-        axS.plot(T[r], running_mean(ds[f"sbar_{r}"].values), color=c, lw=1.8, label=lab)
-    smid = float(np.nanmean(ds["sbar_fortran"].values))
+    for r, c, lab in reversed(MODELS):
+        axS.plot(T[r], D[r]["sbar"], color=c, lw=0.6, alpha=0.25)
+        axS.plot(T[r], running_mean(D[r]["sbar"]), color=c, lw=LW[r], label=lab)
+    smid = float(np.nanmean(D["fortran"]["sbar"]))
     axS.set_ylim(smid - 0.01, smid + 0.01)
     axS.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.3f"))
     axS.set_ylabel("volume-mean S [psu]"); axS.set_xlabel("year")
@@ -200,9 +213,9 @@ def figure(ncpath, figpath):
     axS.legend(fontsize=7, loc="lower right")
 
     # (c) OHC
-    for r, c, lab in MODELS:
-        axO.plot(T[r], ds[f"ohc_{r}"].values, color=c, lw=0.6, alpha=0.25)
-        axO.plot(T[r], running_mean(ds[f"ohc_{r}"].values), color=c, lw=1.8, label=lab)
+    for r, c, lab in reversed(MODELS):
+        axO.plot(T[r], D[r]["ohc"], color=c, lw=0.6, alpha=0.25)
+        axO.plot(T[r], running_mean(D[r]["ohc"]), color=c, lw=LW[r], label=lab)
     axO.set_ylabel("OHC [ZJ, ref 0 °C]"); axO.set_xlabel("year")
     axO.set_title("(c) ocean heat content")
     axO.legend(fontsize=7, loc="best")
@@ -215,7 +228,7 @@ def figure(ncpath, figpath):
     for ax, base, cmap, lab, ttl in [
             (axHT, "tz", "RdBu_r", "ΔT [°C]", "(d) T(z) drift (Kokkos B, vs start)"),
             (axHS, "sz", "BrBG_r", "ΔS [psu]", "(e) S(z) drift (Kokkos B, vs start)")]:
-        field = ds[f"{base}_b63"].values
+        field = D["b63"][base]
         anom = field - field[0:1, :]
         vmax = float(max(1e-4, np.nanpercentile(np.abs(anom), 98)))
         nr.plot_hovmoller(T["b63"], z, field, ax=ax, anomaly=True, mode="depth",
@@ -224,23 +237,24 @@ def figure(ncpath, figpath):
         _sqrt_depth(ax)
         ax.set_xlabel("year"); ax.set_title(ttl)
 
-    # (f) end-minus-start profiles (per-run span; annotated in the legend)
+    # (f) end-minus-start profiles over the COMMON window (identical months for
+    # every model — a per-run span would put different interannual end states
+    # into the upper ocean and fake a model difference)
     LS = {"a63": "-", "b63": "-.", "fortran": "--"}
     axP.axvline(0.0, color="0.7", lw=0.8)
     axP2 = axP.twiny()
-    for r, c, lab in MODELS:
-        dT = ds[f"tz_{r}"].values[-1] - ds[f"tz_{r}"].values[0]
-        dS = ds[f"sz_{r}"].values[-1] - ds[f"sz_{r}"].values[0]
-        axP.plot(dT, z, color="#ff7f0e", ls=LS[r], lw=1.4)
-        axP2.plot(dS, z, color="#1f77b4", ls=LS[r], lw=1.4)
+    for r, c, lab in reversed(MODELS):
+        dT = D[r]["tz"][-1] - D[r]["tz"][0]
+        dS = D[r]["sz"][-1] - D[r]["sz"][0]
+        axP.plot(dT, z, color="#ff7f0e", ls=LS[r], lw=LW[r])
+        axP2.plot(dS, z, color="#1f77b4", ls=LS[r], lw=LW[r])
     _sqrt_depth(axP)
     axP.set_ylim(6200, 0)
     axP.set_xlabel("ΔT [°C]", color="#ff7f0e"); axP2.set_xlabel("ΔS [psu]", color="#1f77b4")
     axP.tick_params(axis="x", colors="#ff7f0e"); axP2.tick_params(axis="x", colors="#1f77b4")
-    axP.set_title("(f) drift profile (end − start)", pad=22)
-    axP.legend(handles=[Line2D([], [], color="0.35", ls=LS[r],
-                               label=f"{lab} ({spans[r]})") for r, _, lab in MODELS],
-               fontsize=7, loc="lower center")
+    axP.set_title(f"(f) drift profile (Dec {ycom} − Jan 1958)", pad=22)
+    axP.legend(handles=[Line2D([], [], color="0.35", ls=LS[r], label=lab)
+                        for r, _, lab in MODELS], fontsize=7, loc="lower center")
 
     fig.savefig(figpath, dpi=140)
     fig.savefig(figpath.replace(".png", ".pdf"))
