@@ -594,12 +594,14 @@ static void cg_spmv(IDV rowptr, IDV colind, DV vals, DV v, DV y, int N)
 }
 
 /* Σ a(i)·b(i) over [0,N). The first parallel_reduce: Serial sums sequentially in
- * index order == the C `for` loop → bit-identical; OpenMP/CUDA climate-close. */
-static real_t cg_dot(DV a, DV b, int N)
+ * index order == the C `for` loop → bit-identical; OpenMP/CUDA climate-close.
+ * M8: accumulates FP64 regardless of real_t (dot-product island — a float
+ * accumulator over 1e5+ products loses ~n·2⁻²⁴; the double reducer is free). */
+static dbl_t cg_dot(DV a, DV b, int N)
 {
-    real_t s = 0.0;
+    dbl_t s = 0.0;
     Kokkos::parallel_reduce("fesom_cg_dot", Kokkos::RangePolicy<>(0, N),
-        KOKKOS_LAMBDA(const int i, real_t &l) { l += a(i) * b(i); }, s);
+        KOKKOS_LAMBDA(const int i, double &l) { l += (double)a(i) * (double)b(i); }, s);
     return s;
 }
 

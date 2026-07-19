@@ -33,7 +33,16 @@
  * FESOM_PHASE1_{A,K}_VER (== the CORE2 1e-4 / 1e-5; same constant as PP).
  *===========================================================================*/
 /* module parameters (oce_ale_mixing_kpp.F90:50-59) */
+/* M8/Task-3 epsilon-FTZ policy: an additive guard MUST be a NORMAL number in the
+ * working precision. 1.0e-40 is subnormal in float32; FTZ/DAZ (Intel -O3, CUDA
+ * default) flushes it to 0, turning every  x/(y+epsln)  into 0/0 = NaN exactly at
+ * cold start when denominators are still zero — FESOM2 PR-940's headline SP bug
+ * (their fix commit 48c37328). FP64 keeps 1.0e-40 so Gate 0 is untouched. */
+#if defined(FESOM_SINGLE_PRECISION)
+#define KPP_EPSLN        1.0e-20    /* epsln  (:50) — FP32-normal, FTZ-safe */
+#else
 #define KPP_EPSLN        1.0e-40    /* epsln  (:50)  */
+#endif
 #define KPP_EPSILON      0.1        /* epsilon_kpp (:52) */
 #define KPP_VONK         0.4        /* vonk   (:53)  */
 #define KPP_CONC1        5.0        /* conc1  (:54)  */
