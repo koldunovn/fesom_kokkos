@@ -54,7 +54,7 @@ struct fesom_partit;
 
 typedef struct fesom_solverinfo {
     int     maxiter;
-    real_t  soltol;
+    dbl_t   soltol;    /* M8 island: CG scalar chain stays FP64 (PRECISION_ISLANDS.md) */
     real_t *rr;
     real_t *zz;
     real_t *pp;

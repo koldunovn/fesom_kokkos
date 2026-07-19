@@ -428,7 +428,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     #define ALLREDUCE_SUM(var) MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, si->partit->MPI_COMM_FESOM)
 
     const int    N      = mesh->myDim_nod2D;
-    const real_t soltol = si->soltol;
+    const dbl_t  soltol = si->soltol;   /* M8 island: CG scalar chain FP64 */
     real_t      *X      = dyn->d_eta;
     const real_t *rhs   = dyn->ssh_rhs;
     real_t       *rr    = si->rr;
@@ -437,13 +437,13 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     real_t       *App   = si->App;
 
     /* Initial ‖rhs‖² and tolerance (Fortran solver.F90:142-154). */
-    real_t s_old = 0.0;
+    dbl_t s_old = 0.0;                  /* M8 island: dots/norms accumulate FP64 */
     for (int row = 0; row < N; ++row) s_old += rhs[row] * rhs[row];
     if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
     /* The global problem size for the rtol normalisation must be the GLOBAL
      * row count, not local (Fortran uses nod2D). */
     int N_global = (si->partit && si->partit->npes > 1) ? mesh->nod2D : N;
-    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
+    dbl_t rtol = soltol * sqrt(s_old / (dbl_t)N_global);
 
     if (s_old == 0.0) {
         memset(X, 0, (size_t)N * sizeof(real_t));
@@ -477,7 +477,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
         csr_matvec(S, S->values, pp, App, N);
 
         /* α = s_old / (pp·App) */
-        real_t s_aux = 0.0;
+        dbl_t s_aux = 0.0;
         for (int row = 0; row < N; ++row) s_aux += pp[row] * App[row];
         if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_aux);
         if (s_aux == 0.0 || s_aux != s_aux) {       /* NaN/zero check */
@@ -487,7 +487,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             }
             FESOM_DIE("CG: pp·App is %g — matrix singular or NaN propagated", s_aux);
         }
-        real_t al = s_old / s_aux;
+        dbl_t al = s_old / s_aux;       /* FP64 α applied to real_t vectors */
 
         for (int row = 0; row < N; ++row) {
             X [row] += al * pp [row];
@@ -497,7 +497,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
 
         csr_matvec(S, S->pr_values, rr, zz, N);
 
-        real_t sp0 = 0.0, sp1 = 0.0;
+        dbl_t sp0 = 0.0, sp1 = 0.0;
         for (int row = 0; row < N; ++row) {
             sp0 += rr[row] * zz[row];
             sp1 += rr[row] * rr[row];
@@ -507,7 +507,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             ALLREDUCE_SUM(sp1);
         }
 
-        real_t residual = sqrt(sp1 / (real_t)N_global);
+        dbl_t residual = sqrt(sp1 / (dbl_t)N_global);
         if ((si->partit == NULL || si->partit->mype == 0)
             && (verbose ? (iter <= 5 || iter % 50 == 0)
                         : (iter % heartbeat_every == 0))) {
@@ -525,7 +525,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             FESOM_DIE("CG residual diverged");
         }
 
-        real_t be = sp0 / s_old;
+        dbl_t be = sp0 / s_old;
         s_old = sp0;
         for (int row = 0; row < N; ++row) pp[row] = zz[row] + be * pp[row];
     }
@@ -533,7 +533,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
         if (si->partit == NULL || si->partit->mype == 0) {
             fprintf(stderr, "[fesom_ssh] CG hit maxiter=%d without converging "
                     "(last residual ~%.4e, rtol=%.4e)\n",
-                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+                    si->maxiter, (double)sqrt(s_old/(dbl_t)N_global), (double)rtol);
             fflush(stderr);
         }
         FESOM_DIE("CG did not converge");
@@ -676,13 +676,13 @@ struct CgPipeState {
     std::vector<int> soff, roff;         /* per-partner offsets into sbuf/rbuf [P+1] */
     Kokkos::View<int*>    sidx_d;        /* [nsend] local slots to pack   */
     Kokkos::View<int*>    ridx_d;        /* [nrecv] local slots to unpack */
-    Kokkos::View<double*> sbuf_d, rbuf_d;
+    Kokkos::View<real_t*> sbuf_d, rbuf_d;   /* M8: halo payload = working precision */
     std::vector<MPI_Request> reqs;
     /* ring1 preconditioner CSR: row r (= local slot N+r), cols are LOCAL slots
      * into the extended rr; entries in the OWNER's row order (byte-identity). */
     Kokkos::View<int*>    rp2_d;         /* [eDim+1] */
     Kokkos::View<int*>    ci2_d;
-    Kokkos::View<double*> pv2_d;
+    Kokkos::View<real_t*> pv2_d;
 };
 CgPipeState g_cgpipe;
 
@@ -711,7 +711,7 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             owner_l[(size_t)(cs->rlist[j] - 1)] = cs->rPE[k];
 
     /* ---- A. ship pr rows: send my slist blocks' rows; receive my rlist blocks' rows. */
-    struct Bundle { std::vector<int> ints; std::vector<double> dbls; int hdr[2]; };
+    struct Bundle { std::vector<int> ints; std::vector<real_t> dbls; int hdr[2]; };
     std::vector<Bundle> sb(cs->sPEnum), rb(cs->rPEnum);
     std::vector<MPI_Request> rq;
     rq.reserve((size_t)(cs->sPEnum + cs->rPEnum));
@@ -738,7 +738,7 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                 const int col = S->colind[n];                      /* col < N+eDim always */
                 b.ints.push_back(p->myList_nod2D[col]);            /* col gid */
                 b.ints.push_back(owner_l[(size_t)col]);            /* col OWNER rank */
-                b.dbls.push_back((double)S->pr_values[n]);         /* VERBATIM, row order */
+                b.dbls.push_back((real_t)S->pr_values[n]);         /* VERBATIM, row order */
             }
         }
         b.hdr[0] = nrows; b.hdr[1] = nent;
@@ -758,13 +758,13 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         rq.push_back(MPI_Request());
         MPI_Irecv(rb[k].ints.data(), (int)rb[k].ints.size(), MPI_INT,    cs->rPE[k], 2102, comm, &rq.back());
         rq.push_back(MPI_Request());
-        MPI_Irecv(rb[k].dbls.data(), (int)rb[k].dbls.size(), MPI_DOUBLE, cs->rPE[k], 2103, comm, &rq.back());
+        MPI_Irecv(rb[k].dbls.data(), (int)rb[k].dbls.size(), FESOM_MPI_REAL, cs->rPE[k], 2103, comm, &rq.back());
     }
     for (int k = 0; k < cs->sPEnum; ++k) {
         rq.push_back(MPI_Request());
         MPI_Isend(sb[k].ints.data(), (int)sb[k].ints.size(), MPI_INT,    cs->sPE[k], 2102, comm, &rq.back());
         rq.push_back(MPI_Request());
-        MPI_Isend(sb[k].dbls.data(), (int)sb[k].dbls.size(), MPI_DOUBLE, cs->sPE[k], 2103, comm, &rq.back());
+        MPI_Isend(sb[k].dbls.data(), (int)sb[k].dbls.size(), FESOM_MPI_REAL, cs->sPE[k], 2103, comm, &rq.back());
     }
     MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
     rq.clear();
@@ -772,7 +772,7 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
 
     /* ---- B. translate rows into per-ring1-slot CSR; discover ring2. */
     std::vector<std::vector<int>>    row_ci((size_t)eDim);
-    std::vector<std::vector<double>> row_pv((size_t)eDim);
+    std::vector<std::vector<real_t>> row_pv((size_t)eDim);
     std::unordered_map<int, int> g2r2;                        /* gid -> ring2 ordinal */
     std::vector<int> r2gid, r2owner;
     for (int k = 0; k < cs->rPEnum; ++k) {
@@ -894,11 +894,11 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     };
     s.sidx_d = push_i("cgpipe.sidx", sidx);
     s.ridx_d = push_i("cgpipe.ridx", ridx);
-    s.sbuf_d = Kokkos::View<double*>("cgpipe.sbuf", (size_t)s.nsend);
-    s.rbuf_d = Kokkos::View<double*>("cgpipe.rbuf", (size_t)s.nrecv);
+    s.sbuf_d = Kokkos::View<real_t*>("cgpipe.sbuf", (size_t)s.nsend);
+    s.rbuf_d = Kokkos::View<real_t*>("cgpipe.rbuf", (size_t)s.nrecv);
 
     std::vector<int> rp2((size_t)eDim + 1, 0), ci2;
-    std::vector<double> pv2;
+    std::vector<real_t> pv2;
     for (int r = 0; r < eDim; ++r) {
         rp2[(size_t)r + 1] = rp2[(size_t)r] + (int)row_ci[(size_t)r].size();
         ci2.insert(ci2.end(), row_ci[(size_t)r].begin(), row_ci[(size_t)r].end());
@@ -907,7 +907,7 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     s.rp2_d = push_i("cgpipe.rp2", rp2);
     s.ci2_d = push_i("cgpipe.ci2", ci2);
     {
-        Kokkos::View<double*> d("cgpipe.pv2", pv2.size());
+        Kokkos::View<real_t*> d("cgpipe.pv2", pv2.size());
         auto h = Kokkos::create_mirror_view(d);
         for (size_t i = 0; i < pv2.size(); ++i) h(i) = pv2[i];
         Kokkos::deep_copy(d, h);
@@ -948,21 +948,21 @@ void cgpipe_exchange_rr(fesom::Field &rr_fld, fesom_partit *p)
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d (drains prev unpack) */
 
     int nreq = 0;
-    double *sp = s.sbuf_d.data();
-    double *rp = s.rbuf_d.data();
+    real_t *sp = s.sbuf_d.data();
+    real_t *rp = s.rbuf_d.data();
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int rc = s.roff[q + 1] - s.roff[q];
         if (rc > 0)
-            MPI_Irecv(rp + s.roff[q], rc, MPI_DOUBLE, s.partner[q], 2100,
+            MPI_Irecv(rp + s.roff[q], rc, FESOM_MPI_REAL, s.partner[q], 2100,
                       p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
     }
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int sc = s.soff[q + 1] - s.soff[q];
         if (sc > 0)
-            MPI_Isend(sp + s.soff[q], sc, MPI_DOUBLE, s.partner[q], 2100,
+            MPI_Isend(sp + s.soff[q], sc, FESOM_MPI_REAL, s.partner[q], 2100,
                       p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
     }
-    fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
+    fesom_halo_prof_bytes((double)sizeof(real_t) * (double)(s.nsend + s.nrecv));
     fesom_halo_prof_waitall(nreq, s.reqs.data());
 
     {
@@ -1069,7 +1069,7 @@ void cgpipe_selfcheck_pp(fesom_solverinfo *si, fesom_partit *p, int iter)
  * and run the UCX_RNDV_THRESH env-leg rescue.
  * ======================================================================= */
 
-using RDV  = Kokkos::View<double*, Kokkos::LayoutRight>;   /* == Field::dev_view_t */
+using RDV  = Kokkos::View<real_t*, Kokkos::LayoutRight>;   /* == Field::dev_view_t */
 using RIV  = Kokkos::View<int*,    Kokkos::LayoutRight>;   /* == IntField::dev_view_t */
 
 struct CgPolyState {
@@ -1123,21 +1123,21 @@ void cgpoly_exchange(RDV v, fesom_partit *p)
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d */
 
     int nreq = 0;
-    double *sp = s.sbuf_d.data();
-    double *rp = s.rbuf_d.data();
+    real_t *sp = s.sbuf_d.data();
+    real_t *rp = s.rbuf_d.data();
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int rc = s.roff[q + 1] - s.roff[q];
         if (rc > 0)
-            MPI_Irecv(rp + s.roff[q], rc, MPI_DOUBLE, s.partner[q], 2110,
+            MPI_Irecv(rp + s.roff[q], rc, FESOM_MPI_REAL, s.partner[q], 2110,
                       p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
     }
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int sc = s.soff[q + 1] - s.soff[q];
         if (sc > 0)
-            MPI_Isend(sp + s.soff[q], sc, MPI_DOUBLE, s.partner[q], 2110,
+            MPI_Isend(sp + s.soff[q], sc, FESOM_MPI_REAL, s.partner[q], 2110,
                       p->MPI_COMM_FESOM, &s.reqs[(size_t)nreq++]);
     }
-    fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
+    fesom_halo_prof_bytes((double)sizeof(real_t) * (double)(s.nsend + s.nrecv));
     fesom_halo_prof_waitall(nreq, s.reqs.data());
 
     {
@@ -1311,7 +1311,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     const int nnz = S->nnz;
     s.av0_d = RDV("cgpoly.av0", (size_t)nnz);
     Kokkos::deep_copy(s.av0_d, S->values_fld.d());
-    std::vector<double> av0_h((size_t)nnz);
+    std::vector<real_t> av0_h((size_t)nnz);
     {
         auto m = Kokkos::create_mirror_view(s.av0_d);
         Kokkos::deep_copy(m, s.av0_d);
@@ -1324,7 +1324,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     g2l.reserve((size_t)(N + eDim) * 2);
     std::vector<int> slot_gid, slot_owner;                 /* slots >= N+eDim */
     std::vector<std::vector<int>> ring_slots((size_t)s.R + 1);   /* [2..R] used */
-    std::vector<std::vector<int>> row_ci; std::vector<std::vector<double>> row_pv;
+    std::vector<std::vector<int>> row_ci; std::vector<std::vector<real_t>> row_pv;
     row_ci.resize((size_t)eDim); row_pv.resize((size_t)eDim);
 
     const fesom_com_struct *cs = parallel ? &p->com_nod2D : NULL;
@@ -1367,7 +1367,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
 
     if (parallel) {
         /* ---- Round 1: com-driven Ã-row ship (cgpipe part A/B, values payload). */
-        struct Bundle { std::vector<int> ints; std::vector<double> dbls; int hdr[2]; };
+        struct Bundle { std::vector<int> ints; std::vector<real_t> dbls; int hdr[2]; };
         std::vector<Bundle> sb((size_t)cs->sPEnum), rb((size_t)cs->rPEnum);
         rq.reserve((size_t)(cs->sPEnum + cs->rPEnum) * 2);
         for (int k = 0; k < cs->rPEnum; ++k) {
@@ -1409,13 +1409,13 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             rq.push_back(MPI_Request());
             MPI_Irecv(rb[(size_t)k].ints.data(), (int)rb[(size_t)k].ints.size(), MPI_INT,    cs->rPE[k], 2122, comm, &rq.back());
             rq.push_back(MPI_Request());
-            MPI_Irecv(rb[(size_t)k].dbls.data(), (int)rb[(size_t)k].dbls.size(), MPI_DOUBLE, cs->rPE[k], 2123, comm, &rq.back());
+            MPI_Irecv(rb[(size_t)k].dbls.data(), (int)rb[(size_t)k].dbls.size(), FESOM_MPI_REAL, cs->rPE[k], 2123, comm, &rq.back());
         }
         for (int k = 0; k < cs->sPEnum; ++k) {
             rq.push_back(MPI_Request());
             MPI_Isend(sb[(size_t)k].ints.data(), (int)sb[(size_t)k].ints.size(), MPI_INT,    cs->sPE[k], 2122, comm, &rq.back());
             rq.push_back(MPI_Request());
-            MPI_Isend(sb[(size_t)k].dbls.data(), (int)sb[(size_t)k].dbls.size(), MPI_DOUBLE, cs->sPE[k], 2123, comm, &rq.back());
+            MPI_Isend(sb[(size_t)k].dbls.data(), (int)sb[(size_t)k].dbls.size(), FESOM_MPI_REAL, cs->sPE[k], 2123, comm, &rq.back());
         }
         MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
         rq.clear();
@@ -1508,13 +1508,13 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                     rq.push_back(MPI_Request());
                     MPI_Irecv(b.ints.data(), (int)b.ints.size(), MPI_INT,    Q, 2140 + r, comm, &rq.back());
                     rq.push_back(MPI_Request());
-                    MPI_Irecv(b.dbls.data(), (int)b.dbls.size(), MPI_DOUBLE, Q, 2150 + r, comm, &rq.back());
+                    MPI_Irecv(b.dbls.data(), (int)b.dbls.size(), FESOM_MPI_REAL, Q, 2150 + r, comm, &rq.back());
                 }
                 if (rcnt[(size_t)Q] > 0) {
                     rq.push_back(MPI_Request());
                     MPI_Isend(rsb[(size_t)Q].ints.data(), (int)rsb[(size_t)Q].ints.size(), MPI_INT,    Q, 2140 + r, comm, &rq.back());
                     rq.push_back(MPI_Request());
-                    MPI_Isend(rsb[(size_t)Q].dbls.data(), (int)rsb[(size_t)Q].dbls.size(), MPI_DOUBLE, Q, 2150 + r, comm, &rq.back());
+                    MPI_Isend(rsb[(size_t)Q].dbls.data(), (int)rsb[(size_t)Q].dbls.size(), FESOM_MPI_REAL, Q, 2150 + r, comm, &rq.back());
                 }
             }
             MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
@@ -1553,7 +1553,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             for (int P = 0; P < npes; ++P) scnt[(size_t)P] = (int)want_r[(size_t)r][(size_t)P].size();
             MPI_Alltoall(scnt.data(), 1, MPI_INT, rcnt.data(), 1, MPI_INT, comm);
             std::vector<std::vector<int>>    wantin((size_t)npes);
-            std::vector<std::vector<double>> dout((size_t)npes), din((size_t)npes);
+            std::vector<std::vector<real_t>> dout((size_t)npes), din((size_t)npes);
             for (int Q = 0; Q < npes; ++Q) {
                 if (rcnt[(size_t)Q] > 0) {
                     wantin[(size_t)Q].resize((size_t)rcnt[(size_t)Q]);
@@ -1571,7 +1571,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                 if (scnt[(size_t)Q] > 0) {
                     din[(size_t)Q].resize((size_t)scnt[(size_t)Q]);
                     rq.push_back(MPI_Request());
-                    MPI_Irecv(din[(size_t)Q].data(), scnt[(size_t)Q], MPI_DOUBLE, Q, 2160, comm, &rq.back());
+                    MPI_Irecv(din[(size_t)Q].data(), scnt[(size_t)Q], FESOM_MPI_REAL, Q, 2160, comm, &rq.back());
                 }
                 if (rcnt[(size_t)Q] > 0) {
                     dout[(size_t)Q].reserve(wantin[(size_t)Q].size());
@@ -1584,7 +1584,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                         dout[(size_t)Q].push_back(av0_h[(size_t)S->rowptr[it->second]]);   /* diag = row's first entry */
                     }
                     rq.push_back(MPI_Request());
-                    MPI_Isend(dout[(size_t)Q].data(), rcnt[(size_t)Q], MPI_DOUBLE, Q, 2160, comm, &rq.back());
+                    MPI_Isend(dout[(size_t)Q].data(), rcnt[(size_t)Q], FESOM_MPI_REAL, Q, 2160, comm, &rq.back());
                 }
             }
             MPI_Waitall((int)rq.size(), rq.data(), MPI_STATUSES_IGNORE);
@@ -1607,7 +1607,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
              * diag = first entry, the CSR builder puts the diagonal first) + ring-R
              * shipped diagonals. Division of identical bytes is deterministic, so
              * local 1/diag == the owner's 1/diag bitwise. */
-            std::vector<double> invd((size_t)s.next_total, 1.0);
+            std::vector<real_t> invd((size_t)s.next_total, 1.0);
             for (int row = 0; row < N; ++row) {
                 FESOM_CHECK(av0_h[(size_t)S->rowptr[row]] > 0.0,
                             "cgpoly: non-positive diagonal at owned row %d", row);
@@ -1622,14 +1622,14 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                 std::vector<size_t> pos((size_t)npes, 0);
                 for (int slot : ring_slots[(size_t)s.R]) {
                     const int own = slot_owner[(size_t)(slot - N - eDim)];
-                    const double dg = din[(size_t)own][pos[(size_t)own]++];
+                    const real_t dg = din[(size_t)own][pos[(size_t)own]++];
                     FESOM_CHECK(dg > 0.0, "cgpoly: non-positive shipped diag for slot %d", slot);
                     invd[(size_t)slot] = 1.0 / dg;
                 }
             }
-            std::vector<double> isq((size_t)s.next_total);
+            std::vector<real_t> isq((size_t)s.next_total);
             for (int i = 0; i < s.next_total; ++i) isq[(size_t)i] = sqrt(invd[(size_t)i]);
-            auto push_d = [](const char *lbl, const std::vector<double> &v) {
+            auto push_d = [](const char *lbl, const std::vector<real_t> &v) {
                 RDV dv(std::string(lbl), v.size());
                 auto h = Kokkos::create_mirror_view(dv);
                 for (size_t i = 0; i < v.size(); ++i) h(i) = v[i];
@@ -1645,7 +1645,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         s.next_total = N;
         s.ext.assign((size_t)s.d + 1, N);
         s.nring_rows = 0;
-        std::vector<double> invd((size_t)N), isq((size_t)N);
+        std::vector<real_t> invd((size_t)N), isq((size_t)N);
         for (int row = 0; row < N; ++row) {
             FESOM_CHECK(av0_h[(size_t)S->rowptr[row]] > 0.0,
                         "cgpoly: non-positive diagonal at owned row %d", row);
@@ -1662,7 +1662,7 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     /* ---- ring CSR device push (rows for rings 1..d, LOCAL ci slots). */
     {
         std::vector<int> rp((size_t)s.nring_rows + 1, 0), ci;
-        std::vector<double> av;
+        std::vector<real_t> av;
         for (int r = 0; r < s.nring_rows; ++r) {
             rp[(size_t)r + 1] = rp[(size_t)r] + (int)row_ci[(size_t)r].size();
             ci.insert(ci.end(), row_ci[(size_t)r].begin(), row_ci[(size_t)r].end());
@@ -1783,10 +1783,10 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                     for (int n = a; n < e; ++n) sacc += av0(n) * (isq(colind(n)) * rrv(colind(n)));
                     w(row) = isq(row) * sacc;
                 });
-            real_t nn = 0.0;
+            double nn = 0.0;                          /* M8 island: norm accumulates FP64 */
             Kokkos::parallel_reduce("fesom_cgpoly_nrm2", Kokkos::RangePolicy<>(0, N),
-                KOKKOS_LAMBDA(const int i, real_t &l) { l += w(i) * w(i); }, nn);
-            double nrm2 = (double)nn;
+                KOKKOS_LAMBDA(const int i, double &l) { l += (double)w(i) * (double)w(i); }, nn);
+            double nrm2 = nn;
             if (parallel) MPI_Allreduce(MPI_IN_PLACE, &nrm2, 1, MPI_DOUBLE, MPI_SUM, comm);
             lam = sqrt(nrm2);
             if (lam == 0.0) { lam = 1.0; break; }        /* degenerate — keep λ sane */
@@ -2140,9 +2140,9 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         } while (0)
 
     /* Initial ‖rhs‖² + tolerance (solver.F90:142-154). rhs is read at OWNED rows only. */
-    real_t s_old = cg_dot(rhs, rhs, N);
+    dbl_t s_old = cg_dot(rhs, rhs, N);   /* M8 island: scalar chain FP64 */
     ALLREDUCE_SUM(s_old);
-    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
+    dbl_t rtol = soltol * sqrt(s_old / (dbl_t)N_global);
 
     if (s_old == 0.0) {
         Kokkos::parallel_for("fesom_cg_zeroX", Kokkos::RangePolicy<>(0, N),
@@ -2193,14 +2193,14 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
          * parallel_reduce — App(row) is computed and pp(row)·App(row) accumulated
          * in row order, identical to the separate cg_spmv+cg_dot (Serial bit-id),
          * saving a kernel launch + a full device read of App per iteration. */
-        real_t s_aux = 0.0;
+        dbl_t s_aux = 0.0;
         Kokkos::parallel_reduce("fesom_cg_spmv_dot", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int row, real_t &l) {
-                real_t s = 0.0;
+            KOKKOS_LAMBDA(const int row, double &l) {
+                real_t s = 0.0;                       /* SpMV row sum stays working precision */
                 const int rstart = rowptr(row), rend = rowptr(row + 1);
                 for (int n = rstart; n < rend; ++n) s += vals(n) * pp(colind(n));
                 App(row) = s;
-                l += pp(row) * s;
+                l += (double)pp(row) * (double)s;     /* dot accumulates FP64 (island) */
             }, s_aux);
         ALLREDUCE_SUM(s_aux);
         if (s_aux == 0.0 || s_aux != s_aux) {        /* NaN/zero check */
@@ -2210,7 +2210,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             }
             FESOM_DIE("CG_kk: pp·App is %g — matrix singular or NaN propagated", s_aux);
         }
-        const real_t al = s_old / s_aux;
+        const dbl_t al = s_old / s_aux;
 
         Kokkos::parallel_for("fesom_cg_axpy", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int row) {
@@ -2227,24 +2227,24 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
          * blocking collectives → the per-iter sync count the GPU is latency-bound on).
          * E.CG2: the Chebyshev apply replaces the psolve; the dots run separately
          * (same row order, still ONE 2-element Allreduce). */
-        real_t sp0 = 0.0, sp1 = 0.0;
+        dbl_t sp0 = 0.0, sp1 = 0.0;
         if (cgpoly) {
             cgpoly_apply(S, rr, zz);
             if (cgpoly_selfcheck_on()) cgpoly_selfcheck(S, rr, zz, partit, iter);
             Kokkos::parallel_reduce("fesom_cg_dot2", Kokkos::RangePolicy<>(0, N),
-                KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
-                    l0 += rr(row) * zz(row);
-                    l1 += rr(row) * rr(row);
+                KOKKOS_LAMBDA(const int row, double &l0, double &l1) {
+                    l0 += (double)rr(row) * (double)zz(row);
+                    l1 += (double)rr(row) * (double)rr(row);
                 }, sp0, sp1);
         } else {
         Kokkos::parallel_reduce("fesom_cg_psolve_dot2", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
-                real_t s = 0.0;
+            KOKKOS_LAMBDA(const int row, double &l0, double &l1) {
+                real_t s = 0.0;                       /* psolve row sum stays working precision */
                 const int rstart = rowptr(row), rend = rowptr(row + 1);
                 for (int n = rstart; n < rend; ++n) s += prvals(n) * rr(colind(n));
                 zz(row) = s;
-                l0 += rr(row) * s;
-                l1 += rr(row) * rr(row);
+                l0 += (double)rr(row) * (double)s;
+                l1 += (double)rr(row) * (double)rr(row);
             }, sp0, sp1);
         if (cgpipe) cgpipe_zz_ring1(rr, zz);         /* E.CG1: ring1 rows (dots stay owned-only) */
         }
@@ -2262,7 +2262,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             FESOM_DIE("cgpoly: preconditioner indefinite (rr·M⁻¹rr = %g)", (double)sp0);
         }
 
-        real_t residual = sqrt(sp1 / (real_t)N_global);
+        dbl_t residual = sqrt(sp1 / (dbl_t)N_global);
         if ((partit == NULL || partit->mype == 0)
             && (verbose ? (iter <= 5 || iter % 50 == 0)
                         : (iter % heartbeat_every == 0))) {
@@ -2279,7 +2279,8 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             FESOM_DIE("CG_kk residual diverged");
         }
 
-        const real_t be = sp0 / s_old;
+        const dbl_t be_h = sp0 / s_old;               /* M8 island: β in FP64 on host */
+        const real_t be = (real_t)be_h;               /* applied in working precision */
         s_old = sp0;
         Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, Next),
             KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
@@ -2295,7 +2296,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         if (partit == NULL || partit->mype == 0) {
             fprintf(stderr, "[fesom_ssh] CG_kk hit maxiter=%d without converging "
                     "(last residual ~%.4e, rtol=%.4e)\n",
-                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+                    si->maxiter, (double)sqrt(s_old/(dbl_t)N_global), (double)rtol);
             fflush(stderr);
         }
         FESOM_DIE("CG_kk did not converge");
