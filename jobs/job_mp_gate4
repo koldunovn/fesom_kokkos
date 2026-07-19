@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
 #SBATCH --constraint=a100_80
-#SBATCH --time=00:45:00
+#SBATCH --time=00:25:00
 #SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
 #SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
 #
