@@ -183,6 +183,15 @@ conservative: dt-flattered CPU ⇒ 32N speedup understated). Sanity: 0.6176 vs 1
 1.2096 = 2 % off perfect halving — on-curve. The M5.24 "before" c32n number was a
 35-step measurement and cannot be mixed in under rule 1.**
 
+## Figure caption notes (user 2026-07-19: caveats go in the CAPTION, not on the figure)
+
+For the speedup figure caption: *"The NG5 32-node CPU point was measured at dt=60 s
+(the finest partition is unstable past ~8 h of model time from a cold start at larger
+timesteps); the reduced timestep slightly lowers the per-step solver cost of the CPU
+run, making the 32-node NG5 speedup a conservative estimate."* For the scaling
+figures: *"dars and NG5 throughput (SYPD) is reported at the production timestep
+(240 s) from runs measured at 120/180 s; time-per-step is timestep-independent."*
+
 ## Work item (pre-JUPITER): fix the cold-start vertical-robustness gap (wsplit)
 
 *User 2026-07-19: "would be nice to diagnose the error and fix it." Not blocking the

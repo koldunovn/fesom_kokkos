@@ -175,9 +175,8 @@ def fig_speedup(df, fname):
     ax.set_title("GPU vs CPU speedup — solid/circles: bit-identical (A),\n"
                  "dashed/triangles: climate-identical (B)")
     ax.legend(fontsize=6)
-    fig.text(0.99, 0.01, "NG5 32N CPU at dt60 (dist_4096 cold-start limit, 5 model-h window;\n"
-             "CG share dt-flattered) — the 32N NG5 speedup point is conservative",
-             ha="right", fontsize=5, alpha=0.6)
+    # NG5 32N CPU caveat (dt60 window, conservative) goes in the PAPER CAPTION, not
+    # on the figure (user 2026-07-19) — text kept in the SCALING-REMEASURE doc.
     fig.savefig(fname, dpi=140)
     plt.close(fig)
     print("wrote", fname)
