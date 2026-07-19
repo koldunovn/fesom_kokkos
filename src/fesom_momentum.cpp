@@ -1178,7 +1178,10 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
     const real_t g0 = (real_t)FESOM_PHASE1_VISC_GAMMA0;
     const real_t g1 = (real_t)FESOM_PHASE1_VISC_GAMMA1;
     const real_t g2 = (real_t)FESOM_PHASE1_VISC_GAMMA2;
-    const real_t bsret = (real_t)FESOM_PHASE1_VISC_EASYBSRETURN;
+    real_t bsret = (real_t)FESOM_PHASE1_VISC_EASYBSRETURN;
+    /* F1's namelist runs easybsreturn=1.5 (constant here is 1.0 by an early
+     * user request) — overridable so probes can match Fortran exactly. */
+    { const char *e = getenv("FESOM_VISC_EASYBSRETURN"); if (e && e[0]) bsret = (real_t)atof(e); }
 
     /* Zero the four work arrays (lines 316-322) over full local extent. */
     memset(dyn->u_b, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));

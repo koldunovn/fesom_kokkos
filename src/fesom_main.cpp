@@ -1400,9 +1400,50 @@ skip_rest_state:
                                     (double)dyn.w_i[FESOM_NODE3D(n0, nz, mesh.nl)]);
                             fflush(stderr);
                         }
+                        /* P1 discriminator: GLOBAL cflz_max + location, printed every
+                         * diag step (Fortran F1's warning lines only appear >1.75 —
+                         * absence there means "below 1.75", so we print the full
+                         * curve here). cfl_z is zeroed then accumulated, so values
+                         * beyond a column's active levels are 0 and a full-nl sweep
+                         * is safe. Host-valid on Serial only. NB: the Allreduce is
+                         * collective — every rank reaches it (s_uvloc is env-driven,
+                         * identical on all ranks). */
+                        real_t cz_loc = 0.0;
+                        int cz_node = -1, cz_nz = -1;
+                        for (int k = 0; k < mesh.myDim_nod2D; ++k) {
+                            for (int nz = 0; nz < mesh.nl; ++nz) {
+                                real_t a = dyn.cfl_z[FESOM_NODE3D(k, nz, mesh.nl)];
+                                if (a > cz_loc) { cz_loc = a; cz_node = k; cz_nz = nz; }
+                            }
+                        }
+                        real_t cz_max = cz_loc;
+                        if (mpi.npes > 1) {
+                            MPI_Allreduce(&cz_loc, &cz_max, 1, MPI_DOUBLE, MPI_MAX, mpi.MPI_COMM_FESOM);
+                        }
+                        if (cz_loc == cz_max && cz_max > 0.0 && cz_node >= 0) {
+                            double glon = mesh.geo_coord_nod2D[2*cz_node + 0] * 180.0 / M_PI;
+                            double glat = mesh.geo_coord_nod2D[2*cz_node + 1] * 180.0 / M_PI;
+                            size_t i = FESOM_NODE3D(cz_node, cz_nz, mesh.nl);
+                            fprintf(stderr, "[cflzmax] step %d rank %d cflz=%.3f node=%d nz=%d "
+                                    "nzmax=%d glon/glat=%.2f/%.2f w=%.3e w_i=%.3e\n",
+                                    n, mpi.mype, (double)cz_max, cz_node, cz_nz,
+                                    mesh.nlevels_nod2D[cz_node] - 1, glon, glat,
+                                    (double)dyn.w[i], (double)dyn.w_i[i]);
+                            fflush(stderr);
+                        }
                     }
                 }
-                if (uv_max > 5.0 || !(uv_max == uv_max)) {
+                /* Guard threshold overridable for wsplit debugging: Fortran F1
+                 * legitimately rides the Gibraltar cold-start event past uv 5
+                 * (CFLz peaks 6.1 at step ~248); FESOM_UV_GUARD=30 lets the port
+                 * attempt the same arc while still aborting before full garbage.
+                 * Default 5.0 = historical behavior. NaN always aborts. */
+                static real_t s_uvguard = -1.0;
+                if (s_uvguard < 0.0) {
+                    const char *g = getenv("FESOM_UV_GUARD");
+                    s_uvguard = (g && g[0]) ? (real_t)atof(g) : (real_t)5.0;
+                }
+                if (uv_max > s_uvguard || !(uv_max == uv_max)) {
                     if (mpi.mype == 0) {
                         fprintf(stderr, "[fesom_port] BLOWUP at step %d "
                                 "(uv=%.3e eta=%.3e w=%.3e) — aborting all ranks\n",

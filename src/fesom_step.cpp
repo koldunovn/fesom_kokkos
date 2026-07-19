@@ -649,8 +649,30 @@ int fesom_timestep(int                          step_n,
     }
     /* M5.13g1: uv device-resident - no re-push (visc_filt reads it on device). */
     /* M5.4: uv_rhs is device-resident with its halo from substep 4 — no IN re-push. */
-    fesom_visc_filt_bidiff_kk(mesh, dyn, p);   /* device: uv_rhs += biharmonic; internal Uc/Vc halo (D21) */
-    if (s_verify_vfilt) fesom_visc_filt_bidiff_verify(mesh, dyn, p, step_n, vfb_uv_rhs_in.data());
+    /* M7-wsplit: FESOM_VISC_OPT=5 selects visc_filt_bcksct (easy backscatter) —
+     * the scheme the NG5/dars production namelists run (F1: opt_visc=5). The
+     * port's default 7 (bidiff) under-dissipates the Gibraltar cold-start jet
+     * that Fortran saturates via scheme 5's flow-aware harmonic viscosity.
+     * Host implementation only: on Serial, device==host so slotting it here is
+     * exact; the env default (unset → 7) keeps the certified byte path. */
+    static int s_visc_opt = -1;
+    if (s_visc_opt < 0) {
+        const char *vo = getenv("FESOM_VISC_OPT");
+        s_visc_opt = (vo && vo[0]) ? atoi(vo) : 7;
+        FESOM_CHECK(s_visc_opt == 5 || s_visc_opt == 7,
+                    "FESOM_VISC_OPT=%d unsupported (5 or 7)", s_visc_opt);
+#ifdef KOKKOS_ENABLE_CUDA
+        FESOM_CHECK(s_visc_opt == 7,
+                    "FESOM_VISC_OPT=5 (bcksct) is host-only — not ported to CUDA yet");
+#endif
+    }
+    if (s_visc_opt == 5) {
+        fesom_visc_filt_bcksct(mesh, dyn, p);  /* host: uv_rhs += harmonic+backscatter (Serial: device==host) */
+        dyn->uv_rhs_fld.modify_host();
+    } else {
+        fesom_visc_filt_bidiff_kk(mesh, dyn, p);   /* device: uv_rhs += biharmonic; internal Uc/Vc halo (D21) */
+        if (s_verify_vfilt) fesom_visc_filt_bidiff_verify(mesh, dyn, p, step_n, vfb_uv_rhs_in.data());
+    }
     /* uv_rhs (final output) needed at halo for impl_vert_visc neighbour reads (TDMA SpMV) →
      * device-halo (GPU-aware MPI on CUDA, host-staged on Serial). */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
