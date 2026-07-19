@@ -1361,13 +1361,16 @@ skip_rest_state:
                         if (a > Av_max) Av_max = a;
                     }
                 }
-                /* Global reductions across ranks. */
+                /* Global reductions across ranks. M8: dbl_t staging — these reduce with
+                 * MPI_DOUBLE, so the buffers MUST be 8-byte or the reduce over-reads AND
+                 * over-writes 2x the buffer under SP (stack smash; found as the step-2
+                 * NaN at npes>1, Gate-2 fleet 2026-07-19 — the Z7-shaped signature). */
                 if (mpi.npes > 1) {
-                    real_t buf_max[16] = {uv_max, eta_max, w_max, T_max, S_max,
+                    dbl_t buf_max[16] = {uv_max, eta_max, w_max, T_max, S_max,
                         stress_max, hflux_max, wflux_max, vsalt_max, rsalt_max,
                         hpres_max, pgf_max, dens_max, bv_max, Kv_max, Av_max};
-                    real_t buf_min[3]  = {T_min, S_min, bv_min};
-                    real_t out_max[16], out_min[3];
+                    dbl_t buf_min[3]  = {T_min, S_min, bv_min};
+                    dbl_t out_max[16], out_min[3];
                     MPI_Allreduce(buf_max, out_max, 16, MPI_DOUBLE, MPI_MAX, mpi.MPI_COMM_FESOM);
                     MPI_Allreduce(buf_min, out_min, 3,  MPI_DOUBLE, MPI_MIN, mpi.MPI_COMM_FESOM);
                     uv_max=out_max[0]; eta_max=out_max[1]; w_max=out_max[2];
