@@ -101,6 +101,21 @@ if(FESOM_SYNC_LOG)
   message(STATUS "FESOM_SYNC_LOG ON — per-field PCIe attribution (SYNCLOG lines on stderr)")
 endif()
 
+# M8 mixed precision (docs/plans/20260719-m8-mixed-precision.md): working precision of the model
+# state. `double` (default) MUST stay bit-identical to the pre-M8 baseline (Gate 0 — the define is
+# absent, so fesom_types.h resolves exactly as before). `single` flips real_t→float and
+# FESOM_MPI_REAL→MPI_FLOAT; dbl_t islands (docs/PRECISION_ISLANDS.md) stay double. Precision is a
+# build dimension that self-certifies: the binary banners it at startup and gate scripts assert
+# the banner (scripts/mp_assert_banner.sh) — a wrong-precision build fails loudly (L80).
+set(FESOM_PRECISION "double" CACHE STRING "Working precision of the model state: double | single")
+set_property(CACHE FESOM_PRECISION PROPERTY STRINGS double single)
+if(FESOM_PRECISION STREQUAL "single")
+  target_compile_definitions(fesom_port PRIVATE FESOM_SINGLE_PRECISION)
+  message(STATUS "FESOM_PRECISION=single — real_t=float (M8; FP64 islands stay dbl_t=double)")
+elseif(NOT FESOM_PRECISION STREQUAL "double")
+  message(FATAL_ERROR "FESOM_PRECISION must be 'double' or 'single', got: '${FESOM_PRECISION}'")
+endif()
+
 # --- Tests (compiled as C++ to match the now-C++ model objects' linkage) --------------------
 enable_testing()
 

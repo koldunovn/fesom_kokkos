@@ -9,10 +9,24 @@
 
 /*
  * The Fortran side uses WP=8 (double precision) everywhere — see
- * oce_modules.F90:8. real_t is defined here so any future precision
- * experiments are a single edit, not a global sed.
+ * oce_modules.F90:8. real_t is the WORKING precision of the model state; under
+ * -DFESOM_SINGLE_PRECISION (CMake -DFESOM_PRECISION=single, M8) it flips to
+ * float, and FESOM_MPI_REAL flips with it (field/halo traffic only — MPI
+ * REDUCTION scalars stay MPI_DOUBLE, the accumulator-island class).
+ *
+ * dbl_t marks a DELIBERATE FP64 island (docs/PRECISION_ISLANDS.md): after the
+ * M8 sweep, every dbl_t in the tree is a registry-documented decision, and raw
+ * `double` in state/kernel code is a sweep bug. The double-precision build is
+ * REQUIRED to stay bit-identical to the pre-M8 baseline (Gate 0).
  */
+#if defined(FESOM_SINGLE_PRECISION)
+typedef float  real_t;
+#  define FESOM_MPI_REAL MPI_FLOAT
+#else
 typedef double real_t;
+#  define FESOM_MPI_REAL MPI_DOUBLE
+#endif
+typedef double dbl_t;   /* deliberate FP64 island marker — never flips */
 
 /*
  * Index helpers matching FRESH_START.md §18. Fortran arrays are

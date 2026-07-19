@@ -290,6 +290,20 @@ int main(int argc, char **argv)
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, mesh_dir, argc, argv);
 
+    /* M8 precision banner (L80: a build dimension must self-certify in-band).
+     * Gate scripts assert this exact line (scripts/mp_assert_banner.sh) so a
+     * wrong-precision binary fails every test loudly instead of silently
+     * running the wrong experiment. Stdout only — fields are untouched. */
+    if (mpi.mype == 0) {
+#if defined(FESOM_SINGLE_PRECISION)
+        printf("[fesom_port] PRECISION: SINGLE (real_t=float, %zu bytes; dbl_t islands=double)\n",
+               sizeof(real_t));
+#else
+        printf("[fesom_port] PRECISION: DOUBLE (real_t=double, %zu bytes)\n",
+               sizeof(real_t));
+#endif
+    }
+
     /* Kokkos after MPI_Init: bind each MPI rank to its OWN GPU (M3.1). The device
      * id must be the NODE-LOCAL rank, not the global rank — every node exposes
      * GPUs 0..(g-1), so e.g. global rank 5 (the 2nd rank on node 1, 4 GPUs/node)

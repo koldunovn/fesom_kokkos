@@ -120,14 +120,24 @@ physics) and Fortran R2, at pre-registered bars (below).
 - Modify: `src/fesom_types.h`, `CMakeLists.txt`, `src/fesom_main.cpp` (banner)
 - Create: `docs/PRECISION_ISLANDS.md` (seeded — done at plan time)
 
-- [ ] `fesom_types.h`: `#ifdef FESOM_SINGLE_PRECISION` → `real_t` float/double; add
+- [x] `fesom_types.h`: `#ifdef FESOM_SINGLE_PRECISION` → `real_t` float/double; add
       `typedef double dbl_t;` (deliberate-island marker) + `FESOM_MPI_REAL` macro
-- [ ] CMake option `FESOM_PRECISION=single|double` → the define; build-dir pairs
-      (`build-mp-serial{,-sp}`, `build-mp-cuda{,-sp}`)
-- [ ] startup banner "FESOM PRECISION: SINGLE/DOUBLE (real_t=…)" printed once by rank 0
-- [ ] gate scripts assert the banner (wrong-precision build fails loudly everywhere — L80)
-- [ ] gate: FP64 field snapshots bit-identical vs base `1df683b` via `scripts/diff_snap.py`
-      (banner changes stdout only — filter it from any full-log byte-diff); record
+- [x] CMake option `FESOM_PRECISION=single|double` → the define; build-dir pairs.
+      DONE 2026-07-19: `build-mp-serial` built+gated FP64; `build-mp-serial-sp` CONFIGURED
+      (`FESOM_SINGLE_PRECISION` verified in all 43 TU compile commands; SP compile itself is
+      Task 6); invalid value FATAL_ERROR guard negative-tested ("half" rejected).
+      ➕ CUDA pair (`build-mp-cuda{,-sp}`) deferred to the first device-touching slice gate
+      (2a) — Task-1 edits are host-stdout + inactive-ifdef only, no device path exists to gate
+- [x] startup banner `[fesom_port] PRECISION: SINGLE|DOUBLE (real_t=…)` printed once by rank 0
+      (after `fesom_mpi_init`, before Kokkos init)
+- [x] gate scripts assert the banner: `scripts/mp_assert_banner.sh <log> <SINGLE|DOUBLE>`,
+      exercised on both np1 and np2 run logs (L80)
+- [x] gate PASSED 2026-07-19: FP64 field snapshots bit-identical vs base code via
+      `scripts/diff_snap.py` — pi mesh, dt100, 20 steps, snaps @0/10/20; np=1 AND np=2 scatter
+      gate (vader-CMA off, L18): ALL FIELDS BIT-IDENTICAL both. REF binary rebuilt from
+      stash-clean base in the same build dir (a mid-build edit race in the first baseline
+      attempt was invalidated and redone deterministically); runs at
+      `/work/ab0995/a270088/port2/mp/task1/{ref,new}{,_np2}`
 
 ### Task 2: The inert sweep (real_t completion) — slices a–j, each slice bit-identical
 
