@@ -154,6 +154,11 @@ physics) and Fortran R2, at pre-registered bars (below).
       `fesom_phc.cpp`): files stay FP64 on disk; convert at boundary; fill/missing cast to
       working precision BEFORE comparison; PHC/init path stays `dbl_t`
 - [ ] 2j main/step/diagnostics (`fesom_main.cpp`, `fesom_step.cpp`, `fesom_phasestats.cpp`)
+- [ ] while sweeping each file (zero extra cost — the file is open anyway): build the
+      **accumulation ledger** in `PRECISION_ISLANDS.md` — tag every prognostic
+      `state += dt·tendency` / running-sum site with its typical increment/state scale.
+      This is the target list for future compensated-summation / anomaly-variable work and
+      the fp16 groundwork (user proposal 2026-07-19); documentation only, no numerics change
 - [ ] after each slice: Serial FP64 rebuild + pi-smoke bit-identical (fast slice gate);
       device-touching slices (2a–2h) ALSO CUDA pi-smoke bit-identical — Serial alone cannot
       exercise the device path (GPU fidelity-gate rule)
@@ -287,6 +292,21 @@ physics) and Fortran R2, at pre-registered bars (below).
   Credible first candidates when that day comes: CGPOLY preconditioner-apply storage
   (mixed-precision iterative-refinement literature) and halo-pack compression lanes.
   Nothing in M8 blocks this; nothing in M8 builds it (YAGNI).
+- **Anomaly/increment formulation (user proposal 2026-07-19 — parked as the M9 candidate
+  track, deliberately NOT M8 step 1):** computing on departures from reference states +
+  compensated accumulation is the published enabling pair for fp16-class precision
+  (Klöwer/Düben-line results). NOT done first because: (a) it changes rounding even at FP64 →
+  forfeits Gate 0 and confounds formulation bugs with precision effects; (b) FP32 evidence
+  says it's broadly unnecessary (PR-940 whole-model absolute FP32; NEMO/ROMS; FESOM already
+  anomaly-form where it matters: `density_m_rho0`, anomaly-integrated `hpressure`, SSH≈0,
+  velocities≈0, T in Celsius); (c) the Gate-3 sensitivity map SELECTS the targets —
+  refactor-first inverts measure-first; (d) a badly chosen reference gains nothing, and a
+  time-varying reference is the Z7 bug class. Physics-identifiable candidates for M9: S−35
+  anomaly (fp16 ulp at 35 ≈ 0.03 PSU — absolute S is fp16-dead), zstar layer-thickness
+  perturbation vs resting thickness, compensated (Kahan) tracer accumulation at the ledger
+  sites. Trigger: M8 sensitivity-map findings or a concrete fp16 ambition. Runs as its own
+  gate-isolated campaign with its own pre-registered floors (it changes numerics at EVERY
+  precision).
 
 ## Post-Completion (no checkboxes — external/user actions)
 

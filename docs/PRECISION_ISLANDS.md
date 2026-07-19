@@ -37,6 +37,17 @@ until a gate objects) · `promoted` (was FP32, failed a gate, now dbl_t — sign
 | KPP stability functions | kernels | Richardson-number cancellations, exp/sqrt chains; PR-940's SP NaN lived here (guard class, fixed by epsilon policy) | suspect-fp32 |
 | cvmix_TKE (ported, `fesom_cvmix_tke.hpp`) | module | PR-940 islanded ALL of CVMix as fixed-r8 — FP32 CVMix-TKE is untested anywhere; our port owns the code so it IS testable; the 63A/63B endgame config runs it | suspect-fp32 (**highest-probability promotion**) |
 
+## Accumulation ledger (built during the Task-2 sweep; documentation only)
+
+Every prognostic `state += dt·tendency` / running-sum site, with its typical increment/state
+scale — the per-step low-bit-loss map for FP32 and the stagnation map for any future fp16 work
+(increments below the state's ulp vanish). Target list for compensated summation / anomaly
+variables (parked M9 track; user proposal 2026-07-19).
+
+| Site | Quantity | typical Δ/state per step | Notes |
+|---|---|---|---|
+| *(filled slice-by-slice during Task 2)* | | | |
+
 ## Promotion log
 
 *(empty — populated by gate failures: date, gate + signature, island added, pinned-pair give-back)*
