@@ -257,13 +257,29 @@ void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
  *       w_i    = dd / (1 + dd) · w
  *===========================================================================*/
 
+/* M7-wsplit: runtime knob (see fesom_ale.h). Default = the compile-time constant
+ * (0) so every certified configuration is byte-untouched; FESOM_WSPLIT=1 enables
+ * the splitter for production-style large-mesh cold starts (rule 0.41 family). */
+int fesom_wsplit_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_WSPLIT");
+        cached = (e && e[0] == '1') ? 1 : (int)FESOM_PHASE1_USE_WSPLIT;
+        if (cached)
+            fprintf(stderr, "[wsplit] FESOM_WSPLIT = ON (maxcfl=%.2f)\n",
+                    (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+    }
+    return cached;
+}
+
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
                                   struct fesom_dyn        *dyn)
 {
     const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
     const real_t maxcfl     = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
-    const real_t use_wsplit = (real_t)FESOM_PHASE1_USE_WSPLIT;
+    const real_t use_wsplit = (real_t)fesom_wsplit_on();
     const real_t inv_maxcfl = 1.0 / ((maxcfl > 1e-12) ? maxcfl : 1e-12);
 
     for (int n = 0; n < N; ++n) {
@@ -541,17 +557,17 @@ void fesom_ale_compute_cflz_kk(const struct fesom_mesh *mesh,
 }
 
 /*--- compute_wvel_split — DEVICE (substep 12) -------------------------------
- * ⚠️ use_wsplit=.false. (FESOM_PHASE1_USE_WSPLIT=0) preserved verbatim: the full
- * use_wsplit branch is kept; with the flag 0 every interface takes the else
- * (w_e=w, w_i=0). Pure per-(n,nz) map, each slot written once → race-free,
- * bit-identical on every backend. Verbatim copy of fesom_ale_compute_wvel_split. */
+ * M7-wsplit: use_wsplit is now the RUNTIME knob fesom_wsplit_on() (default OFF =
+ * the certified byte path: every interface takes the else branch, w_e=w, w_i=0).
+ * Pure per-(n,nz) map, each slot written once → race-free, bit-identical on
+ * every backend. Verbatim copy of fesom_ale_compute_wvel_split. */
 void fesom_ale_compute_wvel_split_kk(const struct fesom_mesh *mesh,
                                      struct fesom_dyn        *dyn)
 {
     const int nl = mesh->nl;
     const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const real_t maxcfl     = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
-    const real_t use_wsplit = (real_t)FESOM_PHASE1_USE_WSPLIT;
+    const real_t use_wsplit = (real_t)fesom_wsplit_on();   /* M7-wsplit runtime knob */
     const real_t inv_maxcfl = 1.0 / ((maxcfl > 1e-12) ? maxcfl : 1e-12);
 
     auto w      = dyn->w_fld.d();

@@ -34,6 +34,7 @@
  * slot at level (nl-1) stays 0; this trades a few bytes for consistency.
  */
 #include "fesom_tracer_adv.h"
+#include "fesom_ale.h"       // M7-wsplit: fesom_wsplit_on()
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_halo.h"
@@ -46,6 +47,7 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#include <vector>            // M7-wsplit: adv_tra_vert_impl host TDMA scratch
 #include <vector>            // M2.6-b: FESOM_KK_VERIFY snapshot buffers (host-only diagnostic)
 #include <string>
 #include <algorithm>
@@ -624,7 +626,7 @@ static void adv_tra_hor_mfct(const struct fesom_mesh *mesh, const struct fesom_d
  * init_zero=false to obtain the antidiffusive vertical flux.
  */
 static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
-                             const struct fesom_dyn  *dyn,
+                             const real_t            *W,
                              const real_t            *ttf,
                              real_t                   num_ord,
                              int                      init_zero,
@@ -632,9 +634,9 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
-    /* Tracer advection uses the EXPLICIT part of w (w_e). When wsplit is
-       not triggered (CFL ≤ maxcfl) compute_Wvel_split sets w_e = w. */
-    const real_t *W = dyn->w_e;
+    /* M7-wsplit: W is now the CALLER's choice, mirroring the Fortran driver —
+       FCT high-order uses the FULL w (pwvel=>w, driver.F90:315); the non-FCT
+       path uses w_e. Identical when wsplit is off (w_e = w). */
 
     if (init_zero) {
         memset(flux, 0, (size_t)N * (size_t)nl * sizeof(real_t));
@@ -705,14 +707,14 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
 
 /*--- adv_tra_ver_upw1 (oce_adv_tra_ver.F90:244-328) -----------------------*/
 static void adv_tra_ver_upw1(const struct fesom_mesh *mesh,
-                             const struct fesom_dyn  *dyn,
+                             const real_t            *W,
                              const real_t            *ttf,
                              real_t                  *flux)
 {
     const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
-    /* Use explicit-W (w_e). compute_Wvel_split sets w_e = w when CFL ≤ maxcfl. */
-    const real_t *W = dyn->w_e;
+    /* M7-wsplit: W is the caller's choice (w_e for the LO explicit part; the
+       FULL w for the wsplit LO-flux recompute — driver.F90:214/292). */
 
     memset(flux, 0, (size_t)N * (size_t)nl * sizeof(real_t));
 
@@ -1201,6 +1203,98 @@ static void flux2dtracer_fct(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- adv_tra_vert_impl (oce_adv_tra_ver.F90:90-240) ------------------------
+ * M7-wsplit: implicit vertical (upwind) advection of `ttf` with the IMPLICIT
+ * velocity share W (= w_i) — a per-node vertical TDMA on the NEW mesh
+ * (hnode_new), applied to the FCT low-order solution when use_wsplit is on
+ * (driver.F90:286). Owned nodes only; the caller's fct_LO exchange follows.
+ * Faithful to the Fortran incl. its block ORDER (the bottom coefficient/rhs
+ * blocks overwrite the surface ones on degenerate single-layer columns); the
+ * ttf[nz-1] read is guarded (>nzmin) where Fortran would index out of range. */
+static void adv_tra_vert_impl(const struct fesom_mesh *mesh,
+                              const real_t            *W,
+                              real_t                  *ttf)
+{
+    const int N  = mesh->myDim_nod2D;
+    const int nl = mesh->nl;
+    const real_t zinv = (real_t)FESOM_PHASE1_DT;    /* Fortran: zinv = 1.0*dt */
+    std::vector<real_t> a(nl), b(nl), c(nl), tr(nl), cp(nl), tp(nl);
+
+    for (int n = 0; n < N; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;     /* layers [nzmin, nzmax) */
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        if (nzmax - nzmin < 1) continue;
+        const real_t *hn = mesh->hnode_new;
+        const real_t *ar = mesh->area;
+        const real_t *av = mesh->areasvol;
+
+        /* coefficients — surface (F90:164-170) */
+        int nz = nzmin;
+        {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t v1 = zinv * ar[k] / av[k];
+            real_t v2 = zinv * ar[FESOM_NODE3D(n, nz + 1, nl)] / av[k];
+            real_t Wt = W[k], Wb = W[FESOM_NODE3D(n, nz + 1, nl)];
+            a[nz] = 0.0;
+            b[nz] = hn[k] + Wt * v1 - ((Wb < 0.0) ? Wb : 0.0) * v2;
+            c[nz] = -((Wb > 0.0) ? Wb : 0.0) * v2;
+        }
+        /* interior (F90:174-183) */
+        for (nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t v1 = zinv * ar[k] / av[k];
+            real_t v2 = zinv * ar[FESOM_NODE3D(n, nz + 1, nl)] / av[k];
+            real_t Wt = W[k], Wb = W[FESOM_NODE3D(n, nz + 1, nl)];
+            a[nz] = ((Wt < 0.0) ? Wt : 0.0) * v1;
+            b[nz] = hn[k] + ((Wt > 0.0) ? Wt : 0.0) * v1 - ((Wb < 0.0) ? Wb : 0.0) * v2;
+            c[nz] = -((Wb > 0.0) ? Wb : 0.0) * v2;
+        }
+        /* bottom layer nzmax-1 (F90:187-195) — runs LAST, may overwrite surface */
+        nz = nzmax - 1;
+        {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t v1 = zinv * ar[k] / av[k];
+            real_t Wt = W[k];
+            a[nz] = ((Wt < 0.0) ? Wt : 0.0) * v1;
+            b[nz] = hn[k] + ((Wt > 0.0) ? Wt : 0.0) * v1;
+            c[nz] = 0.0;
+        }
+        /* rhs: tr = −(A − diag(h))·ttf  (F90:198-208, same block order) */
+        nz = nzmin;
+        {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t tnx = (nz + 1 < nl) ? ttf[FESOM_NODE3D(n, nz + 1, nl)] : 0.0;
+            tr[nz] = -(b[nz] - hn[k]) * ttf[k] - c[nz] * tnx;
+        }
+        for (nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            tr[nz] = -a[nz] * ttf[FESOM_NODE3D(n, nz - 1, nl)]
+                     - (b[nz] - hn[k]) * ttf[k]
+                     - c[nz] * ttf[FESOM_NODE3D(n, nz + 1, nl)];
+        }
+        nz = nzmax - 1;
+        {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t tpx = (nz > nzmin) ? ttf[FESOM_NODE3D(n, nz - 1, nl)] : 0.0;
+            tr[nz] = -a[nz] * tpx - (b[nz] - hn[k]) * ttf[k];
+        }
+        /* Thomas forward sweep + back substitution (F90:211-229) */
+        cp[nzmin] = c[nzmin] / b[nzmin];
+        tp[nzmin] = tr[nzmin] / b[nzmin];
+        for (nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+            real_t m = b[nz] - cp[nz - 1] * a[nz];
+            cp[nz] = c[nz] / m;
+            tp[nz] = (tr[nz] - tp[nz - 1] * a[nz]) / m;
+        }
+        tr[nzmax - 1] = tp[nzmax - 1];
+        for (nz = nzmax - 2; nz >= nzmin; --nz)
+            tr[nz] = tp[nz] - cp[nz] * tr[nz + 1];
+        /* update (F90:233-235) */
+        for (nz = nzmin; nz <= nzmax - 1; ++nz)
+            ttf[FESOM_NODE3D(n, nz, nl)] += tr[nz];
+    }
+}
+
 /*--- Public FCT entry: full FCT step for one tracer ------------------------*/
 void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
                                  int                       tr_idx,
@@ -1220,10 +1314,20 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
     /* 2. LO upwind fluxes from current `values` (NOT valuesAB).
        Match Fortran do_oce_adv_tra:115 which calls hor_upw1 with `ttf`. */
     adv_tra_hor_upw1(mesh, dyn, vals, sc->adv_flux_hor);
-    adv_tra_ver_upw1(mesh, dyn, vals, sc->adv_flux_ver);
+    adv_tra_ver_upw1(mesh, dyn->w_e, vals, sc->adv_flux_ver);
 
     /* 3. fct_LO from upwind (advance one step of upwind solution). */
     fesom_tracer_compute_fct_LO(sc, tr_idx, mesh, tracers);
+
+    /* M7-wsplit (driver.F90:282-293): apply the w_i transport IMPLICITLY to the
+       LO solution, then RECOMPUTE the stored LO vertical flux with the FULL w so
+       the antidiffusive flux (step 4, HO − LO) is full-velocity-consistent.
+       Exact no-ops when wsplit is off (w_i ≡ 0, w_e ≡ w); Fortran order:
+       impl → recompute → exchange. */
+    if (fesom_wsplit_on()) {
+        adv_tra_vert_impl(mesh, dyn->w_i, sc->fct_LO);
+        adv_tra_ver_upw1(mesh, dyn->w, vals, sc->adv_flux_ver);
+    }
 
     /* Halo-exchange fct_LO — Fortran oce_adv_tra_driver.F90:294
      *   call exchange_nod(fct_LO, partit, luse_g2g=.true.)
@@ -1247,7 +1351,8 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
     fill_up_dn_grad         (mesh, sc->tr_xy, sc->edge_up_dn_grad);
     adv_tra_hor_mfct(mesh, dyn, ttfAB, sc->edge_up_dn_grad, /*num_ord=*/0.0,
                      /*init_zero=*/0, sc->adv_flux_hor);
-    adv_tra_ver_qr4c   (mesh, dyn, ttfAB, /*num_ord=*/1.0, /*init_zero=*/0, sc->adv_flux_ver);
+    /* M7-wsplit: FCT high-order vertical uses the FULL w (pwvel=>w, F90:315). */
+    adv_tra_ver_qr4c   (mesh, dyn->w, ttfAB, /*num_ord=*/1.0, /*init_zero=*/0, sc->adv_flux_ver);
 
     /* 5. Zalesak limit the antidiffusive fluxes. */
     oce_tra_adv_fct(sc, mesh, vals, sc->adv_flux_hor, sc->adv_flux_ver);
@@ -1287,7 +1392,7 @@ void fesom_tracer_advect_one(fesom_tracer_adv_scratch *sc,
     /* 2-3. compute upwind fluxes from valuesAB (Fortran calls UPW1 with ttfAB) */
     real_t *ttfAB = tracers->data[tr_idx].valuesAB;
     adv_tra_hor_upw1(mesh, dyn, ttfAB, sc->adv_flux_hor);
-    adv_tra_ver_upw1(mesh, dyn, ttfAB, sc->adv_flux_ver);
+    adv_tra_ver_upw1(mesh, dyn->w_e, ttfAB, sc->adv_flux_ver);   /* non-FCT: w_e (F90:317) */
 
     /* 4. accumulate fluxes into del_ttf_advhoriz, del_ttf_advvert */
     flux2dtracer_upwind(mesh, sc->adv_flux_hor, sc->adv_flux_ver,
@@ -1418,7 +1523,11 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     auto trxy     = sc->tr_xy_fld.d();
     auto eud      = sc->edge_up_dn_grad_fld.d();
     auto uv       = dyn->uv_fld.d();
-    auto W        = dyn->w_e_fld.d();
+    auto W        = dyn->w_e_fld.d();   /* LO explicit part (F90:214) */
+    auto Wfull    = dyn->w_fld.d();     /* M7-wsplit: FCT HO + the wsplit LO-flux
+                                           recompute use the FULL w (F90:292/315);
+                                           ≡ W when wsplit is off */
+    auto Wi       = dyn->w_i_fld.d();   /* M7-wsplit: implicit share (12d halo'd) */
     auto edges    = mesh->edges_fld.d();
     auto edge_tri = mesh->edge_tri_fld.d();
     auto ecross   = mesh->edge_cross_dxdy_fld.d();
@@ -1557,6 +1666,104 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         real_t numer = vals(k)*hnod_old + (fctLO(k) + (f_top - f_bot)) * dt / a;
         fctLO(k) = numer / hnod_new;
     });
+    /* M7-wsplit (driver.F90:282-293): under use_wsplit, (a) apply the w_i share
+     * of vertical transport IMPLICITLY to the LO solution — adv_tra_vert_impl,
+     * a per-node vertical upwind TDMA on the NEW mesh (one thread per owned
+     * node; per-node sequential column solve, backend-order-free = bit-stable);
+     * (b) RECOMPUTE the stored LO vertical flux with the FULL w so the
+     * antidiffusive flux (HO − LO in fct_qr4c_v) is full-velocity-consistent.
+     * Both are exact no-ops when wsplit is off (w_i ≡ 0, w_e ≡ w) — the
+     * knob-off path never reaches this branch. Fortran order: impl →
+     * recompute → exchange (the D21 fct_LO exchange below covers the update). */
+    if (fesom_wsplit_on()) {
+        Kokkos::parallel_for("fct_vimpl", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
+            int nzmin = ulev_n(n) - 1, nzmax = nlev_n(n) - 1;   /* layers [nzmin,nzmax) */
+            if (nzmax - nzmin < 1) return;
+            real_t a[NL_MAX], b[NL_MAX], c[NL_MAX], tr[NL_MAX], cp[NL_MAX], tp[NL_MAX];
+            const real_t zinv = dt;                              /* F90: zinv = 1.0*dt */
+            /* coefficients — Fortran block order (bottom last; overwrites the
+             * surface block on degenerate single-layer columns exactly as F90) */
+            int nz = nzmin;
+            {
+                size_t k = (size_t)n*nl + nz;
+                real_t v1 = zinv * area(k) / areasvol(k);
+                real_t v2 = zinv * area(k + 1) / areasvol(k);
+                real_t Wt = Wi(k), Wb = Wi(k + 1);
+                a[nz] = 0.0;
+                b[nz] = hnode_new(k) + Wt * v1 - ((Wb < 0.0) ? Wb : 0.0) * v2;
+                c[nz] = -((Wb > 0.0) ? Wb : 0.0) * v2;
+            }
+            for (nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                size_t k = (size_t)n*nl + nz;
+                real_t v1 = zinv * area(k) / areasvol(k);
+                real_t v2 = zinv * area(k + 1) / areasvol(k);
+                real_t Wt = Wi(k), Wb = Wi(k + 1);
+                a[nz] = ((Wt < 0.0) ? Wt : 0.0) * v1;
+                b[nz] = hnode_new(k) + ((Wt > 0.0) ? Wt : 0.0) * v1
+                        - ((Wb < 0.0) ? Wb : 0.0) * v2;
+                c[nz] = -((Wb > 0.0) ? Wb : 0.0) * v2;
+            }
+            nz = nzmax - 1;
+            {
+                size_t k = (size_t)n*nl + nz;
+                real_t v1 = zinv * area(k) / areasvol(k);
+                real_t Wt = Wi(k);
+                a[nz] = ((Wt < 0.0) ? Wt : 0.0) * v1;
+                b[nz] = hnode_new(k) + ((Wt > 0.0) ? Wt : 0.0) * v1;
+                c[nz] = 0.0;
+            }
+            /* rhs: tr = −(A − diag(h))·LO  (same block order) */
+            nz = nzmin;
+            {
+                size_t k = (size_t)n*nl + nz;
+                real_t tnx = (nz + 1 < nl) ? fctLO(k + 1) : 0.0;
+                tr[nz] = -(b[nz] - hnode_new(k)) * fctLO(k) - c[nz] * tnx;
+            }
+            for (nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
+                size_t k = (size_t)n*nl + nz;
+                tr[nz] = -a[nz] * fctLO(k - 1) - (b[nz] - hnode_new(k)) * fctLO(k)
+                         - c[nz] * fctLO(k + 1);
+            }
+            nz = nzmax - 1;
+            {
+                size_t k = (size_t)n*nl + nz;
+                real_t tpx = (nz > nzmin) ? fctLO(k - 1) : 0.0;
+                tr[nz] = -a[nz] * tpx - (b[nz] - hnode_new(k)) * fctLO(k);
+            }
+            /* Thomas sweep + back substitution + update */
+            cp[nzmin] = c[nzmin] / b[nzmin];
+            tp[nzmin] = tr[nzmin] / b[nzmin];
+            for (nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                real_t m = b[nz] - cp[nz - 1] * a[nz];
+                cp[nz] = c[nz] / m;
+                tp[nz] = (tr[nz] - tp[nz - 1] * a[nz]) / m;
+            }
+            tr[nzmax - 1] = tp[nzmax - 1];
+            for (nz = nzmax - 2; nz >= nzmin; --nz)
+                tr[nz] = tp[nz] - cp[nz] * tr[nz + 1];
+            for (nz = nzmin; nz <= nzmax - 1; ++nz)
+                fctLO((size_t)n*nl + nz) += tr[nz];
+        });
+        /* LO vertical flux recompute with FULL w (F90:292) — same kernel shape
+         * as fct_upw1v above, W → Wfull. */
+        Kokkos::parallel_for("fct_upw1v_zero_w", RP(0, (size_t)myDim * nl),
+            KOKKOS_LAMBDA(const size_t i) { aflux_v(i) = 0.0; });
+        Kokkos::parallel_for("fct_upw1v_w", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
+            const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
+            int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
+            if (nz < nzmin || nz >= nzmax) return;
+            if (nz == nzmin) {
+                aflux_v((size_t)n*nl+nzmin) = -Wfull((size_t)n*nl+nzmin) * vals((size_t)n*nl+nzmin)
+                                             * area((size_t)n*nl+nzmin);
+            } else {
+                real_t w_iface = Wfull((size_t)n*nl+nz);
+                real_t T_below = vals((size_t)n*nl+nz), T_above = vals((size_t)n*nl+(nz-1));
+                real_t a = area((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);
+                aflux_v((size_t)n*nl+nz) = -0.5*(T_below*(w_iface+aw) + T_above*(w_iface-aw)) * a;
+            }
+        });
+    }
+
     /* D21 internal halo: exchange fct_LO (Zalesak a1 reads LO at halo nodes).
      * M5.4c: device-halo (GPU-aware MPI on CUDA, exact host bracket on Serial). */
     fesom_halo_field(sc->fct_LO_fld, FESOM_HALO_NOD3D, nl, 1, partit);
@@ -1672,15 +1879,15 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         if (nzmax - nzmin == 2 && nz == nzmin+1) {
             return;                                             /* 2nd-layer ∘ bottom-1 cancel → net no-op */
         } else if (nz == nzmin) {                               /* surface */
-            aflux_v(k) = -valsAB(k) * W(k) * area(k) - aflux_v(k);
+            aflux_v(k) = -valsAB(k) * Wfull(k) * area(k) - aflux_v(k);   /* M7-wsplit: HO = full w (F90:315) */
         } else if (nz == nzmax) {                               /* bottom */
             aflux_v(k) = 0.0 - aflux_v(k);
         } else if (nz == nzmin+1) {                             /* 2nd layer (nzmax-nzmin>=3) */
             real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-            aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k);
+            aflux_v(k) = -0.5*(Tup+Tdn) * Wfull(k) * area(k) - aflux_v(k);
         } else if (nz == nzmax-1) {                             /* bottom-1 (nzmax-nzmin>=3) */
             real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-            aflux_v(k) = -0.5*(Tup+Tdn) * W(k) * area(k) - aflux_v(k);
+            aflux_v(k) = -0.5*(Tup+Tdn) * Wfull(k) * area(k) - aflux_v(k);
         } else {                                                /* interior 4th-order quadratic */
             real_t Z_um1 = Z3d(FESOM_NODE3D(n, nz-1, nl)), Z_u   = Z3d(FESOM_NODE3D(n, nz,   nl));
             real_t Z_dn  = Z3d(FESOM_NODE3D(n, nz+1, nl)), Z_um2 = Z3d(FESOM_NODE3D(n, nz-2, nl));
@@ -1692,7 +1899,7 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             real_t zb = zbar3d(FESOM_NODE3D(n, nz, nl));
             real_t Tmean1 = Tu   + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
             real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
-            real_t w_iface = W((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);
+            real_t w_iface = Wfull((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);   /* M7-wsplit: full w */
             real_t Tmean = (w_iface + aw)*Tmean1 + (w_iface - aw)*Tmean2;
             real_t a = area((size_t)n*nl+nz);
             real_t hi = (-0.5*(1.0 - num_ord)*Tmean - num_ord*0.5*(Tmean1 + Tmean2)*w_iface) * a;

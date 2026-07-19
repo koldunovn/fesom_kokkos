@@ -53,6 +53,13 @@ void fesom_ale_commit_thickness(struct fesom_mesh *mesh);
 void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
                             struct fesom_dyn        *dyn);
 
+/* M7-wsplit: runtime switch for the vertical-velocity implicit/explicit splitter
+ * (use_wsplit). FESOM_WSPLIT=1 turns it ON (production large-mesh configs run it);
+ * unset/0 = the compile-time default (FESOM_PHASE1_USE_WSPLIT=0) = the certified
+ * byte-identical path. Consumed by compute_wvel_split (both backends) and by the
+ * FCT tracer driver (the adv_tra_vert_impl w_i step + full-w LO-flux recompute). */
+int fesom_wsplit_on(void);
+
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
                                   struct fesom_dyn        *dyn);
 
