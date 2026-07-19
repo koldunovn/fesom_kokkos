@@ -1110,10 +1110,10 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
      * rank 0 already holds them from read_aux3d (broadcast in place); rank!=0 ran no read_*,
      * so its Field is still empty and .alloc() makes the receive buffer. */
     if (p->mype != 0) { m->zbar_fld.alloc("zbar", (size_t)g_nl); m->zbar = m->zbar_fld.h(); }
-    MPI_CHECK(MPI_Bcast(m->zbar, g_nl, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(m->zbar, g_nl, FESOM_MPI_REAL, 0, p->MPI_COMM_FESOM));
     if (p->mype != 0) { m->Z_fld.alloc("Z", (size_t)(g_nl - 1)); m->Z = m->Z_fld.h();
                         FESOM_CHECK(m->Z, "Z alloc"); }
-    MPI_CHECK(MPI_Bcast(m->Z, g_nl - 1, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(m->Z, g_nl - 1, FESOM_MPI_REAL, 0, p->MPI_COMM_FESOM));
 
     /* Broadcast the global per-node and per-elem arrays from rank 0. */
     /* coord_nod2D + geo_coord_nod2D are 2D (lon, lat). */
@@ -1133,10 +1133,10 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
                  && m->nlevels && m->edges && m->edge_tri,
                     "scatter_mesh: alloc on rank %d", p->mype);
     }
-    MPI_CHECK(MPI_Bcast(m->coord_nod2D,     g_nod2D * 2, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
-    MPI_CHECK(MPI_Bcast(m->geo_coord_nod2D, g_nod2D * 2, MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(m->coord_nod2D,     g_nod2D * 2, FESOM_MPI_REAL, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(m->geo_coord_nod2D, g_nod2D * 2, FESOM_MPI_REAL, 0, p->MPI_COMM_FESOM));
     MPI_CHECK(MPI_Bcast(m->coast_flag,      g_nod2D,     MPI_INT,    0, p->MPI_COMM_FESOM));
-    MPI_CHECK(MPI_Bcast(m->depth,           g_nod2D,     MPI_DOUBLE, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(m->depth,           g_nod2D,     FESOM_MPI_REAL, 0, p->MPI_COMM_FESOM));
     MPI_CHECK(MPI_Bcast(m->nlevels_nod2D,   g_nod2D,     MPI_INT,    0, p->MPI_COMM_FESOM));
     MPI_CHECK(MPI_Bcast(m->elem_nodes,      g_elem2D * 3, MPI_INT,   0, p->MPI_COMM_FESOM));
     MPI_CHECK(MPI_Bcast(m->nlevels,         g_elem2D,    MPI_INT,    0, p->MPI_COMM_FESOM));

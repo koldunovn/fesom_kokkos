@@ -116,8 +116,8 @@ void gather_node(const real_t *local, int stride,
             displs[r] = gp->displ_n[r] * stride;
         }
     }
-    MPI_Gatherv((void *)local, gp->myDim_n * stride, MPI_DOUBLE,
-                recv, counts, displs, MPI_DOUBLE, 0, comm);
+    MPI_Gatherv((void *)local, gp->myDim_n * stride, FESOM_MPI_REAL,
+                recv, counts, displs, FESOM_MPI_REAL, 0, comm);
     if (gp->mype == 0) {
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_n[r]; ++i) {
@@ -149,8 +149,8 @@ void gather_elem(const real_t *local, int stride,
             displs[r] = gp->displ_e[r] * stride;
         }
     }
-    MPI_Gatherv((void *)local, gp->myDim_e * stride, MPI_DOUBLE,
-                recv, counts, displs, MPI_DOUBLE, 0, comm);
+    MPI_Gatherv((void *)local, gp->myDim_e * stride, FESOM_MPI_REAL,
+                recv, counts, displs, FESOM_MPI_REAL, 0, comm);
     if (gp->mype == 0) {
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_e[r]; ++i) {
