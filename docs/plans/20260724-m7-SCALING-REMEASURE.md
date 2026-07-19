@@ -194,6 +194,23 @@ figures: *"dars and NG5 throughput (SYPD) is reported at the production timestep
 
 ## Work item (pre-JUPITER): fix the cold-start vertical-robustness gap (wsplit)
 
+**⭐ DISCRIMINATOR ANSWERED (2026-07-19 morning, probes 26360443/44 — Fortran fesom.x,
+NG5 dist_4096, dt180, cold PHC start, 300 steps):**
+- **F0 (use_wsplit=.false.): DIED — rc=1, NaN** after 261 CFLz warnings. Even Fortran
+  does not survive the 300-step window without wsplit.
+- **F1 (use_wsplit=.true.): COMPLETED — rc=0, zero NaN**, riding 334 CFLz warnings.
+**⟹ wsplit IS the cure (matches production practice: large meshes always run it).
+And rule 0.41 strikes a THIRD time: M5.24's "port less robust than Fortran" verdict
+was a window artifact — Fortran-no-wsplit completed 205 steps then but dies before
+300; the port dies ~242. SAME robustness class. The only real port↔Fortran gap is
+that the port's wsplit implementation is buggy (M5.24: CG NaN ~step 85 when enabled).
+The work item reduces to: debug port-wsplit to bit-match Fortran-wsplit (M6 ladder:
+Fortran wsplit reference → C oracle wsplit-on → Kokkos twin → gates).** The Fortran
+reference is now one submission away (`job_m524_scale_fortran` + `WSPLIT=true`,
+committed `161b25d`); F1's WORK dir holds a complete wsplit-on NG5 run for behavioral
+reference. Payoff after the fix: cold-start legs at production dt on every mesh
+(dars dt240, NG5 dt240) + JUPITER-scale cold starts.
+
 *User 2026-07-19: "would be nice to diagnose the error and fix it." Not blocking the
 paper figures; becomes IMPORTANT before JUPITER (GH200 scale-out ⇒ finer partitions ⇒
 this wall everywhere at cold start).*
