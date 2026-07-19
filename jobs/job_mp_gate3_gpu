@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=mp_g3_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:12:00
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+# M8 Gate-3k CUDA leg on the OPTIONS config (zstar+cvmix_TKE+mEVP+GM), CORE2 private mesh,
+# 1 GPU / 1 rank. BIN-pinned via --export (+ optional FESOM_SPEED*/selfcheck/DT/NSTEPS/SNAP).
+# -C a100_80 (L94 hygiene). Epilogue captures rc + FATAL (SP3).
+ROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar   # options config (GM default-on)
+export FESOM_PRINT_EVERY=${PRINTEVERY:-1}
+export FESOM_MP_CONSERV=${CONSERV:-10}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+: "${BIN:?pin BIN}"; : "${OUT:?set OUT}"
+DT=${DT:-1800}; NSTEPS=${NSTEPS:-100}; SNAP=${SNAP:-10}
+rm -rf "$OUT"; mkdir -p "$OUT"
+srun "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$OUT/log" 2>&1
+rc=$?
+echo "[mp_g3_gpu] rc=$rc out=$OUT ; $(grep -m1 -E 'loop timing' "$OUT/log")"
+grep -m1 "PRECISION" "$OUT/log" || echo "[mp_g3_gpu] WARNING: no precision banner"
+grep -qi "FATAL\|BLOWUP" "$OUT/log" && echo "[mp_g3_gpu] WARNING: FATAL/BLOWUP in log"
+exit $rc

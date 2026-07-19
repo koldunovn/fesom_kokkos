@@ -226,9 +226,11 @@ physics) and Fortran R2, at pre-registered bars (below).
       a silently-promoting kernel is a dead knob wearing a lab coat. Caveat: nvcc device-side
       promotion warnings are weak — the authoritative detectors are Gate 2's throughput +
       footprint counters (optionally ptxas register / f64-op inspection)
-- [ ] restart round-trip gate: write FP32 restart → re-read into FP32 (bit-compare) AND into
-      an FP64 build (exact-embed check) — STILL OPEN (deferred behind the Gate-2 bug hunt;
-      run before Gate 4; endgame runs restart-free)
+- [x] restart round-trip gate — **RESOLVED MOOT 2026-07-19: the port has NO restart
+      writer/reader** (verified: every "restart" string in src/ is a comment; argv has no
+      restart input). The 63-yr endgame runs restart-free in one job, so Gates 4/5 are
+      unaffected. PR-940's SP↔DP interchange rescue experiments would require building
+      restart machinery first — a port feature decision for the user, outside M8 scope
 - [ ] pi-smoke + dist_2/dist_4 NaN-free on both backends, banner asserted
 - [ ] freeze `mp/bin/mp32-0`
 
@@ -261,16 +263,55 @@ physics) and Fortran R2, at pre-registered bars (below).
 - Modify: `scripts/diff_snap.py` — cross-dtype relative mode
 - Create: `scripts/m8_divergence_curve.py`, `scripts/m8_conservation.py` (if not present in port diagnostics)
 
-- [ ] diff_snap cross-dtype: FP64 reference vs FP32 run, relative L2/Linf per field
-- [ ] 1-ulp perturbation hook (single field, step 0) for the chaos-envelope control run
-- [ ] divergence-curve harness + plot (FP32 vs envelope, 1→100 steps)
-- [ ] conservation time series: global heat/salt/volume in FP64 diagnostics
-- [ ] CG iteration-count extraction/comparison (from existing logs)
+- [x] diff_snap cross-dtype: `scripts/mp_divergence_curve.py` (built during Gate-1 era;
+      diff_snap.py itself stays the zero-tolerance same-dtype byte oracle)
+- [x] chaos-envelope control = **FP64 dt-seed ENSEMBLE** (dt 1800.0000001/.00001/.001),
+      not a 1-ulp field hook — Gate-1 finding: single seeds are NON-MONOTONE, envelope
+      must be max-over-seeds. `scripts/mp_envelope_verdict.py` (2026-07-19) computes
+      sp-vs-envelope ratios + plot. (dt parses via atof; seeds run on the FP64 binary —
+      under SP real_t=float would truncate them, noted for L80 hygiene)
+- [x] divergence-curve harness + plot (mp_divergence_curve.py --envelope / verdict script)
+- [x] conservation time series: `FESOM_MP_CONSERV=N` env-gated FP64 vol/heat/salt hook
+      (`e172758`) — dbl_t Kokkos reduce over owned wet columns + MPI_DOUBLE Allreduce,
+      device-current views (CUDA-valid). GATED: FP64 off+armed bit-identical vs base;
+      SP off+armed bit-identical vs frozen mp32-2; **mp64-2/mp32-3 frozen**
+      (013d71cc/276a8960; CUDA pair c24619d6/9e07fc67 — env_cuda.sh needed to build)
+- [x] CG iteration-count extraction: `grep -o "it=[0-9]*"` on PRINT_EVERY=1 logs (used at
+      bring-up: SP tracks DP mean|Δit|=2.2 max 4 over 60 np1 steps)
 
 ### Task 9: Gate 3 verdicts (dist_4 + core2-2N)
 
+- [x] **SP options bring-up PASSED 2026-07-19** (np1 CORE2 login, 60 steps dt1800 =
+      2× the SP3 minimum): rc=0, zero NaN/FATAL, banner SINGLE — **cvmix_TKE+mEVP+zstar+GM
+      runs at FP32 out of the box; no promotion needed at this rung** (cvmix_TKE was the
+      registry's top suspect). CG: SP tracks DP mean|Δit|=2.2, max 4. Divergence at step 60:
+      T 1.1e-4 / S 1.1e-5 / eta 1.0e-4 relL2, flat growth; Kv/Av/ice at the KNOWN
+      chaos-class magnitudes (Kv Linf 0.26 ≈ FP64 seed-control 0.27); lat/lon exactly float
+      ulp (storage class). Runs: `mp/gate3/bringup_{sp,dp}`
 - [ ] run battery ON THE OPTIONS CONFIG (`zstar+cvmix_TKE+mEVP`+GM — the endgame physics):
       divergence curves, 1-month conservation drift, solver health (plain CG, CGPIPE, CGPOLY)
+      — **fleet 26364722-32 submitted 2026-07-19 (jobs/job_mp_gate3, BIN=mp64-2/mp32-3):**
+      3a = a_dp/a_sp + 3 FP64 dt-seed legs (100 steps, snaps @10); 3b = b_dp/b_sp 1440 steps
+      = 30 d (CONSERV=10); 3k = CGPIPE/CGPOLY(d3, both dtypes)/EVPWIDE(K8) selfcheck legs.
+      All 11 legs ran to completion, banners correct, zero FATAL (b_sp: SP survives 30 model
+      days). Verdict analysis in progress
+- [x] **Gate 3b VERDICT (2026-07-19, 30-d CORE2 c1 options config, `mp_conserv_drift.py`):**
+      heat: FP32−FP64 drift gap −2.2e-7 = **0.2 % of the physical 30-d signal** (−1.10e-4).
+      salt: both runs conserve to ~2e-7 relative; gap 8.7e-8 with SIGN CHANGES over the month
+      (random-walk, not systematic; ≈6e-11/step — watch at Gate 5 vs the Tbar/OHC bars).
+      vol: FP64 zstar closes volume to 8e-16 (machine-exact); FP32 wanders ±2e-9 relative
+      (≈0.7 km³ globally, sign-changing). **No leak signature — PASS.** THE measurement
+      PR-940 never made. Artifacts: `mp/gate3/gate3b_conserv.{csv,png}`
+- [x] **Gate 3c plain-CG VERDICT (30 d, padding-safe `it= *[0-9]*` extraction — beware
+      printf %3d):** mean iters 90.83 (FP64) vs 90.88 (SP) = +0.05; pairwise mean|Δit|=0.33,
+      max 5; no stagnation. **PASS.** (CGPOLY selfcheck rung → k2 legs.)
+- [ ] ⚠️ **first 3k fleet was a DEAD KNOB (L80 strikes again):** legs lacked
+      `FESOM_SPEED_FORCE_SERIAL=1`, so on the Serial backend NO lever fired (no selfcheck
+      lines; CGPOLY iters identical to knobs-off). The "bit-identical" diffs were vacuous.
+      k2 rerun fleet 26364952-55 (+FORCE_SERIAL) + CUDA options legs g_sp/g_dp 26364960/61
+      + month-long seed legs b_s7/s5/s3 26364956-58 (mature envelope at snaps 480/960/1440
+      — the 100-step envelope is immature: seeds ~1e-11 start vs SP's ~1e-7 rounding offset,
+      ratio≫1-with-both-tiny is the predicted regime, shape verdict needs saturation)
 - [ ] **Gate 3k:** FP32 × speed-knob re-certification — SPEED=1/CGPIPE, CGPOLY d3, EVPWIDE,
       options config, both backends (these were certified at FP64 only)
 - [ ] verdicts vs pre-registered criteria; island promotions per failure protocol if needed

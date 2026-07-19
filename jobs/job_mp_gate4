@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH --job-name=mp_gate4_y1
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+#
+# M8 Gate 4 — 1-yr FP32 CUDA climate leg, the EXACT 63A posture (from 63A PROVENANCE.txt:
+# FESOM_SPEED=1;FESOM_SPEED_EVPWIDE=8;SLURM_CPU_BIND=none;FESOM_MIX_SCHEME=TKE;
+# FESOM_WHICH_EVP=1;FESOM_ALE=zstar — 2N x 4 GPU, dt1800, JRA55 1958, PHC IC, monthly
+# streams only). Judged vs the FP64 twin = 63A year 1958 (/work/.../port2/climate63/63A)
+# + Fortran R2 at the M5.23 bar via m7_climate_check_plots.
+# Modeled on the m7 job_m7_climate63 (output-protection: never clobber).
+set -u
+ROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=1000
+export FESOM_MP_CONSERV=${CONSERV:-100}   # M8 extra: FP64 conservation series for free
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${NSTEPS:-17280}      # 1 yr @ dt1800
+SNAP_EVERY=-1                # monthly streams only (63A protocol)
+YEAR=1958
+
+# the 63A knob set, verbatim
+export FESOM_SPEED=1 FESOM_SPEED_EVPWIDE=8 SLURM_CPU_BIND=none
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar
+
+OUT=${OUTDIR:?OUTDIR required (absolute, dedicated)}
+case "$OUT" in /*) ;; *) echo "ERROR: OUTDIR must be absolute"; exit 2;; esac
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+    echo "ERROR: $OUT exists and is NON-EMPTY — refusing to clobber a climate run."; exit 3
+fi
+mkdir -p "$OUT"
+FESOM=${BIN:?BIN required (frozen binary path)}
+{ echo "M8 Gate-4 63A-posture FP32 twin"; echo "BIN=$FESOM"; sha256sum "$FESOM";
+  echo "NSTEPS=$NSTEPS DT=$DT YEAR=$YEAR"; echo "nodes=$SLURM_JOB_NODELIST";
+  echo "submitted=$(date -Is) jobid=$SLURM_JOB_ID"; } >> "$OUT/PROVENANCE.txt"
+[ -d "$MESH/dist_$SLURM_NTASKS" ] || { echo "ERROR: dist_$SLURM_NTASKS missing"; exit 2; }
+
+srun -l "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date -Is) — exit $EC ==="
+grep -m1 "PRECISION" "$OUT/run.log"
+echo "--- last heartbeat ---"; tail -2 "$OUT/run.err"
+echo "--- nan/blowup check ---"; grep -icE "nan|blowup" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+exit $EC
