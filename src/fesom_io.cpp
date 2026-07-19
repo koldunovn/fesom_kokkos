@@ -8,6 +8,7 @@
  * can be opened together via `xarray.open_mfdataset(...)`.
  */
 #include "fesom_io.h"
+#include "fesom_nc_real.h"   // M8: real_t -> NC_DOUBLE boundary writers
 #include "fesom_speed.hpp"   // M7 Task 1.0b: FESOM_SPEED_IOACC
 #include <type_traits>
 #include "fesom_aux.h"
@@ -230,7 +231,9 @@ static void gather_elem_int(const int *local, int stride,
 /* ------------------------------------------------------------------ */
 /* Transpose helpers (rank-0 only — operate on global arrays)         */
 /* ------------------------------------------------------------------ */
-static void transpose_node_columns(const real_t *src, real_t *dst,
+/* M8: dst is DOUBLE — these feed nc_put_vara_double directly (write-side
+ * staging stays FP64 on disk; the copy converts under SP, no-op at FP64). */
+static void transpose_node_columns(const real_t *src, double *dst,
                                    int n, int nl, int n_layers)
 {
     for (int i = 0; i < n; ++i) {
@@ -240,7 +243,7 @@ static void transpose_node_columns(const real_t *src, real_t *dst,
     }
 }
 
-static void extract_uv_component(const real_t *uv, real_t *dst,
+static void extract_uv_component(const real_t *uv, double *dst,
                                  int n_elem, int nl, int n_layers, int comp)
 {
     for (int e = 0; e < n_elem; ++e) {
@@ -625,16 +628,16 @@ void fesom_io_write_snapshot(const char                  *path,
         NC_CHECK(nc_put_var_double(ncid, var_lat, lat_d));
         free(lon_d); free(lat_d);
     }
-    NC_CHECK(nc_put_var_double(ncid, var_zbar, mesh->zbar));
-    NC_CHECK(nc_put_var_double(ncid, var_Z,    mesh->Z));
+    NC_CHECK(fesom_nc_put_var_real(ncid, var_zbar, mesh->zbar, (size_t)mesh->nl));
+    NC_CHECK(fesom_nc_put_var_real(ncid, var_Z,    mesh->Z,    (size_t)(mesh->nl - 1)));
     NC_CHECK(nc_put_var_int   (ncid, var_elnodes,   g_elem_nodes));
     NC_CHECK(nc_put_var_int   (ncid, var_nlev_nod,  g_nlev_nod));
     NC_CHECK(nc_put_var_int   (ncid, var_nlev_elem, g_nlev_elem));
 
     /* ---- transposed time-varying state at time index 0 ------------- */
-    real_t *buf_nl   = (real_t *)malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(real_t));
-    real_t *buf_nl_e = (real_t *)malloc((size_t)n_lay  * (size_t)elem2D * sizeof(real_t));
-    real_t *buf_w    = (real_t *)malloc((size_t)nl     * (size_t)nod2D  * sizeof(real_t));
+    double *buf_nl   = (double *)malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(double));
+    double *buf_nl_e = (double *)malloc((size_t)n_lay  * (size_t)elem2D * sizeof(double));
+    double *buf_w    = (double *)malloc((size_t)nl     * (size_t)nod2D  * sizeof(double));
     FESOM_CHECK(buf_nl && buf_nl_e && buf_w, "io: oom (transpose buffers)");
 
     /* Slab-write: start at time=0, count=1 along time, full extent for the rest. */
@@ -648,7 +651,7 @@ void fesom_io_write_snapshot(const char                  *path,
     transpose_node_columns(g_S,    buf_nl, nod2D, nl, n_lay);
     NC_CHECK(nc_put_vara_double(ncid, var_S, startT, countT, buf_nl));
 
-    NC_CHECK(nc_put_vara_double(ncid, var_eta, start1, count1, g_eta));
+    NC_CHECK(fesom_nc_put_vara_real(ncid, var_eta, start1, count1, g_eta, (size_t)nod2D));
 
     transpose_node_columns(g_w,    buf_w, nod2D, nl, nl);
     NC_CHECK(nc_put_vara_double(ncid, var_w, startW, countW, buf_w));
@@ -679,13 +682,13 @@ void fesom_io_write_snapshot(const char                  *path,
     free(buf_nl); free(buf_nl_e); free(buf_w);
 
     if (ice) {
-        NC_CHECK(nc_put_vara_double(ncid, var_aice,  start1, count1, g_aice));
-        NC_CHECK(nc_put_vara_double(ncid, var_mice,  start1, count1, g_mice));
-        NC_CHECK(nc_put_vara_double(ncid, var_msnow, start1, count1, g_msnow));
-        NC_CHECK(nc_put_vara_double(ncid, var_uice,  start1, count1, g_uice));
-        NC_CHECK(nc_put_vara_double(ncid, var_vice,  start1, count1, g_vice));
-        NC_CHECK(nc_put_vara_double(ncid, var_hice,  start1, count1, g_hice));
-        NC_CHECK(nc_put_vara_double(ncid, var_hsnow, start1, count1, g_hsnow));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_aice,  start1, count1, g_aice,  (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_mice,  start1, count1, g_mice,  (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_msnow, start1, count1, g_msnow, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_uice,  start1, count1, g_uice,  (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_vice,  start1, count1, g_vice,  (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_hice,  start1, count1, g_hice,  (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_hsnow, start1, count1, g_hsnow, (size_t)nod2D));
     }
 
     NC_CHECK(nc_close(ncid));

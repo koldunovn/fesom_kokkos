@@ -4,6 +4,7 @@
 #include "fesom_types.h"
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>   /* M8: common_type in tke_min2/max2 */
 
 /*
  * CVMix classical-TKE column core — port of the C oracle's fesom_cvmix_tke.{c,h}
@@ -127,10 +128,23 @@ static_assert(FESOM_TKE_PARAMS.tke_mxl_choice == 2,
  * the template form cannot be mis-called). Compare-select, NOT fmin/fmax: the Fortran
  * min/max map to maxsd/minsd operand semantics for finite values.
  *===========================================================================================*/
-template <class T>
-KOKKOS_INLINE_FUNCTION constexpr T tke_min2(T a, T b) { return (a < b) ? a : b; }
-template <class T>
-KOKKOS_INLINE_FUNCTION constexpr T tke_max2(T a, T b) { return (a > b) ? a : b; }
+/* M8: two-type form with common_type promotion — mixed (double literal, real_t)
+ * calls compute in double exactly like the Fortran r8 literals demand (see the
+ * 6.6 note below); at FP64 both types are double, bit-identical to the old form. */
+template <class A, class B>
+KOKKOS_INLINE_FUNCTION constexpr typename std::common_type<A, B>::type
+tke_min2(A a, B b)
+{
+    using T = typename std::common_type<A, B>::type;
+    return ((T)a < (T)b) ? (T)a : (T)b;
+}
+template <class A, class B>
+KOKKOS_INLINE_FUNCTION constexpr typename std::common_type<A, B>::type
+tke_max2(A a, B b)
+{
+    using T = typename std::common_type<A, B>::type;
+    return ((T)a > (T)b) ? (T)a : (T)b;
+}
 
 /* The 6.6 literal at :717 — plain double (the -r8 rule). */
 inline constexpr real_t TKE_C66 = 6.6;

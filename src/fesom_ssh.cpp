@@ -1828,11 +1828,11 @@ void fesom_ssh_cgpipe_free(void)
     CgPipeState &s = g_cgpipe;
     s.sidx_d = Kokkos::View<int*>();
     s.ridx_d = Kokkos::View<int*>();
-    s.sbuf_d = Kokkos::View<double*>();
-    s.rbuf_d = Kokkos::View<double*>();
+    s.sbuf_d = Kokkos::View<real_t*>();
+    s.rbuf_d = Kokkos::View<real_t*>();
     s.rp2_d  = Kokkos::View<int*>();
     s.ci2_d  = Kokkos::View<int*>();
-    s.pv2_d  = Kokkos::View<double*>();
+    s.pv2_d  = Kokkos::View<real_t*>();
     s.reqs.clear();
     s.partner.clear(); s.soff.clear(); s.roff.clear();
     s.built = false;

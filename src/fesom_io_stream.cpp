@@ -12,6 +12,7 @@
  * and other cadences/rollovers wired in Task 7.
  */
 #include "fesom_io_stream.h"
+#include "fesom_nc_real.h"     /* M8: real_t -> NC_DOUBLE boundary writers */
 #include <Kokkos_Core.hpp>     /* M514: device mean accumulators (fesom_io_stream.cpp is fesom_port-only) */
 #include <type_traits>
 #include "fesom_io.h"          /* full fesom_state typedef */
@@ -300,9 +301,9 @@ static void open_var_file(fesom_io_stream_t *s, int v, const fesom_calendar_t *c
     }
     if (n_layers > 0) {
         if (kind == FESOM_VAR_3D_NODE_IFACE || kind == FESOM_VAR_3D_ELEM_IFACE) {
-            NC_CHECK(nc_put_var_double(ncid, var_z, mesh->zbar));
+            NC_CHECK(fesom_nc_put_var_real(ncid, var_z, mesh->zbar, (size_t)n_layers));
         } else {
-            NC_CHECK(nc_put_var_double(ncid, var_z, mesh->Z));
+            NC_CHECK(fesom_nc_put_var_real(ncid, var_z, mesh->Z, (size_t)n_layers));
         }
     }
 
@@ -413,12 +414,14 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
         if (kind == FESOM_VAR_2D_NODE || kind == FESOM_VAR_2D_ELEM) {
             size_t start[2] = {t_idx, 0};
             size_t count[2] = {1, (size_t)((kind == FESOM_VAR_2D_NODE) ? mesh->nod2D : mesh->elem2D)};
-            NC_CHECK(nc_put_vara_double(s->ncid[v], s->var_id[v], start, count, global));
+            NC_CHECK(fesom_nc_put_vara_real(s->ncid[v], s->var_id[v], start, count, global,
+                                            count[1]));
         } else if (kind == FESOM_VAR_2D_ELEM_VEC) {
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, 2, (size_t)mesh->elem2D};
-            /* gather_elem laid out global as [elem][2]; transpose to [2][elem]. */
-            real_t *xy = (real_t *)malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(real_t));
+            /* gather_elem laid out global as [elem][2]; transpose to [2][elem].
+             * M8: scratch is DOUBLE (write-side staging; the copy converts under SP). */
+            double *xy = (double *)malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(double));
             FESOM_CHECK(xy, "io_stream: oom (uv transpose)");
             for (int e = 0; e < mesh->elem2D; ++e) {
                 xy[(size_t)0 * mesh->elem2D + e] = global[(size_t)e * 2 + 0];
@@ -432,7 +435,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
             int N = kind_is_node(kind) ? mesh->nod2D : mesh->elem2D;
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, (size_t)n_layers, (size_t)N};
-            real_t *t = (real_t *)malloc((size_t)n_layers * (size_t)N * sizeof(real_t));
+            double *t = (double *)malloc((size_t)n_layers * (size_t)N * sizeof(double));
             FESOM_CHECK(t, "io_stream: oom (3D transpose)");
             for (int n = 0; n < N; ++n) {
                 for (int k = 0; k < n_layers; ++k) {
