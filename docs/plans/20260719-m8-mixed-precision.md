@@ -1,7 +1,7 @@
 # M8 — Mixed Precision (FP32 working precision + FP64 islands)
 
-**Branch:** `m8-precision` · **Worktree:** `/home/a/a270088/port_kokkos_mp` · **Base:** `1df683b` (m7-speed HEAD 2026-07-19 = the 63A/63B physics state)
-**Status:** plan approved (brainstormed + user-validated section by section, 2026-07-19). Ban from M6 era explicitly lifted by user for this isolated track.
+**Branch:** `m8-precision` · **Worktree:** `/home/a/a270088/port_kokkos_mp` · **Base:** `1df683b` (the frozen 63A/63B physics commit; ancestor of the moving m7-speed tip — later m7 commits are figures/probes, binary-inert)
+**Status:** plan approved (brainstormed + user-validated section by section, 2026-07-19); **plan-review agent findings applied same day** (blocker fixed: the endgame config is the OPTIONS config `zstar+cvmix_TKE+mEVP+GM`, not KPP-default; FP32×speed-knob rung added). Ban from M6 era explicitly lifted by user for this isolated track.
 
 ## Overview
 
@@ -23,8 +23,9 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 - `src/fesom_types.h:15` — `typedef double real_t;` already centralized "so any future precision"
   switch is possible; `FieldT<T>` (`src/fesom_field.hpp`) already templated.
-- Adoption partial: ~536 raw `double` sites in `.cpp` (heaviest: `fesom_ssh.cpp` 83,
-  `fesom_main.cpp` 69, `fesom_phc.cpp` 54), ~65 `MPI_DOUBLE` sites, ~19 `parallel_reduce` sites.
+- Adoption partial: ~560 raw `double` sites in `.cpp` (heaviest: `fesom_ssh.cpp` 83,
+  `fesom_main.cpp` 69, `fesom_phc.cpp` ~48), 65 `MPI_DOUBLE` sites, 23 `parallel_reduce` sites
+  (incl. headers).
 - SSH CG: `soltol = 1e-5` (`FESOM_PHASE1_SOLTOL`) — within FP32 vector reach with FP64 scalars.
 - EOS already computes anomaly `density_m_rho0` (`use_density_ref` → ρ₀) — PGF cancellation
   partially defused; still suspect #1.
@@ -71,9 +72,14 @@ physics) and Fortran R2, at pre-registered bars (below).
   `-Wdouble-promotion`-clean hot code; precision banner asserted by the gate scripts.
 - **Gate 2 (prize-sizing, ALWAYS MEASURE — immediately after Gate 1):** 300-step pinned pairs
   FP64/FP32: dars CPU c1..c32, dars GPU g2/g4/g8, production mesh 4N/16N; device-memory-per-rank
-  counter (the JUPITER number). Priors: PR-940 CPU 1.5–1.65×; 16N comm-share halving.
-  **Decision D1 (pre-registered):** continue full campaign if whole-model ≥ ~1.25× on any target
-  axis OR footprint ≈ ½; else pivot to solver-only MP.
+  counter (the JUPITER number). Priors: PR-940 CPU 1.5–1.65× — measured on **native KPP** (they
+  islanded ALL of CVMix as fixed-r8; our endgame config runs our *ported* cvmix_TKE in FP32, a
+  first anywhere, and the registry's highest-probability promotion candidate); 16N comm-byte
+  halving. Knob posture per leg is recorded: headline pairs at the 63A posture (SPEED=1) + one
+  knobs-off pair to decompose FP32 savings vs what CGPIPE/CGPOLY already save (no double count).
+  **Decision D1 (pre-registered, crisp):** continue if whole-model ≥ 1.25× on ANY of {dars CPU,
+  dars GPU, 4N, 16N} OR device-memory-per-rank ≤ 0.65× (int connectivity/index arrays are already
+  32-bit, so the floor sits above 0.5×); else pivot to solver-only MP.
 - **Gate 3 (short-run physics):**
   (a) *divergence curve*: FP32-vs-FP64 relative field diffs at 1→100 steps judged against the
   chaos-envelope control (FP64 vs FP64+1ulp perturbation); FP32 must track the envelope's growth
@@ -86,14 +92,21 @@ physics) and Fortran R2, at pre-registered bars (below).
 - **Gate 4 (1-yr climate leg):** M5.23 bar, exact CGPOLY-cert machinery — sst/sss/ssh/a_ice
   pattern correlations vs FP64 twin in the certified class (1.00000/0.99996/1.00000/0.99997
   territory); `m7_climate_check_plots` vs `/work/ab0995/a270088/fesom2_core2`.
-- **Gate 5 (endgame, 63-yr hindcast):** config matched to 63A/63B (rule-0.40 trim).
+- **Gate 5 (endgame, 63-yr hindcast):** 63C-MP = FP32 twin of the **63A posture** specifically
+  (63A≠63B; see Task 11) (rule-0.40 trim).
   **Pre-registered bars:** Tbar gap ≤ 0.001 °C; OHC gap ≤ ~10× the port↔Fortran gap (few ZJ of
   ~19400); gap curve **co-tracks/flattens** (no systematic FP32 drift).
 - **Failure protocol (any gate):** promote suspects to `dbl_t` islands one at a time (EOS/PGF
   first), re-gate, log in `docs/PRECISION_ISLANDS.md` with the failing signature, and re-measure
   the standard pinned pair so the registry always shows the prize give-back.
-- **Scheme coverage:** KPP-default config first (the 63A/63B config); TKE/mEVP/zstar per-scheme
-  Gate-3-class rungs after the default passes (per-scheme floors discipline, L79).
+- **Gate 3k (FP32 × speed knobs):** `FESOM_SPEED=1`/CGPIPE, CGPOLY d3, and EVPWIDE were certified
+  at **FP64 only** — each gets a Gate-3-class re-certification at FP32 (options config, both
+  backends: selfchecks, solver health, short-run divergence) BEFORE any 1-yr/63-yr leg runs with
+  knobs on.
+- **Scheme coverage:** Gates 3–5 run the **actual 63A/63B options config
+  `zstar + cvmix_TKE + mEVP` (+ GM)** — the shipped/endgame physics (SCALING-REMEASURE §config).
+  KPP-default (the namelist default scheme) is an optional extra Gate-3 rung in Task 12; note the
+  PR-940 1.65× prior was measured on native KPP, not on this config (per-scheme floors, L79).
 
 ## Progress Tracking
 
@@ -113,13 +126,15 @@ physics) and Fortran R2, at pre-registered bars (below).
       (`build-mp-serial{,-sp}`, `build-mp-cuda{,-sp}`)
 - [ ] startup banner "FESOM PRECISION: SINGLE/DOUBLE (real_t=…)" printed once by rank 0
 - [ ] gate scripts assert the banner (wrong-precision build fails loudly everywhere — L80)
-- [ ] gate: FP64 build fields bit-identical (banner is stdout-only); record
+- [ ] gate: FP64 field snapshots bit-identical vs base `1df683b` via `scripts/diff_snap.py`
+      (banner changes stdout only — filter it from any full-log byte-diff); record
 
 ### Task 2: The inert sweep (real_t completion) — slices a–j, each slice bit-identical
 
 **Files:** (per slice) `src/fesom_*.cpp/.h/.hpp`
 
-- [ ] 2a core state structs + field allocs (`fesom_aux.h`, alloc sites)
+- [ ] 2a core state structs + field allocs (`fesom_aux.h`, alloc sites, **`fesom_field.hpp`:
+      `Field = FieldT<real_t>`** — the single edit that actually flips the state type)
 - [ ] 2b dyn/momentum/ALE (`fesom_dyn.cpp`, `fesom_momentum.cpp`, `fesom_ale.cpp`)
 - [ ] 2c tracers/advection/diffusion (`fesom_tracer_*.cpp`, `fesom_tracers.cpp`)
 - [ ] 2d ice family (`fesom_ice*.cpp` incl. evp/maevp/evpwide/fct/thermo)
@@ -127,14 +142,21 @@ physics) and Fortran R2, at pre-registered bars (below).
       `fesom_cvmix_tke.hpp`)
 - [ ] 2f EOS/pressure (`fesom_eos.cpp`) — stays real_t (suspect, NOT pre-islanded)
 - [ ] 2g SSH solver (`fesom_ssh.cpp`) — vectors/SpMV real_t; scalar chain
-      (residual/rtol/α/β) + CGPIPE/CGPOLY eigen-bounds → `dbl_t` islands
+      (residual/rtol/α/β) + CGPIPE/CGPOLY eigen-bounds → `dbl_t` islands.
+      **Explicit MPI split (18 sites):** vector-halo `Isend/Irecv` AND their `rb/sb[].dbls`
+      buffer types (lines 761/767, 956/962, 1131/1137, 1412/1418, 1511/1517, 1574/1587) →
+      `real_t` + `FESOM_MPI_REAL` (else CG comm bytes never halve and Gate 2 under-reads with
+      no visible culprit); `Allreduce` dot/norm/scalar sites (428, 1020, 1280, 1790, 2139,
+      2253) **stay `MPI_DOUBLE`** (CG-scalar island)
 - [ ] 2h halo/MPI layer (`fesom_halo*.cpp/.hpp`, `fesom_mpi.cpp`): `MPI_DOUBLE` →
       `FESOM_MPI_REAL` at field-exchange sites ONLY; buffers `sizeof(real_t)`
 - [ ] 2i I/O + forcing boundary (`fesom_io*.cpp`, `fesom_forcing.cpp`, `fesom_jra55.cpp`,
       `fesom_phc.cpp`): files stay FP64 on disk; convert at boundary; fill/missing cast to
       working precision BEFORE comparison; PHC/init path stays `dbl_t`
 - [ ] 2j main/step/diagnostics (`fesom_main.cpp`, `fesom_step.cpp`, `fesom_phasestats.cpp`)
-- [ ] after each slice: Serial FP64 rebuild + pi-smoke bit-identical (fast slice gate)
+- [ ] after each slice: Serial FP64 rebuild + pi-smoke bit-identical (fast slice gate);
+      device-touching slices (2a–2h) ALSO CUDA pi-smoke bit-identical — Serial alone cannot
+      exercise the device path (GPU fidelity-gate rule)
 
 ### Task 3: Epsilon/FTZ audit (PR-940 headline class)
 
@@ -149,7 +171,7 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 ### Task 4: Reduction-accumulator hardening
 
-**Files:** ~19 `parallel_reduce` sites; MPI reduction call sites
+**Files:** all 23 `parallel_reduce` sites (incl. `fesom_ssh.h`, `fesom_ice_coupling.h`); MPI reduction call sites
 
 - [ ] every `parallel_reduce` gets an explicit `double`/`dbl_t` accumulator (lambda arg type)
 - [ ] MPI reduction scalars stay `MPI_DOUBLE` (dots, norms, global sums, conservation)
@@ -169,7 +191,13 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 - [ ] FP32 Serial + CUDA compile clean; fix stragglers (NetCDF staging conversions, casts)
 - [ ] `-Wdouble-promotion` pass over hot kernels; literal hygiene (`real_t(0.5)` forms) —
-      a silently-promoting kernel is a dead knob wearing a lab coat
+      a silently-promoting kernel is a dead knob wearing a lab coat. Caveat: nvcc device-side
+      promotion warnings are weak — the authoritative detectors are Gate 2's throughput +
+      footprint counters (optionally ptxas register / f64-op inspection)
+- [ ] restart round-trip gate: write FP32 restart → re-read into FP32 (bit-compare) AND into
+      an FP64 build (exact-embed check); DP→SP direction truncates mantissa by design —
+      document, never claim "free" (endgame runs restart-free, so this is the only rung that
+      exercises it)
 - [ ] pi-smoke + dist_2/dist_4 NaN-free on both backends, banner asserted
 - [ ] freeze `mp/bin/mp32-0`
 
@@ -184,7 +212,7 @@ physics) and Fortran R2, at pre-registered bars (below).
 ### Task 8: Gate-3 instrumentation
 
 **Files:**
-- Modify: `tools/diff_snap.py` (or `scripts/`) — cross-dtype relative mode
+- Modify: `scripts/diff_snap.py` — cross-dtype relative mode
 - Create: `scripts/m8_divergence_curve.py`, `scripts/m8_conservation.py` (if not present in port diagnostics)
 
 - [ ] diff_snap cross-dtype: FP64 reference vs FP32 run, relative L2/Linf per field
@@ -195,29 +223,38 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 ### Task 9: Gate 3 verdicts (dist_4 + core2-2N)
 
-- [ ] run battery: divergence curves, 1-month conservation drift, solver health (plain CG,
-      CGPIPE, CGPOLY variants)
+- [ ] run battery ON THE OPTIONS CONFIG (`zstar+cvmix_TKE+mEVP`+GM — the endgame physics):
+      divergence curves, 1-month conservation drift, solver health (plain CG, CGPIPE, CGPOLY)
+- [ ] **Gate 3k:** FP32 × speed-knob re-certification — SPEED=1/CGPIPE, CGPOLY d3, EVPWIDE,
+      options config, both backends (these were certified at FP64 only)
 - [ ] verdicts vs pre-registered criteria; island promotions per failure protocol if needed
-      (EOS/PGF first); registry + re-measure after each promotion
+      (EOS/PGF first; cvmix_TKE = highest-probability candidate); registry + re-measure after
+      each promotion
 
 ### Task 10: Gate 4 — 1-yr climate leg
 
-- [ ] 1-yr FP32 CUDA run, 63A/63B config, output → `/work/ab0995/a270088/port2/mp/y1/`
+- [ ] 1-yr FP32 CUDA run, 63A posture (options config, SPEED=1, no CGPOLY), output →
+      `/work/ab0995/a270088/port2/mp/y1/`
 - [ ] `m7_climate_check_plots` vs FP64 twin + Fortran reference; M5.23-bar verdict recorded
 
 ### Task 11: Gate 5 — the 63-yr hindcast (endgame)
 
 - [ ] pre-register bars in this file BEFORE submission (they are: Tbar ≤ 0.001 °C; OHC ≤ ~10×
       port↔Fortran gap; co-track/flatten) — re-affirm numbers against the final 63A/63B harvest
-- [ ] submit 63-yr FP32 hindcast ("63C-MP"), config matched to 63A/63B, 2N class,
-      OUTDIR `/work/ab0995/a270088/port2/mp/climate63/63C/`
+- [ ] submit 63-yr FP32 hindcast **63C-MP = FP32 twin of the 63A posture** (options config,
+      SPEED=1, no CGPOLY — the clean twin, no solver-class confound; 63A≠63B, one run cannot
+      match both), 2N class, OUTDIR `/work/ab0995/a270088/port2/mp/climate63/63C/`.
+      Optional second arm 63D-MP (63B posture, +CGPOLY) only on user call if the CGPOLY×FP32
+      question is worth another 12-h run
 - [ ] harvest (rule-0.40 trim); `m7_hindcast_drift.py` vs 63A/63B + Fortran R2; F4-style figure
 - [ ] verdict vs bars; if failed → island bisection + re-run decision (user consult)
 
 ### Task 12: Sensitivity map + per-scheme rungs + merge decision
 
 - [ ] `docs/PRECISION_ISLANDS.md` finalized (the map: every island + evidence + cost)
-- [ ] per-scheme Gate-3 rungs: TKE, mEVP, zstar configs
+- [ ] optional extra rungs: KPP-default config + per-option isolation legs (TKE-only /
+      mEVP-only / zstar-only) if the sensitivity map needs per-scheme attribution (the main
+      ladder already covered the combined options config)
 - [ ] campaign findings doc `docs/plans/20260719-m8-FINDINGS.md`; lessons →
       `docs/KOKKOS_PORTING_LESSONS.md`
 - [ ] merge-back assessment vs settled M7 (expect mechanical rename conflicts); default
@@ -233,11 +270,23 @@ physics) and Fortran R2, at pre-registered bars (below).
 - Mixed-type kernel expressions promote to double automatically = correct island semantics;
   the literal-hygiene pass exists to kill *unintended* promotions in hot FP32 kernels.
 - Mesh metrics: computed FP64 at init, stored `real_t` (never compute geometry from FP32 coords).
-- Restart schema stays `NC_DOUBLE`: a double holds every float exactly → FP32 round-trip is
-  bit-exact, SP↔DP restart interchange free, zero format churn.
+- Restart schema stays `NC_DOUBLE`: a double holds every float exactly → SP→disk→SP round-trip
+  bit-exact and SP-restart-into-DP exact (both GATED in Task 6, not assumed; the 63-yr endgame
+  runs restart-free so Task 6 is the only rung exercising this). **DP→SP truncates mantissa by
+  design** — the interchange is free only in the FP32→FP64 rescue direction. Zero format churn.
 - Aliasing at any precision-boundary shim: one seeded buffer when the same actual is bound to
   in + inout roles (PR-940 CVMix lesson).
 - Calendar/time: untouched double island (their FP32 seconds-in-day ulp-8ms trap is impossible here).
+- **Half precision (future, parked — user asked; answer: yes, per-field):** the type system
+  extends downward. A future `half_t` (`Kokkos::Experimental::half_t`/`bhalf_t`, native on
+  A100/GH200) can demote *individual fields/buffers* under the same registry discipline
+  (demotion entry + gate evidence + pinned-pair give-back), because `FieldT<T>` is templated and
+  the convert-at-boundary pattern M8 establishes covers the two hard edges (MPI and NetCDF have
+  no native half). **Whole-model FP16/BF16 stays out permanently** — fp16 overflows at 6.5e4
+  (pressure in Pa) and bf16 carries ~3 decimal digits (0.01 °C structure drowns at 20 °C).
+  Credible first candidates when that day comes: CGPOLY preconditioner-apply storage
+  (mixed-precision iterative-refinement literature) and halo-pack compression lanes.
+  Nothing in M8 blocks this; nothing in M8 builds it (YAGNI).
 
 ## Post-Completion (no checkboxes — external/user actions)
 
