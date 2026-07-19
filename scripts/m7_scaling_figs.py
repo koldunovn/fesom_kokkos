@@ -156,6 +156,64 @@ def fig_scaling(df, fname, ylims):
     print("wrote", fname)
 
 
+M524_GPU = {   # docs/SCALING_M524.md GPU table (s/step, 2026-05-31, 35-step protocol;
+               # dars/NG5 measured at dt180 there vs dt120/dt180 now — s/step is
+               # dt-independent (M5.24 finding), so the eras compare directly)
+    "core2": {1: 0.117, 2: 0.095, 4: 0.112, 8: 0.111},
+    "farc":  {1: 0.309, 2: 0.244, 4: 0.210, 8: 0.190, 16: 0.177, 32: 0.256},
+    "dars":  {2: 0.814, 4: 0.475, 8: 0.344, 16: 0.237, 32: 0.211},
+    "ng5":   {2: 2.335, 4: 1.273, 8: 0.810, 16: 0.492, 32: 0.374},
+}
+
+
+def fig_before_after(df, fname):
+    """(a) GPU s/step BEFORE (M5.24 campaign, pre-M7 binary) vs AFTER (class B =
+    all M7 optimizations), (b) the gain ratio before/after per mesh. Same mesh
+    colors; before = open markers + dotted, after = filled + solid."""
+    from matplotlib.lines import Line2D
+    common.set_style()
+    fig, (axA, axR) = plt.subplots(1, 2, figsize=(9.4, 4.0))
+    gc = gpu_class(df, "B").assign(ngpu=lambda d: d.ranks)
+    counts, all_v = [], []
+    for mesh in [m for m in common.MESH_ORDER if m in set(gc.mesh)]:
+        col = common.MESH_COLOR.get(mesh, "k")
+        g = gc[gc.mesh == mesh].sort_values("ngpu")
+        pre = M524_GPU.get(mesh, {})
+        pn = sorted(pre)
+        axA.plot([4 * n for n in pn], [pre[n] for n in pn], marker="o", ms=4, ls=":",
+                 color=col, markerfacecolor="none")
+        axA.plot(g.ngpu, g.sstep, marker="o", ms=4, ls="-", color=col,
+                 label=common.MESH_LABEL.get(mesh, mesh))
+        counts += [4 * n for n in pn] + g.ngpu.tolist()
+        all_v += [pre[n] for n in pn] + g.sstep.tolist()
+        both = [(n, pre[n] / s) for n, s in zip(g.nodes, g.sstep) if n in pre]
+        if both:
+            axR.plot([4 * n for n, _ in both], [r for _, r in both], marker="o",
+                     ms=4, ls="-", color=col)
+    axA.set_yscale("log")
+    decimal_log_yaxis(axA, min(all_v), max(all_v))
+    gpu_axis(axA, counts)
+    axA.set_ylabel("time per step  [s]")
+    axA.set_title("(a) GPU time per step, before vs after M7")
+    axA.legend(handles=axA.get_legend_handles_labels()[0] + [
+        Line2D([], [], color="0.35", ls=":", marker="o", markerfacecolor="none",
+               ms=4, label="before (M5.24, May)"),
+        Line2D([], [], color="0.35", ls="-", marker="o", ms=4,
+               label="after (M7 class B)")], fontsize=6, loc="lower left")
+    axR.axhline(1.0, color="k", lw=0.7, alpha=0.5)
+    gpu_axis(axR, counts)
+    axR.set_ylabel("speed-up factor  (before ÷ after)")
+    axR.set_ylim(0.9, None)
+    axR.set_title("(b) the M7 optimization gain")
+    fig.tight_layout()
+    fig.text(0.995, 0.005, "before = M5.24 campaign (35-step protocol); after = class B, std300; "
+             "dars dt180→120 between eras (s/step dt-independent)",
+             ha="right", fontsize=5, alpha=0.6)
+    fig.savefig(fname, dpi=140)
+    plt.close(fig)
+    print("wrote", fname)
+
+
 def fig_speedup(df, fname):
     common.set_style()
     fig, ax = plt.subplots(figsize=(5.6, 4.0), constrained_layout=True)
@@ -203,6 +261,7 @@ def main():
     }
     fig_scaling(df, f"{a.outdir}/fig_m7_scaling.png", ylims)
     fig_speedup(df, f"{a.outdir}/fig_m7_speedup.png")
+    fig_before_after(df, f"{a.outdir}/fig_m7_before_after.png")
 
 
 if __name__ == "__main__":
