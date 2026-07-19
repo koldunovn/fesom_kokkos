@@ -1266,10 +1266,11 @@ skip_rest_state:
                  * snapshot recently pulled them. Documented, not fixed here. */
                 dyn.eta_n_fld.sync_host();
                 real_t uv_max = 0.0, eta_max = 0.0, w_max = 0.0;
+                size_t uv_arg = 0;                 /* M7-wsplit debug: argmax slot */
                 size_t te = (size_t)mesh.myDim_elem2D * (size_t)mesh.nl * 2;
                 for (size_t i = 0; i < te; ++i) {
                     real_t a = fabs(dyn.uv[i]);
-                    if (a > uv_max) uv_max = a;
+                    if (a > uv_max) { uv_max = a; uv_arg = i; }
                 }
                 for (int k = 0; k < mesh.myDim_nod2D; ++k) {
                     real_t a = fabs(dyn.eta_n[k]);
@@ -1375,6 +1376,31 @@ skip_rest_state:
                            (double)hpres_max, (double)pgf_max, (double)dens_max,
                            (double)bv_min, (double)bv_max, (double)Kv_max, (double)Av_max);
                     fflush(stdout);
+                }
+                /* M7-wsplit debug (FESOM_DIAG_UVMAX=1): the rank owning the global
+                 * max |uv| prints WHERE it lives — element level + geographic
+                 * coordinates of its vertices — so a ramp can be attributed to (or
+                 * cleared of) the CFLz cells. Print-only, env-gated, byte-inert. */
+                {
+                    static int s_uvloc = -1;
+                    if (s_uvloc < 0) { const char *e = getenv("FESOM_DIAG_UVMAX"); s_uvloc = (e && e[0]=='1') ? 1 : 0; }
+                    if (s_uvloc) {
+                        real_t loc = 0.0;
+                        for (size_t i = 0; i < te; ++i) { real_t a = fabs(dyn.uv[i]); if (a > loc) loc = a; }
+                        if (loc == uv_max && uv_max > 0.0) {
+                            int el = (int)(uv_arg / ((size_t)mesh.nl * 2));
+                            int nz = (int)((uv_arg / 2) % (size_t)mesh.nl);
+                            int n0 = mesh.elem_nodes[3*el + 0];
+                            double glon = mesh.geo_coord_nod2D[2*n0 + 0] * 180.0 / M_PI;
+                            double glat = mesh.geo_coord_nod2D[2*n0 + 1] * 180.0 / M_PI;
+                            double cflz = (double)dyn.cfl_z[FESOM_NODE3D(n0, nz, mesh.nl)];
+                            fprintf(stderr, "[uvmax] step %d rank %d |uv|=%.3e elem=%d nz=%d "
+                                    "glon/glat=%.2f/%.2f cflz(n0,nz)=%.2f w_i(n0,nz)=%.3e\n",
+                                    n, mpi.mype, (double)uv_max, el, nz, glon, glat, cflz,
+                                    (double)dyn.w_i[FESOM_NODE3D(n0, nz, mesh.nl)]);
+                            fflush(stderr);
+                        }
+                    }
                 }
                 if (uv_max > 5.0 || !(uv_max == uv_max)) {
                     if (mpi.mype == 0) {

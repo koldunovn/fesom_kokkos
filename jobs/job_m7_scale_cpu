@@ -18,7 +18,7 @@ source "$ROOT/jobs/m7_provenance.sh"
 source /sw/etc/profile.levante
 source "$ROOT/env.sh"
 ulimit -s 204800
-export FESOM_PRINT_EVERY=999
+export FESOM_PRINT_EVERY=${FESOM_PRINT_EVERY:-999}   # overridable (M7-wsplit debug)
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
 MESH=${MESH:?MESH required}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
