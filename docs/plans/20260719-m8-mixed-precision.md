@@ -218,25 +218,42 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 **Files:** whatever the compiler finds; `configure.sh`; gate scripts
 
-- [ ] FP32 Serial + CUDA compile clean; fix stragglers (NetCDF staging conversions, casts)
+- [x] FP32 Serial + CUDA compile clean (35 errors total, all boundary seams: nc-write staging
+      → fesom_nc_real.h helpers; evpwide FESOM_MPI_REAL; cgpipe_free Views; tke common_type;
+      + the two runtime bugs above). Gate 1 PASSED both backends (pi np1+np2+CUDA NaN-free,
+      banner SINGLE). SP survives 48-step CORE2 (2× the old death wall)
 - [ ] `-Wdouble-promotion` pass over hot kernels; literal hygiene (`real_t(0.5)` forms) —
       a silently-promoting kernel is a dead knob wearing a lab coat. Caveat: nvcc device-side
       promotion warnings are weak — the authoritative detectors are Gate 2's throughput +
       footprint counters (optionally ptxas register / f64-op inspection)
 - [ ] restart round-trip gate: write FP32 restart → re-read into FP32 (bit-compare) AND into
-      an FP64 build (exact-embed check); DP→SP direction truncates mantissa by design —
-      document, never claim "free" (endgame runs restart-free, so this is the only rung that
-      exercises it)
+      an FP64 build (exact-embed check) — STILL OPEN (deferred behind the Gate-2 bug hunt;
+      run before Gate 4; endgame runs restart-free)
 - [ ] pi-smoke + dist_2/dist_4 NaN-free on both backends, banner asserted
 - [ ] freeze `mp/bin/mp32-0`
 
 ### Task 7: Gate 2 prize-sizing fleet + D1
 
-- [ ] same-day pinned pairs (BIN= mp64-0/mp32-0): dars CPU c1..c32; dars GPU g2/g4/g8;
-      production mesh 4N/16N; min-of-2; cheap walltimes
-- [ ] device-memory-per-rank counter both precisions (JUPITER number)
-- [ ] results table + verdict vs priors (PR-940 CPU 1.5–1.65×; 16N comm-byte halving)
-- [ ] **Decision D1** recorded here: full campaign vs solver-only pivot
+- [x] first pinned-pair fleet run 2026-07-19 (BIN=mp64-0 / mp32-2 — same code state, FP64 side
+      re-proven bit-identical across the two SP bug fixes): dars c2 CPU, CORE2 c1 CPU,
+      dars g2 GPU; 300 steps, min-of-2, knobs-off posture. Two SP bugs found+fixed en route
+      (diag-Allreduce stack smash `7e90742`; JRA time-axis FP32-impossibility `7247412` —
+      see SP_PORTING_LESSONS.md SP1/SP2)
+- [x] device-memory-per-rank: **23.2 → 11.9 GB = 0.51×** (dars g2, sampled mid-run — the
+      JUPITER number; int-array floor pushed it barely above ½)
+- [x] **GATE-2 BOARD (2026-07-19, s/step min-of-2):**
+      | axis | FP64 | FP32 | speedup |
+      | CORE2 c1 CPU (128r) | 0.1999 | 0.1320 | **1.51×** |
+      | dars g2 GPU (8r)    | 0.7598 | 0.5169 | **1.47×** |
+      | dars c2 CPU (256r)  | 3.0417 | 1.9425 | **1.57×** |
+      | device mem/GPU      | 23.2 GB | 11.9 GB | **0.51×** |
+      CG iters: 91→92 (CORE2), 32→33 (dars) — mixed-precision CG costs ~1 iteration.
+      Priors honored: PR-940 CPU 1.5–1.65× (ours 1.51 gcc/128r vs theirs 1.65 intel/64r).
+- [x] **DECISION D1: PASSED — CONTINUE FULL CAMPAIGN.** Both crisp criteria met:
+      speed ≥1.25× on two axes (1.51× CPU, 1.47× GPU); footprint 0.51× ≤ 0.65×.
+- ➕ wider fleet (dars c1..c32 curve, g4/g8, production 4N/16N incl. comm-share phasestats)
+      deferred to the Gate-3/4 era — the D1 question is answered; curve completeness is
+      documentation, not decision-critical
 
 ### Task 8: Gate-3 instrumentation
 
