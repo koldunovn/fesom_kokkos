@@ -233,7 +233,26 @@ this wall everywhere at cold start).*
   walltime started after 14 s / 11 min / 7 min queue wait; one rep to the dt180
   blowup ≈ 8 min wall (4 min init + 3 min to step ~242). CPU-side reproducible —
   no GPU queue needed. Optional cheaper still: oversubscribe dist_4096 on 8-16
-  nodes for correctness-only iterations. On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
+  nodes for correctness-only iterations.
+
+**⭐ ROOT CAUSE FOUND (2026-07-19 evening, code-level — no run needed):** the port's
+FCT tracer path is missing Fortran's wsplit machinery (`oce_adv_tra_driver.F90`):
+1. FCT **low-order** = `adv_tra_ver_upw1(we)` explicit + **under `use_wsplit` an
+   IMPLICIT vertical advection of the low-order field with `wi`:**
+   `call adv_tra_vert_impl(dt, wi, fct_LO)` (line 286). **The port has NO
+   `adv_tra_vert_impl` at all** — the `w_i` share of tracer transport is silently
+   DROPPED at every CFL-limited cell when wsplit is on.
+2. FCT **high-order** vertical advection uses `pwvel => w` — the FULL velocity
+   (line 315); the port feeds `dyn->w_e` (fesom_tracer_adv.cpp:637/715/1421).
+Both errors are exactly zero at wsplit-OFF (`w_e=w, w_i=0`) — invisible to every
+certification ever run; at wsplit-ON they give the slow tracer/density error at
+Gibraltar-class cells → the CG-NaN-~step-85 signature M5.24 observed. (The non-FCT
+`do_wimpl` implicit-diffusion path is irrelevant: `oce_ale_tracer.F90:617` forces it
+off for FCT configs.) The momentum-side `w_i` TDMA EXISTS in the port (substep 6)
+but is unexercised — verify against Fortran during cert. The M5.14 w_i-residency
+assumptions (no-init-push fesom_step.cpp:676; L3 same-kind halo fuse) need re-audit
+once `w_i ≠ 0`. Fix = port `adv_tra_vert_impl` + high-order `w_e→w` + runtime knob
+`FESOM_WSPLIT` (default off ⇒ byte-identical) + the gate ladder above. On a green probe the full dars ladder resubmits at that dt; `m7_scaling_figs.py`
 DT_RUN["dars"] updates, and the CG dt-correction to production dt240 is re-derived from
 measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, user-confirmed),
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
