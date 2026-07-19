@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=mp_gate3
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:08:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+# M8 Gate-3 leg on the OPTIONS config (zstar+cvmix_TKE+mEVP+GM — the 63A/63B physics;
+# SCALING-REMEASURE §config is authoritative). CPU Serial backend, CORE2 c1 = the Gate-2 shape.
+# Parameterized via --export: BIN OUT [DT NSTEPS SNAP CONSERV PRINTEVERY] + any FESOM_SPEED*
+# / selfcheck knobs for the 3k legs. Mesh = PRIVATE core2 copy (L73). Cheap-gate walltime;
+# 1440-step (1-month) legs override -t at submit. Epilogue captures rc + FATAL (SP3: job
+# state COMPLETED says nothing about the run inside).
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos_mp/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar   # options config (GM default-on)
+export FESOM_PRINT_EVERY=${PRINTEVERY:-1}
+export FESOM_MP_CONSERV=${CONSERV:-10}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+: "${BIN:?set BIN=/path/to/pinned/binary}"
+: "${OUT:?set OUT=/work/.../outdir}"
+DT=${DT:-1800}; NSTEPS=${NSTEPS:-100}; SNAP=${SNAP:-10}
+rm -rf "$OUT"; mkdir -p "$OUT"
+srun -l "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$OUT/log" 2>&1
+rc=$?
+echo "[mp_gate3] rc=$rc out=$OUT ; $(grep -m1 -E 'loop timing' "$OUT/log")"
+grep -m1 "PRECISION" "$OUT/log" || echo "[mp_gate3] WARNING: no precision banner"
+grep -qi "FATAL\|BLOWUP" "$OUT/log" && echo "[mp_gate3] WARNING: FATAL/BLOWUP in log"
+exit $rc

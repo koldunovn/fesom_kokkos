@@ -87,3 +87,10 @@ bool fesom_sshrails_on(void);
 /* M8 forensic instrument (FESOM_MP_NANSCAN=1) — see fesom_step.cpp. */
 int  fesom_mp_nanscan_enabled(void);
 void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n);
+
+/* M8 Gate-3b conservation diagnostic (FESOM_MP_CONSERV=N) — see fesom_step.cpp.
+ * Collective (Allreduce): when enabled, call on ALL ranks each diagnostic step. */
+struct fesom_tracers;
+int  fesom_mp_conserv_every(void);
+void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
+                      struct fesom_tracers *tracers, struct fesom_partit *partit);

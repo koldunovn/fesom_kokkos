@@ -126,6 +126,57 @@ void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n)
     }
 }
 
+/* M8 Gate-3b diagnostic (FESOM_MP_CONSERV=N): global ∫dV, ∫T·dV, ∫S·dV over owned wet
+ * columns (areasvol·hnode), every N steps. Accumulation is dbl_t and the Allreduce is
+ * MPI_DOUBLE regardless of real_t (SP1) — the FP32 run is judged in FP64 units.
+ * Reads DEVICE-current views (valid on CUDA, where the host step-diag aliases are stale);
+ * collective — call on ALL ranks. Units: vol m³, heat °C·m³, salt PSU·m³ (constant ρ₀·c_p
+ * omitted — the Gate-3b bar is FP32-vs-FP64 twin drift, a relative measure).
+ * Off by default (env unset ⇒ zero calls ⇒ FP64/production inert). */
+int fesom_mp_conserv_every(void)
+{
+    static int ev = -1;
+    if (ev < 0) {
+        const char *e = getenv("FESOM_MP_CONSERV");
+        ev = e ? atoi(e) : 0;
+        if (ev < 0) ev = 0;
+    }
+    return ev;
+}
+void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
+                      struct fesom_tracers *tracers, struct fesom_partit *partit)
+{
+    const int myDim = mesh->myDim_nod2D;
+    const int nl    = mesh->nl;
+    auto T        = tracers->data[FESOM_TRACER_T].values_fld.d();
+    auto S        = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto hnode    = mesh->hnode_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n   = mesh->nlevels_nod2D_fld.d();
+    dbl_t vol = 0.0, heat = 0.0, salt = 0.0;   /* M8 islands: FP64 accumulators */
+    Kokkos::parallel_reduce("mp_conserv", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n, double &v, double &h, double &s) {
+            const int nzmin = ulev_n(n) - 1;
+            const int nzmax = nlev_n(n) - 1;
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                const size_t i  = FESOM_NODE3D(n, nz, nl);
+                const double dv = (double)areasvol(i) * (double)hnode(i);
+                v += dv;
+                h += dv * (double)T(i);
+                s += dv * (double)S(i);
+            }
+        }, vol, heat, salt);
+    dbl_t sums[3] = {vol, heat, salt};
+    if (partit->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, sums, 3, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+    if (partit->mype == 0) {
+        printf("[fesom_port] CONSERV step=%6d heat=%.15e salt=%.15e vol=%.15e\n",
+               step_n, sums[1], sums[2], sums[0]);
+        fflush(stdout);
+    }
+}
+
 bool fesom_sshrails_on(void)
 {
     static int c = -1;

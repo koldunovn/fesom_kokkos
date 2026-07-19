@@ -1273,6 +1273,13 @@ skip_rest_state:
                 fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing };
                 fesom_io_step(&io, (double)FESOM_PHASE1_DT, &st, &mpi);
             }
+            /* M8 Gate-3b: FP64 conservation diagnostic at its own cadence
+             * (FESOM_MP_CONSERV=N; collective — all ranks call, rank 0 prints). */
+            {
+                const int ce = fesom_mp_conserv_every();
+                if (ce > 0 && (n == 1 || n % ce == 0 || n == nsteps))
+                    fesom_mp_conserv(n, &mesh, &tracers, ctx.partit);
+            }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
                 /* Iterate myDim only for stat collection — halo entries are
                  * just owner copies, so global max via MPI_Allreduce is
