@@ -39,9 +39,16 @@ sed -i "s|restart_length_unit *=.*|restart_length_unit='off'|"   namelist.config
 sed -i "s|raw_restart_length_unit *=.*|raw_restart_length_unit='off'|" namelist.config
 sed -i "s|bin_restart_length_unit *=.*|bin_restart_length_unit='off'|" namelist.config
 sed -i "s|mix_scheme *=.*|mix_scheme='KPP'|"                      namelist.oce
-# keep opt_visc=5 (easy backscatter, γ0=0.003/γ1=0.1/γ2=0.285) = EXACTLY what the Kokkos/C port implements;
+# NB the template carries opt_visc=5 (easy backscatter). The old comment here claimed that matches
+# the port — WRONG (s16 finding): the port defaults to opt_visc=7 (bidiff); FESOM_VISC_OPT=5 exists
+# since 0419c96. Every m524 Fortran timing ref therefore ran 5 vs the port's 7. OPT_VISC below
+# overrides; unset = template value (5), byte-identical job behavior.
 # just bypass the coarse-mesh resolution check that aborts on farc/dars/NG5.
 sed -i "s|check_opt_visc *=.*|check_opt_visc=.false.|"            namelist.dyn
+if [ -n "${OPT_VISC:-}" ]; then
+  sed -i "s|opt_visc *=.*|opt_visc = ${OPT_VISC}|" namelist.dyn
+  echo "OVERRIDE: $(grep -m1 '^opt_visc' namelist.dyn)"
+fi
 sed -i "s/, *'[mdhs]' *,/, 'y',/g"                                namelist.io   # push all output to yearly -> nothing fires in <5 days
 # optional: WSPLIT=true turns on the vertical-velocity implicit/explicit splitter
 # (use_wsplit) — the M7 wsplit work item's Fortran-behavior probes. Default: template

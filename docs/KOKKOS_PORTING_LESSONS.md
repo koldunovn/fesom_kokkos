@@ -1226,4 +1226,40 @@ exchanges/step = the 349 >0.1 ms events, one wait each, at both scales).**
 
 ---
 
+### L101 — MATCHED PHYSICS BEFORE ROBUSTNESS VERDICTS: three sessions of "the port rides CFLz less robustly than Fortran" dissolved the day the two models ran the SAME viscosity scheme. (M7 session 16, 2026-07-19)
+
+The port hardwires `opt_visc=7` (bidiff — the work_core reference scheme); the Fortran scale
+job pinned its template's `opt_visc=5` with a comment claiming that "exactly matches the
+Kokkos/C port" — wrong, and never re-checked. Every Fortran stability/timing reference
+(F0/F1, all m524 refs) therefore ran scheme 5 against the port's scheme 7. On the NG5
+dist_4096 dt180 cold start (the M5.24 instability class):
+
+| wsplit-ON | Fortran | port |
+|---|---|---|
+| opt_visc=5 | F1: rides the CFLz arc (peak 6.1@248) to rc=0 | dbg6: **identical arc** (peak 6.02@255, same cell, same max-migration, final 5.03 vs 5.06), rc=0 |
+| opt_visc=7 | F2: **eta-NaN @203**, rank 2813, CFLz plateau ~4.16 | dbg5: **detonates @200**, rank 2813, plateau 4.09 |
+
+Same event, same cell (−5.46/35.94), same endgame, both directions. The port was never less
+robust — it was running different physics than its comparator.
+
+- **The rule: before ANY cross-model robustness/stability verdict, diff the FULL physics
+  namelist of the actual comparator runs against the port's compiled constants.** A scheme
+  choice that is climatically invisible on the certified mesh (CORE2: v5-vs-v7 final-state
+  stats differ in the 2nd digit only) can be the entire story at an extreme transient.
+- **The trap that hid it:** `visc_filt_bcksct` was fully ported, audited, allocated — and DEAD
+  CODE (never called). A grep for the Fortran routine name "finds" the port and passes a
+  structural audit; only a call-site check reveals the scheme is unreachable.
+- **Cost of the confusion was near-zero once measured** (the reassuring counter): scheme
+  5-vs-7 timing delta = 0.0 % on CORE2 c1, +0.8 % on NG5 c32 (matched knob-only pairs, frozen
+  bin `visc0`) — the cross-model SYPD comparisons carry <1 % scheme bias.
+- Knobs shipped: `FESOM_VISC_OPT=5|7` (default 7 = certified byte path; 5 host-only),
+  `FESOM_UV_GUARD` (the port-only uv>5 abort masked the endgame — Fortran has no such guard),
+  `FESOM_VISC_EASYBSRETURN`. User policy: scheme 5 = low-res (CORE2) physics only; high-res
+  meshes run 7 — matching their production practice.
+- Corollary (rule 0.41 extension): the NG5/dars cold-start CFLz wall at production dt is a
+  BENCHMARK-PROTOCOL artifact present in BOTH models under scheme 7. Production runs start
+  from spun-up states and never see it. Protocol dt-ladders (dars dt120, NG5 32N dt60) stand.
+
+---
+
 *Keep appending. Date entries when the context (versions, paths) might age.*
