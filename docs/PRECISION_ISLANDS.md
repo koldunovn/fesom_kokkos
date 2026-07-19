@@ -61,4 +61,12 @@ variables (parked M9 track; user proposal 2026-07-19).
 
 ## Promotion log
 
-*(empty — populated by gate failures: date, gate + signature, island added, pinned-pair give-back)*
+- **2026-07-19 — RULE ESTABLISHED (the first SP-only bug): every `MPI_DOUBLE` reduce buffer MUST
+  be `dbl_t`, never `real_t`.** Found by the Gate-2 fleet: `fesom_main.cpp` step-diag Allreduce
+  staged `real_t buf_max[16]` under `16, MPI_DOUBLE` ⇒ 2× over-read AND over-write = stack smash
+  at npes>1 ⇒ step-1-clean/step-2-NaN (Z7 shape), partition-layout-dependent (np2 survived by
+  luck, 128/256 ranks died). One bug explained all three f32 leg failures. Fix `7e90742`;
+  tree-wide re-audit clean; `mp32-0` retired → `mp32-1`. Grep-enforceable invariant:
+  `MPI_DOUBLE` may only touch `dbl_t`/`double` storage; `FESOM_MPI_REAL` only `real_t` storage.
+
+*(further entries: date, gate + signature, island added, pinned-pair give-back)*
