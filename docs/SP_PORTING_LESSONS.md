@@ -20,8 +20,15 @@ use of per-field `FieldT<dbl_t>`).
 ⚠️ **The same scheme exists in Fortran FESOM2 (`gen_surface_forcing.F90` sbc_do/getcoeffld) and in
 the JAX port (`fesom_jax/jra55.py`, faithful port of the same design).** The Fortran SP branch
 (PR-940) actively demoted `nc_time` to WP (`MPI_DOUBLE_PRECISION → MPI_WP` Bcast) — it carries this
-landmine latent (their CORE2 validation did not exercise 3-hourly JRA). The JAX port is safe ONLY
-because it forces x64. Report upstream before anyone runs those configs in SP.
+landmine latent. The JAX port is safe ONLY because it forces x64. Report upstream before anyone
+runs those configs in SP.
+**Why PR-940's validation could not catch it (the alignment accident):** their benchmark used
+"core2 mesh, core2 forcing" (PR body). CORE-II's fastest records are 6-hourly = 0.25 d — EXACTLY
+the float ulp at JD ≈ 2.44e6 (between 2²¹ and 2²²). Integer JD + k·0.25 is exactly representable
+there, so CORE-II record times survive float with delta_t = one ulp = 0.25 exact. JRA55-do
+(3-hourly = 0.125 d, +1.5 h offsets) is sub-ulp ⇒ collides. The general criterion stands:
+FP32-safe iff record spacing ≥ ulp(time magnitude) AND grid-aligned — which is luck, not design;
+keep the time axis double.
 
 **SP3 — A correctness verdict is only as long as its RUN LENGTH (the run-length illusion; SP twin
 of rule 0.41).** Every "passing" SP probe (np1/np2/np4..np128, both transports) was ≤5 steps; the
