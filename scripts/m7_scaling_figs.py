@@ -167,12 +167,13 @@ M524_GPU = {   # docs/SCALING_M524.md GPU table (s/step, 2026-05-31, 35-step pro
 
 
 def fig_before_after(df, fname):
-    """(a) GPU s/step BEFORE (M5.24 campaign, pre-M7 binary) vs AFTER (class B =
-    all M7 optimizations), (b) the gain ratio before/after per mesh. Same mesh
-    colors; before = open markers + dotted, after = filled + solid."""
+    """GPU before (M5.24 campaign, pre-M7 binary) vs after (class B = all M7
+    optimizations): (a) s/step, (b)+(c) SYPD at production dt (linear, split by
+    mesh family like fig_scaling), (d) the gain ratio (identical in either unit).
+    Same mesh colors; before = open markers + dotted, after = filled + solid."""
     from matplotlib.lines import Line2D
     common.set_style()
-    fig, (axA, axR) = plt.subplots(1, 2, figsize=(9.4, 4.0))
+    fig, (axA, axS, axL, axR) = plt.subplots(1, 4, figsize=(16.5, 3.9))
     gc = gpu_class(df, "B").assign(ngpu=lambda d: d.ranks)
     counts, all_v = [], []
     for mesh in [m for m in common.MESH_ORDER if m in set(gc.mesh)]:
@@ -180,12 +181,17 @@ def fig_before_after(df, fname):
         g = gc[gc.mesh == mesh].sort_values("ngpu")
         pre = M524_GPU.get(mesh, {})
         pn = sorted(pre)
-        axA.plot([4 * n for n in pn], [pre[n] for n in pn], marker="o", ms=4, ls=":",
-                 color=col, markerfacecolor="none")
+        pre_g = [4 * n for n in pn]
+        pre_s = [pre[n] for n in pn]
+        pre_y = [DT_PROD[mesh] / (365.0 * s) for s in pre_s]
+        axA.plot(pre_g, pre_s, marker="o", ms=4, ls=":", color=col, markerfacecolor="none")
         axA.plot(g.ngpu, g.sstep, marker="o", ms=4, ls="-", color=col,
                  label=common.MESH_LABEL.get(mesh, mesh))
-        counts += [4 * n for n in pn] + g.ngpu.tolist()
-        all_v += [pre[n] for n in pn] + g.sstep.tolist()
+        ax = axS if mesh in ("core2", "farc") else axL
+        ax.plot(pre_g, pre_y, marker="o", ms=4, ls=":", color=col, markerfacecolor="none")
+        ax.plot(g.ngpu, g.sypd, marker="o", ms=4, ls="-", color=col)
+        counts += pre_g + g.ngpu.tolist()
+        all_v += pre_s + g.sstep.tolist()
         both = [(n, pre[n] / s) for n, s in zip(g.nodes, g.sstep) if n in pre]
         if both:
             axR.plot([4 * n for n, _ in both], [r for _, r in both], marker="o",
@@ -194,20 +200,28 @@ def fig_before_after(df, fname):
     decimal_log_yaxis(axA, min(all_v), max(all_v))
     gpu_axis(axA, counts)
     axA.set_ylabel("time per step  [s]")
-    axA.set_title("(a) GPU time per step, before vs after M7")
+    axA.set_title("(a) time per step, before vs after")
     axA.legend(handles=axA.get_legend_handles_labels()[0] + [
         Line2D([], [], color="0.35", ls=":", marker="o", markerfacecolor="none",
                ms=4, label="before (M5.24, May)"),
         Line2D([], [], color="0.35", ls="-", marker="o", ms=4,
                label="after (M7 class B)")], fontsize=6, loc="lower left")
+    gpu_axis(axS, counts)
+    axS.set_ylabel("SYPD  (simulated yr / wall day)")
+    axS.set_ylim(0, None)
+    axS.set_title("(b) throughput, CORE2 & farc")
+    gpu_axis(axL, counts)
+    axL.set_ylabel("SYPD  (simulated yr / wall day)")
+    axL.set_ylim(0, None)
+    axL.set_title("(c) throughput, multi-million-node meshes")
     axR.axhline(1.0, color="k", lw=0.7, alpha=0.5)
     gpu_axis(axR, counts)
     axR.set_ylabel("speed-up factor  (before ÷ after)")
     axR.set_ylim(0.9, None)
-    axR.set_title("(b) the M7 optimization gain")
+    axR.set_title("(d) the M7 optimization gain")
     fig.tight_layout()
     fig.text(0.995, 0.005, "before = M5.24 campaign (35-step protocol); after = class B, std300; "
-             "dars dt180→120 between eras (s/step dt-independent)",
+             "dars dt180→120 between eras (s/step dt-independent); SYPD at production dt both eras",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
     plt.close(fig)
