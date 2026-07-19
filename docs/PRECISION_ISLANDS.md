@@ -69,4 +69,14 @@ variables (parked M9 track; user proposal 2026-07-19).
   tree-wide re-audit clean; `mp32-0` retired → `mp32-1`. Grep-enforceable invariant:
   `MPI_DOUBLE` may only touch `dbl_t`/`double` storage; `FESOM_MPI_REAL` only `real_t` storage.
 
+- **2026-07-19 — PROMOTED: JRA forcing-time machinery → calendar island (first `FieldT<dbl_t>`
+  use).** Signature: deterministic global T/S NaN at ~9.4 model-hours (dt1800 step 19 / dt900
+  step 37), scheme-independent, rank-independent. Root cause: absolute-Julian-day time axis
+  (~2.44e6 d; float ulp = 6 h > 3-h records) ⇒ record-time collision ⇒ delta_t=0 ⇒ Inf coefs ⇒
+  NaN forcing everywhere (SP_PORTING_LESSONS.md SP2). Promoted: rdate/timenew/nc_time/delta_t +
+  coef_a/coef_b (+ faithful dbl_t binarysearch twin). Give-back: ~none (8 nod2D coef pairs
+  double = KBs; interp math per node unchanged count). Fix `7247412`; FP64 bit-identity re-proven.
+  ⚠️ Same design in Fortran `gen_surface_forcing.F90` (PR-940 SP branch demoted nc_time to WP —
+  latent) and JAX `jra55.py` (safe only via forced x64) — report upstream.
+
 *(further entries: date, gate + signature, island added, pinned-pair give-back)*
