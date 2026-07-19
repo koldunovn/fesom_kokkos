@@ -43,6 +43,13 @@ sed -i "s|mix_scheme *=.*|mix_scheme='KPP'|"                      namelist.oce
 # just bypass the coarse-mesh resolution check that aborts on farc/dars/NG5.
 sed -i "s|check_opt_visc *=.*|check_opt_visc=.false.|"            namelist.dyn
 sed -i "s/, *'[mdhs]' *,/, 'y',/g"                                namelist.io   # push all output to yearly -> nothing fires in <5 days
+# optional: WSPLIT=true turns on the vertical-velocity implicit/explicit splitter
+# (use_wsplit) — the M7 wsplit work item's Fortran-behavior probes. Default: template
+# value (.false.), byte-identical job behavior when WSPLIT is unset.
+if [ -n "${WSPLIT:-}" ]; then
+  sed -i "s|use_wsplit *=.*|use_wsplit=.${WSPLIT}.|" namelist.dyn
+  echo "OVERRIDE: $(grep -m1 use_wsplit namelist.dyn)"
+fi
 # This FESOM2 errors on a missing fesom.clock instead of auto-creating one -> seed a cold start
 # (sec_in_day, day_of_year, year) x2 = start of 1958, matching the Kokkos/C YEAR=1958 + PHC IC.
 printf "  0.0000000000000000E+00              1        1958\n  0.0000000000000000E+00              1        1958\n" > fesom.clock
