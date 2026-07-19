@@ -49,16 +49,23 @@ mp64-1/mp32-2 remain valid but lack the hook).
 - `jobs/job_mp_gate3` (CPU c1 options-config leg) · `jobs/job_mp_gate3_gpu` (1-GPU CORE2) ·
   `jobs/job_mp_gate4` (1-yr 63A-posture twin, output-protected, CONSERV=100 free series).
 
-## IN FLIGHT at handoff (harvest these first)
+## CUDA rung — CLOSED (post-handoff same day)
 
-- **g_sp / g_dp = 26364960/61** (gpu partition, PENDING at write time): SP+FP64 CUDA
-  options-config legs, 100 steps, SPEED=1 + CGPIPE selfcheck + CONSERV. Harvest: rc=0,
-  banner, `[cgpipe-selfcheck] … 0.000e+00` count, CONSERV lines vs CPU twins (expect
-  last-digit-class agreement FP64; SP CONSERV vs CPU-SP differs at CUDA-atomics class).
-- **Gate 4 = 26365064**, `--dependency=afterok:26364960` (auto-starts only if g_sp exits 0;
-  scancel it if g_sp's selfcheck lines look wrong before it dispatches): 1-yr FP32 CUDA,
-  EXACT 63A posture (verbatim KNOBS from 63A PROVENANCE incl. the inert EVPWIDE=8), 2N×4GPU,
-  monthly streams only, OUTDIR `/work/ab0995/a270088/port2/mp/y1/63Cmp_1958`.
+- **g_sp / g_dp (26364960/61) HARVESTED:** both rc=0, banners correct, clean; full SPEED
+  package ON at SP-CUDA; CONSERV physically consistent (CORE2 mean T ≈ 3.64 °C = known Tbar;
+  SP−FP64 heat 2.9e-8 rel at step 100 = state-divergence class). CGPIPE **structurally
+  INACTIVE at npes==1** (own banner: "npes==1 … running the 2-exchange CG") — SP10 family.
+- **g4_sp (26365141) HARVESTED — the closing rung:** 4 ranks × 4 GPU (dist_4), CGPIPE
+  **ACTIVE** ("2-ring single-exchange CG ACTIVE", partners=3) and
+  **selfcheck 0.000e+00 on ALL 11,923 lines** at SP-CUDA. Run clean, 0.1707 s/step.
+  **⇒ GATE 3k CLOSED ON BOTH BACKENDS.**
+
+## IN FLIGHT at handoff
+
+- **Gate 4 = 26365487** (v2 — walltime 45→25 min on user call; fairshare 0 + a100_80 pool
+  36A/0I/23DOWN made the 45-min 2-node job wait ~6.5 h; v1 26365064 scancelled pre-start):
+  1-yr FP32 CUDA, EXACT 63A posture (verbatim KNOBS incl. the inert EVPWIDE=8), 2N×4GPU,
+  monthly streams only, OUTDIR `/work/ab0995/a270088/port2/mp/y1/63Cmp_1958`, CONSERV=100.
   **Harvest:** `m7_climate_check_plots.py <outdir> <plotdir> --years 1958` (main-checkout
   script, read-only) vs FP64 twin = **63A year 1958** (`/work/ab0995/a270088/port2/climate63/63A`)
   + Fortran `/work/ab0995/a270088/fesom2_core2`; M5.23 bar = pattern correlations in the
