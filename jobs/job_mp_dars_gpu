@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=mp_dars_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+# M8 Gate-2 GPU leg on dars. BIN-pinned; dt120/300-step min-of-2 (house shape); knobs OFF
+# (posture recorded); -C a100_80 (L94). Samples device memory mid-rep_a (the JUPITER number).
+# Required --export: BIN, TAG. Optional DT (120), NSTEPS (300).
+ROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+: "${BIN:?pin BIN}"; : "${TAG:?TAG required}"
+OUT=/work/ab0995/a270088/port2/mp/gate2/$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+run() {
+  srun "$BIN" "$MESH" "$OUT" "${DT:-120}" "${NSTEPS:-300}" 999999 "$PHC" 1958 \
+       > "$OUT/log_$1.txt" 2>&1
+  printf "%-8s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+echo "=== mp dars GPU $TAG nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:-120} nsteps=${NSTEPS:-300} bin=$BIN ==="
+sha256sum "$BIN" | cut -c1-8
+nvidia-smi -L | head -1
+( sleep 60; nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv,noheader \
+    > "$OUT/gpumem.txt" 2>&1 ) &
+run rep_a
+run rep_b
+grep -m1 "PRECISION" "$OUT/log_rep_a.txt"
+grep -E "it=" "$OUT/log_rep_a.txt" | tail -1
+echo "--- device memory (sampled 60s into rep_a) ---"; cat "$OUT/gpumem.txt" 2>/dev/null
