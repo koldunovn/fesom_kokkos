@@ -143,8 +143,16 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 **Files:** (per slice) `src/fesom_*.cpp/.h/.hpp`
 
-- [ ] 2a core state structs + field allocs (`fesom_aux.h`, alloc sites, **`fesom_field.hpp`:
-      `Field = FieldT<real_t>`** — the single edit that actually flips the state type)
+- [x] 2a DONE 2026-07-19: `fesom_field.hpp` `Field = FieldT<real_t>` + `#include fesom_types.h`
+      (+ `test_field` gains MPI::MPI_CXX for the transitive `<mpi.h>`). `fesom_constants.h` and
+      `fesom_aux.*` were ALREADY clean (0 raw doubles). Serial np1+np2 bit-identical;
+      CUDA envelope gate PASS (worst 0.10 of allowance).
+      ⚠️ **METHODOLOGY FINDING: CUDA is run-to-run non-bit-reproducible** (same-binary control:
+      per-field 1e-20..1e-14 on pi/20 steps — atomics order). Per-slice CUDA gate is therefore a
+      **noise-envelope gate** (`scripts/mp_cuda_gate.py`: per-(snap,field) diff ≤ max(10× same-
+      binary-rerun noise, 1e-13), pre-registered) with Serial as the sole byte oracle — matching
+      the house cert shape (Serial byte proofs; CUDA selfchecks + climate-close floors). Standing
+      noise basis: `gate_2a/{cuda,cuda_rerun}`; refresh after kernel-set-changing slices (2h).
 - [ ] 2b dyn/momentum/ALE (`fesom_dyn.cpp`, `fesom_momentum.cpp`, `fesom_ale.cpp`)
 - [ ] 2c tracers/advection/diffusion (`fesom_tracer_*.cpp`, `fesom_tracers.cpp`)
 - [ ] 2d ice family (`fesom_ice*.cpp` incl. evp/maevp/evpwide/fct/thermo)

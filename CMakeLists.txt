@@ -148,7 +148,9 @@ endif()
 
 # M1.1: fesom::Field DualView wrapper round-trip (host<->device sync, deep_copy). Needs Kokkos
 # only; links the active backend (Serial/OpenMP/CUDA) so the round trip is exercised per build.
+# M8: + MPI::MPI_CXX for include paths — fesom_field.hpp now includes fesom_types.h (real_t),
+# which needs <mpi.h> (FESOM_DIE → MPI_Abort).
 add_executable(test_field tests/test_field.cpp)
 target_include_directories(test_field PRIVATE src)
-target_link_libraries(test_field PRIVATE Kokkos::kokkos)
+target_link_libraries(test_field PRIVATE Kokkos::kokkos MPI::MPI_CXX)
 add_test(NAME field COMMAND test_field)
