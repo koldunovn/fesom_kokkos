@@ -334,9 +334,20 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 ### Task 10: Gate 4 — 1-yr climate leg
 
-- [ ] 1-yr FP32 CUDA run, 63A posture (options config, SPEED=1, no CGPOLY), output →
-      `/work/ab0995/a270088/port2/mp/y1/`
-- [ ] `m7_climate_check_plots` vs FP64 twin + Fortran reference; M5.23-bar verdict recorded
+- [x] 1-yr FP32 CUDA run DONE 2026-07-20 (job 26365487, 25-min class, 2N×4×A100-80,
+      63A posture verbatim): 17280/17280 steps, ZERO NaN, 17 monthly streams, CG 92 iters
+      at year end; CONSERV over the year: heat −0.40 % (physical annual signal),
+      salt −4.2e-6, vol −1.9e-9 rel. Output `/work/ab0995/a270088/port2/mp/y1/63Cmp_1958`
+- [x] **GATE 4 VERDICT: PASSED AT THE M5.23 BAR** (`scripts/mp_gate4_verdict.py`, house
+      eps_climate_compare convention, annual-mean maps, year 1958):
+      | pair | sst | sss | ssh | a_ice | m_ice |
+      | FP32 vs FP64 twin (63A) | **1.00000** | **1.00000** | **1.00000** | **0.99999** | 0.99999 |
+      | FP32 vs Fortran R2      | 1.00000 | 0.99996 | 0.99999 | 0.99855 | 0.99928 |
+      | FP64(63A) vs Fortran R2 | 1.00000 | 0.99996 | 1.00000 | 0.99872 | 0.99930 |
+      Twin correlations ≥ the bar class (sst 1.00000/sss 0.99996/ssh 1.00000/a_ice 0.99997)
+      on every var; **FP32-vs-Fortran ≡ FP64-vs-Fortran to the printed digit** — precision
+      sits exactly on the pre-existing port↔Fortran floor. Biases ≤3e-4; |Δ|max sst 0.50 K
+      twin / 0.88 K vs Fortran (= the FP64 run's own 0.89 K weather class)
 
 ### Task 11: Gate 5 — the 63-yr hindcast (endgame)
 
