@@ -108,9 +108,12 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    fig, (ax1, ax3, ax2) = plt.subplots(1, 3, figsize=(16, 4.5))
-    all_ns, y1, y3 = [], [], []
-    # one color per mesh family, solid=FP64 / dashed=FP32 — same key in all three
+    fig, (ax1, axB, axC, ax2) = plt.subplots(1, 4, figsize=(20, 4.5))
+    all_ns, y1 = [], []
+    # SYPD split by mesh size, LINEAR y — the m7_scaling_figs.py throughput layout
+    # ((b) CORE2 & farc, (c) multi-million-node meshes)
+    nsB, nsC, yB, yC = [], [], [], []
+    # one color per mesh family, solid=FP64 / dashed=FP32 — same key in all
     # panels, so the shared legend needs one entry per family + two style proxies
     for fam, label, marker, col in (("c", "dars CPU", "o", "C0"), ("g", "dars GPU", "s", "C1"),
                                     ("n", "NG5 CPU", "^", "C2"), ("N", "NG5 GPU", "D", "C3"),
@@ -124,12 +127,19 @@ def main():
         ax1.loglog(ns, sps, ls="--", marker=marker, color=col)
         dt = FAM_DT[fam]
         sy = [sypd(dt, d) for d in dps] + [sypd(dt, s) for s in sps]
-        ax3.loglog(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
-        ax3.loglog(ns, sy[len(ns):], ls="--", marker=marker, color=col)
+        small = fam in ("k", "f")
+        axS = axB if small else axC
+        axS.plot(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
+        axS.plot(ns, sy[len(ns):], ls="--", marker=marker, color=col)
+        if small:
+            nsB += ns
+            yB += sy
+        else:
+            nsC += ns
+            yC += sy
         ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], ls="-", marker=marker, color=col)
         all_ns += ns
         y1 += dps + sps
-        y3 += sy
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
                label="m7 anchor (dars)")
@@ -139,11 +149,16 @@ def main():
     y1 += list(M7_CPU.values()) + list(M7_NG5.values())
     all_ns += m7n + m7g
     ax1.set_ylabel("s/step (min-of-2)")
-    ax1.set_title("300 steps, knobs-off, per-mesh dt")
+    ax1.set_title("(a) time per step (300 steps, knobs-off, per-mesh dt)")
     ax1.grid(True, which="both", alpha=0.3)
-    ax3.set_ylabel("SYPD  (simulated yr / wall day)")
-    ax3.set_title("SYPD at production dt (CORE2 1800 · farc 1200 · dars/NG5 240)")
-    ax3.grid(True, which="both", alpha=0.3)
+    axB.set_ylabel("SYPD  (simulated yr / wall day)")
+    axB.set_title("(b) throughput, CORE2 & farc (prod dt 1800 / 1200)")
+    axB.set_ylim(0, max(yB) * 1.1)
+    axB.grid(True, which="both", alpha=0.3)
+    axC.set_ylabel("SYPD  (simulated yr / wall day)")
+    axC.set_title("(c) throughput, multi-million-node meshes (prod dt 240)")
+    axC.set_ylim(0, max(yC) * 1.1)
+    axC.grid(True, which="both", alpha=0.3)
     # one shared horizontal legend BELOW the panels — in-axes it covered the data
     # (user 2026-07-22; same fix as m7_scaling_figs.py fig_scaling)
     handles = ax1.get_legend_handles_labels()[0] + [
@@ -152,10 +167,11 @@ def main():
     # legend row sits ABOVE the footnote line (they collided at the same y)
     fig.legend(handles=handles, ncol=len(handles), fontsize=7.5, frameon=False,
                loc="lower center", bbox_to_anchor=(0.5, 0.022))
-    for ax in (ax1, ax3, ax2):
-        node_axis(ax, all_ns)
+    node_axis(ax1, all_ns)
+    node_axis(axB, nsB)   # per-panel counts, the m7 gpu_axis(axB, cb) pattern
+    node_axis(axC, nsC)
+    node_axis(ax2, all_ns)
     decimal_log_yaxis(ax1, min(y1), max(y1))
-    decimal_log_yaxis(ax3, min(y3), max(y3))
     fig.text(0.995, 0.005,
              "dars/NG5 SYPD at dt240 from dt120/dt180 (c32n dt60) runs — s/step dt-independent; "
              "CG dt-correction not applied",
@@ -163,7 +179,7 @@ def main():
     ax2.axhline(1.0, color="gray", lw=0.5)
     ax2.set_xlabel("nodes")
     ax2.set_ylabel("FP32 speedup (×)")
-    ax2.set_title("SP speedup vs scale (same-day pinned pairs)")
+    ax2.set_title("(d) SP speedup vs scale (same-day pinned pairs)")
     ax2.grid(True, which="both", alpha=0.3)
     fig.tight_layout(rect=[0, 0.075, 1, 1])
     for ext in ("png", "pdf"):
