@@ -18,6 +18,16 @@ import re
 M7_CPU = {1: 5.947, 2: 3.031, 4: 1.583, 8: 0.839, 16: 0.413, 32: 0.201}
 M7_NG5 = {4: 4.58, 8: 2.35, 16: 1.21, 32: 0.618}   # s15 curve; c32n = dt60 adopted point
 
+# working dt per family (the dt each leg actually ran — SCALING-REMEASURE protocol);
+# NG5 CPU c32n runs dt60 (s15 adoption) — its SYPD point is honestly at dt60.
+FAM_DT = {"c": 120, "g": 120, "n": 180, "N": 180, "k": 1800, "f": 900}
+NG5_C32_DT = 60
+YEAR_S = 365 * 86400.0   # 365-day-year convention
+
+
+def sypd(dt_s: float, s_step: float) -> float:
+    return dt_s / s_step * 86400.0 / YEAR_S
+
 
 def leg(base: pathlib.Path, tag: str, want_banner: str):
     d = base / tag
@@ -74,7 +84,7 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
+    fig, (ax1, ax3, ax2) = plt.subplots(1, 3, figsize=(16, 4.5))
     for fam, label, marker in (("c", "dars CPU (128 r/node)", "o"), ("g", "dars GPU (4/node)", "s"),
                                ("n", "NG5 CPU (128 r/node)", "^"), ("N", "NG5 GPU (4/node)", "D"),
                                ("k", "CORE2 CPU (128 r/node)", "v"), ("f", "farc CPU (128 r/node)", "P")):
@@ -85,6 +95,9 @@ def main():
         sps = [r[3] for r in rows if r[0] == fam]
         ax1.loglog(ns, dps, f"-{marker}", label=f"{label} FP64")
         ax1.loglog(ns, sps, f"--{marker}", label=f"{label} FP32")
+        dts = [NG5_C32_DT if (fam == "n" and n == 32) else FAM_DT[fam] for n in ns]
+        ax3.loglog(ns, [sypd(t, d) for t, d in zip(dts, dps)], f"-{marker}", label=f"{label} FP64")
+        ax3.loglog(ns, [sypd(t, s) for t, s in zip(dts, sps)], f"--{marker}", label=f"{label} FP32")
         ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], f"-{marker}", label=label)
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
@@ -97,6 +110,11 @@ def main():
     ax1.set_title("dars dt120, 300 steps, knobs-off")
     ax1.grid(True, which="both", alpha=0.3)
     ax1.legend(fontsize=8)
+    ax3.set_xlabel("nodes")
+    ax3.set_ylabel("SYPD (365-d yr)")
+    ax3.set_title("SYPD at working dt (CORE2 1800 · farc 900 · dars 120 · NG5 180; c32n@60)")
+    ax3.grid(True, which="both", alpha=0.3)
+    ax3.legend(fontsize=7)
     ax2.axhline(1.0, color="gray", lw=0.5)
     ax2.set_xlabel("nodes")
     ax2.set_ylabel("FP32 speedup (×)")
