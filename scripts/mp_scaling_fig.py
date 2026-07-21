@@ -29,6 +29,28 @@ def sypd(dt_s: float, s_step: float) -> float:
     return dt_s / (365.0 * s_step)
 
 
+def node_axis(ax, counts, label="nodes  (4×A100  /  128-core CPU)"):
+    """m7 house style: log-base-2 x with PLAIN node-count labels, no minors."""
+    import matplotlib.ticker as mtick
+    ax.set_xscale("log", base=2)
+    counts = sorted(set(int(c) for c in counts))
+    ax.set_xticks(counts)
+    ax.set_xticklabels([str(c) for c in counts])
+    ax.xaxis.set_minor_locator(mtick.NullLocator())
+    ax.set_xlabel(label)
+
+
+def decimal_log_yaxis(ax, lo, hi):
+    """m7 house style: log y-scale with PLAIN decimal tick labels (no powers of 10)."""
+    import matplotlib.ticker as mtick
+    ticks = [t for t in (0.02, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10)
+             if lo * 0.95 <= t <= hi * 1.05]
+    ax.set_yticks(ticks)
+    ax.yaxis.set_major_formatter(mtick.FormatStrFormatter("%g"))
+    ax.yaxis.set_minor_formatter(mtick.NullFormatter())
+    ax.set_ylim(lo * 0.9, hi * 1.1)
+
+
 def leg(base: pathlib.Path, tag: str, want_banner: str):
     d = base / tag
     vals = []
@@ -85,6 +107,7 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, (ax1, ax3, ax2) = plt.subplots(1, 3, figsize=(16, 4.5))
+    all_ns, y1, y3 = [], [], []
     for fam, label, marker in (("c", "dars CPU (128 r/node)", "o"), ("g", "dars GPU (4/node)", "s"),
                                ("n", "NG5 CPU (128 r/node)", "^"), ("N", "NG5 GPU (4/node)", "D"),
                                ("k", "CORE2 CPU (128 r/node)", "v"), ("f", "farc CPU (128 r/node)", "P")):
@@ -96,25 +119,33 @@ def main():
         ax1.loglog(ns, dps, f"-{marker}", label=f"{label} FP64")
         ax1.loglog(ns, sps, f"--{marker}", label=f"{label} FP32")
         dt = FAM_DT[fam]
-        ax3.loglog(ns, [sypd(dt, d) for d in dps], f"-{marker}", label=f"{label} FP64")
-        ax3.loglog(ns, [sypd(dt, s) for s in sps], f"--{marker}", label=f"{label} FP32")
+        sy = [sypd(dt, d) for d in dps] + [sypd(dt, s) for s in sps]
+        ax3.loglog(ns, sy[:len(ns)], f"-{marker}", label=f"{label} FP64")
+        ax3.loglog(ns, sy[len(ns):], f"--{marker}", label=f"{label} FP32")
         ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], f"-{marker}", label=label)
+        all_ns += ns
+        y1 += dps + sps
+        y3 += sy
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
                label="m7-s15 FP64 anchor (dars)")
     m7g = sorted(M7_NG5)
     ax1.loglog(m7g, [M7_NG5[n] for n in m7g], ":+", color="darkgray",
                label="m7-s15 FP64 anchor (NG5)")
-    ax1.set_xlabel("nodes")
+    y1 += list(M7_CPU.values()) + list(M7_NG5.values())
+    all_ns += m7n + m7g
     ax1.set_ylabel("s/step (min-of-2)")
-    ax1.set_title("dars dt120, 300 steps, knobs-off")
+    ax1.set_title("300 steps, knobs-off, per-mesh dt")
     ax1.grid(True, which="both", alpha=0.3)
     ax1.legend(fontsize=8)
-    ax3.set_xlabel("nodes")
     ax3.set_ylabel("SYPD  (simulated yr / wall day)")
     ax3.set_title("SYPD at production dt (CORE2 1800 · farc 900 · dars/NG5 240)")
     ax3.grid(True, which="both", alpha=0.3)
     ax3.legend(fontsize=7)
+    for ax in (ax1, ax3, ax2):
+        node_axis(ax, all_ns)
+    decimal_log_yaxis(ax1, min(y1), max(y1))
+    decimal_log_yaxis(ax3, min(y3), max(y3))
     fig.text(0.995, 0.005,
              "dars/NG5 SYPD at dt240 from dt120/dt180 (c32n dt60) runs — s/step dt-independent; "
              "CG dt-correction not applied",
