@@ -84,7 +84,7 @@ def main():
 
     rows = []
     for fam, tagfmt, sizes in (("c", "scal_c{n}", [1, 2, 4, 8, 16, 32]),
-                               ("g", "scal_g{n}", [2, 4, 8]),
+                               ("g", "scal_g{n}", [2, 4, 8, 16, 32]),
                                ("n", "scal_ng5_c{n}", [4, 8, 16, 32]),
                                ("N", "scal_ng5_g{n}", [4, 8, 16, 32]),
                                ("k", "scal_core2_c{n}", [1, 2, 4]),
