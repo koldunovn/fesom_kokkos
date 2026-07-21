@@ -139,7 +139,10 @@ def fig_scaling(df, fname, ylims):
     handles = axA.get_legend_handles_labels()[0] + [
         Line2D([], [], color="0.35", ls="-", marker="o", ms=4, label="bit-identical (A)"),
         Line2D([], [], color="0.35", ls="--", marker="^", ms=4, label="climate-identical (B)")]
-    axA.legend(handles=handles, fontsize=6, loc="lower left")
+    # one shared horizontal legend BELOW the panels — in-axes it sat on the CORE2
+    # curves in (a) and dominated the panel (user 2026-07-21)
+    fig.legend(handles=handles, ncol=len(handles), fontsize=7.5, frameon=False,
+               loc="lower center", bbox_to_anchor=(0.5, -0.005))
     gpu_axis(axB, cb)
     axB.set_ylabel("SYPD  (simulated yr / wall day)")
     axB.set_ylim(0, ylims["small"])
@@ -148,7 +151,7 @@ def fig_scaling(df, fname, ylims):
     axC.set_ylabel("SYPD  (simulated yr / wall day)")
     axC.set_ylim(0, ylims["large"])
     axC.set_title("(c) throughput, multi-million-node meshes")
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
     fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt120/dt180 runs (CG dt-correction not applied)",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
@@ -201,11 +204,14 @@ def fig_before_after(df, fname):
     gpu_axis(axA, counts)
     axA.set_ylabel("time per step  [s]")
     axA.set_title("(a) time per step, before vs after")
-    axA.legend(handles=axA.get_legend_handles_labels()[0] + [
+    ba_handles = axA.get_legend_handles_labels()[0] + [
         Line2D([], [], color="0.35", ls=":", marker="o", markerfacecolor="none",
                ms=4, label="before (M5.24, May)"),
         Line2D([], [], color="0.35", ls="-", marker="o", ms=4,
-               label="after (M7 class B)")], fontsize=6, loc="lower left")
+               label="after (M7 class B)")]
+    # shared horizontal legend below the panels (same fix as fig_scaling)
+    fig.legend(handles=ba_handles, ncol=len(ba_handles), fontsize=7.5, frameon=False,
+               loc="lower center", bbox_to_anchor=(0.5, -0.005))
     gpu_axis(axS, counts)
     axS.set_ylabel("SYPD  (simulated yr / wall day)")
     axS.set_ylim(0, None)
@@ -219,7 +225,7 @@ def fig_before_after(df, fname):
     axR.set_ylabel("speed-up factor  (before ÷ after)")
     axR.set_ylim(0.9, None)
     axR.set_title("(d) the M7 optimization gain")
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.05, 1, 1])
     fig.text(0.995, 0.005, "before = M5.24 campaign (35-step protocol); after = class B, std300; "
              "dars dt180→120 between eras (s/step dt-independent); SYPD at production dt both eras",
              ha="right", fontsize=5, alpha=0.6)
