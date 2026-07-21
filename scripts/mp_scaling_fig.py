@@ -16,6 +16,7 @@ import pathlib
 import re
 
 M7_CPU = {1: 5.947, 2: 3.031, 4: 1.583, 8: 0.839, 16: 0.413, 32: 0.201}
+M7_NG5 = {4: 4.58, 8: 2.35, 16: 1.21, 32: 0.618}   # s15 curve; c32n = dt60 adopted point
 
 
 def leg(base: pathlib.Path, tag: str, want_banner: str):
@@ -49,16 +50,20 @@ def main():
     args.out.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    for fam, sizes in (("c", [1, 2, 4, 8, 16, 32]), ("g", [2, 4, 8])):
+    for fam, tagfmt, sizes in (("c", "scal_c{n}", [1, 2, 4, 8, 16, 32]),
+                               ("g", "scal_g{n}", [2, 4, 8]),
+                               ("n", "scal_ng5_c{n}", [4, 8, 16, 32])):
         for n in sizes:
-            dp = leg(args.base, f"scal_{fam}{n}_dp", "DOUBLE")
-            sp = leg(args.base, f"scal_{fam}{n}_sp", "SINGLE")
+            tag = tagfmt.format(n=n)
+            dp = leg(args.base, f"{tag}_dp", "DOUBLE")
+            sp = leg(args.base, f"{tag}_sp", "SINGLE")
             if dp is None or sp is None:
-                print(f"scal_{fam}{n}: incomplete (dp={dp} sp={sp}) — skipped")
+                print(f"{tag}: incomplete (dp={dp} sp={sp}) — skipped")
                 continue
             rows.append((fam, n, dp, sp))
-            anchor = f"  [m7 {M7_CPU[n]:.3f}]" if fam == "c" and n in M7_CPU else ""
-            print(f"{fam}{n:<3d} dp={dp:.4f} sp={sp:.4f} speedup={dp/sp:.3f}x{anchor}")
+            anch = {"c": M7_CPU, "n": M7_NG5}.get(fam, {}).get(n)
+            anchor = f"  [m7 {anch:.3f}]" if anch else ""
+            print(f"{tag:<14s} dp={dp:.4f} sp={sp:.4f} speedup={dp/sp:.3f}x{anchor}")
 
     if not rows:
         raise SystemExit("no complete pairs yet")
@@ -67,7 +72,8 @@ def main():
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
-    for fam, label, marker in (("c", "CPU (128 r/node)", "o"), ("g", "GPU (4/node)", "s")):
+    for fam, label, marker in (("c", "dars CPU (128 r/node)", "o"), ("g", "dars GPU (4/node)", "s"),
+                               ("n", "NG5 CPU (128 r/node)", "^")):
         ns = [r[1] for r in rows if r[0] == fam]
         if not ns:
             continue
@@ -78,7 +84,10 @@ def main():
         ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], f"-{marker}", label=label)
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
-               label="m7-s15 FP64 anchor (CPU)")
+               label="m7-s15 FP64 anchor (dars)")
+    m7g = sorted(M7_NG5)
+    ax1.loglog(m7g, [M7_NG5[n] for n in m7g], ":+", color="darkgray",
+               label="m7-s15 FP64 anchor (NG5)")
     ax1.set_xlabel("nodes")
     ax1.set_ylabel("s/step (min-of-2)")
     ax1.set_title("dars dt120, 300 steps, knobs-off")
