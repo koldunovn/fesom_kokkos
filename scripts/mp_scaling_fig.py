@@ -18,15 +18,15 @@ import re
 M7_CPU = {1: 5.947, 2: 3.031, 4: 1.583, 8: 0.839, 16: 0.413, 32: 0.201}
 M7_NG5 = {4: 4.58, 8: 2.35, 16: 1.21, 32: 0.618}   # s15 curve; c32n = dt60 adopted point
 
-# working dt per family (the dt each leg actually ran — SCALING-REMEASURE protocol);
-# NG5 CPU c32n runs dt60 (s15 adoption) — its SYPD point is honestly at dt60.
-FAM_DT = {"c": 120, "g": 120, "n": 180, "N": 180, "k": 1800, "f": 900}
-NG5_C32_DT = 60
-YEAR_S = 365 * 86400.0   # 365-day-year convention
+# SYPD at PRODUCTION dt — the m7_scaling_figs.py convention exactly:
+# SYPD = dt_prod/(365*sstep); DT_PROD core2 1800 / farc 900 / dars 240 / NG5 240.
+# s/step is dt-independent, so projecting measurement runs (dars dt120, NG5 dt180/60)
+# to production dt is legitimate; CG dt-correction not applied (same footnote as m7).
+FAM_DT = {"c": 240.0, "g": 240.0, "n": 240.0, "N": 240.0, "k": 1800.0, "f": 900.0}
 
 
 def sypd(dt_s: float, s_step: float) -> float:
-    return dt_s / s_step * 86400.0 / YEAR_S
+    return dt_s / (365.0 * s_step)
 
 
 def leg(base: pathlib.Path, tag: str, want_banner: str):
@@ -95,9 +95,9 @@ def main():
         sps = [r[3] for r in rows if r[0] == fam]
         ax1.loglog(ns, dps, f"-{marker}", label=f"{label} FP64")
         ax1.loglog(ns, sps, f"--{marker}", label=f"{label} FP32")
-        dts = [NG5_C32_DT if (fam == "n" and n == 32) else FAM_DT[fam] for n in ns]
-        ax3.loglog(ns, [sypd(t, d) for t, d in zip(dts, dps)], f"-{marker}", label=f"{label} FP64")
-        ax3.loglog(ns, [sypd(t, s) for t, s in zip(dts, sps)], f"--{marker}", label=f"{label} FP32")
+        dt = FAM_DT[fam]
+        ax3.loglog(ns, [sypd(dt, d) for d in dps], f"-{marker}", label=f"{label} FP64")
+        ax3.loglog(ns, [sypd(dt, s) for s in sps], f"--{marker}", label=f"{label} FP32")
         ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], f"-{marker}", label=label)
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
@@ -111,10 +111,14 @@ def main():
     ax1.grid(True, which="both", alpha=0.3)
     ax1.legend(fontsize=8)
     ax3.set_xlabel("nodes")
-    ax3.set_ylabel("SYPD (365-d yr)")
-    ax3.set_title("SYPD at working dt (CORE2 1800 · farc 900 · dars 120 · NG5 180; c32n@60)")
+    ax3.set_ylabel("SYPD  (simulated yr / wall day)")
+    ax3.set_title("SYPD at production dt (CORE2 1800 · farc 900 · dars/NG5 240)")
     ax3.grid(True, which="both", alpha=0.3)
     ax3.legend(fontsize=7)
+    fig.text(0.995, 0.005,
+             "dars/NG5 SYPD at dt240 from dt120/dt180 (c32n dt60) runs — s/step dt-independent; "
+             "CG dt-correction not applied",
+             ha="right", va="bottom", fontsize=6, color="gray")
     ax2.axhline(1.0, color="gray", lw=0.5)
     ax2.set_xlabel("nodes")
     ax2.set_ylabel("FP32 speedup (×)")
