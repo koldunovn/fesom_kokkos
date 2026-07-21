@@ -24,9 +24,9 @@ MESH=/work/ab0995/a270088/port2/mesh/core2
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 : "${BIN:?set BIN=/path/to/pinned/binary}"
 : "${OUT:?set OUT=/work/.../outdir}"
-DT=${DT:-1800}; NSTEPS=${NSTEPS:-100}; SNAP=${SNAP:-10}
+DT=${DT:-1800}; NSTEPS=${NSTEPS:-100}; SNAP=${SNAP:-10}; YEAR=${YEAR:-1958}
 rm -rf "$OUT"; mkdir -p "$OUT"
-srun -l "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$OUT/log" 2>&1
+srun -l "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" "$YEAR" > "$OUT/log" 2>&1
 rc=$?
 echo "[mp_gate3] rc=$rc out=$OUT ; $(grep -m1 -E 'loop timing' "$OUT/log")"
 grep -m1 "PRECISION" "$OUT/log" || echo "[mp_gate3] WARNING: no precision banner"
