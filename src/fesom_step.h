@@ -84,9 +84,14 @@ bool fesom_sshrails_on(void);
 
 #endif /* FESOM_STEP_H */
 
-/* M8 forensic instrument (FESOM_MP_NANSCAN=1) — see fesom_step.cpp. */
+/* M8 forensic instrument (FESOM_MP_NANSCAN=1) — see fesom_step.cpp.
+ * s4: non-finite (NaN|Inf); _elem/_node variants decode culprit position + geo coords. */
 int  fesom_mp_nanscan_enabled(void);
 void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n);
+void fesom_mp_nanscan_elem(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh);
+void fesom_mp_nanscan_node(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh, int nlev);
 
 /* M8 Gate-3b conservation diagnostic (FESOM_MP_CONSERV=N) — see fesom_step.cpp.
  * Collective (Allreduce): when enabled, call on ALL ranks each diagnostic step. */

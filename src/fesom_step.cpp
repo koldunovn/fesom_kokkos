@@ -128,13 +128,60 @@ int fesom_mp_nanscan_enabled(void)
 }
 void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n)
 {
+    /* s4 upgrade: NON-FINITE scan (NaN OR Inf) — the vel-rhs verdict left open the
+     * classic SP overflow story (x→inf a step earlier, inf−inf→NaN later); a
+     * NaN-only scan is blind to the inf stage. */
     if (!fesom_mp_nanscan_enabled() || !a) return;
     for (size_t i = 0; i < n; ++i) {
-        if (a[i] != a[i]) {
-            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST NaN at flat=%zu (of %zu)\n",
-                    step_n, phase, i, n);
-            FESOM_DIE("mp-nanscan: NaN produced by phase %s (step %d, flat %zu)",
+        if (!std::isfinite(a[i])) {
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at flat=%zu (of %zu)\n",
+                    step_n, phase, (double)a[i], i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, flat %zu)",
                       phase, step_n, i);
+        }
+    }
+}
+
+/* Located variants: same tripwire, but the report decodes the culprit's position and
+ * geographic coordinates (the hunt needs "WHERE" — is it the Maud Rise storm cell?).
+ * ELEMVEC layout e*nl*2 + nz*2 + c; NODE3D n*nl + nz (pass nl=1 for 2D node arrays). */
+void fesom_mp_nanscan_elem(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh)
+{
+    if (!fesom_mp_nanscan_enabled() || !a) return;
+    const int nl = mesh->nl;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i])) {
+            const size_t e = i / ((size_t)nl * 2), rem = i % ((size_t)nl * 2);
+            const int nz = (int)(rem / 2), c = (int)(rem % 2);
+            const int v0 = mesh->elem_nodes[e * 3];
+            const double lon = mesh->geo_coord_nod2D[v0 * 2] * 180.0 / M_PI;
+            const double lat = mesh->geo_coord_nod2D[v0 * 2 + 1] * 180.0 / M_PI;
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at "
+                    "elem=%zu nz=%d comp=%d geo=(%.2f, %.2f) owned=%s (flat=%zu of %zu)\n",
+                    step_n, phase, (double)a[i], e, nz, c, lon, lat,
+                    e < (size_t)mesh->myDim_elem2D ? "yes" : "HALO", i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, elem %zu nz %d "
+                      "comp %d at %.2f/%.2f)", phase, step_n, e, nz, c, lon, lat);
+        }
+    }
+}
+void fesom_mp_nanscan_node(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh, int nlev)
+{
+    if (!fesom_mp_nanscan_enabled() || !a) return;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i])) {
+            const size_t nd = i / (size_t)nlev;
+            const int nz = (int)(i % (size_t)nlev);
+            const double lon = mesh->geo_coord_nod2D[nd * 2] * 180.0 / M_PI;
+            const double lat = mesh->geo_coord_nod2D[nd * 2 + 1] * 180.0 / M_PI;
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at "
+                    "node=%zu nz=%d geo=(%.2f, %.2f) owned=%s (flat=%zu of %zu)\n",
+                    step_n, phase, (double)a[i], nd, nz, lon, lat,
+                    nd < (size_t)mesh->myDim_nod2D ? "yes" : "HALO", i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, node %zu nz %d "
+                      "at %.2f/%.2f)", phase, step_n, nd, nz, lon, lat);
         }
     }
 }
@@ -281,8 +328,11 @@ int fesom_timestep(int                          step_n,
                           * (size_t)mesh->nl * 2;
     const real_t *mp_T = tracers->data[FESOM_TRACER_T].values;
     const real_t *mp_S = tracers->data[FESOM_TRACER_S].values;
-    fesom_mp_nanscan("step-entry(T)", mp_T, mp_n3, step_n);
-    fesom_mp_nanscan("step-entry(uv)", dyn->uv, mp_e3v, step_n);
+    fesom_mp_nanscan_node("step-entry(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
+    fesom_mp_nanscan_elem("step-entry(uv)", dyn->uv, mp_e3v, step_n, mesh);
+    /* AB2 cross-step history read by compute_vel_rhs — the one input the s4 verdict
+     * left unscanned (an inf here at step N-1 makes vel-rhs NaN at step N). */
+    fesom_mp_nanscan_elem("step-entry(uvAB)", dyn->uv_rhsAB, mp_e3v, step_n, mesh);
 
     /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3713-3752 mix_scheme_nmb).
      *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing_kk (K-Profile) — the CORE2
@@ -390,8 +440,8 @@ int fesom_timestep(int                          step_n,
         /* M5.13f: hnode device-resident from last step's commit (fesom_halo_field) - no re-push; EOS reads it on device. */
     }
     fesom_pressure_bv_kk(tracers, mesh, aux);   /* device: density_m_rho0/hpressure/bvfreq/dbsfc/MLD1 */
-    fesom_mp_nanscan("pressure_bv(rho)", aux->density_m_rho0, mp_n3, step_n);
-    fesom_mp_nanscan("pressure_bv(hp)", aux->hpressure, mp_n3, step_n);
+    fesom_mp_nanscan_node("pressure_bv(rho)", aux->density_m_rho0, mp_n3, step_n, mesh, mesh->nl);
+    fesom_mp_nanscan_node("pressure_bv(hp)", aux->hpressure, mp_n3, step_n, mesh, mesh->nl);
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
      * Mirror of Fortran oce_ale.F90:3475 sw_alpha_beta. */
     fesom_compute_sw_alpha_beta_kk(tracers, mesh, aux);   /* device: sw_alpha/sw_beta */
@@ -728,7 +778,7 @@ int fesom_timestep(int                          step_n,
      * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:
      * uv_rhs now stays device-resident with its halo across substeps 4-6. */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
-    fesom_mp_nanscan("vel-rhs(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
+    fesom_mp_nanscan_elem("vel-rhs(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n, mesh);
     /* M5.23 (L5): uv_rhsAB's device-halo was DEAD and is REMOVED (was at :467). compute_vel_rhs_kk
      * reads uv_rhsAB only at OWNED elements (E=myDim_elem2D); momadv scatters into it but its flux
      * reads uvnode_rhs, not uv_rhsAB → nothing reads uv_rhsAB's HALO on device. The poison-test
@@ -758,7 +808,7 @@ int fesom_timestep(int                          step_n,
     /* uv_rhs (final output) needed at halo for impl_vert_visc neighbour reads (TDMA SpMV) →
      * device-halo (GPU-aware MPI on CUDA, host-staged on Serial). */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
-    fesom_mp_nanscan("visc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
+    fesom_mp_nanscan_elem("visc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n, mesh);
 
     PMARK("5_viscfilt");
     /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
@@ -793,7 +843,7 @@ int fesom_timestep(int                          step_n,
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */
-    fesom_mp_nanscan("ivisc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
+    fesom_mp_nanscan_elem("ivisc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n, mesh);
     /* M5.9-pin (session 20): placebo sync dropped — uv_rhs is read by impl_vert_visc (substep 6) and
      * compute_ssh_rhs (substep 7) on the DEVICE (device-resident with its halo), and is NOT a snapshot
      * or diagnostic-print field, so it has NO host reader at all. The NaN-poison discriminator confirmed
@@ -859,13 +909,13 @@ int fesom_timestep(int                          step_n,
         dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
         fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
     }
-    fesom_mp_nanscan("ssh-rhs(rhs)", dyn->ssh_rhs, mp_n2, step_n);
+    fesom_mp_nanscan_node("ssh-rhs(rhs)", dyn->ssh_rhs, mp_n2, step_n, mesh, 1);
 
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
     fesom_phasestats_mark(FESOM_PH_CG);      /* M7 E.IMB.0: the solve is its own phase */
     int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
-    fesom_mp_nanscan("ssh-solve(eta)", dyn->d_eta, mp_n2, step_n);
+    fesom_mp_nanscan_node("ssh-solve(eta)", dyn->d_eta, mp_n2, step_n, mesh, 1);
     fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
@@ -1244,9 +1294,9 @@ int fesom_timestep(int                          step_n,
                 fct_pre_vo.assign(tracers->data[FESOM_TRACER_T].valuesold,
                                   tracers->data[FESOM_TRACER_T].valuesold + (size_t)N_redi * nl);
             }
-            fesom_mp_nanscan("pre-adv(T)", mp_T, mp_n3, step_n);
+            fesom_mp_nanscan_node("pre-adv(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers, p);
-            fesom_mp_nanscan("adv-fct(T)", mp_T, mp_n3, step_n);
+            fesom_mp_nanscan_node("adv-fct(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
             /* M5.13g1-T (FIX): T values + valuesold both device-resident - no FCT OUT sync_host. */
             if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn,
                                                         tracers, p, step_n, fct_pre_v, fct_pre_vo);
@@ -1276,7 +1326,7 @@ int fesom_timestep(int                          step_n,
                                   tracers->data[FESOM_TRACER_S].valuesold + (size_t)N_redi * nl);
             }
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers, p);
-            fesom_mp_nanscan("adv-fct(S)", mp_S, mp_n3, step_n);
+            fesom_mp_nanscan_node("adv-fct(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
             /* M5.14 (S flip): S values + valuesold both device-resident - no FCT OUT sync_host. */
             if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn,
                                                         tracers, p, step_n, fct_pre_v, fct_pre_vo);
@@ -1355,15 +1405,15 @@ int fesom_timestep(int                          step_n,
         /* M5.13g1-T: T values device-resident - no trdiff IN re-push (reads it on device). */
         /* M5.14 (S flip): S values device-resident too - no trdiff IN re-push (reads it on device). */
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
-        fesom_mp_nanscan("pre-impl(Kv)", aux->Kv, mp_n3, step_n);
-        fesom_mp_nanscan("pre-impl(hnode)", mesh->hnode, mp_n3, step_n);
-        fesom_mp_nanscan("pre-impl(hf)", forcing->heat_flux, mp_n2, step_n);
-        fesom_mp_nanscan("pre-impl(wf)", forcing->water_flux, mp_n2, step_n);
-        fesom_mp_nanscan("pre-impl(vs)", forcing->virtual_salt, mp_n2, step_n);
-        fesom_mp_nanscan("pre-impl(rs)", forcing->relax_salt, mp_n2, step_n);
+        fesom_mp_nanscan_node("pre-impl(Kv)", aux->Kv, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("pre-impl(hnode)", mesh->hnode, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("pre-impl(hf)", forcing->heat_flux, mp_n2, step_n, mesh, 1);
+        fesom_mp_nanscan_node("pre-impl(wf)", forcing->water_flux, mp_n2, step_n, mesh, 1);
+        fesom_mp_nanscan_node("pre-impl(vs)", forcing->virtual_salt, mp_n2, step_n, mesh, 1);
+        fesom_mp_nanscan_node("pre-impl(rs)", forcing->relax_salt, mp_n2, step_n, mesh, 1);
         fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
-        fesom_mp_nanscan("impl-vdiff(T)", mp_T, mp_n3, step_n);
-        fesom_mp_nanscan("impl-vdiff(S)", mp_S, mp_n3, step_n);
+        fesom_mp_nanscan_node("impl-vdiff(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("impl-vdiff(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
         /* M5.13g1-T: T values device-resident - no trdiff OUT sync_host (device-halo'd below). */
         /* M5.14 (S flip): S values device-resident too - no trdiff OUT sync_host (device-halo'd below). */
         if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,
@@ -1409,8 +1459,8 @@ int fesom_timestep(int                          step_n,
          * device halo above so the owned+halo clamp reproduces the prior host path's exchange-then-floor
          * order (bit-identical, race-free per-node column, no scatter). FESOM_NO_SFLOOR=1 still bisects. */
         if (!sf_skip) fesom_salinity_floor_kk(mesh, tracers);
-        fesom_mp_nanscan("post-sfloor(S)", mp_S, mp_n3, step_n);
-        fesom_mp_nanscan("post-sfloor(T)", mp_T, mp_n3, step_n);
+        fesom_mp_nanscan_node("post-sfloor(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("post-sfloor(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
     }
 
     /* 13c. Phase G6b — bolus velocity sub (Fortran oce_ale_tracer.F90:284-295).

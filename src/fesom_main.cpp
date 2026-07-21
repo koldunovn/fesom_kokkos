@@ -1117,8 +1117,8 @@ skip_rest_state:
                  * same host-authoritative forcing/ice state the C twin did, so the ice step + coupling are
                  * unchanged. The single-threaded host loop (blmc/L49 trap, ~16% of the NG5 step) is gone. */
                 FPROF_BEG(_tb); fesom_bulk_compute_kk(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
-                fesom_mp_nanscan("bulk(hf)", forcing.heat_flux,
-                                 (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n);
+                fesom_mp_nanscan_node("bulk(hf)", forcing.heat_flux,
+                                 (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n, &mesh, 1);
                 if (verify_bulk) {
                     /* C twin reads SST + uvnode on the HOST → make them host-current first (no-op on
                      * Serial, where device==host; on the CUDA print-only path it refreshes the host copy). */
@@ -1185,18 +1185,18 @@ skip_rest_state:
                            use_sr  ? &sr  : NULL,
                            &stiff);
             TP_END(tp_ice);
-            fesom_mp_nanscan("ice-step(hf)", forcing.heat_flux,
-                             (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n);
+            fesom_mp_nanscan_node("ice-step(hf)", forcing.heat_flux,
+                             (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n, &mesh, 1);
             /* 1964-storm hunt (session-4): the ice/momentum chain was the ladder's blind
              * zone — scan post-EVP ice velocities, ice-ocean stress, and ice tracers. */
             {
                 const size_t mp_nn = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
-                fesom_mp_nanscan("ice-step(uice)",  ice.uice,            mp_nn, n);
-                fesom_mp_nanscan("ice-step(vice)",  ice.vice,            mp_nn, n);
-                fesom_mp_nanscan("ice-step(siox)",  ice.stress_iceoce_x, mp_nn, n);
-                fesom_mp_nanscan("ice-step(sioy)",  ice.stress_iceoce_y, mp_nn, n);
-                fesom_mp_nanscan("ice-step(aice)",  ice.data[FESOM_ICE_AICE].values, mp_nn, n);
-                fesom_mp_nanscan("ice-step(mice)",  ice.data[FESOM_ICE_MICE].values, mp_nn, n);
+                fesom_mp_nanscan_node("ice-step(uice)",  ice.uice,            mp_nn, n, &mesh, 1);
+                fesom_mp_nanscan_node("ice-step(vice)",  ice.vice,            mp_nn, n, &mesh, 1);
+                fesom_mp_nanscan_node("ice-step(siox)",  ice.stress_iceoce_x, mp_nn, n, &mesh, 1);
+                fesom_mp_nanscan_node("ice-step(sioy)",  ice.stress_iceoce_y, mp_nn, n, &mesh, 1);
+                fesom_mp_nanscan_node("ice-step(aice)",  ice.data[FESOM_ICE_AICE].values, mp_nn, n, &mesh, 1);
+                fesom_mp_nanscan_node("ice-step(mice)",  ice.data[FESOM_ICE_MICE].values, mp_nn, n, &mesh, 1);
             }
             fesom_phasestats_mark(FESOM_PH_COUPL);
             TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
