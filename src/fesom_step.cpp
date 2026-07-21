@@ -110,7 +110,20 @@ static void ocean_synccheck_roundtrip(struct fesom_dyn     *dyn,
 int fesom_mp_nanscan_enabled(void)
 {
     static int on = -1;
-    if (on < 0) { const char *e = getenv("FESOM_MP_NANSCAN"); on = (e && e[0] == '1') ? 1 : 0; }
+    if (on < 0) {
+        const char *e = getenv("FESOM_MP_NANSCAN");
+        on = (e && e[0] == '1') ? 1 : 0;
+        /* L80 banner=truth: the armed state must be provable from the log. */
+        if (on) {
+            int rank = 0, inited = 0;
+            MPI_Initialized(&inited);
+            if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+            if (rank == 0) {
+                printf("[fesom_port] MP-NANSCAN ARMED (per-phase NaN tripwire, host aliases)\n");
+                fflush(stdout);
+            }
+        }
+    }
     return on;
 }
 void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n)
@@ -261,9 +274,15 @@ int fesom_timestep(int                          step_n,
     /* M8 nanscan probes (Serial host-alias reads; env-gated). */
     const size_t mp_n3 = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)mesh->nl;
     const size_t mp_n2 = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
+    /* Momentum-chain extent: elem3D 2-component (owned+eDim+eXDim, full alloc). The 1964-storm
+     * hunt showed the tracer-side ladder is blind to a NaN born in ice/momentum → CG rhs;
+     * these probes walk that chain (session-4). */
+    const size_t mp_e3v = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D)
+                          * (size_t)mesh->nl * 2;
     const real_t *mp_T = tracers->data[FESOM_TRACER_T].values;
     const real_t *mp_S = tracers->data[FESOM_TRACER_S].values;
     fesom_mp_nanscan("step-entry(T)", mp_T, mp_n3, step_n);
+    fesom_mp_nanscan("step-entry(uv)", dyn->uv, mp_e3v, step_n);
 
     /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3713-3752 mix_scheme_nmb).
      *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing_kk (K-Profile) — the CORE2
@@ -709,6 +728,7 @@ int fesom_timestep(int                          step_n,
      * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:
      * uv_rhs now stays device-resident with its halo across substeps 4-6. */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_mp_nanscan("vel-rhs(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
     /* M5.23 (L5): uv_rhsAB's device-halo was DEAD and is REMOVED (was at :467). compute_vel_rhs_kk
      * reads uv_rhsAB only at OWNED elements (E=myDim_elem2D); momadv scatters into it but its flux
      * reads uvnode_rhs, not uv_rhsAB → nothing reads uv_rhsAB's HALO on device. The poison-test
@@ -738,6 +758,7 @@ int fesom_timestep(int                          step_n,
     /* uv_rhs (final output) needed at halo for impl_vert_visc neighbour reads (TDMA SpMV) →
      * device-halo (GPU-aware MPI on CUDA, host-staged on Serial). */
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);
+    fesom_mp_nanscan("visc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
 
     PMARK("5_viscfilt");
     /*  6. implicit vertical viscosity TDMA — M2.4: device kernel (per-element TDMA).
@@ -772,6 +793,7 @@ int fesom_timestep(int                          step_n,
     fesom_impl_vert_visc_kk(mesh, aux, forcing, dyn);   /* device: uv_rhs */
     if (s_verify_ivisc) fesom_impl_vert_visc_verify(mesh, aux, forcing, dyn, step_n, ivv_uv_rhs_in.data());
     fesom_halo_field(dyn->uv_rhs_fld, FESOM_HALO_ELEM3D, nl, 2, p);   /* device-halo (GPU-aware MPI) */
+    fesom_mp_nanscan("ivisc(uv_rhs)", dyn->uv_rhs, mp_e3v, step_n);
     /* M5.9-pin (session 20): placebo sync dropped — uv_rhs is read by impl_vert_visc (substep 6) and
      * compute_ssh_rhs (substep 7) on the DEVICE (device-resident with its halo), and is NOT a snapshot
      * or diagnostic-print field, so it has NO host reader at all. The NaN-poison discriminator confirmed
@@ -837,6 +859,7 @@ int fesom_timestep(int                          step_n,
         dyn->ssh_rhs_fld.sync_host();                          /* OUT: before the nod2D halo */
         fesom_exchange_nod2D(dyn->ssh_rhs_fld.h_checked(), p); /* Fortran oce_ale.F90:1954 */
     }
+    fesom_mp_nanscan("ssh-rhs(rhs)", dyn->ssh_rhs, mp_n2, step_n);
 
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */

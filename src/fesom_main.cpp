@@ -1187,6 +1187,17 @@ skip_rest_state:
             TP_END(tp_ice);
             fesom_mp_nanscan("ice-step(hf)", forcing.heat_flux,
                              (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D), n);
+            /* 1964-storm hunt (session-4): the ice/momentum chain was the ladder's blind
+             * zone — scan post-EVP ice velocities, ice-ocean stress, and ice tracers. */
+            {
+                const size_t mp_nn = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
+                fesom_mp_nanscan("ice-step(uice)",  ice.uice,            mp_nn, n);
+                fesom_mp_nanscan("ice-step(vice)",  ice.vice,            mp_nn, n);
+                fesom_mp_nanscan("ice-step(siox)",  ice.stress_iceoce_x, mp_nn, n);
+                fesom_mp_nanscan("ice-step(sioy)",  ice.stress_iceoce_y, mp_nn, n);
+                fesom_mp_nanscan("ice-step(aice)",  ice.data[FESOM_ICE_AICE].values, mp_nn, n);
+                fesom_mp_nanscan("ice-step(mice)",  ice.data[FESOM_ICE_MICE].values, mp_nn, n);
+            }
             fesom_phasestats_mark(FESOM_PH_COUPL);
             TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
 
@@ -1201,6 +1212,9 @@ skip_rest_state:
              * re-populate from ice-ocean drag. */
             if (!no_wind) {
                 fesom_ice_oce_fluxes_mom(&ice, &mpi, &mesh, &forcing);
+                /* 1964-storm hunt: stress_surf is what compute_vel_rhs consumes. */
+                fesom_mp_nanscan("coupl(stress_surf)", forcing.stress_surf,
+                                 (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D) * 2, n);
             }
 
             /* Shortwave penetration (oce_shortwave_pene.F90 cal_shortwave_rad,
