@@ -1,0 +1,51 @@
+#!/bin/bash
+#SBATCH --job-name=mp_scale_gpu_bp
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+# M8 SP-scaling GPU leg in the m7 class-Bp posture (user-commissioned s4: "SP with all
+# speed optimisations, all meshes"): FESOM_SPEED=1 + EVPWIDE=8 + CGPOLY=3 + unbind +
+# proto pkg (SCALING-REMEASURE §GPU classes). House shape otherwise identical to
+# job_mp_scale_gpu (300 steps, min-of-2, knobs-fired asserted per L80). Required
+# --export: BIN, TAG, MESH, DT. Optional NSTEPS (300), SNAP (999999).
+ROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+# --- class-Bp deltas vs job_mp_scale_gpu ---
+export UCX_NET_DEVICES=all UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes   # proto pkg (E.T1)
+export SLURM_CPU_BIND=none                                                  # unbind
+export FESOM_SPEED=1 FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_CGPOLY=3
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+: "${BIN:?pin BIN}"; : "${TAG:?TAG required}"; : "${MESH:?MESH required}"; : "${DT:?DT required}"
+OUT=/work/ab0995/a270088/port2/mp/gate2/$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=999
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+run() {
+  srun "$BIN" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" "${SNAP:-999999}" "$PHC" 1958 \
+       > "$OUT/log_$1.txt" 2>&1
+  printf "%-8s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
+}
+echo "=== mp scale GPU-Bp $TAG mesh=$(basename $MESH) nodes=$SLURM_NNODES ntasks=$NPES dt=$DT nsteps=${NSTEPS:-300} bin=$BIN ==="
+sha256sum "$BIN" | cut -c1-8
+run rep_a
+run rep_b
+grep -m1 "PRECISION" "$OUT/log_rep_a.txt" || echo "WARNING: no precision banner"
+# L80 knob-fired asserts — a Bp point without these banners is NOT a Bp point
+grep -m1 '\[cgpoly\] ACTIVE'  "$OUT/log_rep_a.txt" || echo "L80 FAIL: no [cgpoly] ACTIVE banner"
+grep -m1 '\[evpwide\] hook:'  "$OUT/log_rep_a.txt" || echo "L80 FAIL: no [evpwide] hook banner"
+n_speed=$(grep -c '\[fesom_speed\]' "$OUT/log_rep_a.txt")
+echo "[fesom_speed] banner lines: $n_speed"
+grep -m3 '!!' "$OUT/log_rep_a.txt" && echo "WARNING: dead-knob (!!) lines above"
+grep -E "it=" "$OUT/log_rep_a.txt" | tail -1
+grep -qiE "FATAL|BLOWUP" "$OUT/log_rep_a.txt" "$OUT/log_rep_b.txt" && echo "WARNING: FATAL/BLOWUP present"
+exit 0
