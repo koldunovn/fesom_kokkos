@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=mp_gate5_63D
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+#SBATCH --time=12:00:00
+#SBATCH -o /work/ab0995/a270088/port2/mp/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/mp/slurm.%j.err
+#
+# M8 Gate 5 second arm — 63D-MP: 63-yr FP32 CUDA hindcast, EXACT 63B posture (user call
+# 2026-07-20: 63B set = 63A + CGPOLY d3 + E.T1 UCX env pkg, from 63B PROVENANCE verbatim).
+# 63B reached 52 complete yr at FP64; SP ~1.47x => expect the FULL 63 years inside the wall
+# — the first arm covering 1958-2020 end-to-end incl. the paper's 1980-2009 RMSE window.
+# Judged vs 63B on the common window at the same affirmed bar values (|Tbar gap| <= 0.001 C
+# per common complete year; |OHC gap| <= 2 ZJ; co-track/flatten). Also the decadal
+# CGPOLYxSP evidence (certified so far to 1 yr / Gate-3k). Output-protected: never clobbers.
+set -u
+ROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=1000
+export FESOM_MP_CONSERV=${CONSERV:-100}
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800
+NSTEPS=${NSTEPS:-1088640}
+SNAP_EVERY=-1
+YEAR=1958
+
+# the 63B knob set, verbatim order (UCX_NET_DEVICES=all OVERRIDES the mlx5_0:1 above — E.T1)
+export FESOM_SPEED=1 FESOM_SPEED_EVPWIDE=8 SLURM_CPU_BIND=none
+export FESOM_SPEED_CGPOLY=3
+export UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes UCX_NET_DEVICES=all
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar
+
+OUT=${OUTDIR:?OUTDIR required (absolute, dedicated)}
+case "$OUT" in /*) ;; *) echo "ERROR: OUTDIR must be absolute"; exit 2;; esac
+if [ -d "$OUT" ] && [ -n "$(ls -A "$OUT" 2>/dev/null)" ]; then
+    echo "ERROR: $OUT exists and is NON-EMPTY — refusing to clobber a climate run."; exit 3
+fi
+mkdir -p "$OUT"
+FESOM=${BIN:?BIN required (frozen binary path)}
+{ echo "M8 Gate-5 second arm 63D-MP: 63-yr FP32 CUDA hindcast, 63B posture (CGPOLY d3 + E.T1 env)";
+  echo "BIN=$FESOM"; sha256sum "$FESOM";
+  echo "BARS: same affirmed values as 63C, judged vs 63B common window (|Tbar|<=0.001C/yr; |OHC|<=2ZJ; co-track/flatten)";
+  echo "NSTEPS=$NSTEPS DT=$DT YEAR=$YEAR CONSERV=$FESOM_MP_CONSERV"; echo "nodes=$SLURM_JOB_NODELIST";
+  echo "submitted=$(date -Is) jobid=$SLURM_JOB_ID"; } >> "$OUT/PROVENANCE.txt"
+[ -d "$MESH/dist_$SLURM_NTASKS" ] || { echo "ERROR: dist_$SLURM_NTASKS missing"; exit 2; }
+
+srun -l "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date -Is) — exit $EC ==="
+grep -m1 "PRECISION" "$OUT/run.log"
+echo "--- last heartbeat ---"; tail -2 "$OUT/run.err"
+echo "--- nan/blowup check ---"; grep -icE "nan|blowup" "$OUT/run.err" || true
+echo "--- yearly monthly files ---"; ls "$OUT"/temp.fesom.*.monthly.nc 2>/dev/null | wc -l
+exit $EC
