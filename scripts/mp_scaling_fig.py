@@ -52,7 +52,8 @@ def main():
     rows = []
     for fam, tagfmt, sizes in (("c", "scal_c{n}", [1, 2, 4, 8, 16, 32]),
                                ("g", "scal_g{n}", [2, 4, 8]),
-                               ("n", "scal_ng5_c{n}", [4, 8, 16, 32])):
+                               ("n", "scal_ng5_c{n}", [4, 8, 16, 32]),
+                               ("N", "scal_ng5_g{n}", [4, 8, 16, 32])):
         for n in sizes:
             tag = tagfmt.format(n=n)
             dp = leg(args.base, f"{tag}_dp", "DOUBLE")
@@ -73,7 +74,7 @@ def main():
     import matplotlib.pyplot as plt
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.5))
     for fam, label, marker in (("c", "dars CPU (128 r/node)", "o"), ("g", "dars GPU (4/node)", "s"),
-                               ("n", "NG5 CPU (128 r/node)", "^")):
+                               ("n", "NG5 CPU (128 r/node)", "^"), ("N", "NG5 GPU (4/node)", "D")):
         ns = [r[1] for r in rows if r[0] == fam]
         if not ns:
             continue
