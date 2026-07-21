@@ -351,13 +351,15 @@ physics) and Fortran R2, at pre-registered bars (below).
 
 ### Task 11: Gate 5 — the 63-yr hindcast (endgame)
 
-- [ ] pre-register bars in this file BEFORE submission (they are: Tbar ≤ 0.001 °C; OHC ≤ ~10×
-      port↔Fortran gap; co-track/flatten) — re-affirm numbers against the final 63A/63B harvest
-- [ ] submit 63-yr FP32 hindcast **63C-MP = FP32 twin of the 63A posture** (options config,
-      SPEED=1, no CGPOLY — the clean twin, no solver-class confound; 63A≠63B, one run cannot
-      match both), 2N class, OUTDIR `/work/ab0995/a270088/port2/mp/climate63/63C/`.
-      Optional second arm 63D-MP (63B posture, +CGPOLY) only on user call if the CGPOLY×FP32
-      question is worth another 12-h run
+- [x] bars re-affirmed WITH USER 2026-07-20 ("go"): **|Tbar(63C−63A)| ≤ 0.001 °C at every
+      common complete year; |OHC gap| ≤ 2 ZJ (10× the 0.2-ZJ port↔Fortran gap); gap curve
+      co-tracks/flattens on m7_hindcast_drift.** Single arm (63A posture, no CGPOLY);
+      63D-MP CGPOLY arm SKIPPED (user accepted — CGPOLY×SP already certified at 3k;
+      s13 showed solver class climatically invisible)
+- [x] **SUBMITTED 2026-07-20: job 26373534** (`jobs/job_mp_gate5`, BIN=mp32-3-cuda 9e07fc67,
+      2N×4×A100-80, 12 h = partition max, OUTDIR `/work/ab0995/a270088/port2/mp/climate63/63C/`,
+      CONSERV=100 decadal FP64 conservation series). Wall guillotines cleanly, rule-0.40 trim;
+      SP ~1.47× ⇒ expect ~55-60 complete yr vs 63A's 41 (bars on the COMMON window)
 - [ ] harvest (rule-0.40 trim); `m7_hindcast_drift.py` vs 63A/63B + Fortran R2; F4-style figure
 - [ ] verdict vs bars; if failed → island bisection + re-run decision (user consult)
 
