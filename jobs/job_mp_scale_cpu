@@ -22,7 +22,10 @@ export FESOM_PRINT_EVERY=999
 NPES=$SLURM_NTASKS
 [ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
 run() {
-  srun "$BIN" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" 999999 "$PHC" 1958 \
+  # SNAP=-1 kills snapshots INCLUDING the step-0 initial write (fesom_main:1051) — its
+  # rank-0 gather_elem dies in UCX ibv_reg_mr at NG5 x 4096 ranks (s4). 999999 kept as
+  # default for continuity with the banked fleet (timed loop excludes the init write).
+  srun "$BIN" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" "${SNAP:-999999}" "$PHC" 1958 \
        > "$OUT/log_$1.txt" 2>&1
   printf "%-8s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"
 }
