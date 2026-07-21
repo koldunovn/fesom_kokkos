@@ -19,10 +19,11 @@ M7_CPU = {1: 5.947, 2: 3.031, 4: 1.583, 8: 0.839, 16: 0.413, 32: 0.201}
 M7_NG5 = {4: 4.58, 8: 2.35, 16: 1.21, 32: 0.618}   # s15 curve; c32n = dt60 adopted point
 
 # SYPD at PRODUCTION dt — the m7_scaling_figs.py convention exactly:
-# SYPD = dt_prod/(365*sstep); DT_PROD core2 1800 / farc 900 / dars 240 / NG5 240.
+# SYPD = dt_prod/(365*sstep); DT_PROD core2 1800 / farc 1200 (user 2026-07-22:
+# 20 min, not 15) / dars 240 / NG5 240.
 # s/step is dt-independent, so projecting measurement runs (dars dt120, NG5 dt180/60)
 # to production dt is legitimate; CG dt-correction not applied (same footnote as m7).
-FAM_DT = {"c": 240.0, "g": 240.0, "n": 240.0, "N": 240.0, "k": 1800.0, "f": 900.0}
+FAM_DT = {"c": 240.0, "g": 240.0, "n": 240.0, "N": 240.0, "k": 1800.0, "f": 1200.0}
 
 
 def sypd(dt_s: float, s_step: float) -> float:
@@ -141,7 +142,7 @@ def main():
     ax1.set_title("300 steps, knobs-off, per-mesh dt")
     ax1.grid(True, which="both", alpha=0.3)
     ax3.set_ylabel("SYPD  (simulated yr / wall day)")
-    ax3.set_title("SYPD at production dt (CORE2 1800 · farc 900 · dars/NG5 240)")
+    ax3.set_title("SYPD at production dt (CORE2 1800 · farc 1200 · dars/NG5 240)")
     ax3.grid(True, which="both", alpha=0.3)
     # one shared horizontal legend BELOW the panels — in-axes it covered the data
     # (user 2026-07-22; same fix as m7_scaling_figs.py fig_scaling)
