@@ -43,7 +43,7 @@ def node_axis(ax, counts, label="nodes  (4×A100  /  128-core CPU)"):
 def decimal_log_yaxis(ax, lo, hi):
     """m7 house style: log y-scale with PLAIN decimal tick labels (no powers of 10)."""
     import matplotlib.ticker as mtick
-    ticks = [t for t in (0.02, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10)
+    ticks = [t for t in (0.02, 0.03, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 3, 5, 10, 20, 30, 50)
              if lo * 0.95 <= t <= hi * 1.05]
     ax.set_yticks(ticks)
     ax.yaxis.set_major_formatter(mtick.FormatStrFormatter("%g"))
@@ -106,42 +106,51 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
     fig, (ax1, ax3, ax2) = plt.subplots(1, 3, figsize=(16, 4.5))
     all_ns, y1, y3 = [], [], []
-    for fam, label, marker in (("c", "dars CPU (128 r/node)", "o"), ("g", "dars GPU (4/node)", "s"),
-                               ("n", "NG5 CPU (128 r/node)", "^"), ("N", "NG5 GPU (4/node)", "D"),
-                               ("k", "CORE2 CPU (128 r/node)", "v"), ("f", "farc CPU (128 r/node)", "P")):
+    # one color per mesh family, solid=FP64 / dashed=FP32 — same key in all three
+    # panels, so the shared legend needs one entry per family + two style proxies
+    for fam, label, marker, col in (("c", "dars CPU", "o", "C0"), ("g", "dars GPU", "s", "C1"),
+                                    ("n", "NG5 CPU", "^", "C2"), ("N", "NG5 GPU", "D", "C3"),
+                                    ("k", "CORE2 CPU", "v", "C4"), ("f", "farc CPU", "P", "C5")):
         ns = [r[1] for r in rows if r[0] == fam]
         if not ns:
             continue
         dps = [r[2] for r in rows if r[0] == fam]
         sps = [r[3] for r in rows if r[0] == fam]
-        ax1.loglog(ns, dps, f"-{marker}", label=f"{label} FP64")
-        ax1.loglog(ns, sps, f"--{marker}", label=f"{label} FP32")
+        ax1.loglog(ns, dps, ls="-", marker=marker, color=col, label=label)
+        ax1.loglog(ns, sps, ls="--", marker=marker, color=col)
         dt = FAM_DT[fam]
         sy = [sypd(dt, d) for d in dps] + [sypd(dt, s) for s in sps]
-        ax3.loglog(ns, sy[:len(ns)], f"-{marker}", label=f"{label} FP64")
-        ax3.loglog(ns, sy[len(ns):], f"--{marker}", label=f"{label} FP32")
-        ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], f"-{marker}", label=label)
+        ax3.loglog(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
+        ax3.loglog(ns, sy[len(ns):], ls="--", marker=marker, color=col)
+        ax2.semilogx(ns, [d / s for d, s in zip(dps, sps)], ls="-", marker=marker, color=col)
         all_ns += ns
         y1 += dps + sps
         y3 += sy
     m7n = sorted(M7_CPU)
     ax1.loglog(m7n, [M7_CPU[n] for n in m7n], ":x", color="gray",
-               label="m7-s15 FP64 anchor (dars)")
+               label="m7 anchor (dars)")
     m7g = sorted(M7_NG5)
     ax1.loglog(m7g, [M7_NG5[n] for n in m7g], ":+", color="darkgray",
-               label="m7-s15 FP64 anchor (NG5)")
+               label="m7 anchor (NG5)")
     y1 += list(M7_CPU.values()) + list(M7_NG5.values())
     all_ns += m7n + m7g
     ax1.set_ylabel("s/step (min-of-2)")
     ax1.set_title("300 steps, knobs-off, per-mesh dt")
     ax1.grid(True, which="both", alpha=0.3)
-    ax1.legend(fontsize=8)
     ax3.set_ylabel("SYPD  (simulated yr / wall day)")
     ax3.set_title("SYPD at production dt (CORE2 1800 · farc 900 · dars/NG5 240)")
     ax3.grid(True, which="both", alpha=0.3)
-    ax3.legend(fontsize=7)
+    # one shared horizontal legend BELOW the panels — in-axes it covered the data
+    # (user 2026-07-22; same fix as m7_scaling_figs.py fig_scaling)
+    handles = ax1.get_legend_handles_labels()[0] + [
+        Line2D([], [], color="0.35", ls="-", label="FP64"),
+        Line2D([], [], color="0.35", ls="--", label="FP32")]
+    # legend row sits ABOVE the footnote line (they collided at the same y)
+    fig.legend(handles=handles, ncol=len(handles), fontsize=7.5, frameon=False,
+               loc="lower center", bbox_to_anchor=(0.5, 0.022))
     for ax in (ax1, ax3, ax2):
         node_axis(ax, all_ns)
     decimal_log_yaxis(ax1, min(y1), max(y1))
@@ -155,8 +164,7 @@ def main():
     ax2.set_ylabel("FP32 speedup (×)")
     ax2.set_title("SP speedup vs scale (same-day pinned pairs)")
     ax2.grid(True, which="both", alpha=0.3)
-    ax2.legend(fontsize=8)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0.075, 1, 1])
     for ext in ("png", "pdf"):
         fig.savefig(args.out / f"mp_scaling.{ext}", dpi=150)
     print(f"wrote {args.out}/mp_scaling.png+pdf")
