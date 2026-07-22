@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=jspn
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:25:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.err
+#
+# SP fidelity discriminator (m8 lesson SP8): the DP-calibrated gpu_fidelity_check
+# ceilings flagged SP-CUDA-vs-SP-serial as COHERENT-over (T 1006 / u 1284 / v 991
+# clustered entries, run 1020354). The m8-certified CUDA instrument is the
+# NOISE-ENVELOPE gate (scripts/mp_cuda_gate.py): PASS iff
+#   max|cuda - serial| <= max(10 x same-binary-rerun noise, 1e-13)  per field.
+# This job produces the same-binary rerun pair (SP CUDA x2, STAGE transport,
+# identical config to gates run spfid_cuda_np4) and applies the m8 gate using the
+# existing gates-v2 dirs as ref (SP serial) and new (SP CUDA).
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos
+MPROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_mp
+source "$ROOT/env_jupiter.sh"
+module load Python/3.12.3 SciPy-Stack/2024a netcdf4-python 2>/dev/null
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/hclimrep/koldunov1/meshes/core2
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/scale/gates
+CUDA_SP=$MPROOT/build-jupiter-cuda-sp/fesom_port
+echo "=== spnoise: $(hostname) $(date) ==="
+for rep in c d; do
+  OUT=$BASE/spnoise_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n4 -c72 --distribution=block:block bash -c "
+    source $ROOT/env_jupiter.sh
+    export FESOM_HALO_STAGE=1
+    exec $CUDA_SP $MESH $OUT 1800 20 20 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  echo "RESULT spnoise rep=$rep rc=$rc snaps=$(ls $OUT/snap_*.nc 2>/dev/null | wc -l)"
+  [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+done
+python3 "$MPROOT/scripts/mp_cuda_gate.py" "$BASE/spfid_ser_np4" "$BASE/spfid_cuda_np4" \
+        "$BASE/spnoise_c" "$BASE/spnoise_d" > "$BASE/sp_noise_gate.txt" 2>&1 \
+  && echo "VERDICT SP noise-envelope gate (m8 SP8): PASS — CUDA-vs-serial within 10x same-binary rerun noise" \
+  || echo "VERDICT SP noise-envelope gate (m8 SP8): FAIL — coherent excess beyond the noise envelope (real SP device bug)"
+tail -12 "$BASE/sp_noise_gate.txt" | sed 's/^/    spn| /'
+echo "=== spnoise done ==="

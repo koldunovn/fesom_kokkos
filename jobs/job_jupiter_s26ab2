@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH --job-name=j26ab2
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.err
+#
+# Stage-2026 A/B (PSMPI 5.13 + CUDA 13 + Kokkos 4.7.03) vs the certified
+# Stage-2025 twin fleet build — CORE2 dist_8, one allocation:
+#   1) selfcheck legs (10 steps): device + STAGE transports, DP  (does the 5.13
+#      fabric deliver correct device-pointer halos? = the D6 question)
+#   2) fidelity (20 steps, np4): DP + SP CUDA (each with the transports that
+#      passed 1) vs same-tree serial oracles — noise-envelope NOT applied here;
+#      the DP checker ceilings apply to DP, SP verdict via m8 mp_cuda_gate on
+#      the sp reruns (sp_dev_a/b or sp_stage_a/b double as the noise pair).
+#   3) timed anchors (300 steps x2): dp_dev / dp_stage / sp_dev / sp_stage.
+# Compare vs Stage-2025 fleet g1 anchors: dp 0.0445 / sp 0.0406 (min-of-2) and
+# dolpung twins 0.0463 / 0.0397. FLEET BINARIES STAY FROZEN regardless.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_s26
+MPROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_mp_s26
+ROOT25=/e/home/jusers/koldunov1/jupiter/port_kokkos
+source "$ROOT/env_jupiter.sh"
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/hclimrep/koldunov1/meshes/core2
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/scale/s26g2
+CUDA_DP=$ROOT/build-jupiter-cuda/fesom_port
+SER_DP=$ROOT/build-jupiter-serial/fesom_port
+CUDA_SP=$MPROOT/build-jupiter-cuda-sp/fesom_port
+SER_SP=$MPROOT/build-jupiter-serial-sp/fesom_port
+mkdir -p "$BASE"
+echo "=== s26 A/B: $(hostname) $(date) ==="
+for b in "$CUDA_DP" "$SER_DP" "$CUDA_SP" "$SER_SP"; do echo "bin $b md5=$(md5sum $b | cut -d' ' -f1)"; done
+
+leg(){ # $1 name  $2 bin  $3 ntasks  $4 dt  $5 nsteps  $6 snap  $7 knobs(;-sep)
+  OUT=$BASE/$1; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n$3 -c72 --distribution=block:block bash -c "
+    source $ROOT/env_jupiter.sh
+    export FESOM_SPEED=1
+    IFS=';' read -ra KV <<< '$7'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+    exec $2 $MESH $OUT $4 $5 $6 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+  echo "RESULT s26 $1 rc=$rc s_step=${ss:-NA}"
+  grep -iE 'selfcheck.*fail|cgpoly-selfcheck' "$OUT/log.txt" | tail -2 | sed 's/^/    sc| /'
+  [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+}
+# 1) transport selfchecks (DP)
+leg dev_check   "$CUDA_DP" 8 1800 10 -1 "FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1;FESOM_SPEED_CGPOLY=3"
+leg stage_check "$CUDA_DP" 8 1800 10 -1 "FESOM_HALO_STAGE=1;FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1;FESOM_SPEED_CGPOLY=3"
+# 2) fidelity runs (snap at 20)
+leg fid_ser_dp    "$SER_DP"  8 1800 20 20 ""
+leg fid_cuda_dev  "$CUDA_DP" 8 1800 20 20 ""
+leg fid_cuda_stg  "$CUDA_DP" 8 1800 20 20 "FESOM_HALO_STAGE=1"
+leg fid_ser_sp    "$SER_SP"  8 1800 20 20 ""
+leg fid_sp_dev_a  "$CUDA_SP" 8 1800 20 20 ""
+leg fid_sp_dev_b  "$CUDA_SP" 8 1800 20 20 ""
+leg fid_sp_stg_a  "$CUDA_SP" 8 1800 20 20 "FESOM_HALO_STAGE=1"
+leg fid_sp_stg_b  "$CUDA_SP" 8 1800 20 20 "FESOM_HALO_STAGE=1"
+# 3) timed anchors, 300 steps x2 (master set, no CGPOLY — fleet dp/sp legs)
+for t in dev stage; do
+  K=""; [ $t = stage ] && K="FESOM_HALO_STAGE=1"
+  leg dp_${t}_a "$CUDA_DP" 8 1800 300 -1 "$K"
+  leg dp_${t}_b "$CUDA_DP" 8 1800 300 -1 "$K"
+  leg sp_${t}_a "$CUDA_SP" 8 1800 300 -1 "$K"
+  leg sp_${t}_b "$CUDA_SP" 8 1800 300 -1 "$K"
+done
+# fidelity verdicts (python from the 2025 env's stack — checkers are stack-neutral)
+bash -c "
+  source $ROOT25/env_jupiter.sh >/dev/null 2>&1
+  module load Python/3.12.3 SciPy-Stack/2024a netcdf4-python 2>/dev/null
+  python3 $ROOT/scripts/gpu_fidelity_check.py $BASE/fid_ser_dp $BASE/fid_cuda_dev > $BASE/fid_dp_dev.txt 2>&1 && echo 'VERDICT s26 DP-dev fidelity: PASS' || echo 'VERDICT s26 DP-dev fidelity: FAIL'
+  python3 $ROOT/scripts/gpu_fidelity_check.py $BASE/fid_ser_dp $BASE/fid_cuda_stg > $BASE/fid_dp_stg.txt 2>&1 && echo 'VERDICT s26 DP-stage fidelity: PASS' || echo 'VERDICT s26 DP-stage fidelity: FAIL'
+  python3 $MPROOT/scripts/mp_cuda_gate.py $BASE/fid_ser_sp $BASE/fid_sp_dev_a $BASE/fid_sp_dev_a $BASE/fid_sp_dev_b > $BASE/fid_sp_dev.txt 2>&1 && echo 'VERDICT s26 SP-dev noise-envelope: PASS' || echo 'VERDICT s26 SP-dev noise-envelope: FAIL'
+  python3 $MPROOT/scripts/mp_cuda_gate.py $BASE/fid_ser_sp $BASE/fid_sp_stg_a $BASE/fid_sp_stg_a $BASE/fid_sp_stg_b > $BASE/fid_sp_stg.txt 2>&1 && echo 'VERDICT s26 SP-stage noise-envelope: PASS' || echo 'VERDICT s26 SP-stage noise-envelope: FAIL'
+"
+tail -2 $BASE/fid_dp_dev.txt 2>/dev/null | sed 's/^/    dpdev| /'
+tail -2 $BASE/fid_dp_stg.txt 2>/dev/null | sed 's/^/    dpstg| /'
+echo "=== s26 A/B done ==="

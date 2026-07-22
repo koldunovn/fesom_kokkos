@@ -1,0 +1,75 @@
+#!/bin/bash
+#SBATCH --job-name=jgate
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:50:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.err
+#
+# JUPITER gate ladder v2 (JUPITER-PLAN §3 + Addendum D), corrected after run 1020281:
+#  * run-1 lesson A: cross-decomposition snapshots are NOT byte-comparable in this
+#    port — snap_000000 already differs np2-vs-np8 (partition-dependent IC interp;
+#    T max|Δ| 6.3 K, ice on/off at node 102218). The certified Levante byte gate
+#    (job_m7_gate_serial) is np8-vs-np8 against a stored baseline. So the platform
+#    gate here is SAME-DECOMP DETERMINISM (np8 x2), and fidelity pairs SAME np.
+#  * run-1 lesson B: CUDA legs must run the ladder-certified transport
+#    (FESOM_HALO_STAGE=1) — device transport is broken on Stage-2025 PSMPI 5.11.
+#  G-det   serial np8 rep a vs rep b   -> byte equality REQUIRED (platform health;
+#          nondeterminism here = host-MPI/stack rot -> switch to Stages/2026 plan B)
+#  J-G4    CUDA(STAGE) np4 vs serial np4, 20 steps -> gpu_fidelity_check.py (record)
+#  SP      same J-G4 pair on the m8 builds (SP oracle = SP serial np4)
+#  J-G1/J-G3 still SKIP until private core2 + m6_baseline_serial refs land.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos
+MPROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_mp
+source "$ROOT/env_jupiter.sh"
+module load Python/3.12.3 SciPy-Stack/2024a netcdf4-python 2>/dev/null
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/hclimrep/koldunov1/meshes/core2
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/scale/gates
+SER_DP=$ROOT/build-jupiter-serial/fesom_port
+CUDA_DP=$ROOT/build-jupiter-cuda/fesom_port
+SER_SP=$MPROOT/build-jupiter-serial-sp/fesom_port
+CUDA_SP=$MPROOT/build-jupiter-cuda-sp/fesom_port
+mkdir -p "$BASE"
+echo "=== gates v2: $(hostname) $(date) ==="
+
+run(){ # $1 out-subdir  $2 ntasks  $3 cpus  $4 binary  $5 transport-knobs (semicolon-sep, may be empty)
+  OUT=$BASE/$1; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n$2 -c$3 --distribution=block:block bash -c "
+    source $ROOT/env_jupiter.sh
+    IFS=';' read -ra KV <<< '$5'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+    exec $4 $MESH $OUT 1800 20 20 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  echo "RESULT gates run=$1 np=$2 rc=$rc snaps=$(ls $OUT/snap_*.nc 2>/dev/null | wc -l)"
+  [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+  return $rc
+}
+
+# G-det: same-decomposition determinism, serial np8 x2 (the platform-health gate)
+run det_np8_a 8 36 "$SER_DP" ""
+run det_np8_b 8 36 "$SER_DP" ""
+python3 "$ROOT/scripts/diff_snap.py" "$BASE/det_np8_a" "$BASE/det_np8_b" > "$BASE/det_diff.txt" 2>&1 \
+  && echo "VERDICT G-det serial np8 rep-pair: BYTE-IDENTICAL PASS" \
+  || { echo "VERDICT G-det serial np8 rep-pair: FAIL (host nondeterminism -> plan B stack)"; tail -8 "$BASE/det_diff.txt" | sed 's/^/    | /'; }
+# J-G4 CUDA fidelity (DP), same-np pair, STAGE transport on the CUDA leg
+run fid_ser_np4  4 72 "$SER_DP"  ""
+run fid_cuda_np4 4 72 "$CUDA_DP" "FESOM_HALO_STAGE=1"
+python3 "$ROOT/scripts/gpu_fidelity_check.py" "$BASE/fid_ser_np4" "$BASE/fid_cuda_np4" > "$BASE/g4_fidelity.txt" 2>&1 \
+  && echo "VERDICT J-G4 CUDA-DP fidelity: PASS" || echo "VERDICT J-G4 CUDA-DP fidelity: FAIL"
+tail -6 "$BASE/g4_fidelity.txt" | sed 's/^/    g4| /'
+# SP twin (m8): SP serial oracle + SP CUDA fidelity, same-np pair
+run spfid_ser_np4  4 72 "$SER_SP"  ""
+run spfid_cuda_np4 4 72 "$CUDA_SP" "FESOM_HALO_STAGE=1"
+python3 "$ROOT/scripts/gpu_fidelity_check.py" "$BASE/spfid_ser_np4" "$BASE/spfid_cuda_np4" > "$BASE/sp_fidelity.txt" 2>&1 \
+  && echo "VERDICT J-G4 CUDA-SP fidelity: PASS" || echo "VERDICT J-G4 CUDA-SP fidelity: FAIL"
+tail -6 "$BASE/sp_fidelity.txt" | sed 's/^/    sp| /'
+echo "SKIP J-G1 np1 + J-G3 drift doc (private core2 / m6_baseline_serial pending transfer)"
+echo "=== gates v2 done ==="

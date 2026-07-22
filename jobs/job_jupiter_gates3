@@ -1,0 +1,55 @@
+#!/bin/bash
+#SBATCH --job-name=jgate3
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=8
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:40:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.err
+#
+# Final gate pair, unlocked by the DKRZ transfer (2026-07-22):
+#  J-G1  serial np1 smoke on the PRIVATE core2 (dist_1), 20 steps — runs, no NaN.
+#  J-G3  cross-arch drift DOCUMENTATION (not a pass bar): serial np8 on the private
+#        core2 dist_8 replicating the m6_baseline_serial config EXACTLY
+#        (dt=1800, 20 steps, snap_every=10, year 1958 — job_m7_gate_serial header),
+#        then diff_snap vs the Levante snapshots. The printed per-field max|Δ| IS
+#        the deliverable: the documented JUPITER floor (L79 — every platform has
+#        its own floor; measure it, never assume it). diff_snap exit 1 is EXPECTED
+#        (aarch64 libm/FMA vs x86); only the magnitudes matter.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos
+source "$ROOT/env_jupiter.sh"
+module load Python/3.12.3 SciPy-Stack/2024a netcdf4-python 2>/dev/null
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/e-sta-destine/koldunov1/meshes/core2_private
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/scale/gates
+REFS=/e/scratch/e-sta-destine/koldunov1/gate_refs/m6_baseline_serial
+SER_DP=$ROOT/build-jupiter-serial/fesom_port
+mkdir -p "$BASE"
+echo "=== gates3 (private core2): $(hostname) $(date) ==="
+
+# J-G1: np1 smoke
+OUT=$BASE/g1_np1_private; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -n1 -c72 bash -c "source $ROOT/env_jupiter.sh; exec $SER_DP $MESH $OUT 1800 20 20 $PHC 1958" > "$OUT/log.txt" 2>&1
+rc=$?
+nan=$(grep -ciE 'nan|fatal|diverged' "$OUT/log.txt")
+echo "RESULT gates3 J-G1 np1 rc=$rc nan_hits=$nan snaps=$(ls $OUT/snap_*.nc 2>/dev/null | wc -l)"
+[ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+[ $rc -eq 0 ] && [ "$nan" = 0 ] && echo "VERDICT J-G1 serial np1 smoke: PASS" || echo "VERDICT J-G1 serial np1 smoke: FAIL"
+
+# J-G3: np8 baseline-config replica -> drift table vs Levante refs
+OUT=$BASE/g3_np8_private; rm -rf "$OUT"; mkdir -p "$OUT"
+srun -n8 -c36 --distribution=block:block bash -c "source $ROOT/env_jupiter.sh; exec $SER_DP $MESH $OUT 1800 20 10 $PHC 1958" > "$OUT/log.txt" 2>&1
+rc=$?
+echo "RESULT gates3 J-G3 np8 rc=$rc snaps=$(ls $OUT/snap_*.nc 2>/dev/null | wc -l)"
+[ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+python3 "$ROOT/scripts/diff_snap.py" "$REFS" "$OUT" > "$BASE/g3_drift.txt" 2>&1
+echo "J-G3 cross-arch drift table (JUPITER aarch64/gcc13 vs Levante x86 m6_baseline_serial) — DOCUMENTATION:"
+grep -E '==|max-abs-diff|IDENTICAL|match' "$BASE/g3_drift.txt" | head -40 | sed 's/^/    g3| /'
+echo "=== gates3 done ==="

@@ -1,0 +1,55 @@
+#!/bin/bash
+#SBATCH --job-name=jlad
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:35:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/scale/slurm.%x.%j.err
+#
+# JUPITER day-0 transport ladder (JUPITER-PLAN Addendum A) on CORE2 dist_4:
+#   check legs (10 steps, selfchecks ON):  (a) device transport  (b) FESOM_HALO_STAGE=1
+#   timed legs (300 steps, x2 reps each):  (a) vs (b), FESOM_SPEED=1 master set
+# Verdict = min-of-2 A/B; even if (a) works, (b) is measured too (Addendum A.2:
+# on coherent GH200 the staged path may win regardless). NEVER FESOM_HOST_HALO
+# (A.3: silently kills CGPIPE/CGPOLY, factor 2-3 — the dolpung v1 trap).
+# GPU selection: gres=gpu:4 + gpu-bind=none, Kokkos maps device by SLURM_LOCALID
+# (dolpung-proven config; JUPITER's --gpus-per-task=1 native idiom is the fallback
+# if the per-rank GPU census below shows misassignment).
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos
+source "$ROOT/env_jupiter.sh"
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/hclimrep/koldunov1/meshes/core2
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/scale
+BIN=$ROOT/build-jupiter-cuda/fesom_port
+echo "=== ladder: $(hostname) $(date) bin_md5=$(md5sum $BIN | cut -d' ' -f1) ==="
+srun -c72 --distribution=block:block bash -c 'echo "rank $SLURM_PROCID localid $SLURM_LOCALID gpus_visible=$(nvidia-smi -L 2>/dev/null | wc -l)"' | sort
+
+leg(){ # $1 leg-name  $2 nsteps  $3 extra knobs (semicolon-sep)
+  OUT=$BASE/ladder/$1; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -c72 --distribution=block:block bash -c "
+    source $ROOT/env_jupiter.sh
+    export FESOM_SPEED=1
+    IFS=';' read -ra KV <<< '$3'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+    exec $BIN $MESH $OUT 1800 $2 -1 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+  echo "RESULT ladder $1 rc=$rc s_step=${ss:-NA}"
+  grep -iE 'selfcheck|cgpoly' "$OUT/log.txt" | tail -3 | sed 's/^/    sc| /'
+  [ $rc -ne 0 ] && tail -6 "$OUT/log.txt" | sed 's/^/    | /'
+}
+leg dev_check   10  "FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1;FESOM_SPEED_CGPOLY=3"
+leg stage_check 10  "FESOM_HALO_STAGE=1;FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1;FESOM_SPEED_CGPOLY=3"
+leg dev_a   300 ""
+leg dev_b   300 ""
+leg stage_a 300 "FESOM_HALO_STAGE=1"
+leg stage_b 300 "FESOM_HALO_STAGE=1"
+echo "=== ladder done ==="

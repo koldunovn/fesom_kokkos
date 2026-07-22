@@ -1,0 +1,69 @@
+#!/bin/bash
+#SBATCH --job-name=jclg1
+#SBATCH --account=e-sta-destine
+#SBATCH --partition=booster
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/clang_ab/slurm.%x.%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/clang_ab/slurm.%x.%j.err
+#
+# Host-compiler A/B, g1 anchor (clang++ 20.1.8 vs the s26 fleet's g++ 14.3;
+# everything else identical: Stage 2026, CUDA 13, Kokkos 4.7.03, DEVICE
+# transport). Compare timed legs vs s26 fleet core2_g1. Fidelity refs reuse the
+# s26 gcc-serial oracles (cross-compiler drift is climate-close class).
+# ISOLATION: clang trees/binaries only; results ONLY under port2/clang_ab.
+set -u
+ROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_clang
+MPROOT=/e/home/jusers/koldunov1/jupiter/port_kokkos_mp_clang
+ROOT25=/e/home/jusers/koldunov1/jupiter/port_kokkos
+source "$ROOT/env_jupiter.sh"
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+MESH=/e/scratch/hclimrep/koldunov1/meshes/core2
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/clang_ab
+S26REF=/e/scratch/e-sta-destine/koldunov1/port2/scale/s26
+CUDA_DP=$ROOT/build-jupiter-cuda/fesom_port
+CUDA_SP=$MPROOT/build-jupiter-cuda-sp/fesom_port
+mkdir -p "$BASE"
+echo "=== clang g1 A/B: $(hostname) $(date) ==="
+echo "dp: $CUDA_DP md5=$(md5sum $CUDA_DP | cut -d' ' -f1)"
+echo "sp: $CUDA_SP md5=$(md5sum $CUDA_SP | cut -d' ' -f1)"
+
+leg(){ # $1 name  $2 bin  $3 nsteps  $4 snap  $5 knobs(;-sep)
+  OUT=$BASE/$1; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n4 -c72 --distribution=block:block bash -c "
+    source $ROOT/env_jupiter.sh
+    export FESOM_SPEED=1
+    IFS=';' read -ra KV <<< '$5'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+    exec $2 $MESH $OUT 1800 $3 $4 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+  echo "RESULT clang $1 rc=$rc s_step=${ss:-NA}"
+  grep -iE 'selfcheck.*fail|cgpoly-selfcheck' "$OUT/log.txt" | tail -2 | sed 's/^/    sc| /'
+  [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+}
+leg dev_check "$CUDA_DP" 10 -1 "FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1;FESOM_SPEED_CGPOLY=3"
+leg fid_dp    "$CUDA_DP" 20 20 ""
+leg fid_sp_a  "$CUDA_SP" 20 20 ""
+leg fid_sp_b  "$CUDA_SP" 20 20 ""
+for r in a b; do
+  leg dp_$r     "$CUDA_DP" 300 -1 ""
+  leg dp_cgp_$r "$CUDA_DP" 300 -1 "FESOM_SPEED_CGPOLY=3"
+  leg sp_$r     "$CUDA_SP" 300 -1 ""
+  leg sp_cgp_$r "$CUDA_SP" 300 -1 "FESOM_SPEED_CGPOLY=3"
+done
+bash -c "
+  source $ROOT25/env_jupiter.sh >/dev/null 2>&1
+  module load Python/3.12.3 SciPy-Stack/2024a netcdf4-python 2>/dev/null
+  python3 $ROOT/scripts/gpu_fidelity_check.py $S26REF/fid_ser_dp $BASE/fid_dp > $BASE/fid_dp.txt 2>&1 && echo 'VERDICT clang DP fidelity (vs s26 gcc serial): PASS' || echo 'VERDICT clang DP fidelity: FAIL'
+  python3 $MPROOT/scripts/mp_cuda_gate.py $S26REF/fid_ser_sp $BASE/fid_sp_a $BASE/fid_sp_a $BASE/fid_sp_b > $BASE/fid_sp.txt 2>&1 && echo 'VERDICT clang SP noise-envelope: PASS' || echo 'VERDICT clang SP noise-envelope: FAIL (check isolated-cell class before believing)'
+"
+tail -2 $BASE/fid_dp.txt | sed 's/^/    dp| /'
+grep -v '\[ok\]' $BASE/fid_sp.txt | tail -3 | sed 's/^/    sp| /'
+echo "=== clang g1 A/B done ==="
