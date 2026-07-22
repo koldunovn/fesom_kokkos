@@ -186,6 +186,105 @@ def main():
         fig.savefig(args.out / f"mp_scaling.{ext}", dpi=150)
     print(f"wrote {args.out}/mp_scaling.png+pdf")
 
+    # ---- class-Bp companion (s4, user-commissioned): SP x full speed stack, GPU ----
+    # Tags scal_bp_<mesh>_g<n>_{dp,sp}; posture = m7 Bp (SPEED=1+EVPWIDE=8+CGPOLY=3+
+    # unbind+proto pkg). dp-Bp anchors read live from the m7 CSV class-Bp rows.
+    m7csv = pathlib.Path("/work/ab0995/a270088/port2/m7/scaling_figs/m7_scaling.csv")
+    m7bp = {}
+    if m7csv.exists():
+        for line in m7csv.read_text().splitlines():
+            cc = line.split(",")
+            if len(cc) >= 6 and cc[1] == "gpu" and cc[2] == "Bp":
+                m7bp[(cc[0], int(cc[3]))] = float(cc[5])
+    off_gpu = {("dars", r[1]): (r[2], r[3]) for r in rows if r[0] == "g"}
+    off_gpu.update({("ng5", r[1]): (r[2], r[3]) for r in rows if r[0] == "N"})
+    BP_FAMS = (("dars", "s", "C1", 240.0), ("ng5", "D", "C3", 240.0),
+               ("core2", "v", "C4", 1800.0), ("farc", "P", "C5", 1200.0))
+    BP_SIZES = {"dars": [2, 4, 8, 16, 32], "ng5": [2, 4, 8, 16, 32],
+                "core2": [1, 2, 4, 8], "farc": [1, 2, 4, 8, 16, 32]}
+    bprows = []
+    for mesh, _, _, _ in BP_FAMS:
+        for n in BP_SIZES[mesh]:
+            dp = leg(args.base, f"scal_bp_{mesh}_g{n}_dp", "DOUBLE")
+            sp = leg(args.base, f"scal_bp_{mesh}_g{n}_sp", "SINGLE")
+            if dp is None or sp is None:
+                print(f"bp_{mesh}_g{n}: incomplete (dp={dp} sp={sp}) — skipped")
+                continue
+            bprows.append((mesh, n, dp, sp))
+            an = m7bp.get((mesh, n))
+            extra = f"  [m7-Bp {an:.4f}]" if an else ""
+            offp = off_gpu.get((mesh, n))
+            if offp:
+                extra += f"  [off {offp[0]/offp[1]:.2f}x -> Bp {dp/sp:.2f}x; stack dp {offp[0]/dp:.2f}x]"
+            print(f"bp_{mesh}_g{n:<3d} dp={dp:.4f} sp={sp:.4f} speedup={dp/sp:.3f}x{extra}")
+    if not bprows:
+        print("no complete Bp pairs yet — Bp figure skipped")
+        return
+    fig2, (b1, bB, bC, b2) = plt.subplots(1, 4, figsize=(20, 4.5))
+    bp_ns, bp_y1, bp_nsB, bp_nsC, bp_yB, bp_yC = [], [], [], [], [], []
+    for mesh, marker, col, dtp in BP_FAMS:
+        ns = [r[1] for r in bprows if r[0] == mesh]
+        if not ns:
+            continue
+        dps = [r[2] for r in bprows if r[0] == mesh]
+        sps = [r[3] for r in bprows if r[0] == mesh]
+        b1.loglog(ns, dps, ls="-", marker=marker, color=col, label=f"{mesh} GPU")
+        b1.loglog(ns, sps, ls="--", marker=marker, color=col)
+        an = [(n, m7bp[(mesh, n)]) for n in ns if (mesh, n) in m7bp]
+        if an:
+            b1.loglog([a[0] for a in an], [a[1] for a in an], ls=":", marker="x",
+                      color=col, alpha=0.45)
+        sy = [sypd(dtp, d) for d in dps] + [sypd(dtp, s) for s in sps]
+        small = mesh in ("core2", "farc")
+        axS = bB if small else bC
+        axS.plot(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
+        axS.plot(ns, sy[len(ns):], ls="--", marker=marker, color=col)
+        (bp_nsB if small else bp_nsC).extend(ns)
+        (bp_yB if small else bp_yC).extend(sy)
+        b2.semilogx(ns, [d / s for d, s in zip(dps, sps)], ls="-", marker=marker, color=col)
+        offs = [(n, off_gpu[(mesh, n)][0] / off_gpu[(mesh, n)][1])
+                for n in ns if (mesh, n) in off_gpu]
+        if offs:
+            b2.semilogx([o[0] for o in offs], [o[1] for o in offs], ls=":", marker=marker,
+                        color=col, alpha=0.45)
+        bp_ns += ns
+        bp_y1 += dps + sps + [a[1] for a in an]
+    b1.set_ylabel("s/step (min-of-2)")
+    b1.set_title("(a) time per step, class Bp (dotted x = m7 FP64-Bp anchor)")
+    b1.grid(True, which="both", alpha=0.3)
+    bB.set_ylabel("SYPD  (simulated yr / wall day)")
+    bB.set_title("(b) throughput, CORE2 & farc (prod dt 1800 / 1200)")
+    bB.set_ylim(0, max(bp_yB) * 1.1 if bp_yB else 1)
+    bB.grid(True, which="both", alpha=0.3)
+    bC.set_ylabel("SYPD  (simulated yr / wall day)")
+    bC.set_title("(c) throughput, multi-million-node meshes (prod dt 240)")
+    bC.set_ylim(0, max(bp_yC) * 1.1 if bp_yC else 1)
+    bC.grid(True, which="both", alpha=0.3)
+    b2.axhline(1.0, color="gray", lw=0.5)
+    b2.set_ylabel("FP32 speedup (×)")
+    b2.set_title("(d) SP speedup: Bp (solid) vs knobs-off (dotted)")
+    b2.grid(True, which="both", alpha=0.3)
+    handles2 = b1.get_legend_handles_labels()[0] + [
+        Line2D([], [], color="0.35", ls="-", label="FP64"),
+        Line2D([], [], color="0.35", ls="--", label="FP32")]
+    fig2.legend(handles=handles2, ncol=len(handles2), fontsize=7.5, frameon=False,
+                loc="lower center", bbox_to_anchor=(0.5, 0.022))
+    node_axis(b1, bp_ns)
+    if bp_nsB:
+        node_axis(bB, bp_nsB)
+    if bp_nsC:
+        node_axis(bC, bp_nsC)
+    node_axis(b2, bp_ns)
+    decimal_log_yaxis(b1, min(bp_y1), max(bp_y1))
+    fig2.text(0.995, 0.005,
+              "class Bp = FESOM_SPEED=1 + EVPWIDE=8 + CGPOLY=3 + unbind + proto pkg; "
+              "knobs fired asserted per leg (L80); measurement dts as knobs-off fleet",
+              ha="right", va="bottom", fontsize=6, color="gray")
+    fig2.tight_layout(rect=[0, 0.075, 1, 1])
+    for ext in ("png", "pdf"):
+        fig2.savefig(args.out / f"mp_scaling_bp.{ext}", dpi=150)
+    print(f"wrote {args.out}/mp_scaling_bp.png+pdf")
+
 
 if __name__ == "__main__":
     main()
