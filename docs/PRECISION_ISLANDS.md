@@ -79,4 +79,24 @@ variables (parked M9 track; user proposal 2026-07-19).
   ⚠️ Same design in Fortran `gen_surface_forcing.F90` (PR-940 SP branch demoted nc_time to WP —
   latent) and JAX `jra55.py` (safe only via forced x64) — report upstream.
 
+- **2026-07-22 — PROMOTED: zstar SSH-stiffness cumulative ALE increments → dbl_t accumulation
+  shadow (`ssh-stiff-ale-acc`).** Signature (the Gate-5 killer, the "1964 storm"): BOTH 63-yr SP
+  arms + two cold-1958 CPU replays die at the SAME model date 1964-10-04/05 (step 118503±1)
+  across different backends/rank counts; located probes + node trace showed a clean exponential
+  eta mode (doubling ≈20 steps, onset ≈Sep-22) at Bering-basin node 118958 (179.35°E 57.63°N),
+  ssh_rhs there 600× normal while local physics stayed sane, eta decoupled from layer
+  thicknesses; death = tracer advection under runaway d_eta shear → T −7e7 (finite!) → EOS −inf
+  at `pressure_bv(rho)` → PGF → CG NaN. Root cause: `update_stiff_mat_ale` incremented the
+  real_t CSR `values` every step for 118k steps (open-loop, never rebuilt; invariant sum(dhe) ==
+  hbar−hbar₀) — float absorption dropped sub-ulp increments asymmetrically across each row and
+  de-tuned the operator until an eigenmode crossed |λ|=1; the crossing follows the (SP-identical)
+  seasonal state ⇒ the date-locked death. FP64 immune (ulp 2e-16). Island: `values_dbl_fld`
+  (FieldT<dbl_t> shadow, seeded from the base matrix in fesom_ssh_preconditioner); increments
+  accumulate there, real_t working copy refreshed each update (rounded ONCE) — CG SpMV keeps
+  float bandwidth. Give-back: one nnz-sized dbl_t array (~7·nod2D·8 B, ≈7 MB CORE2 total) + one
+  trivial per-step refresh kernel, zstar-only; CG unchanged. FP64 bit-identity: same adds, same
+  order, exact copy (gate below). ⚠️ Fortran shares the design (oce_ale.F90:1892-2001) — PR-940's
+  SP branch would hit the same wall on any zstar run ≳ months: upstream-report material. Proof =
+  replay58e must ride through Oct-1964.
+
 *(further entries: date, gate + signature, island added, pinned-pair give-back)*

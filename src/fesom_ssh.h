@@ -45,6 +45,17 @@ typedef struct fesom_ssh_stiff {
     fesom::IntField colind_fld;
     fesom::Field    values_fld;
     fesom::Field    pr_values_fld;
+
+    /* M8 s4 dbl_t island (registry: ssh-stiff-ale-acc — the 1964-storm root cause):
+     * zstar's per-step CUMULATIVE ALE increments accumulate in this dbl_t SHADOW of
+     * values; the real_t working copy the CG reads is refreshed from it each update
+     * (base + correctly-accumulated total, rounded ONCE). At SP, 118k direct float
+     * `values +=` absorbed increments asymmetrically across each row and de-tuned the
+     * operator (exponential eta mode, doubling ~20 steps, Bering basin node 118958).
+     * FP64: dbl_t==real_t, same adds in the same order + exact copy => bit-identical.
+     * Seeded from the assembled base matrix at the end of fesom_ssh_preconditioner;
+     * linfs never calls the update, so the shadow is inert there. */
+    fesom::FieldT<dbl_t> values_dbl_fld;
 } fesom_ssh_stiff;
 
 /*

@@ -286,6 +286,18 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
     S->colind_fld.modify_host();    S->colind_fld.sync_device();
     S->values_fld.modify_host();    S->values_fld.sync_device();
     S->pr_values_fld.modify_host(); S->pr_values_fld.sync_device();
+
+    /* M8 s4 (ssh-stiff-ale-acc): seed the dbl_t accumulation shadow from the assembled
+     * base matrix, on device. update_stiff_mat_ale accumulates HERE and refreshes the
+     * real_t working copy; without zstar the shadow is never read again. */
+    S->values_dbl_fld.alloc("ssh.values_dbl", (size_t)S->nnz);
+    {
+        auto vals = S->values_fld.d();
+        auto vdbl = S->values_dbl_fld.d();
+        Kokkos::parallel_for("ssh_values_dbl_seed", Kokkos::RangePolicy<>(0, S->nnz),
+            KOKKOS_LAMBDA(const int q) { vdbl(q) = (dbl_t)vals(q); });
+        S->values_dbl_fld.modify_device();
+    }
 }
 
 /*===========================================================================
@@ -1990,6 +2002,11 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
     auto rowptr = S->rowptr_fld.d();
     auto colind = S->colind_fld.d();
     auto values = S->values_fld.d();
+    /* M8 s4 (ssh-stiff-ale-acc): increments land in the dbl_t shadow — NOT in values.
+     * A float `values +=` here absorbed sub-ulp increments over 118k steps and de-tuned
+     * the operator (the 1964 eta-runaway root cause); the shadow keeps the cumulative
+     * invariant sum(dhe)==hbar-hbar(init) exact, and values is refreshed below. */
+    auto vdbl   = S->values_dbl_fld.d();
     auto edge_tri = mesh->edge_tri_fld.d();
     auto edges    = mesh->edges_fld.d();
     auto elnod    = mesh->elem_nodes_fld.d();
@@ -2026,7 +2043,7 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
                          * identical to the C's spos[] lookup (CSR columns are unique per row). */
                         for (int q = rowptr(row); q < rowptr(row + 1); ++q) {
                             if (colind(q) == en[k]) {
-                                Kokkos::atomic_add(&values(q), sgn * fy[k] * factor);
+                                Kokkos::atomic_add(&vdbl(q), (dbl_t)(sgn * fy[k] * factor));
                                 break;
                             }
                         }
@@ -2034,6 +2051,12 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
                 }
             }
         });
+    /* Refresh the real_t working copy the CG reads: base + exact accumulated total,
+     * rounded once. FP64: dbl_t==real_t => exact copy, bit-identical to the old
+     * direct accumulation. */
+    Kokkos::parallel_for("fesom_stiff_ale_refresh", Kokkos::RangePolicy<>(0, S->nnz),
+        KOKKOS_LAMBDA(const int q) { values(q) = (real_t)vdbl(q); });
+    S->values_dbl_fld.modify_device();
     S->values_fld.modify_device();
     /* pr_values deliberately NOT refreshed -- see the banner above. */
 }
