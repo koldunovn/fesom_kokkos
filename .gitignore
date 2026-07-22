@@ -31,3 +31,7 @@ externals/kokkos/build/
 # Python
 __pycache__/
 *.pyc
+
+# frozen campaign binaries live in /work/ab0995/a270088/port2/{m7,mp}/bin — NEVER in git (user 2026-07-22)
+mp/bin/
+m7/bin/
