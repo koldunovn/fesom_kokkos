@@ -20,7 +20,11 @@ export OMPI_MCA_pml=ucx OMPI_MCA_btl=self
 export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
 export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
 # --- class-Bp deltas vs job_mp_scale_gpu ---
-export UCX_NET_DEVICES=all UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes   # proto pkg (E.T1)
+# NOPROTO=1 drops the proto pkg => class B (m7 precedent: farc-32N Bp = reproducible
+# proto hang x2 allocations; m7 fig plots best(B,Bp) with the per-scale env noted).
+if [ -z "${NOPROTO:-}" ]; then
+  export UCX_NET_DEVICES=all UCX_PROTO_ENABLE=y UCX_IB_GPU_DIRECT_RDMA=yes  # proto pkg (E.T1)
+fi
 export SLURM_CPU_BIND=none                                                  # unbind
 export FESOM_SPEED=1 FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_CGPOLY=3
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
