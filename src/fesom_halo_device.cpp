@@ -36,6 +36,22 @@ bool fesom_halo_device_active()
 #endif
 }
 
+bool fesom_halo_stage_on()
+{
+#ifdef KOKKOS_ENABLE_CUDA
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_HALO_STAGE");
+        cached = (e && e[0] == '1') ? 1 : 0;   // default OFF (GPU-aware MPI direct)
+        // FESOM_HOST_HALO=1 turns the whole device module off before this knob is
+        // ever consulted — the two are alternatives, not composable (see .hpp).
+    }
+    return cached != 0;
+#else
+    return false;
+#endif
+}
+
 /* ======================================================================= *
  * M5.17 halo MPI profiler — barrier-isolation split of the per-step halo
  * wait into LOAD-IMBALANCE (rank arrival skew) vs COMM (messages in flight).
@@ -193,6 +209,8 @@ struct DevHaloScratch {
     Kokkos::View<int*>    rlist_d;   // device copy of cs->rlist (1-based local idx)
     Kokkos::View<double*> send_d;    // device send buffer (grown on demand)
     Kokkos::View<double*> recv_d;    // device recv buffer
+    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> send_h;  // FESOM_HALO_STAGE pinned mirrors
+    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> recv_h;  //   (allocated only when staged)
     bool                  built = false;
     std::vector<MPI_Request> reqs;
 };
@@ -293,6 +311,42 @@ inline void halo_fence_pre_mpi()
     if (syncstats_on()) ++s_ss_fence_pre;
 }
 
+/* FESOM_HALO_STAGE support (M7.5, dolpung/GH200 — no-GPUDirect fabrics).
+ * The staged MPI leg is: D2H deep_copy of the USED send range -> MPI on pinned
+ * host pointers -> H2D deep_copy of the USED recv range -> device unpack.
+ * A deep_copy with no exec-space argument fences, so the NOFENCE2 audit holds
+ * unchanged: MPI never touches device memory in this mode, and the H2D copy
+ * into recv_d is stream-ordered against the following unpack. */
+inline void grow_pinned(Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &v,
+                        size_t need, const char *label)
+{
+    if (v.extent(0) < need)
+        v = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>(std::string(label), need);
+}
+inline void stage_announce(fesom_partit *p)
+{
+    static bool done = false;   // L80: a transport knob must announce that it FIRED
+    if (done) return;
+    done = true;
+    if (p->mype == 0) {
+        fprintf(stderr, "[halo] FESOM_HALO_STAGE=1 — device-packed halos, MPI leg staged "
+                        "through pinned host (no GPUDirect required)\n");
+        fflush(stderr);
+    }
+}
+inline void stage_d2h(const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h,
+                      const Kokkos::View<double*> &d, size_t n)
+{
+    if (n) Kokkos::deep_copy(Kokkos::subview(h, std::make_pair((size_t)0, n)),
+                             Kokkos::subview(d, std::make_pair((size_t)0, n)));
+}
+inline void stage_h2d(const Kokkos::View<double*> &d,
+                      const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h, size_t n)
+{
+    if (n) Kokkos::deep_copy(Kokkos::subview(d, std::make_pair((size_t)0, n)),
+                             Kokkos::subview(h, std::make_pair((size_t)0, n)));
+}
+
 inline void grow(Kokkos::View<double*> &v, size_t need, const char *label)
 {
     if (v.extent(0) < need) {
@@ -320,6 +374,8 @@ void fesom_halo_device_free()
         g_dev[i].rlist_d = Kokkos::View<int*>();
         g_dev[i].send_d  = Kokkos::View<double*>();
         g_dev[i].recv_d  = Kokkos::View<double*>();
+        g_dev[i].send_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
+        g_dev[i].recv_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
         g_dev[i].reqs.clear();
         g_dev[i].built = false;
     }
@@ -382,8 +438,15 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     const int needed = cs->rPEnum + cs->sPEnum;
     if ((int)s.reqs.size() < needed) s.reqs.resize(needed);
     int     nreq     = 0;
-    double *send_ptr = send.data();
-    double *recv_ptr = recv.data();
+    const bool staged = fesom_halo_stage_on();   // M7.5: MPI on pinned-host mirrors of the PACKED buffers
+    if (staged) {
+        stage_announce(p);
+        grow_pinned(s.send_h, send_total, "halo.send_h");
+        grow_pinned(s.recv_h, recv_total, "halo.recv_h");
+        stage_d2h(s.send_h, s.send_d, send_total);
+    }
+    double *send_ptr = staged ? s.send_h.data() : send.data();
+    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg  = cs->rptr[k + 1] - cs->rptr[k];
@@ -398,6 +461,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());   // M5.17: timed (gated FESOM_HALO_MPI_PROF)
+    if (staged) stage_h2d(s.recv_d, s.recv_h, recv_total);   // M7.5: packed halo back to device
 
     // UNPACK: scatter the recv buffer into the halo slots (race-free — each
     // rlist entry is a distinct halo node, so no atomics).
@@ -476,8 +540,15 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
     const int needed = cs->rPEnum + cs->sPEnum;
     if ((int)s.reqs.size() < needed) s.reqs.resize(needed);
     int     nreq     = 0;
-    double *send_ptr = send.data();
-    double *recv_ptr = recv.data();
+    const bool staged = fesom_halo_stage_on();   // M7.5: MPI on pinned-host mirrors of the PACKED buffers
+    if (staged) {
+        stage_announce(p);
+        grow_pinned(s.send_h, send_total, "halo.send_h");
+        grow_pinned(s.recv_h, recv_total, "halo.recv_h");
+        stage_d2h(s.send_h, s.send_d, send_total);
+    }
+    double *send_ptr = staged ? s.send_h.data() : send.data();
+    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
@@ -492,6 +563,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());
+    if (staged) stage_h2d(s.recv_d, s.recv_h, recv_total);   // M7.5: packed halo back to device
 
     // UNPACK: scatter each field's half of the per-node block back (race-free, no atomics).
     if (recv_count > 0) {
@@ -574,8 +646,15 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
     const int needed = cs->rPEnum + cs->sPEnum;
     if ((int)s.reqs.size() < needed) s.reqs.resize(needed);
     int     nreq     = 0;
-    double *send_ptr = send.data();
-    double *recv_ptr = recv.data();
+    const bool staged = fesom_halo_stage_on();   // M7.5: MPI on pinned-host mirrors of the PACKED buffers
+    if (staged) {
+        stage_announce(p);
+        grow_pinned(s.send_h, send_total, "halo.send_h");
+        grow_pinned(s.recv_h, recv_total, "halo.recv_h");
+        stage_d2h(s.send_h, s.send_d, send_total);
+    }
+    double *send_ptr = staged ? s.send_h.data() : send.data();
+    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
@@ -590,6 +669,7 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());
+    if (staged) stage_h2d(s.recv_d, s.recv_h, recv_total);   // M7.5: packed halo back to device
 
     // UNPACK: N disjoint unpack kernels (field i reads slot i*fs → its own halo). Race-free, no atomics.
     if (recv_count > 0) {

@@ -1262,4 +1262,41 @@ robust — it was running different physics than its comparator.
 
 ---
 
+## L102 — dolpung (GH200) first light: two x86 env leaks + the gdr_copy pin failure (2026-07-22)
+
+The port compiled and ran on DKRZ's `dolpung` partition (42 nodes × 4 GH200: 72-core Grace
+ARM + H100-class GPU, CUDA 12.9, RHEL 9.5 aarch64) the same day it was attempted. CORE2
+dist_4, dt1800, 35 steps: knob-off 1.857 s/step, `FESOM_SPEED=1` 0.779 s/step (min-of-2,
+rc=0, T/S sane, it= diag zeros match A100 logs) — the speed pack is worth **2.4×** on GH200
+vs ~10 % on A100-class runs. Serial oracle + np2 pi smokes pass on Grace. Recipes:
+`env_dolpung.sh` (toolchain) + `jobs/job_dolpung_gpu` (run template).
+
+- **Compile ON the node** (`salloc -t 360 -A mh1571 -p dolpung -n 288`): logins are x86,
+  nodes aarch64. Toolchain has NO usable modules for MPI/netCDF — the matched set is spack
+  dirs by absolute path (gcc 14.2 `am53qrz`, nvhpc 25.7 CUDA 12.9 `dsupkck`, CUDA-aware
+  `openmpi/4.1.8_cuda-12.9_nvhpc-25.7_gcc-14` under `/sw/mpi/...`, `netcdf-c-4.9.3-6xe2mx2`).
+  CMake: `-DKokkos_ARCH_HOPPER90=ON -DKokkos_ARCH_NATIVE=ON` + nvcc_wrapper, exactly as the
+  JUPITER plan predicted. Build ~7 min on 64 Grace cores.
+- **⚠️ srun exports the x86 login environment onto the ARM node.** Two configure failures
+  before the first clean one: (1) the login modules' `CMAKE_PREFIX_PATH` steered cmake to the
+  **x86 netCDF** even with the ARM `nc-config` first in PATH (find_program consults
+  CMAKE_PREFIX_PATH before PATH) — pin `-DNC_CONFIG=` and sanitize; (2) the x86 spack `git`
+  ("cannot execute binary file") broke Kokkos' build_env_info. `env_dolpung.sh` strips every
+  `/sw/spack-levante/` (x86) PATH/LD_LIBRARY_PATH entry — reusable pattern for any
+  cross-arch partition.
+- **⚠️ The fabric has no working GPUDirect.** First device-halo (step 1) dies:
+  `gdr_copy_md.c gdr_pin_buffer failed ret:22` → `Fatal: failed to register buffer with mem
+  type domain cuda`; multi-node adds `ibv_reg_mr(... cuda ...) Bad address`. SUPERSEDED
+  workarounds, in the order tried: blanket `^gdr_copy` runs but is 3.6× slow (UCX picks
+  knem/xpmem/IB-loopback for intra-node GPU traffic); the explicit
+  `UCX_TLS=self,sm,cuda_copy,cuda_ipc[,dc_mlx5]` list recovers that; **the real answer is
+  `FESOM_HALO_STAGE=1` (see the s17 act-2 entry / dolpung campaign doc): device-packed
+  halos with the MPI leg on pinned-host mirrors — full speed, no GPUDirect, CG levers
+  live.** Levante's `UCX_NET_DEVICES=mlx5_0:1` pin does NOT transfer (as the JUPITER plan
+  warned); plain srun + pmix works with zero MPI flags.
+- **Scheduler quirk:** fresh `mh1571_gpu` association ⇒ priority 1 (all sprio factors 0);
+  jobs sit PENDING ~40 min beside 39 idle nodes, with a misleading "Nodes DOWN/DRAINED/
+  reserved" reason. Not an access problem (you must be in Unix group `dolpunguser` +
+  an allowed account; both held). Budget the lag or hold `--no-shell` allocations.
+
 *Keep appending. Date entries when the context (versions, paths) might age.*

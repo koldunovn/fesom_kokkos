@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=dprobe
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/probe.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/probe.%j.err
+#
+# Config follow-up probes on big meshes (the A100-Bp gap hunt, 2026-07-22):
+# does EVPWIDE=8 pay on big meshes on GH200 (it lost on CORE2 g1), and does the
+# device halo (HOST_HALO=0) win at big-mesh message sizes where cuda_ipc rndv
+# amortizes? Legs: dp_evpw, dp_dev, dp_dev_evpw, sp_evpw; 2 reps, 300 steps.
+ROOT=/home/a/a270088/port_kokkos
+MPROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_dolpung.sh"
+if [ "${SLURM_NNODES:-1}" -gt 1 ]; then
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc,dc_mlx5
+else
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc
+fi
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+MESH=${MESH:?}; DT=${DT:?}; TAG=${TAG:?}; NSTEPS=${NSTEPS:-300}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/dolpung/scale
+BIN_DP=$ROOT/build-dolpung-cuda/fesom_port
+BIN_SP=$MPROOT/build-dolpung-cuda-sp/fesom_port
+echo "=== dolpung probe $TAG N=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=$DT nsteps=$NSTEPS ==="
+leg(){ # $1 leg  $2 binary  $3 hosthalo(0/1)  $4 extra knobs
+  for rep in a b; do
+    OUT=$BASE/${TAG}/$1_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+    srun bash -c "
+      source $ROOT/env_dolpung.sh
+      export FESOM_SPEED=1 FESOM_HOST_HALO=$3
+      IFS=';' read -ra KV <<< '$4'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+      exec $2 $MESH $OUT $DT $NSTEPS -1 $PHC 1958" > "$OUT/log.txt" 2>&1
+    rc=$?
+    ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+    echo "RESULT $TAG $1 $rep rc=$rc s_step=${ss:-NA}"
+    [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+  done
+}
+leg dp_evpw     "$BIN_DP" 1 "FESOM_SPEED_EVPWIDE=8"
+leg dp_dev      "$BIN_DP" 0 ""
+leg dp_dev_evpw "$BIN_DP" 0 "FESOM_SPEED_EVPWIDE=8"
+leg sp_evpw     "$BIN_SP" 1 "FESOM_SPEED_EVPWIDE=8"
+echo "=== $TAG done ==="

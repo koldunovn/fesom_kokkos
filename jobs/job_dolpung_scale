@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=dscal
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/slurm.%j.err
+#
+# dolpung (GH200) strong-scaling point, FLEET v2 (STAGE era): 4 legs x 2 reps.
+#   dp     = FP64  FESOM_SPEED=1 + FESOM_HALO_STAGE=1
+#   dp_cgp = dp    + FESOM_SPEED_CGPOLY=3
+#   sp     = FP32 (M8 build) same knobs
+#   sp_cgp = sp    + CGPOLY=3
+# env: MESH DT TAG, NSTEPS(300).
+# v2 (2026-07-22 evening): FESOM_HALO_STAGE replaces v1's FESOM_HOST_HALO —
+# device-packed halos with the MPI leg on pinned-host mirrors (no GPUDirect
+# needed; dolpung fabric can't ibv_reg_mr cuda memory). Unlike HOST_HALO it
+# keeps CGPIPE/CGPOLY alive and moves packed bytes only: CORE2 g1 0.0788 ->
+# 0.0460 (gate job 26405236). EVPWIDE still absent (fabric + measured loss).
+ROOT=/home/a/a270088/port_kokkos
+MPROOT=/home/a/a270088/port_kokkos_mp
+source "$ROOT/env_dolpung.sh"
+# intra-node winner + dc_mlx5 for inter-node (host halos -> host buffers on IB).
+# NEVER blanket "^gdr_copy": UCX then picks knem/xpmem/IB-loopback for intra-node
+# GPU traffic -> 3.6x slower (probe table 2026-07-22).
+if [ "${SLURM_NNODES:-1}" -gt 1 ]; then
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc,dc_mlx5
+else
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc
+fi
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+MESH=${MESH:?}; DT=${DT:?}; TAG=${TAG:?}; NSTEPS=${NSTEPS:-300}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/dolpung/scale
+BIN_DP=$ROOT/build-dolpung-cuda/fesom_port
+BIN_SP=$MPROOT/build-dolpung-cuda-sp/fesom_port
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== dolpung scale $TAG mesh=$(basename $MESH) N=$SLURM_NNODES ntasks=$NPES dt=$DT nsteps=$NSTEPS ==="
+echo "dp:  $BIN_DP  md5=$(md5sum $BIN_DP | cut -d' ' -f1)"
+echo "sp:  $BIN_SP  md5=$(md5sum $BIN_SP | cut -d' ' -f1)"
+echo "nodes: $SLURM_JOB_NODELIST"
+
+leg(){ # $1 leg-name  $2 binary  $3 extra knobs (semicolon-sep)
+  for rep in a b; do
+    OUT=$BASE/${TAG}/$1_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+    srun -c72 --distribution=block:block bash -c "
+      source $ROOT/env_dolpung.sh
+      export FESOM_SPEED=1 FESOM_HALO_STAGE=1
+      IFS=';' read -ra KV <<< '$3'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+      exec $2 $MESH $OUT $DT $NSTEPS -1 $PHC 1958" > "$OUT/log.txt" 2>&1
+    rc=$?
+    ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+    echo "RESULT $TAG $1 $rep rc=$rc s_step=${ss:-NA}"
+    [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+  done
+}
+leg dp     "$BIN_DP" ""
+leg dp_cgp "$BIN_DP" "FESOM_SPEED_CGPOLY=3"
+leg sp     "$BIN_SP" ""
+leg sp_cgp "$BIN_SP" "FESOM_SPEED_CGPOLY=3"
+echo "=== $TAG done ==="

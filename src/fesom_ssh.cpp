@@ -677,6 +677,7 @@ struct CgPipeState {
     Kokkos::View<int*>    sidx_d;        /* [nsend] local slots to pack   */
     Kokkos::View<int*>    ridx_d;        /* [nrecv] local slots to unpack */
     Kokkos::View<double*> sbuf_d, rbuf_d;
+    Kokkos::View<double*, fesom_halo_pinned_space> sbuf_h, rbuf_h;  /* FESOM_HALO_STAGE mirrors */
     std::vector<MPI_Request> reqs;
     /* ring1 preconditioner CSR: row r (= local slot N+r), cols are LOCAL slots
      * into the extended rr; entries in the OWNER's row order (byte-identity). */
@@ -896,6 +897,10 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     s.ridx_d = push_i("cgpipe.ridx", ridx);
     s.sbuf_d = Kokkos::View<double*>("cgpipe.sbuf", (size_t)s.nsend);
     s.rbuf_d = Kokkos::View<double*>("cgpipe.rbuf", (size_t)s.nrecv);
+    if (fesom_halo_stage_on()) {   /* M7.5: pinned mirrors for the staged MPI leg */
+        s.sbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>("cgpipe.sbuf_h", (size_t)s.nsend);
+        s.rbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>("cgpipe.rbuf_h", (size_t)s.nrecv);
+    }
 
     std::vector<int> rp2((size_t)eDim + 1, 0), ci2;
     std::vector<double> pv2;
@@ -948,8 +953,10 @@ void cgpipe_exchange_rr(fesom::Field &rr_fld, fesom_partit *p)
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d (drains prev unpack) */
 
     int nreq = 0;
-    double *sp = s.sbuf_d.data();
-    double *rp = s.rbuf_d.data();
+    const bool staged = fesom_halo_stage_on();   /* M7.5: MPI on pinned mirrors (no GPUDirect) */
+    if (staged && s.nsend > 0) Kokkos::deep_copy(s.sbuf_h, s.sbuf_d);
+    double *sp = staged ? s.sbuf_h.data() : s.sbuf_d.data();
+    double *rp = staged ? s.rbuf_h.data() : s.rbuf_d.data();
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int rc = s.roff[q + 1] - s.roff[q];
         if (rc > 0)
@@ -964,6 +971,7 @@ void cgpipe_exchange_rr(fesom::Field &rr_fld, fesom_partit *p)
     }
     fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
     fesom_halo_prof_waitall(nreq, s.reqs.data());
+    if (staged && s.nrecv > 0) Kokkos::deep_copy(s.rbuf_d, s.rbuf_h);   /* M7.5 */
 
     {
         auto ridx = s.ridx_d; auto rbuf = s.rbuf_d;
@@ -1084,6 +1092,7 @@ struct CgPolyState {
     std::vector<int> partner, soff, roff;
     RIV sidx_d, ridx_d;
     RDV sbuf_d, rbuf_d;
+    Kokkos::View<double*, fesom_halo_pinned_space> sbuf_h, rbuf_h;  /* FESOM_HALO_STAGE mirrors */
     std::vector<MPI_Request> reqs;
     /* frozen Ã: owned rows = av0 over S's CSR; ring rows 1..d = shipped CSR
      * (ci = LOCAL slots, entries in the OWNER's row order — byte-identity). */
@@ -1123,8 +1132,10 @@ void cgpoly_exchange(RDV v, fesom_partit *p)
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf_d + re-posts rbuf_d */
 
     int nreq = 0;
-    double *sp = s.sbuf_d.data();
-    double *rp = s.rbuf_d.data();
+    const bool staged = fesom_halo_stage_on();   /* M7.5: MPI on pinned mirrors (no GPUDirect) */
+    if (staged && s.nsend > 0) Kokkos::deep_copy(s.sbuf_h, s.sbuf_d);
+    double *sp = staged ? s.sbuf_h.data() : s.sbuf_d.data();
+    double *rp = staged ? s.rbuf_h.data() : s.rbuf_d.data();
     for (size_t q = 0; q < s.partner.size(); ++q) {
         const int rc = s.roff[q + 1] - s.roff[q];
         if (rc > 0)
@@ -1139,6 +1150,7 @@ void cgpoly_exchange(RDV v, fesom_partit *p)
     }
     fesom_halo_prof_bytes(8.0 * (double)(s.nsend + s.nrecv));
     fesom_halo_prof_waitall(nreq, s.reqs.data());
+    if (staged && s.nrecv > 0) Kokkos::deep_copy(s.rbuf_d, s.rbuf_h);   /* M7.5 */
 
     {
         auto ridx = s.ridx_d; auto rbuf = s.rbuf_d;
@@ -1738,6 +1750,10 @@ void cgpoly_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         s.ridx_d = push_i("cgpoly.ridx", ridx);
         s.sbuf_d = RDV("cgpoly.sbuf", (size_t)s.nsend);
         s.rbuf_d = RDV("cgpoly.rbuf", (size_t)s.nrecv);
+        if (fesom_halo_stage_on()) {   /* M7.5: pinned mirrors for the staged MPI leg */
+            s.sbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>("cgpoly.sbuf_h", (size_t)s.nsend);
+            s.rbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>("cgpoly.rbuf_h", (size_t)s.nrecv);
+        }
     }
 
     /* rr gains the ring tail; every solve writes owned rr before the first
@@ -1828,6 +1844,8 @@ void fesom_ssh_cgpipe_free(void)
     s.ridx_d = Kokkos::View<int*>();
     s.sbuf_d = Kokkos::View<double*>();
     s.rbuf_d = Kokkos::View<double*>();
+    s.sbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>();   /* M7.5 staged mirrors */
+    s.rbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>();
     s.rp2_d  = Kokkos::View<int*>();
     s.ci2_d  = Kokkos::View<int*>();
     s.pv2_d  = Kokkos::View<double*>();
@@ -1843,6 +1861,8 @@ void fesom_ssh_cgpoly_free(void)
     CgPolyState &s = g_cgpoly;
     s.sidx_d = RIV(); s.ridx_d = RIV();
     s.sbuf_d = RDV(); s.rbuf_d = RDV();
+    s.sbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>();   /* M7.5 staged mirrors */
+    s.rbuf_h = Kokkos::View<double*, fesom_halo_pinned_space>();
     s.av0_d  = RDV(); s.rp_d = RIV(); s.ci_d = RIV(); s.av_d = RDV();
     s.invd_d = RDV(); s.isq_d = RDV();
     s.f_d = RDV(); s.za_d = RDV(); s.zb_d = RDV(); s.dd_d = RDV();

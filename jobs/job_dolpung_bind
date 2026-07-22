@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --job-name=dbind
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/bind.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/bind.%j.err
+#
+# THE BINDING PROBE (2026-07-22): the whole scaling fleet ran 1 Grace core per
+# rank (sbatch default cpus-per-task=1; sacct AllocCPUS=4/node) — host-halo
+# staging, sm MPI, UCX progress and CUDA driver threads all serialized on one
+# core, probably all on socket 0. Legs isolate the geometry effect on CORE2
+# dist_4 (dt1800, 300 steps, min-of-2) + one np1 chip-anchor with a full socket.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_dolpung.sh"
+export UCX_TLS=self,sm,cuda_copy,cuda_ipc UCX_MEMTYPE_CACHE=n
+export OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/dolpung/scale
+BIN=$ROOT/build-dolpung-cuda/fesom_port
+echo "=== dolpung bind probe: node $SLURM_JOB_NODELIST ==="
+nvidia-smi topo -m 2>/dev/null | head -8
+nvidia-smi --query-gpu=index,clocks.sm,clocks.max.sm,persistence_mode --format=csv 2>/dev/null
+echo "--- per-rank placement at -c72 block:block ---"
+srun -n4 -c72 --distribution=block:block bash -c 'echo "rank $SLURM_PROCID cpus=$(taskset -pc $$ | cut -d: -f2)"' | sort
+
+leg(){ # $1 name  $2 srun-args  $3 ntasks  $4 dist  $5 extra-knobs
+  for rep in a b; do
+    OUT=$BASE/bindprobe/$1_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+    srun -n $3 $2 bash -c "
+      source $ROOT/env_dolpung.sh
+      export FESOM_SPEED=1 FESOM_HOST_HALO=1
+      IFS=';' read -ra KV <<< '$5'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+      exec $BIN $MESH $OUT 1800 300 -1 $PHC 1958" > "$OUT/log.txt" 2>&1
+    rc=$?
+    ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+    echo "RESULT bind $1 $rep rc=$rc s_step=${ss:-NA}"
+    [ $rc -ne 0 ] && tail -4 "$OUT/log.txt" | sed 's/^/    | /'
+  done
+}
+leg c1        "-c1"                                   4 dist_4 ""
+leg c72       "-c72 --distribution=block:block"       4 dist_4 ""
+leg c72_cgp   "-c72 --distribution=block:block"       4 dist_4 "FESOM_SPEED_CGPOLY=3"
+leg c72_hostucx "-c72 --distribution=block:block"     4 dist_4 "UCX_TLS=self,sm;UCX_MEMTYPE_CACHE="
+leg np1_c72   "-c72"                                  1 dist_1 ""
+echo "=== bind probe done ==="

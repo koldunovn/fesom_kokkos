@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=dlpg
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/run.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/run.%j.err
+#
+# GH200 (dolpung) run of the Kokkos port — derived from jobs/job_m7_scale_gpu.
+# env: MESH (full path), DT, NSTEPS (35), TAG, optional KNOBS
+# (semicolon-separated VAR=VAL exports, e.g. "FESOM_SPEED=1"), optional BIN
+# (defaults to build-dolpung-cuda). 4 GH200/node -> dist_$NTASKS.
+#
+# Differences vs the A100 template (deliberate):
+#  - env_dolpung.sh (absolute-path aarch64 toolchain), NOT env_cuda.sh.
+#  - no UCX_NET_DEVICES pin, no mlx5_0 — Levante's IB names do not transfer
+#    (JUPITER plan §build); OMPI 4.1.8 + UCX 1.19 pick transports themselves.
+#  - queue note: fresh mh1571 fairshare => jobs may sit PENDING ~40 min even
+#    next to idle nodes (observed 2026-07-22).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_dolpung.sh"
+# GH200 transport recipe (probe ladder 2026-07-22, see L102):
+#  - default UCX crashes at the first device halo (gdrcopy can't pin cudaMalloc
+#    on coherent Grace-Hopper: gdr_pin_buffer ret:22 -> Fatal);
+#  - blanket ^gdr_copy runs but is 3.6x slow (UCX picks knem/xpmem/IB-loopback);
+#  - the explicit list below is the measured winner; +dc_mlx5 needed inter-node;
+#  - FESOM_HOST_HALO=1 is 2.5x on top: device-pointer MPI costs ~1 ms/msg on this
+#    UCX, host-staged halos ride the coherent C2C. M5.1's A100 lesson INVERTS here.
+if [ "${SLURM_NNODES:-1}" -gt 1 ]; then
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc,dc_mlx5
+else
+  export UCX_TLS=self,sm,cuda_copy,cuda_ipc
+fi
+export FESOM_HOST_HALO=1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/dolpung/${TAG:?TAG required}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-dolpung-cuda/fesom_port}
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+echo "=== dolpung GPU $TAG mesh=$(basename $MESH) nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=$DT nsteps=${NSTEPS:-35} knobs=${KNOBS:-none} ==="
+echo "binary: $FESOM  md5: $(md5sum "$FESOM" | cut -d' ' -f1)"
+echo "nodes: $SLURM_JOB_NODELIST"; nvidia-smi -L | head -4
+run(){ srun "$FESOM" "$MESH" "$OUT" "${DT:?DT required}" "${NSTEPS:-35}" -1 "$PHC" 1958 \
+        > "$OUT/log_$1.txt" 2>&1
+  printf "%-8s rc=%s  %s\n" "$1" "$?" "$(grep 'loop timing' "$OUT/log_$1.txt" | tail -1)"; }
+run rep_a; run rep_b
+echo "--- CG iters + T/S sanity (rep_a, last step) ---"; grep -E "it=" "$OUT/log_rep_a.txt" | tail -1
+nvidia-smi --query-gpu=memory.used,memory.total --format=csv 2>/dev/null | tail -4

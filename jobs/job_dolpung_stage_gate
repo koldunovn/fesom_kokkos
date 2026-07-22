@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH --job-name=dstage
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/stage.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/stage.%j.err
+#
+# FESOM_HALO_STAGE gate + first perf look (M7.5, 2026-07-22).
+#  gate_hosthalo / gate_stage : 10 steps, snap_every=10, NO speed knobs — same
+#     legacy solver, same bytes, transports must be BIT-IDENTICAL (diff_snap from
+#     the login node afterwards).
+#  selfcheck : STAGE + SPEED + CGPOLY + halo & cgpoly selfcheckers, 10 steps —
+#     silence (no [devhalo-selfcheck] / [cgpoly] mismatch lines) = pass.
+#  perf      : 300-step min-of-2 — stage, stage+cgpoly, hosthalo anchor.
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_dolpung.sh"
+export UCX_TLS=self,sm,cuda_copy,cuda_ipc UCX_MEMTYPE_CACHE=n
+export OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/dolpung/scale/stagegate
+BIN=$ROOT/build-dolpung-cuda/fesom_port
+echo "=== stage gate: node $SLURM_JOB_NODELIST  bin md5 $(md5sum $BIN | cut -d' ' -f1) ==="
+
+run(){ # $1 name  $2 nsteps  $3 snap  $4 knobs
+  OUT=$BASE/$1; rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n4 -c72 --distribution=block:block bash -c "
+    source $ROOT/env_dolpung.sh
+    IFS=';' read -ra KV <<< '$4'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && export \"\$kv\"; done
+    exec $BIN $MESH $OUT 1800 $2 $3 $PHC 1958" > "$OUT/log.txt" 2>&1
+  rc=$?
+  ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+  printf "RESULT %s rc=%s s_step=%s\n" "$1" "$rc" "${ss:-NA}"
+  grep -E "\[halo\] FESOM_HALO_STAGE|devhalo-selfcheck|cgpoly.*selfcheck|ACTIVE" "$OUT/log.txt" | sort -u | head -6
+  [ $rc -ne 0 ] && tail -5 "$OUT/log.txt" | sed 's/^/    | /'
+}
+run gate_hosthalo 10 10  "FESOM_HOST_HALO=1"
+run gate_stage    10 10  "FESOM_HALO_STAGE=1"
+run selfcheck     10 -1  "FESOM_HALO_STAGE=1;FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3;FESOM_HALO_SELFCHECK=1;FESOM_CGPOLY_SELFCHECK=1"
+run perf_stage_a  300 -1 "FESOM_HALO_STAGE=1;FESOM_SPEED=1"
+run perf_stage_b  300 -1 "FESOM_HALO_STAGE=1;FESOM_SPEED=1"
+run perf_scgp_a   300 -1 "FESOM_HALO_STAGE=1;FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3"
+run perf_scgp_b   300 -1 "FESOM_HALO_STAGE=1;FESOM_SPEED=1;FESOM_SPEED_CGPOLY=3"
+run perf_hosthalo 300 -1 "FESOM_HOST_HALO=1;FESOM_SPEED=1"
+echo "=== stage gate done ==="

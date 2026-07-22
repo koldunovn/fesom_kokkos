@@ -182,3 +182,100 @@ the idle pool = MPI wait + imbalance; imbalance is composite (ice: partner-count
 correlated r=+0.80, NOT ice-cover r=−0.21; ocean: node-monotone, hardware-vs-data
 pending); GPUDirect kernel-path open on Levante but no cheap UCX_TLS win. JUPITER's
 D3 attribution at scale is the continuation of exactly that thread.*
+
+---
+
+# ADDENDUM (2026-07-22 s17): the dolpung GH200 shakedown — what carries to JUPITER
+
+*dolpung (DKRZ, 42× quad-GH200) is JUPITER-class hardware; users report dolpung ≈
+JUPITER node-for-node. One day of shakedown (campaign doc
+`20260722-dolpung-GH200-SCALING.md`) produced a complete 21-point dual-precision
+fleet and rewrote several assumptions in this plan. The JUPITER campaign should
+reproduce the dolpung FLEET v2 protocol below, not the original §4 matrix alone.*
+
+## A. The transport decision ladder (REPLACES blind reuse of Levante env pins)
+
+Run these in order on day 0; each is a 10-step CORE2 dist_4 job:
+
+1. **Device transport as-is** (no knobs). If it crashes at step 1 with
+   `gdr_pin_buffer failed` / `Fatal: failed to register buffer with mem type
+   domain cuda`, or multi-node with `ibv_reg_mr(... cuda ...) Bad address` —
+   the fabric has no working GPUDirect (dolpung's state 2026-07).
+2. **`FESOM_HALO_STAGE=1`** — the s17 transport (device pack/unpack kept, MPI leg
+   on pinned-host mirrors of the PACKED buffers; CGPIPE/CGPOLY stay live). Works
+   on ANY fabric. On dolpung this delivered the full 2.0× chip ratio:
+   CORE2 g1 0.0463 dp / 0.0397 sp; dars 1.8–1.9× over the A100-best fleet at
+   every node count. **Even if GPUDirect works on JUPITER, A/B device-vs-STAGE —
+   on coherent GH200 the staged path may win regardless.**
+3. **NEVER `FESOM_HOST_HALO=1` for performance.** It is a debug fallback: reverts
+   every exchange to FULL-FIELD GPU↔host syncs AND silently deactivates
+   CGPIPE+CGPOLY (`[cgpipe] INACTIVE` banner). It cost dolpung v1 a factor ~2-3
+   and masqueraded as "GH200 barely beats A100" for half a day.
+4. UCX: start from defaults + `UCX_TLS=self,sm,cuda_copy,cuda_ipc[,dc_mlx5
+   inter-node]`; with STAGE the MPI buffers are host, so IB device names matter
+   less. Do NOT ship `^gdr_copy` (3.6× slow: UCX picks knem/xpmem/loopback).
+   Levante's mlx5_0 pin and the E.T1 proto trio remain Levante-only until A/B'd.
+
+## B. Knob transfer measured on GH200 (v2 fleet, STAGE config)
+
+- `FESOM_SPEED=1` (CGPIPE et al.): large, always on.
+- `FESOM_SPEED_CGPOLY=3`: **BIG on GH200** — −20 % (CORE2 g1) to −35 % (farc g8),
+  everywhere positive under STAGE. Run it as its own leg (dp_cgp/sp_cgp).
+- `FESOM_SPEED_EVPWIDE=8`: measured LOSS on GH200 CORE2 (0.0973 vs 0.0845) and
+  its wide-halo exchange still passes device pointers (crashes on no-GPUDirect
+  fabrics). Leave OUT unless JUPITER GPUDirect works AND an A/B says it pays.
+- Host binding: `--cpus-per-task=72`, `srun -c72 --distribution=block:block`
+  (rank i → Grace socket i). Measured ~neutral on dolpung but it is the correct
+  hygiene and free. 1-cpu-per-task (SLURM default!) was measured harmless too —
+  but don't rely on that on JUPITER.
+- SP: build the m8-precision branch with `-DFESOM_PRECISION=single`; SP/DP =
+  1.24× (CORE2) → 1.5× (big meshes) on GH200 — same per-rank-workload law as A100.
+
+## C. Build lessons (aarch64)
+
+- `env_dolpung.sh` is the template: ABSOLUTE PATHS, no modules; sanitize
+  `CMAKE_PREFIX_PATH`/`PKG_CONFIG_PATH`/`PATH` of foreign-arch spack entries
+  (srun exports the login environment; an x86 netcdf via CMAKE_PREFIX_PATH and
+  an x86 `git` each broke one configure on dolpung). Pin
+  `-DNC_CONFIG=<aarch64 nc-config>` explicitly.
+- CMake: `-DKokkos_ENABLE_CUDA -DKokkos_ARCH_HOPPER90 -DKokkos_ARCH_NATIVE` +
+  nvcc_wrapper + gcc≥12 host; Kokkos 4.4.1 + CUDA 12.9 + gcc 14.2 = clean.
+  Full CUDA build ~7 min on 64 Grace cores; build ON a compute node via a batch
+  job (no interactive needed): `sbatch -N1 -c144 --wrap 'make -C build… -j96'`.
+
+## D. Certification method (REFINES §3 J-G2/J-G4)
+
+**Trajectory-level bitwise gates are INVALID for the CUDA build** — measured on
+A100: the device transport does not reproduce ITSELF run-to-run (atomics;
+dev-vs-dev = dev-vs-stage noise, T ~4e-4 after 10 steps CORE2). Valid instruments:
+- per-exchange halo selfcheck `FESOM_HALO_SELFCHECK=1` (silent = pass),
+- `FESOM_CGPOLY_SELFCHECK=1` (prints max|apply−ref|, expect 0.000e+00),
+- serial byte gates on-platform (Serial backend is unaffected by all of this),
+- climate-bar correlations for anything longer (M5.23 bar).
+`FESOM_HALO_NOFUSE=1` decomposes the fused device2/deviceN exchanges (no
+selfcheck variant exists for the fused layout) — the isolation lever if a fused
+transport bug is ever suspected.
+
+## E. The fleet protocol to reproduce on JUPITER (= dolpung FLEET v2)
+
+Clone `jobs/job_dolpung_scale` + `jobs/submit_dolpung_scaling.sh` (adapt
+partition/account/gres + mesh paths after transfer). Per point: 4 legs
+(dp, dp_cgp, sp, sp_cgp) × min-of-2, 300 steps, snap −1, dt CORE2 1800 / farc
+900 / dars 120 / NG5 180 (rule 0.41), SYPD at production dt with the measured
+CG corrections (dars ×1.0222, NG5 ×1.0110; farc reported at dt1200).
+Matrix: CORE2 g1-8, farc g1-32, dars g1-32 (g1 fits GH200's 4×120 GB — a
+capability A100 lacks), NG5 g2-32(+64 on JUPITER where the dists exist to 8192).
+Ops: pathfind ONE 2-node job before releasing the multi-node bulk; walltimes
+sized to the v2 speeds (see dolpung numbers) so backfill works; idle `--no-shell`
+allocations count against per-user MaxJobs — release them before the fleet.
+Figures: `scripts/dolpung_sypd_figs.py` (house style; add a JUPITER series
+alongside the GH200/A100 ones).
+
+## F. Calibration for pre-registration (§5), from dolpung v2
+
+Chip-for-chip (np1, CORE2, same knobs): GH200 = 2.0× A100. Node-for-node vs the
+A100-best (m8-Bp) fleet: CORE2 1.4-1.5×, farc 1.4-1.5×, dars 1.8-1.9×, growing
+with mesh size and node count. JUPITER with working GPUDirect should match or
+exceed these; if a JUPITER point lands BELOW its dolpung twin, suspect setup
+(transport ladder step A) before anything else — that exact symptom on dolpung
+was the HOST_HALO trap.

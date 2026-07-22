@@ -37,6 +37,36 @@
 // so the dispatch reads cleanly on every backend.
 bool fesom_halo_device_active();
 
+// M7.5 (dolpung/GH200) — FESOM_HALO_STAGE=1: keep the device-packed transport
+// (pack/unpack kernels, per-partner packed buffers, device_active()==true so the
+// CG levers stay live) but run the MPI leg on PINNED-HOST mirrors of the packed
+// buffers. For fabrics with no GPUDirect (dolpung: ibv_reg_mr on cuda memory
+// fails, gdrcopy can't pin — L102): MPI never sees a device pointer, and only
+// the PACKED bytes cross the (coherent, fast) host link — unlike FESOM_HOST_HALO
+// which drops to the legacy FULL-FIELD sync bracket and deactivates the module.
+// The two knobs are alternatives; HOST_HALO=1 wins if both are set (module off).
+// Always defined; false on non-CUDA builds.
+bool fesom_halo_stage_on();
+
+// Memory space for the staged pinned-host mirrors (HostSpace on host builds so
+// shared structs compile everywhere; only ever allocated when STAGE is on).
+#ifdef KOKKOS_ENABLE_CUDA
+using fesom_halo_pinned_space = Kokkos::CudaHostPinnedSpace;
+#else
+using fesom_halo_pinned_space = Kokkos::HostSpace;
+#endif
+
+// FESOM_HALO_NOFUSE=1 (debug): make field2/fieldN decompose into N single-field
+// device exchanges instead of the fused device2/deviceN message. The fused paths
+// have no selfcheck variant (the checker decomposes), so this is the isolation
+// A/B for fused-transport bugs — and a temporarily-safe fallback config.
+inline bool fesom_halo_nofuse_on()
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("FESOM_HALO_NOFUSE"); c = (e && e[0] == '1') ? 1 : 0; }
+    return c != 0;
+}
+
 // Free the persistent device comm-lists + send/recv buffers. MUST be called
 // before Kokkos::finalize() (the Views must not outlive Kokkos). No-op on
 // non-CUDA builds. (fesom_halo_free_buffers() frees the host scratch.)
@@ -154,6 +184,9 @@ inline void fesom_halo_field2(fesom::Field &f0, fesom::Field &f1, fesom_halo_kin
         if (selfcheck) {   // fall back to per-field selfcheck (the diff path is single-field)
             fesom_halo_device_selfcheck(f0, kind, n_levels, n_components, p, base_off);
             fesom_halo_device_selfcheck(f1, kind, n_levels, n_components, p, base_off);
+        } else if (fesom_halo_nofuse_on()) {   // isolation A/B: two covered single exchanges
+            fesom_halo_exchange_device(f0, kind, n_levels, n_components, p, base_off);
+            fesom_halo_exchange_device(f1, kind, n_levels, n_components, p, base_off);
         } else {
             fesom_halo_exchange_device2(f0, f1, kind, n_levels, n_components, p, base_off);
         }
