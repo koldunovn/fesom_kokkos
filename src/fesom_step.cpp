@@ -1502,6 +1502,40 @@ int fesom_timestep(int                          step_n,
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */
 
+    /* s4 storm forensics: per-step single-node trace (FESOM_MP_TRACE_NODE=<global id>,
+     * FESOM_MP_TRACE_FROM=<step>). Owner rank prints one end-of-step line: the eta-runaway
+     * time series at the Bering culprit (node 118957 blew 1.85 m -> 48 m in <100 steps).
+     * Env-unset => one static getenv, zero calls — FP64/production inert. */
+    {
+        static int tr_gid = -2, tr_from = 0, tr_loc = -1;
+        if (tr_gid == -2) {
+            const char *e = getenv("FESOM_MP_TRACE_NODE");
+            tr_gid = e ? atoi(e) : -1;
+            const char *f = getenv("FESOM_MP_TRACE_FROM");
+            tr_from = f ? atoi(f) : 0;
+            if (tr_gid >= 0) {
+                for (int nn = 0; nn < mesh->myDim_nod2D; ++nn)
+                    if (p->myList_nod2D[nn] == tr_gid) { tr_loc = nn; break; }
+                if (tr_loc >= 0)
+                    fprintf(stderr, "[mp-trace] ARMED global %d = local %d, geo=(%.2f, %.2f)\n",
+                            tr_gid, tr_loc,
+                            mesh->geo_coord_nod2D[tr_loc * 2] * 180.0 / M_PI,
+                            mesh->geo_coord_nod2D[tr_loc * 2 + 1] * 180.0 / M_PI);
+            }
+        }
+        if (tr_loc >= 0 && step_n >= tr_from) {
+            const size_t k0 = FESOM_NODE3D(tr_loc, 0, nl);
+            fprintf(stderr, "[mp-trace] step %d eta=%.7g deta=%.7g rhs=%.7g hn0=%.7g "
+                    "T0=%.7g S0=%.7g rho0=%.7g Kv0=%.7g w0=%.7g\n",
+                    step_n, (double)dyn->eta_n[tr_loc], (double)dyn->d_eta[tr_loc],
+                    (double)dyn->ssh_rhs[tr_loc], (double)mesh->hnode[k0],
+                    (double)tracers->data[FESOM_TRACER_T].values[k0],
+                    (double)tracers->data[FESOM_TRACER_S].values[k0],
+                    (double)aux->density_m_rho0[k0], (double)aux->Kv[k0],
+                    (double)dyn->w[k0]);
+        }
+    }
+
     PMARK("13c_bolus+14_commit");   /* M5.6: close the last substep bucket */
 #undef PMARK
 
