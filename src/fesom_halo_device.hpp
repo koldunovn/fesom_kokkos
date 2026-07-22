@@ -37,6 +37,24 @@
 // so the dispatch reads cleanly on every backend.
 bool fesom_halo_device_active();
 
+// M7.5 (dolpung/GH200) — FESOM_HALO_STAGE=1: keep the device-packed transport
+// (pack/unpack kernels, per-partner packed buffers, device_active()==true so the
+// CG levers stay live) but run the MPI leg on PINNED-HOST mirrors of the packed
+// buffers. For fabrics with no GPUDirect (dolpung: ibv_reg_mr on cuda memory
+// fails — L102): MPI never sees a device pointer, and only the PACKED bytes
+// cross the host link — unlike FESOM_HOST_HALO which drops to the legacy
+// FULL-FIELD sync bracket and deactivates the module. Alternatives, not
+// composable (HOST_HALO=1 wins). Always defined; false on non-CUDA builds.
+bool fesom_halo_stage_on();
+
+// Memory space for the staged pinned-host mirrors (HostSpace on host builds so
+// shared structs compile everywhere; only ever allocated when STAGE is on).
+#ifdef KOKKOS_ENABLE_CUDA
+using fesom_halo_pinned_space = Kokkos::CudaHostPinnedSpace;
+#else
+using fesom_halo_pinned_space = Kokkos::HostSpace;
+#endif
+
 // Free the persistent device comm-lists + send/recv buffers. MUST be called
 // before Kokkos::finalize() (the Views must not outlive Kokkos). No-op on
 // non-CUDA builds. (fesom_halo_free_buffers() frees the host scratch.)
