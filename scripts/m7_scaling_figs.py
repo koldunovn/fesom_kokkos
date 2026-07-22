@@ -32,6 +32,13 @@ import common  # noqa: E402  (the paper's style: MESH_COLOR/MESH_LABEL/set_style
 M7 = "/work/ab0995/a270088/port2/m7"
 DT_PROD = {"core2": 1800.0, "farc": 900.0, "dars": 240.0, "ng5": 240.0}
 DT_RUN = {"core2": 1800.0, "farc": 900.0, "dars": 120.0, "ng5": 180.0}  # dars: rule 0.41 (dt180 cold-start-unstable past ~35 steps; 120 = the JAX dars dt)
+# CG dt-correction: s/step at DT_PROD vs at DT_RUN, MEASURED on same-allocation g2n
+# pairs (2026-07-22, frozen cgpoly0 bin, class-A env): NG5 dt180→240 = 1.2099/1.1967
+# (35-step pair, iters 89.4→119.5); dars dt120→240 = median{1.0222,1.0214,1.0277} of
+# three 10-step pairs (dt240 cold dies @12, rule 0.41 — longer impossible; iters
+# 50.1→96.1 identical all pairs). Factor measured on GPU; applied to all sypd rows
+# (CPU bias second-order). Corrected sypd = DT_PROD/(365·sstep·CORR).
+DT_CORR = {"core2": 1.0, "farc": 1.0, "dars": 1.0222, "ng5": 1.0110}
 
 
 def harvest():
@@ -55,7 +62,7 @@ def harvest():
             rows.append(dict(mesh=m.group(1), backend="cpu", leg="cpu", nodes=int(m.group(3)),
                              ranks=int(m.group(4)), sstep=min(reps), source=os.path.basename(f)))
     df = pd.DataFrame(rows).sort_values(["mesh", "backend", "leg", "nodes"])
-    df["sypd"] = df.apply(lambda r: DT_PROD[r.mesh] / (365.0 * r.sstep), axis=1)
+    df["sypd"] = df.apply(lambda r: DT_PROD[r.mesh] / (365.0 * r.sstep * DT_CORR[r.mesh]), axis=1)
     return df
 
 
@@ -152,7 +159,7 @@ def fig_scaling(df, fname, ylims):
     axC.set_ylim(0, ylims["large"])
     axC.set_title("(c) throughput, multi-million-node meshes")
     fig.tight_layout(rect=[0, 0.05, 1, 1])
-    fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt120/dt180 runs (CG dt-correction not applied)",
+    fig.text(0.995, 0.005, "dars/NG5 SYPD at dt240 from dt120/dt180 runs; measured CG dt-correction applied (dars ×1.022, NG5 ×1.011)",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
     plt.close(fig)
@@ -227,7 +234,8 @@ def fig_before_after(df, fname):
     axR.set_title("(d) the M7 optimization gain")
     fig.tight_layout(rect=[0, 0.05, 1, 1])
     fig.text(0.995, 0.005, "before = M5.24 campaign (35-step protocol); after = class B, std300; "
-             "dars dt180→120 between eras (s/step dt-independent); SYPD at production dt both eras",
+             "dars dt180→120 between eras (s/step dt-independent); SYPD at production dt both eras "
+             "(measured CG dt-correction on the after era; before-era dars ≲2% high ⇒ gain conservative)",
              ha="right", fontsize=5, alpha=0.6)
     fig.savefig(fname, dpi=140)
     plt.close(fig)

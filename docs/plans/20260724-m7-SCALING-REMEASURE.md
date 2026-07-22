@@ -258,3 +258,49 @@ measured iters (the ×1.03 was 180→240). s/step is ~dt-independent (M5.24, use
 so cross-mesh comparability is unaffected; the figure footnote states the per-mesh dt.
 Fallback if even dt90 blows: dars at 35-step legs, footnoted (the M5.24 "before" is
 35-step too — internally consistent).
+
+---
+
+## CAMPAIGN CLOSED — FINAL TABLE (2026-07-22)
+
+The full fleet landed (last points: dars g16 26354135, dars g32 26354136, NG5 g32
+26351276, farc g32 26351266 + retry 26373406). All L80 announce checks pass. Figures:
+`/work/ab0995/a270088/port2/m7/scaling_figs/` (regenerated with shared below-panel
+legend + measured dt-corrections).
+
+### GPU env-A/B fleet, s/step (min-of-2, same-allocation; A=SPEED+EVPWIDE ref,
+### Au=+unbind, B=+CGPOLY3, Bp=+UCX proto trio)
+
+| point | A | Au | B | Bp |
+|---|---|---|---|---|
+| dars g16n (64 GPU, dt120) | 0.1271 | 0.1213 | 0.1146 | 0.0939 (−26.1 %) |
+| dars g32n (128 GPU, dt120) | 0.1164 | 0.1119 | 0.1023 | 0.0807 (−30.7 %) |
+| NG5 g32n (128 GPU, dt180) | 0.1978 | 0.1917 | 0.1810 | 0.1435 (−27.5 %) |
+| farc g32n (128 GPU, dt900) | 0.1396 | 0.1407 | 0.0945 (−32.3 %) | **HANG (×2)** |
+
+- **Bp gains GROW with scale** (dars: −1..−5 % small counts → −26/−31 % at 16/32N) —
+  consistent with the s14 per-partner-toll mechanism: the proto trio attacks exactly
+  the comm overhead that dominates at high rank counts.
+- ⚠️ **farc-32N proto hang is REPRODUCIBLE**: Bp force-terminated on two independent
+  allocations (26351266, 26373406) while the same allocations ran A/B clean (0.1396/
+  0.1397). CAVEAT on the E.T1 env recommendation: do not enable `UCX_PROTO_ENABLE=y`
+  on farc at ≥128 ranks. Figure B unaffected (min(B,Bp)=B=0.0945).
+
+### CG dt-correction (SYPD footnote) — MEASURED, replaces the old ×1.03 estimate
+
+Same-allocation dt pairs (`jobs/job_m7_dtpair`, frozen cgpoly0, class-A env, g2n):
+- **NG5 dt180→240: ×1.0110** (35-step pair 26378115: 1.1967→1.2099; iters 89.4→119.5).
+- **dars dt120→240: ×1.0222** (median of three 10-step pairs 26386487/26387609/26387610:
+  1.0222/1.0214/1.0277; iters 50.1→96.1 bit-identical across pairs. dt240 cold dies at
+  step 12 — rule 0.41 — so 10-step legs are the longest measurable window; the three
+  dt240 minima spread 0.15 %).
+- Applied in `m7_scaling_figs.py` (`DT_CORR`); footnote updated. Correction measured on
+  GPU g2n and applied to all sypd rows (CPU bias second-order; s/step figures raw).
+
+### Ops notes from the close-out
+- gpu-partition node-pair l[50190,50193] hung a run at post-init (log frozen 15 min,
+  job 26385842); excluded via `-x` on the retries. Second hang class of the night after
+  the farc proto hang — both env/fabric, neither touches a banked number.
+- (from the M8 track) snapshot gather at 4096 ranks on NG5 blows UCX memory registration
+  (`ibv_reg_mr EFAULT`) — the m7 jobs are immune ONLY because they pass snap_every=-1
+  (no step-0 write). Keep `-1` in every ≥4096-rank job; carry into the JUPITER plan.
