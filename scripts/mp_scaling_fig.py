@@ -19,15 +19,17 @@ M7_CPU = {1: 5.947, 2: 3.031, 4: 1.583, 8: 0.839, 16: 0.413, 32: 0.201}
 M7_NG5 = {4: 4.58, 8: 2.35, 16: 1.21, 32: 0.618}   # s15 curve; c32n = dt60 adopted point
 
 # SYPD at PRODUCTION dt — the m7_scaling_figs.py convention exactly:
-# SYPD = dt_prod/(365*sstep); DT_PROD core2 1800 / farc 1200 (user 2026-07-22:
+# SYPD = dt_prod/(365*sstep*CORR); DT_PROD core2 1800 / farc 1200 (user 2026-07-22:
 # 20 min, not 15) / dars 240 / NG5 240.
-# s/step is dt-independent, so projecting measurement runs (dars dt120, NG5 dt180/60)
-# to production dt is legitimate; CG dt-correction not applied (same footnote as m7).
+# s/step is near-dt-independent; projecting measurement runs (dars dt120, NG5 dt180/60)
+# to production dt uses the m7-s16b MEASURED CG dt-correction (jobs/job_m7_dtpair,
+# median-of-3: dars x1.0222, NG5 x1.0110); CORE2/farc measure AT production dt (1.0).
 FAM_DT = {"c": 240.0, "g": 240.0, "n": 240.0, "N": 240.0, "k": 1800.0, "f": 1200.0}
+FAM_CORR = {"c": 1.0222, "g": 1.0222, "n": 1.0110, "N": 1.0110, "k": 1.0, "f": 1.0}
 
 
-def sypd(dt_s: float, s_step: float) -> float:
-    return dt_s / (365.0 * s_step)
+def sypd(dt_s: float, s_step: float, corr: float = 1.0) -> float:
+    return dt_s / (365.0 * s_step * corr)
 
 
 def node_axis(ax, counts, label="nodes  (4×A100  /  128-core CPU)"):
@@ -126,7 +128,8 @@ def main():
         ax1.loglog(ns, dps, ls="-", marker=marker, color=col, label=label)
         ax1.loglog(ns, sps, ls="--", marker=marker, color=col)
         dt = FAM_DT[fam]
-        sy = [sypd(dt, d) for d in dps] + [sypd(dt, s) for s in sps]
+        corr = FAM_CORR[fam]
+        sy = [sypd(dt, d, corr) for d in dps] + [sypd(dt, s, corr) for s in sps]
         small = fam in ("k", "f")
         axS = axB if small else axC
         axS.plot(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
@@ -173,8 +176,8 @@ def main():
     node_axis(ax2, all_ns)
     decimal_log_yaxis(ax1, min(y1), max(y1))
     fig.text(0.995, 0.005,
-             "dars/NG5 SYPD at dt240 from dt120/dt180 (c32n dt60) runs — s/step dt-independent; "
-             "CG dt-correction not applied",
+             "dars/NG5 SYPD at dt240 from dt120/dt180 (c32n dt60) runs; CG dt-correction "
+             "applied (m7-s16b measured: dars x1.0222, NG5 x1.0110)",
              ha="right", va="bottom", fontsize=6, color="gray")
     ax2.axhline(1.0, color="gray", lw=0.5)
     ax2.set_xlabel("nodes")
@@ -198,12 +201,12 @@ def main():
                 m7bp[(cc[0], int(cc[3]))] = float(cc[5])
     off_gpu = {("dars", r[1]): (r[2], r[3]) for r in rows if r[0] == "g"}
     off_gpu.update({("ng5", r[1]): (r[2], r[3]) for r in rows if r[0] == "N"})
-    BP_FAMS = (("dars", "s", "C1", 240.0), ("ng5", "D", "C3", 240.0),
-               ("core2", "v", "C4", 1800.0), ("farc", "P", "C5", 1200.0))
+    BP_FAMS = (("dars", "s", "C1", 240.0, 1.0222), ("ng5", "D", "C3", 240.0, 1.0110),
+               ("core2", "v", "C4", 1800.0, 1.0), ("farc", "P", "C5", 1200.0, 1.0))
     BP_SIZES = {"dars": [2, 4, 8, 16, 32], "ng5": [2, 4, 8, 16, 32],
                 "core2": [1, 2, 4, 8], "farc": [1, 2, 4, 8, 16, 32]}
     bprows = []
-    for mesh, _, _, _ in BP_FAMS:
+    for mesh, _, _, _, _ in BP_FAMS:
         for n in BP_SIZES[mesh]:
             dp = leg(args.base, f"scal_bp_{mesh}_g{n}_dp", "DOUBLE")
             sp = leg(args.base, f"scal_bp_{mesh}_g{n}_sp", "SINGLE")
@@ -222,7 +225,7 @@ def main():
         return
     fig2, (b1, bB, bC, b2) = plt.subplots(1, 4, figsize=(20, 4.5))
     bp_ns, bp_y1, bp_nsB, bp_nsC, bp_yB, bp_yC = [], [], [], [], [], []
-    for mesh, marker, col, dtp in BP_FAMS:
+    for mesh, marker, col, dtp, corr in BP_FAMS:
         ns = [r[1] for r in bprows if r[0] == mesh]
         if not ns:
             continue
@@ -234,7 +237,7 @@ def main():
         if an:
             b1.loglog([a[0] for a in an], [a[1] for a in an], ls=":", marker="x",
                       color=col, alpha=0.45)
-        sy = [sypd(dtp, d) for d in dps] + [sypd(dtp, s) for s in sps]
+        sy = [sypd(dtp, d, corr) for d in dps] + [sypd(dtp, s, corr) for s in sps]
         small = mesh in ("core2", "farc")
         axS = bB if small else bC
         axS.plot(ns, sy[:len(ns)], ls="-", marker=marker, color=col)
@@ -277,8 +280,9 @@ def main():
     node_axis(b2, bp_ns)
     decimal_log_yaxis(b1, min(bp_y1), max(bp_y1))
     fig2.text(0.995, 0.005,
-              "class Bp = FESOM_SPEED=1 + EVPWIDE=8 + CGPOLY=3 + unbind + proto pkg; "
-              "knobs fired asserted per leg (L80); measurement dts as knobs-off fleet",
+              "class Bp = FESOM_SPEED=1 + EVPWIDE=8 + CGPOLY=3 + unbind + proto pkg "
+              "(farc g32 = class B: proto hangs farc at 128 ranks, m7-s16b); knobs fired "
+              "asserted per leg (L80); CG dt-corr applied (dars x1.0222, NG5 x1.0110)",
               ha="right", va="bottom", fontsize=6, color="gray")
     fig2.tight_layout(rect=[0, 0.075, 1, 1])
     for ext in ("png", "pdf"):
