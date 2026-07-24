@@ -8,8 +8,8 @@ meshes (dars+NG5), in three precision variants:
   fig_dolpung_sypd_both_{small,large}.{png,pdf}   SP + DP overlaid
 
 Series (fastest certified config per platform, min-of-2 everywhere):
-  GH200 = dolpung fleet 2026-07-22 (docs/plans/20260722-dolpung-GH200-SCALING.md),
-          FESOM_SPEED=1 + FESOM_HOST_HALO=1 (+CGPOLY3 where it helps), 300 steps;
+  GH200 = dolpung fleet v2 (docs/plans/20260722-dolpung-GH200-SCALING.md),
+          FESOM_SPEED=1 + FESOM_HALO_STAGE=1 (+CGPOLY3 where it helps), 300 steps;
           DP = m7-speed build, SP = m8 -DFESOM_PRECISION=single build;
           logs /work/ab0995/a270088/port2/dolpung/scale/.
   A100  = m8 Bp fleet (SPEED=1+EVPWIDE=8+CGPOLY=3+proto env), dp+sp legs,
@@ -45,20 +45,19 @@ DT_CORR = {"core2": 1.0, "farc": 1.0, "dars": 1.0222, "ng5": 1.0110}
 # FLEET v2 (2026-07-22 evening, jobs 26405881+): FESOM_SPEED=1 + FESOM_HALO_STAGE=1
 # (+CGPOLY3 where it wins) — the STAGE transport (device-packed halos, MPI on
 # pinned-host mirrors; CGPIPE/CGPOLY live). v1 HOST_HALO numbers are SUPERSEDED
-# and deliberately absent. Points still in flight (ng5, farc/dars g32) are
-# simply missing and appear as the campaign closes.
+# and deliberately absent. COMPLETE: all 21 points, 168/168 legs rc=0.
 GH200 = {
     "sp": {
         "core2": {1: 0.0397, 2: 0.0295, 4: 0.0303, 8: 0.0306},
-        "farc":  {1: 0.0770, 2: 0.0524, 4: 0.0446, 8: 0.0427, 16: 0.0412},
-        "dars":  {1: 0.3175, 2: 0.1682, 4: 0.0947, 8: 0.0590, 16: 0.0448},
-        "ng5":   {},
+        "farc":  {1: 0.0770, 2: 0.0524, 4: 0.0446, 8: 0.0427, 16: 0.0412, 32: 0.0521},
+        "dars":  {1: 0.3175, 2: 0.1682, 4: 0.0947, 8: 0.0590, 16: 0.0448, 32: 0.0398},
+        "ng5":   {2: 0.5236, 4: 0.2774, 8: 0.1541, 16: 0.0886, 32: 0.0657},
     },
     "dp": {
         "core2": {1: 0.0463, 2: 0.0328, 4: 0.0328, 8: 0.0325},
-        "farc":  {1: 0.0930, 2: 0.0606, 4: 0.0507, 8: 0.0472, 16: 0.0450},
-        "dars":  {1: 0.3697, 2: 0.1964, 4: 0.1150, 8: 0.0704, 16: 0.0517},
-        "ng5":   {},
+        "farc":  {1: 0.0930, 2: 0.0606, 4: 0.0507, 8: 0.0472, 16: 0.0450, 32: 0.0535},
+        "dars":  {1: 0.3697, 2: 0.1964, 4: 0.1150, 8: 0.0704, 16: 0.0517, 32: 0.0459},
+        "ng5":   {2: 0.5859, 4: 0.3152, 8: 0.1776, 16: 0.1045, 32: 0.0753},
     },
 }
 A100 = {
@@ -85,7 +84,7 @@ def foot(variant):
     p = {"sp": "single precision (FP32, FP64 islands)",
          "dp": "double precision",
          "both": "SP = FP32 with FP64 islands"}[variant]
-    return (p + "; GH200 = dolpung fleet v2 (STAGE transport) 2026-07-22, A100 = m8 Bp fleet (ends at 64 GPUs); GH200 NG5 + 128-GPU points in flight;\n"
+    return (p + "; GH200 = dolpung fleet v2 (STAGE transport) 2026-07-22, complete; A100 = m8 Bp fleet (its ladder ends at 64 GPUs);\n"
             "SYPD at production dt (CORE2 1800 s, farc 1200 s, dars/NG5 240 s); measured CG dt-corr applied (dars ×1.022, NG5 ×1.011)")
 
 

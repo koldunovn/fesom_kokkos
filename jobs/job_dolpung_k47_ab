@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=k47ab
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=01:40:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/k47ab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/k47ab.%j.err
+# Kokkos/toolkit A/B — ALL variants in ONE allocation (cross-allocation drift is
+# ~3%, larger than the effect we are hunting). Fleet-v2 config otherwise:
+# SPEED=1 + HALO_STAGE=1 + CGPOLY=3, -c72 block:block, 300 steps, 2 reps.
+# Fleet anchors: core2_g1 0.0463 · dars_g2 0.1964 (both reproduced twice).
+ROOT=/home/a/a270088/port_kokkos
+BASE=/work/ab0995/a270088/port2/dolpung/scale/k47ab
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DARS=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+CORE2=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+leg(){ # $1 variant  $2 mesh-tag  $3 mesh  $4 dt  $5 nodes  $6 ntasks
+  local V=$1 BIN ENVSH
+  case $V in
+    base)     BIN=$ROOT/build-dolpung-cuda/fesom_port;      ENVSH="source $ROOT/env_dolpung.sh" ;;
+    k47_c129) BIN=$ROOT/build-dolpung-k47_c129/fesom_port;  ENVSH="source $ROOT/env_dolpung.sh" ;;
+    k47_c130) BIN=$ROOT/build-dolpung-k47_c130/fesom_port;  ENVSH="export CUDAVAR=130; source $ROOT/env_dolpung_cuda13.sh" ;;
+    k47_c132) BIN=$ROOT/build-dolpung-k47_c132/fesom_port;  ENVSH="export CUDAVAR=132; source $ROOT/env_dolpung_cuda13.sh" ;;
+  esac
+  [ -x "$BIN" ] || { echo "SKIP $2 $V (no binary)"; return; }
+  local TLS="self,sm,cuda_copy,cuda_ipc"; [ "$5" -gt 1 ] && TLS="$TLS,dc_mlx5"
+  for rep in a b; do
+    OUT=$BASE/${2}_${V}_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+    srun -N$5 -n$6 -c72 --distribution=block:block bash -c "
+      $ENVSH
+      export UCX_TLS=$TLS UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+      export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+      export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_SPEED_CGPOLY=3
+      exec $BIN $3 $OUT $4 300 -1 $PHC 1958" > "$OUT/log.txt" 2>&1
+    rc=$?
+    ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+    echo "RESULT $2 $V $rep rc=$rc s_step=${ss:-NA}"
+    [ $rc -ne 0 ] && tail -4 "$OUT/log.txt" | sed 's/^/    | /'
+  done
+}
+for V in base k47_c129 k47_c130 k47_c132; do leg $V core2_g1 $CORE2 1800 1 4; done
+for V in base k47_c129 k47_c130 k47_c132; do leg $V dars_g2  $DARS   120 2 8; done
+echo "=== k47 A/B done (anchors: core2_g1 0.0463 · dars_g2 0.1964) ==="

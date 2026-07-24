@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=k47b
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=144
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/k47build.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/k47build.%j.err
+# Kokkos 4.7.04 (external tree, submodule untouched) x CUDA toolkit matrix.
+# Separates the two variables the CUDA-13 question entangles:
+#   k47_c129 = Kokkos 4.7.04 + CUDA 12.9  -> pure Kokkos-version effect
+#   k47_c130 = Kokkos 4.7.04 + CUDA 13.0  -> toolkit effect given new Kokkos
+#   k47_c132 = Kokkos 4.7.04 + CUDA 13.2  -> newest toolkit
+# Baseline for all of them = build-dolpung-cuda (Kokkos 4.4.01 + CUDA 12.9, the
+# certified fleet binary).
+ROOT=/home/a/a270088/port_kokkos
+KDIR=/work/ab0995/a270088/port2/kokkos-4.7.04
+WRAP=$ROOT/scripts/nvcc_wrapper_sm90
+build(){ # $1 tag  $2 env-setup
+  echo "================ $1 ================"
+  ( eval "$2" || exit 1
+    export NVCC_WRAPPER_DEFAULT_COMPILER=$DOLPUNG_GCC/bin/g++
+    echo "nvcc: $(nvcc --version | grep release)"
+    B=$ROOT/build-dolpung-$1; rm -rf $B
+    cmake -S $ROOT -B $B -DCMAKE_BUILD_TYPE=Release \
+      -DFESOM_KOKKOS_DIR=$KDIR \
+      -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_HOPPER90=ON -DKokkos_ARCH_NATIVE=ON \
+      -DNC_CONFIG=$DOLPUNG_NETCDF/bin/nc-config \
+      -DCMAKE_CXX_COMPILER=$WRAP > /tmp/cfg_$1.log 2>&1 \
+      || { echo "CONFIGURE FAILED ($1):"; tail -20 /tmp/cfg_$1.log; exit 1; }
+    grep -E "Kokkos: EXTERNAL|Kokkos version" /tmp/cfg_$1.log | head -2
+    make -C $B -j 96 > /tmp/mk_$1.log 2>&1 \
+      || { echo "BUILD FAILED ($1):"; grep -iE "error" /tmp/mk_$1.log | head -12; exit 1; }
+    echo "BUILD OK ($1): md5 $(md5sum $B/fesom_port | cut -d' ' -f1)" )
+  echo "$1 exit=$?"
+}
+build k47_c129 "source $ROOT/env_dolpung.sh"
+build k47_c130 "export CUDAVAR=130; source $ROOT/env_dolpung_cuda13.sh"
+build k47_c132 "export CUDAVAR=132; source $ROOT/env_dolpung_cuda13.sh"

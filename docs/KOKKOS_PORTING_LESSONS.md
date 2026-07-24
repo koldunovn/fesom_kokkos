@@ -1300,3 +1300,33 @@ vs ~10 % on A100-class runs. Serial oracle + np2 pi smokes pass on Grace. Recipe
   an allowed account; both held). Budget the lag or hold `--no-shell` allocations.
 
 *Keep appending. Date entries when the context (versions, paths) might age.*
+
+## L103 — the debug fallback that ate a factor of two (dolpung, 2026-07-22)
+
+The dolpung fleet's first 21 points ran with `FESOM_HOST_HALO=1`, chosen because it was
+the only setting that survived the fabric's missing GPUDirect. It produced a coherent,
+publishable-looking campaign that said "GH200 ≈ A100" — and it was wrong by ~2×. The
+user's calibration ("JUPITER is 3× A100 and dolpung ≥ JUPITER") is what re-opened it.
+
+- **What the knob actually does:** `FESOM_HOST_HALO` is a *debug* toggle (M5.1-era A/B
+  against the device path). It reverts every exchange to the legacy FULL-FIELD
+  device↔host sync bracket **and**, because `fesom_halo_device_active()` gates them, it
+  silently deactivates CGPIPE and CGPOLY. Both printed `!! requested but INACTIVE` in
+  every single v1 log. Nobody read them. **A perf config must be audited for what it
+  turns OFF, not only for what it turns on** (L80's dead-knob rule, inverted).
+- **The fix that recovered the hardware:** `FESOM_HALO_STAGE=1` — keep the device
+  pack/unpack and the per-partner packed buffers; stage only the PACKED bytes through
+  pinned host for the MPI leg. 10–100× less traffic than full-field, no device pointers,
+  CG levers alive. CORE2 g1: 0.0788 → 0.0460. Fleet-wide: 1.35–1.9× over A100-best
+  instead of parity.
+- **Two hypotheses falsified on the way** (both plausible, both cost a job each):
+  1-core-per-rank SLURM binding (`-c1` 0.0789 vs `-c72` 0.0791) and UCX
+  memtype-cache/CUDA-layer overhead. Neither mattered. The negative results are what
+  made the third hypothesis (transport bytes) the only survivor.
+- **Certification corollary:** we tried to gate STAGE with a trajectory bitwise diff and
+  got "DIVERGENCE" — then measured the CUDA build against *itself*: dev-vs-dev = 3.7e-4
+  at 10 steps, dev-vs-stage = 3.8e-4. **Trajectory bitwise gates are meaningless for the
+  CUDA build** (atomics ⇒ run-to-run nondeterminism). The valid instruments are the
+  per-exchange halo selfcheck and `FESOM_CGPOLY_SELFCHECK` (both clean under STAGE), plus
+  the untouched Serial byte gates. A "divergence" from an invalid gate nearly buried a
+  correct 2× speedup.

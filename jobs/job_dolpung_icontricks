@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=dtrick
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/trick.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/trick.%j.err
+# A/B of ICON-dolpung (sap0006.run, k203123) platform tricks on the port:
+#   nic   = per-rank UCX_NET_DEVICES=mlx5_$SLURM_LOCALID:1 (rank-local HCA)
+#   affin = nic + numactl --cpunodebind/--membind=$SLURM_LOCALID
+#   thp   = MALLOC_CONF=thp:never
+#   coll  = OMPI_MCA_coll=^hcoll,ml (their idiom, replaces hcoll_enable=0)
+# Baseline = fleet-v2 dars_g2 dp_cgp config (anchor 0.1964).
+ROOT=/home/a/a270088/port_kokkos
+source "$ROOT/env_dolpung.sh"
+export UCX_TLS=self,sm,cuda_copy,cuda_ipc,dc_mlx5 UCX_MEMTYPE_CACHE=n
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/dolpung/scale/tricks
+BIN=$ROOT/build-dolpung-cuda/fesom_port
+leg(){ # $1 name  $2 inner-env (semicolon)  $3 numactl(0/1)
+  for rep in a b; do
+    OUT=$BASE/$1_$rep; rm -rf "$OUT"; mkdir -p "$OUT"
+    srun -c72 --distribution=block:block bash -c "
+      source $ROOT/env_dolpung.sh
+      export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_SPEED_CGPOLY=3
+      export OMPI_MCA_coll_hcoll_enable=0
+      IFS=';' read -ra KV <<< '$2'; for kv in \"\${KV[@]}\"; do [ -n \"\$kv\" ] && eval \"export \$kv\"; done
+      if [ '$3' = 1 ]; then exec numactl --cpunodebind=\$SLURM_LOCALID --membind=\$SLURM_LOCALID $BIN $MESH $OUT 120 300 -1 $PHC 1958
+      else exec $BIN $MESH $OUT 120 300 -1 $PHC 1958; fi" > "$OUT/log.txt" 2>&1
+    rc=$?
+    ss=$(grep 'loop timing' "$OUT/log.txt" | tail -1 | grep -o '[0-9.]* s/step' | cut -d' ' -f1)
+    echo "RESULT trick $1 $rep rc=$rc s_step=${ss:-NA}"
+    [ $rc -ne 0 ] && tail -3 "$OUT/log.txt" | sed 's/^/    | /'
+  done
+}
+leg base  "" 0
+leg nic   'UCX_NET_DEVICES=mlx5_\${SLURM_LOCALID}:1' 0
+leg affin 'UCX_NET_DEVICES=mlx5_\${SLURM_LOCALID}:1' 1
+leg thp   "MALLOC_CONF=thp:never" 0
+leg coll  'OMPI_MCA_coll=^hcoll,ml' 0
+echo "=== tricks done ==="

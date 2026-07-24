@@ -1,0 +1,31 @@
+#!/bin/bash
+#SBATCH --job-name=d13b
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=144
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/dolpung/scale/c13build.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/dolpung/scale/c13build.%j.err
+# Build the port with the newer CUDA toolkits (13.0 / 13.2) for the nvcc-version
+# A/B. Kokkos 4.4.1 predates CUDA 13, so a build failure here is a RESULT, not a
+# mishap — it is logged and the A/B simply skips that variant.
+ROOT=/home/a/a270088/port_kokkos
+for V in 130 132; do
+  echo "================ CUDAVAR=$V ================"
+  ( export CUDAVAR=$V
+    source $ROOT/env_dolpung_cuda13.sh || exit 1
+    echo "nvcc: $(nvcc --version | grep release)"
+    B=$ROOT/build-dolpung-cuda$V
+    rm -rf $B
+    cmake -S $ROOT -B $B -DCMAKE_BUILD_TYPE=Release \
+      -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_HOPPER90=ON -DKokkos_ARCH_NATIVE=ON \
+      -DNC_CONFIG=$DOLPUNG_NETCDF/bin/nc-config \
+      -DCMAKE_CXX_COMPILER=$DOLPUNG_NVCC_WRAPPER > /tmp/cfg$V.log 2>&1 \
+      || { echo "CONFIGURE FAILED ($V):"; tail -25 /tmp/cfg$V.log; exit 1; }
+    make -C $B -j 96 > /tmp/mk$V.log 2>&1 \
+      || { echo "BUILD FAILED ($V):"; grep -iE "error" /tmp/mk$V.log | head -15; exit 1; }
+    echo "BUILD OK ($V): $(ls -l $B/fesom_port | awk '{print $5}') bytes  md5 $(md5sum $B/fesom_port | cut -d' ' -f1)"
+  )
+  echo "variant $V exit=$?"
+done

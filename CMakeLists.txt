@@ -11,7 +11,17 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # --- Kokkos (vendored submodule, built in-tree; backend via -DKokkos_ENABLE_*) -------------
-add_subdirectory(externals/kokkos ${CMAKE_BINARY_DIR}/kokkos)
+# -DFESOM_KOKKOS_DIR=<path> builds against an EXTERNAL Kokkos source tree instead of the
+# vendored 4.4.01. Added for toolkit experiments: Kokkos 4.4 cannot compile against CUDA 13
+# (cudaGraphAddDependencies / cudaMemLocation API breaks), so measuring a newer toolkit
+# requires a newer Kokkos. The submodule stays pinned and every CERTIFIED build is the one
+# WITHOUT this option — a binary built with it is experimental by construction.
+if(FESOM_KOKKOS_DIR)
+  message(STATUS "Kokkos: EXTERNAL tree ${FESOM_KOKKOS_DIR} (vendored 4.4.01 bypassed — experimental build)")
+  add_subdirectory(${FESOM_KOKKOS_DIR} ${CMAKE_BINARY_DIR}/kokkos)
+else()
+  add_subdirectory(externals/kokkos ${CMAKE_BINARY_DIR}/kokkos)
+endif()
 
 # --- MPI + netCDF (host serial I/O — FESOM gathers to rank 0) -------------------------------
 find_package(MPI REQUIRED COMPONENTS CXX)

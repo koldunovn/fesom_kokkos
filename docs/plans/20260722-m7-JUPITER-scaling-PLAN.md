@@ -238,6 +238,29 @@ Run these in order on day 0; each is a 10-step CORE2 dist_4 job:
   (srun exports the login environment; an x86 netcdf via CMAKE_PREFIX_PATH and
   an x86 `git` each broke one configure on dolpung). Pin
   `-DNC_CONFIG=<aarch64 nc-config>` explicitly.
+- ⚠️ **The vendored Kokkos 4.4.01 CANNOT build against CUDA 13.x** (tested 13.0 and
+  13.2 on dolpung, 2026-07-22): CUDA 13 changed API signatures the Kokkos CUDA
+  backend uses — `Kokkos_Cuda_Instance.hpp` fails on `cudaGraphAddDependencies`
+  (now takes `const cudaGraphEdgeData*`), `cudaMemAdvise`/`cudaMemPrefetchAsync`
+  (now take `cudaMemLocation`, not an int device id). **If JUPITER's stack is
+  CUDA 13-only, this is a day-0 BLOCKER**: either pick a CUDA 12.x toolkit (12.9
+  is proven) or bump the Kokkos submodule to a CUDA-13-capable release (≥4.7)
+  — the latter re-opens certification, so treat it as a decision, not a detail.
+- **Kokkos 4.7.04 DOES build against CUDA 13.2** (measured 2026-07-22; use
+  `-DFESOM_KOKKOS_DIR=<external kokkos tree>` to test without touching the pinned
+  submodule). Two caveats: (a) with `-DKokkos_ARCH_NATIVE=ON` the 4.7 build FAILS
+  on aarch64 with `g++: error: missing argument to '-msve-vector-bits='` (its SVE
+  width auto-detection yields an empty value) — use `-DKokkos_ARCH_ARMV9_GRACE=ON`
+  instead; (b) payoff is workload-dependent: **−4.6 % on the launch-overhead-bound
+  case (CORE2 g1: 0.0453 vs 0.0475) but 0 % where per-GPU work is large (dars g2:
+  0.1960 vs 0.1966)**, same allocation, 2 reps each. Kokkos-version and toolkit
+  effects are NOT separated (both moved at once).
+- ⚠️ Related, and needed on ANY CUDA-13 machine even after a Kokkos bump:
+  `externals/kokkos/bin/nvcc_wrapper` hardcodes `default_arch="sm_70"` and
+  appends it to every arch-less invocation (CMake's compiler probe). CUDA 13
+  dropped Volta ⇒ `nvcc fatal: Unsupported gpu architecture 'sm_70'` before any
+  real source compiles. Fix shipped: `scripts/nvcc_wrapper_sm90` (same wrapper,
+  sm_90 default) — pass it as `CMAKE_CXX_COMPILER`.
 - CMake: `-DKokkos_ENABLE_CUDA -DKokkos_ARCH_HOPPER90 -DKokkos_ARCH_NATIVE` +
   nvcc_wrapper + gcc≥12 host; Kokkos 4.4.1 + CUDA 12.9 + gcc 14.2 = clean.
   Full CUDA build ~7 min on 64 Grace cores; build ON a compute node via a batch
