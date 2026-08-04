@@ -101,11 +101,24 @@ def sypd(mesh, sstep):
     return DT_PROD[mesh] / (365.0 * sstep * DT_CORR[mesh])
 
 
-def one_fig(meshes, variant, title, fname):
+def decimal_log_yaxis(ax, lo, hi):
+    """log y-scale with PLAIN decimal tick labels (house convention, m7_scaling_figs.py).
+    On log-y a constant multiplicative gap — e.g. the 1.8-1.9x GH200-over-A100 ratio —
+    reads as a constant VERTICAL OFFSET, which the linear panels hide."""
+    ax.set_yscale("log")
+    cands = [0.5, 0.7, 1, 1.5, 2, 3, 5, 7, 10, 15, 20, 30, 50, 70, 100, 150, 200]
+    ticks = [t for t in cands if lo * 0.95 <= t <= hi * 1.05]
+    ax.set_yticks(ticks)
+    ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%g"))
+    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.set_ylim(lo * 0.85, hi * 1.18)
+
+
+def one_fig(meshes, variant, title, fname, logy=False):
     precs = ["dp", "sp"] if variant == "both" else [variant]
     common.set_style()
     fig, ax = plt.subplots(figsize=(5.6, 3.9))
-    counts = []
+    counts, yvals = [], []
     for mesh in [m for m in common.MESH_ORDER if m in meshes]:
         col = common.MESH_COLOR.get(mesh, "k")
         for prec in precs:
@@ -116,12 +129,17 @@ def one_fig(meshes, variant, title, fname):
                 gp = [4 * n for n in ns]
                 lbl = (common.MESH_LABEL.get(mesh, mesh)
                        if (ls == "-" and prec == precs[0]) else None)
-                ax.plot(gp, [sypd(mesh, pts[n]) for n in ns], marker=mk, ms=4,
+                ys = [sypd(mesh, pts[n]) for n in ns]
+                ax.plot(gp, ys, marker=mk, ms=4,
                         ls=ls, color=col, markerfacecolor=mfc, label=lbl)
                 counts += gp
+                yvals += ys
     gpu_axis(ax, counts)
     ax.set_ylabel("SYPD  (simulated yr / wall day)")
-    ax.set_ylim(0, None)
+    if logy:
+        decimal_log_yaxis(ax, min(yvals), max(yvals))
+    else:
+        ax.set_ylim(0, None)
     ax.set_title(title)
     handles = ax.get_legend_handles_labels()[0] + [
         Line2D([], [], color="0.35", ls="-", marker="s", ms=4, label="GH200 (dolpung)"),
@@ -141,18 +159,63 @@ def one_fig(meshes, variant, title, fname):
     print("wrote", fname + ".png/.pdf")
 
 
+def speedup_fig(meshes, title, fname):
+    """SP speedup = dp_sstep / sp_sstep, per mesh and node count, both platforms.
+    Ratio of s/step, so it is dt- and SYPD-convention-independent — the cleanest
+    statement of what FP32 buys. 1.0 = no gain (dashed reference)."""
+    common.set_style()
+    fig, ax = plt.subplots(figsize=(5.6, 3.9))
+    counts = []
+    for mesh in [m for m in common.MESH_ORDER if m in meshes]:
+        col = common.MESH_COLOR.get(mesh, "k")
+        for tbl, ls, mfc, lblok in ((GH200, "-", col, True), (A100, "--", "none", False)):
+            ns = sorted(set(tbl["dp"].get(mesh, {})) & set(tbl["sp"].get(mesh, {})))
+            if not ns:
+                continue
+            ax.plot([4 * n for n in ns],
+                    [tbl["dp"][mesh][n] / tbl["sp"][mesh][n] for n in ns],
+                    marker="o", ms=4, ls=ls, color=col, markerfacecolor=mfc,
+                    label=common.MESH_LABEL.get(mesh, mesh) if lblok else None)
+            counts += [4 * n for n in ns]
+    ax.axhline(1.0, color="0.5", lw=0.8, ls=":", zorder=0)
+    gpu_axis(ax, counts)
+    ax.set_ylabel("SP speedup  (FP64 s/step  /  FP32 s/step)")
+    ax.set_ylim(0.95, 1.35)
+    ax.set_title(title)
+    handles = ax.get_legend_handles_labels()[0] + [
+        Line2D([], [], color="0.35", ls="-", marker="s", ms=4, label="GH200 (dolpung)"),
+        Line2D([], [], color="0.35", ls="--", marker="s", ms=4, markerfacecolor="none",
+               label="A100 (Levante)")]
+    fig.legend(handles=handles, ncol=len(handles), fontsize=7.5, frameon=False,
+               loc="lower center", bbox_to_anchor=(0.5, -0.005))
+    fig.tight_layout(rect=[0, 0.07, 1, 1])
+    fig.text(0.995, -0.045,
+             "FP32 build = M8 -DFESOM_PRECISION=single (FP64 islands retained); ratio of matched s/step, same config/allocation per platform;\n"
+             "GH200 = dolpung fleet v2 (STAGE transport), A100 = m8 Bp fleet (ladder ends at 64 GPUs)",
+             ha="right", fontsize=4.6, alpha=0.6)
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{fname}.{ext}", dpi=200)
+    plt.close(fig)
+    print("wrote", fname + ".png/.pdf")
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--outdir", default="/work/ab0995/a270088/port2/dolpung/figs")
     a = p.parse_args()
     os.makedirs(a.outdir, exist_ok=True)
     for variant in ("sp", "dp", "both"):
-        one_fig({"core2", "farc"}, variant,
-                f"throughput, CORE2 & farc — {PREC_NAME[variant]}",
-                os.path.join(a.outdir, f"fig_dolpung_sypd_{variant}_small"))
-        one_fig({"dars", "ng5"}, variant,
-                f"throughput, multi-million-node meshes — {PREC_NAME[variant]}",
-                os.path.join(a.outdir, f"fig_dolpung_sypd_{variant}_large"))
+        for logy, suf in ((False, ""), (True, "_logy")):
+            one_fig({"core2", "farc"}, variant,
+                    f"throughput, CORE2 & farc — {PREC_NAME[variant]}",
+                    os.path.join(a.outdir, f"fig_dolpung_sypd_{variant}_small{suf}"), logy)
+            one_fig({"dars", "ng5"}, variant,
+                    f"throughput, multi-million-node meshes — {PREC_NAME[variant]}",
+                    os.path.join(a.outdir, f"fig_dolpung_sypd_{variant}_large{suf}"), logy)
+    speedup_fig({"core2", "farc"}, "SP speedup, CORE2 & farc",
+                os.path.join(a.outdir, "fig_dolpung_spdp_small"))
+    speedup_fig({"dars", "ng5"}, "SP speedup, multi-million-node meshes",
+                os.path.join(a.outdir, "fig_dolpung_spdp_large"))
 
 
 if __name__ == "__main__":

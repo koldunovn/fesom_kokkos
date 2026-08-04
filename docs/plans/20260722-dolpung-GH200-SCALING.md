@@ -63,9 +63,18 @@ see the FLEET v2 section below for why they were wrong by ~2x.)
 Shape: CORE2 saturates past 2 nodes (floor ~0.030 = the over-decomposition tail,
 same as A100); farc peaks at 16 nodes and inverse-scales at 32 (0.0450 → 0.0535
 dp) exactly as it does on A100; **dars and NG5 keep scaling to 128 GPUs**
-(g16→g32 = 1.13x dars, 1.39x NG5 dp). SP/DP = 1.09–1.21x — LOWER than v1's
-1.24–1.5x, and that is the expected signature: STAGE removed the byte-volume
-bottleneck that SP was partly compensating for.
+(g16→g32 = 1.13x dars, 1.39x NG5 dp).
+
+**SP speedup (FP64 s/step / FP32 s/step, matched pairs): 1.03–1.21x, median
+1.15x** — figures `fig_dolpung_spdp_{small,large}`. Per mesh on GH200: CORE2
+1.06–1.17 (falls with node count), farc 1.03–1.21, dars 1.15–1.21, NG5
+1.12–1.18. The A100 median is 1.18x (range 0.99–1.29, noisier), so **FP32 buys
+slightly LESS on GH200 than on A100** — expected: STAGE removed the byte-volume
+bottleneck that FP32 was partly compensating for, and the M8 design keeps FP64
+islands (CG scalar chain, zstar ALE accumulation), so the halved-word benefit
+never applies to the whole step. Under the v1 host-halo config the same builds
+showed 1.24–1.5x — that number measured the full-field sync traffic, not the
+model.
 
 ## SYPD at production dt (CORE2 1800 · farc 1200 · dars 240 x1.0222 · NG5 240 x1.0110)
 
