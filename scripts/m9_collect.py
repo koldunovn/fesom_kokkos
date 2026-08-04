@@ -64,6 +64,10 @@ runs = []
 for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
     jobid = re.search(r"\.(\d+)\.out$", out)
     jobid = jobid.group(1) if jobid else None
+    # backend comes from the JOB SCRIPT that wrote the file (abcpu.* / abgpu.*), not from the
+    # node count — a first attempt inferred it from ntasks/nodes and silently mislabelled every
+    # CPU run, which emptied a whole figure panel.
+    backend = "GPU" if os.path.basename(out).startswith("abgpu") else "CPU"
     meta, legs = {}, {}
     with open(out, "rb") as f:
         for raw in f:
@@ -101,7 +105,7 @@ for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
         reps = d.get("reps") or []
         if len(reps) >= 2:
             d["rep_spread_pct"] = 100.0 * (max(reps) - min(reps)) / min(reps)
-    runs.append(dict(jobid=jobid, **meta, legs=legs))
+    runs.append(dict(jobid=jobid, backend=backend, **meta, legs=legs))
 
 # derive per-run cell deltas against the reference leg (leg order = insertion order)
 for r in runs:

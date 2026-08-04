@@ -1358,3 +1358,54 @@ this fix — the constant was hardwired precisely because the reference config n
 **Corollary for the inert case:** the bit-identical result is not worthless — it is the *null
 rung* of the ladder, proving the path is inert below threshold, which is a real requirement.
 Record it as that, and never as evidence the machinery works.
+
+---
+
+## L103 — A diagnostic branch inside a kernel you intend to time is a measurement bug (M9, 2026-08-05)
+
+The M9 divergence-subcycled mEVP (S. Danilov's reformulation: carry `R = ∇·σ` at nodes instead
+of `σ` at elements) shipped with an in-kernel equivalence check — `if (m9_selfcheck) { … }`
+inside the hot element kernel, guarded by a runtime bool that is `false` in every timing leg.
+
+Measured with it in place: `icedyn` **+30 %** on GPU (CORE2 np8) and **+39 %** at CPU np1.
+Measured with the identical algorithm after moving the diagnostic to its own launch:
+**+13 %** on GPU and **−0.65 %** on CPU. Same maths, same trajectory (L3 magnitudes identical to
+the last digit), same binaries otherwise.
+
+**On CUDA a never-taken branch still costs the registers its body needs, and the occupancy those
+registers buy. On CPU it inhibits vectorisation.** The branch is free only in the sense that it
+does not execute.
+
+Worse than the number was the reasoning it provoked. The `+30 %` was attributed to a real,
+defensible mechanism — the M9 trap that forces the R recursion to run over every owned node
+while the classic node solve returns early for non-ice nodes, which on a global mesh with
+partial ice cover genuinely converts a masked kernel into a full-domain one. A masked variant
+was built to fix it. The ablation then measured **10.9 vs 10.8 ms** — the mask changed nothing,
+and the story was wrong. Only then did the confound surface.
+
+**Rules:**
+- **Never leave a diagnostic branch inside a kernel you intend to time.** Give it its own
+  launch; a diagnostic only runs in diagnostic mode, where speed is irrelevant, so it can
+  recompute whatever it needs rather than share registers with the timed path.
+- **Quote the noise floor with every delta**, derived from legs that *must* be identical. Here
+  `classic` (leg 1) vs `classic_noeps` (leg 4) differ by 0.16 %, and rep 1 of leg 1 runs ~3 %
+  slow from job warm-up — which also proves leg-order/thermal drift is not present, since leg 4
+  is as fast as leg 1. All of that was already in the output being quoted from.
+- **A causal story is a hypothesis until an ablation isolates it.** Weight the ablation that
+  *disproves* your explanation above the one that confirms it.
+
+## L104 — For the mEVP subcycle on GPU at small per-rank size, the phase is launch-bound (M9)
+
+nsys, ratio-validated against the untraced A/B (traced +1.76 % vs untraced +1.63 %; absolute
+trace times are 48 % inflated and were not used): of the 8.2 ms `icedyn` phase at CORE2 np8 on
+one A100, only **~1.25 ms is mEVP kernel execution**, spread over ~480 launches/step. Total
+kernel-busy is *identical* between the classic and divergence forms (21.8 vs 21.7 ms/step), and
+the divergence form's kernels are marginally the cheaper pair (1.24 vs 1.27 ms).
+
+Consequences: (a) no kernel-level lever can pay in that regime, which is why the M9 element-
+kernel saving is invisible there and why `FESOM_SPEED_MEVPNOEPS` — which removes three element
+stores per element per subcycle — measures **exactly 0.00 %**; (b) the levers that *do* pay are
+the ones that remove whole launches or whole exchanges. Cell ⑤ (exchange every K-th subcycle)
+removes 120 → 120/K exchanges and delivers **−15 % to −21 % of the whole model step** at np8 and
+np32 respectively. **Size an ice-dynamics lever against the launch/exchange count first, and
+against kernel bytes second.**
