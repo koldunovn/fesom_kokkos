@@ -226,6 +226,8 @@ void fesom_ice_init(fesom_ice           *ice,
          * for a diagnostic that never runs in a timing leg is not free. */
         ice->work.mevp_Ru_fld.alloc("ice.mevp_Ru", n);  ice->work.mevp_Ru = ice->work.mevp_Ru_fld.h();
         ice->work.mevp_Rv_fld.alloc("ice.mevp_Rv", n);  ice->work.mevp_Rv = ice->work.mevp_Rv_fld.h();
+        ice->work.mevp_nod_has_el_fld.alloc("ice.mevp_nod_has_el", n);
+        ice->work.mevp_nod_has_el = ice->work.mevp_nod_has_el_fld.h();
         if (getenv("FESOM_MEVPDIV_SELFCHECK")) {
             ice->work.mevp_Rchk_u_fld.alloc("ice.mevp_Rchk_u", n);
             ice->work.mevp_Rchk_v_fld.alloc("ice.mevp_Rchk_v", n);

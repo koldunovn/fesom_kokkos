@@ -114,6 +114,17 @@ typedef struct fesom_ice_work {
     real_t *mevp_Ru,     *mevp_Rv;
     real_t *mevp_Rchk_u, *mevp_Rchk_v;
 
+    /*   mevp_nod_has_el [myDim+eDim]  M9: 1 where the node has >=1 incident ICE element.
+     * Measured need (Fleet 1A, GPU CORE2 np8): the classic node solve returns early for
+     * non-ice nodes, but the R recursion must run over EVERY owned node (the ice_nod trap), so
+     * on a global mesh with partial ice cover the divergence form turned a masked kernel into a
+     * full-domain one and cost +30% of icedyn. This mask restores the proportionality — and it
+     * is also MORE faithful: for a node with no incident ice element the classic assembly skips
+     * every contributing element, so div(sigma) there is EXACTLY 0, whereas an unmasked R
+     * decays geometrically instead. Set once per ocean step (the ice_el mask is fixed within a
+     * step); R is zeroed there at step entry and the recursion then skips those nodes. */
+    int    *mevp_nod_has_el;
+
     /* M1.4: Field owners; the raw ptrs above are non-owning aliases = field.h() (D12).
      * fct_massmatrix is alloc'd lazily in fesom_ice_mass_matrix_fill (sized stiff->nnz),
      * the others in fesom_ice_init. */
@@ -126,6 +137,7 @@ typedef struct fesom_ice_work {
     fesom::IntField mevp_ice_nod_fld, mevp_ice_el_fld;
     fesom::Field mevp_Ru_fld, mevp_Rv_fld;               /* M9 divergence form */
     fesom::Field mevp_Rchk_u_fld, mevp_Rchk_v_fld;       /* M9 selfcheck only */
+    fesom::IntField mevp_nod_has_el_fld;                 /* M9 ice-element node mask */
 } fesom_ice_work;
 
 /*

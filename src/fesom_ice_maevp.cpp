@@ -61,6 +61,12 @@ static bool maevp_div_on(void)   { static int c = -1; return fesom_speed_on_exp(
  * and the dead-write removal are never reported as one number. */
 static bool maevp_noeps_on(void) { static int c = -1; return fesom_speed_on_exp("MEVPNOEPS", &c); }
 
+/* Ablation switch: restore the NAIVE divergence form, whose R recursion runs over the whole
+ * owned domain instead of only the ice-element node set. Kept so the masked-vs-unmasked pair
+ * can be measured — that difference is what quantifies the cost of the ice_nod trap on a mesh
+ * with partial ice cover, and it is a result, not an implementation detail to hide. */
+static bool maevp_nomask_on(void) { static int c = -1; return fesom_speed_on_exp("MEVPDIV_NOMASK", &c); }
+
 /* Diagnostic: carry sigma AND R and compare. Perturbs the trajectory (it re-baselines R at
  * each step entry), so it is NEVER a timing or trajectory leg. See the plan §L2. */
 static int maevp_div_selfcheck(void)
@@ -122,13 +128,15 @@ static int maevp_lag_K(const struct fesom_ice *ice, const struct fesom_partit *p
 /* One provenance line naming the active cell of the 2x3 study matrix. Every M9 gate and every
  * A/B leg greps this; it is the single place that says what actually ran. */
 static void maevp_announce_cell(const struct fesom_partit *partit,
-                                bool div_on, bool noeps_on, int lagK, int selfcheck)
+                                bool div_on, bool noeps_on, int lagK, int selfcheck,
+                                bool nomask)
 {
     static int announced = 0;
     if (announced || partit->mype != 0) return;
     announced = 1;
     fprintf(stderr, "[m9] mEVP cell: form=%s halo=%s eps=%s%s\n",
-            div_on   ? "divergence(R_u,R_v @nodes)" : "classic(sigma @elements)",
+            div_on   ? (nomask ? "divergence(R@nodes,UNMASKED)" : "divergence(R@nodes,masked)")
+                     : "classic(sigma @elements)",
             lagK > 1 ? "lagged"                     : "every-subcycle",
             noeps_on ? "dropped"                    : "kept",
             selfcheck ? "  [SELFCHECK ON — diagnostic mode, not a timing leg]" : "");
@@ -186,9 +194,10 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
      * find the lines in a known place. Resolution is cached; the announce fires once. */
     const bool m9_div       = maevp_div_on();
     const bool m9_noeps     = maevp_noeps_on();
+    const bool m9_nomask    = maevp_nomask_on();
     const int  m9_selfcheck = maevp_div_selfcheck();
     const int  m9_lagK      = maevp_lag_K(ice, partit);
-    maevp_announce_cell(partit, m9_div, m9_noeps, m9_lagK, m9_selfcheck);
+    maevp_announce_cell(partit, m9_div, m9_noeps, m9_lagK, m9_selfcheck, m9_nomask);
 
     const int N     = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* node_size */
     const int myDim = mesh->myDim_nod2D;
@@ -249,6 +258,7 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     auto R_v     = ice->work.mevp_Rv_fld.d();
     auto Rchk_u  = m9_selfcheck ? ice->work.mevp_Rchk_u_fld.d() : R_u;   /* alias when unused */
     auto Rchk_v  = m9_selfcheck ? ice->work.mevp_Rchk_v_fld.d() : R_v;
+    auto nod_el  = ice->work.mevp_nod_has_el_fld.d();
     /* mesh */
     auto en       = mesh->elem_nodes_fld.d();
     auto ea       = mesh->elem_area_fld.d();
@@ -341,6 +351,40 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     /* zero u_rhs/v_rhs over myDim (:668-673) */
     Kokkos::parallel_for("maevp_rhs_uv_zero", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });
+
+    /* ── M9: the ice-element NODE mask, and the R reset that goes with it ───────────────────
+     * MEASURED NEED (Fleet 1A, GPU CORE2 np8, jobs 26698614/15): the classic node solve returns
+     * early for non-ice nodes, but the R recursion must run over EVERY owned node (the ice_nod
+     * trap above). On a global mesh where ice covers a minority of nodes that turns a masked
+     * kernel into a full-domain one — icedyn went from 8.3 to 10.8 ms/step, +30%, because the
+     * div form moved ~509 KB/subcycle of R traffic where the classic form moved ~240 KB of
+     * sigma over ICE ELEMENTS ONLY. The reformulation ADDED traffic.
+     *
+     * Fix, and it is also MORE FAITHFUL than the unmasked version: a node with no incident ice
+     * element receives nothing from the assembly (the element loop skips those elements), so
+     * div(sigma) there is EXACTLY 0 in the classic form — whereas an unmasked R sits there
+     * decaying by det1 per subcycle. So zero R on those nodes once per step and skip them in
+     * the recursion. The ice_el mask is fixed within a step, so the node mask is too.
+     *
+     * FESOM_SPEED_MEVPDIV_NOMASK=1 restores the naive full-domain behaviour — kept because the
+     * masked-vs-unmasked pair is the ablation that quantifies this effect for the write-up.
+     * (Sergey's reference F90 has no masks at all; it computes over whole arrays, which is why
+     * the question does not arise there and does arise in FESOM2's actual mEVP.) */
+    if (m9_div && !m9_nomask) {
+        Kokkos::parallel_for("maevp_nod_has_el_zero", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i) { nod_el(i) = 0; });
+        Kokkos::parallel_for("maevp_nod_has_el_set", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+                /* plain stores of the same value => idempotent, race-free on both backends */
+                nod_el(en(3*el + 0)) = 1; nod_el(en(3*el + 1)) = 1; nod_el(en(3*el + 2)) = 1;
+            });
+        Kokkos::parallel_for("maevp_R_reset_nonice", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) {
+                if (!nod_el(i)) { R_u(i) = 0.0; R_v(i) = 0.0; }
+            });
+    }
 
     /* ── M9 SELFCHECK, step entry (plan §L2) ────────────────────────────────────────────────
      * The naive check "R == div(sigma) for the whole run" CANNOT pass, and the reason is the
@@ -589,6 +633,12 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
          * non-cavity ice elements, which is precisely what u_rhs already holds.) */
         Kokkos::parallel_for("maevp_node_solve_div", Kokkos::RangePolicy<>(0, myDim),
             KOKKOS_LAMBDA(const int i) {
+                /* Nodes with no incident ice element contribute nothing and hold R == 0 (reset
+                 * at step entry): div(sigma) there is exactly 0 in the classic form too. Skipping
+                 * them is what keeps this kernel's cost proportional to the ice-covered region
+                 * instead of the whole domain — see the banner above the mask construction. */
+                if (!m9_nomask && !nod_el(i)) return;
+
                 const real_t Ru = det1*R_u(i) + u_rhs(i);
                 const real_t Rv = det1*R_v(i) + v_rhs(i);
                 R_u(i) = Ru; R_v(i) = Rv;

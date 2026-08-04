@@ -763,37 +763,44 @@ namespace {
 
 struct PackViews { DevV v[11]; };
 
-void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
+/*
+ * M9 — what ONE extended exchange ships and what it diagnoses.
+ *
+ * Before M9 all of this was implied by the single integer `nf`, and EVERY diagnostic was keyed
+ * on its VALUE: `sig = (nf<=6)`, the selfcheck on `nf<=6`, the debug split on `nf==6`, the
+ * window print on `nf==2`, the prestep echo on `nf==11`. Handing the field list to the caller
+ * (which is what lets mEVP reuse this machinery) silently re-keys every one of them — and the
+ * FORCE_SERIAL byte proof passes just as happily with all the diagnostics DEAD, because a dead
+ * diagnostic changes no bytes. That is the L80 class, and it is why intent is now stated
+ * explicitly instead of being inferred from a count.
+ *
+ * The std-EVP callers below construct exactly the three plans that used to be nf = 11 / 2 / 6,
+ * so their behaviour is unchanged by construction.
+ */
+struct EvpwPlan {
+    PackViews F;
+    int  nf  = 0;              /* node fields shipped */
+    int  nun = 0;              /* how many are UNPACKED; the rest are compare-only */
+    bool sig = false;          /* also ship the element sigma segment (tag 2205) */
+    enum Diag { NONE, WINDOW, WINDOW_DBG, PRESTEP_ECHO } diag = NONE;
+};
+
+void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan &P)
 {
     EvpwState &S = g_w;
     FESOM_CHECK(S.built, "evpwide: exchange before build");
+    /* the send/recv buffers are sized nsend*11 / nrecv*11 in evpw_build — a plan wider than
+     * that would overrun them silently. Widen the sizing first if a caller ever needs it. */
+    FESOM_CHECK(P.nf >= 1 && P.nf <= 11,
+                "evpwide: plan ships %d node fields; buffers are sized for 11", P.nf);
+    FESOM_CHECK(P.nun >= 0 && P.nun <= P.nf, "evpwide: plan unpacks %d of %d", P.nun, P.nf);
 
-    PackViews F;
-    F.v[0]  = ice->uice_fld.d();
-    F.v[1]  = ice->vice_fld.d();
-    if (nf == 6) {
-        /* selfcheck level 2: ship the owner's FINALIZED u_rhs/v_rhs + its inv_am/inv_m for
-         * comparison (compare-only — never unpacked). Splits gather-vs-finalize-input bugs. */
-        F.v[2] = ice->uice_rhs_fld.d();
-        F.v[3] = ice->vice_rhs_fld.d();
-        F.v[4] = ice->work.inv_areamass_fld.d();
-        F.v[5] = ice->work.inv_mass_fld.d();
-    }
-    if (nf > 6) {
-        F.v[2]  = ice->data[FESOM_ICE_AICE].values_fld.d();
-        F.v[3]  = ice->data[FESOM_ICE_MICE].values_fld.d();
-        F.v[4]  = ice->data[FESOM_ICE_MSNOW].values_fld.d();
-        F.v[5]  = ice->srfoce_u_fld.d();
-        F.v[6]  = ice->srfoce_v_fld.d();
-        F.v[7]  = ice->stress_atmice_x_fld.d();
-        F.v[8]  = ice->stress_atmice_y_fld.d();
-        F.v[9]  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
-        F.v[10] = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
-    }
+    const PackViews F  = P.F;
+    const int       nf = P.nf;
 
     fesom_halo_prof_barrier(p);                 /* M5.17 split-instrumentation parity */
 
-    const bool sig = (nf <= 6);   /* the wide refresh re-baselines ghost SIGMA every window
+    const bool sig = P.sig;       /* the wide refresh re-baselines ghost SIGMA every window
                                    * (design §2 corrected: velocity-only refresh is inexact
                                    * for any finite R); the per-step 11-field ship does not
                                    * (sigma is untouched on both sides between EVP calls). */
@@ -865,7 +872,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
      * never reaches owned reads — design §2 corrected) => this is a DRIFT DIAGNOSTIC,
      * expected small-but-NONZERO. The exact-zero certification is the FORCE_SERIAL
      * diff_snap gate on owned bytes, plus the pre-step echo check below. */
-    if (nf <= 6 && S.selfcheck) {
+    if ((P.diag == EvpwPlan::WINDOW || P.diag == EvpwPlan::WINDOW_DBG) && S.selfcheck) {
         auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; auto flag = S.selff_d;
         const PackViews FF = F; const int nfl = nf; const int Nlim = S.N;
         double mx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -881,7 +888,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
                 }, Kokkos::Max<double>(m1));
             mx[f] = m1;
         }
-        if (nf == 6) {   /* debug split of the urhs mismatch by gather composition */
+        if (P.diag == EvpwPlan::WINDOW_DBG) {   /* debug split of the urhs mismatch by gather composition */
             for (int cls = 1; cls <= 2; ++cls) {
                 double m1 = 0.0; const char want = (char)cls;
                 Kokkos::parallel_reduce("fesom_evpwide_self_cls", Kokkos::RangePolicy<>(0, S.nrecv),
@@ -898,7 +905,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
         double gmx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         MPI_Reduce(mx, gmx, 8, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
         if (p->mype == 0) {
-            if (nf == 2)
+            if (P.diag == EvpwPlan::WINDOW)
                 printf("[evpwide-self] exch %ld  ghost drift (end-clean set, expected 0 only if R>K) = %.3e\n",
                        g_w.exch_count, gmx[0] > gmx[1] ? gmx[0] : gmx[1]);
             else
@@ -912,7 +919,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
     /* selfcheck level 3 (Serial-only): dump the WORST urhs slot's full gather composition.
      * All Views are host-resident on Serial — direct indexing. */
     static bool s_dumped = false;
-    if (nf == 6 && S.selfcheck >= 3 && !s_dumped) {
+    if (P.diag == EvpwPlan::WINDOW_DBG && S.selfcheck >= 3 && !s_dumped) {
         s_dumped = true;
         auto rbuf = S.rbuf_d; auto ridx = S.ridx_d; auto flag = S.selff_d;
         int ndust = 0;
@@ -1033,7 +1040,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
      * the last window ends with a refresh => the incoming ghost bytes MUST equal what we
      * already hold, EXACTLY, on every backend. A nonzero here = plumbing or an unexpected
      * outside writer of uice/vice ghosts. */
-    if (nf == 11 && S.selfcheck) {
+    if (P.diag == EvpwPlan::PRESTEP_ECHO && S.selfcheck) {
         auto ridx = S.ridx_d; auto rbuf = S.rbuf_d;
         auto u = F.v[0]; auto v = F.v[1];
         double mx0 = 0.0; const int nfl = nf;
@@ -1056,7 +1063,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
 
     {   /* unpack into ghost slots (fields >= 2 of the dbg nf==4 mode are compare-only) */
         auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; const PackViews FF = F; const int nfl = nf;
-        const int nun = (nf == 6) ? 2 : nf;      /* dbg fields are compare-only */
+        const int nun = P.nun;                   /* compare-only fields are not unpacked */
         if (S.nrecv > 0)
             Kokkos::parallel_for("fesom_evpwide_unpack", Kokkos::RangePolicy<>(0, S.nrecv),
                 KOKKOS_LAMBDA(const int i) {
@@ -1081,11 +1088,49 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, int nf)
 
 } /* anonymous namespace */
 
+/* ── std-EVP plans. These reproduce the pre-M9 nf = 11 / 2 / 6 cases EXACTLY, which is what
+ *    keeps the certified std-EVP behaviour unchanged by construction. ────────────────────── */
+
 void fesom_evpwide_prestep_exchange(struct fesom_ice *ice, struct fesom_partit *p)
-{ evpw_exchange(ice, p, 11); }
+{
+    EvpwPlan P;                       /* was nf = 11 */
+    P.F.v[0]  = ice->uice_fld.d();
+    P.F.v[1]  = ice->vice_fld.d();
+    P.F.v[2]  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    P.F.v[3]  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    P.F.v[4]  = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    P.F.v[5]  = ice->srfoce_u_fld.d();
+    P.F.v[6]  = ice->srfoce_v_fld.d();
+    P.F.v[7]  = ice->stress_atmice_x_fld.d();
+    P.F.v[8]  = ice->stress_atmice_y_fld.d();
+    P.F.v[9]  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    P.F.v[10] = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    P.nf = 11; P.nun = 11;
+    P.sig = false;                    /* sigma is untouched on both sides between EVP calls */
+    P.diag = EvpwPlan::PRESTEP_ECHO;  /* uice/vice ghosts MUST already equal the incoming bytes */
+    evpw_exchange(ice, p, P);
+}
 
 void fesom_evpwide_subcycle_exchange(struct fesom_ice *ice, struct fesom_partit *p)
-{ evpw_exchange(ice, p, g_w.selfcheck >= 2 ? 6 : 2); }
+{
+    EvpwPlan P;
+    P.F.v[0] = ice->uice_fld.d();
+    P.F.v[1] = ice->vice_fld.d();
+    P.nf = 2; P.nun = 2;
+    P.sig = true;                     /* re-baseline ghost sigma every window (design §2 corr.) */
+    P.diag = EvpwPlan::WINDOW;
+    if (g_w.selfcheck >= 2) {         /* was nf = 6: ship the owner's finalized u_rhs/v_rhs +
+                                       * inv_am/inv_m for COMPARISON only, never unpacked —
+                                       * splits gather bugs from finalize-input bugs. */
+        P.F.v[2] = ice->uice_rhs_fld.d();
+        P.F.v[3] = ice->vice_rhs_fld.d();
+        P.F.v[4] = ice->work.inv_areamass_fld.d();
+        P.F.v[5] = ice->work.inv_mass_fld.d();
+        P.nf = 6; P.nun = 2;
+        P.diag = EvpwPlan::WINDOW_DBG;
+    }
+    evpw_exchange(ice, p, P);
+}
 
 void fesom_evpwide_free(void)
 {
