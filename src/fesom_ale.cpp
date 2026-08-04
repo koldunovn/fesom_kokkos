@@ -265,7 +265,22 @@ int fesom_wsplit_on(void)
     static int cached = -1;
     if (cached < 0) {
         const char *e = getenv("FESOM_WSPLIT");
-        cached = (e && e[0] == '1') ? 1 : (int)FESOM_PHASE1_USE_WSPLIT;
+        /* House rule for a physics option (README, FESOM_ALE precedent): an unrecognised
+         * value ABORTS. The old `e[0]=='1' ? 1 : default` silently read FESOM_WSPLIT=true,
+         * =on, =yes, =2 as OFF — a silent fallback to OFF on a high-resolution mesh is
+         * precisely the failure this option exists to prevent. */
+        if (!e || !e[0]) {
+            cached = (int)FESOM_PHASE1_USE_WSPLIT;
+        } else if (strcmp(e, "1") == 0) {
+            cached = 1;
+        } else if (strcmp(e, "0") == 0) {
+            cached = 0;
+        } else {
+            fprintf(stderr, "FESOM_WSPLIT=%s not supported (0|1) — refusing to guess, "
+                            "because guessing means running a high-resolution mesh with the "
+                            "vertical-velocity splitter silently off\n", e);
+            exit(1);
+        }
         if (cached)
             fprintf(stderr, "[wsplit] FESOM_WSPLIT = ON (maxcfl=%.2f)\n",
                     (double)fesom_wsplit_maxcfl());
@@ -286,15 +301,24 @@ real_t fesom_wsplit_maxcfl(void)
     static real_t cached = -1.0;
     if (cached < 0.0) {
         const char *e = getenv("FESOM_WSPLIT_MAXCFL");
-        cached = (e && e[0]) ? (real_t)atof(e) : (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
-        if (!(cached > 0.0)) {
-            fprintf(stderr, "[wsplit] FESOM_WSPLIT_MAXCFL='%s' invalid (must be > 0) — "
-                            "falling back to %.2f\n", e, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+        if (!e || !e[0]) {
             cached = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
+        } else {
+            /* Full-string parse + abort, not atof: atof("0.3x")=0.3 and atof("threehundredths")
+             * =0.0 both silently become a THRESHOLD, i.e. a different model. */
+            char *end = NULL;
+            const double v = strtod(e, &end);
+            if (end == e || (end && *end) || !(v > 0.0)) {
+                fprintf(stderr, "FESOM_WSPLIT_MAXCFL=%s not supported (need a number > 0; "
+                                "Fortran namelist wsplit_maxcfl; default %.2f)\n",
+                        e, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+                exit(1);
+            }
+            cached = (real_t)v;
+            if (cached != (real_t)FESOM_PHASE1_WSPLIT_MAXCFL)
+                fprintf(stderr, "[wsplit] FESOM_WSPLIT_MAXCFL = %.3f (default %.2f)\n",
+                        (double)cached, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
         }
-        if (cached != (real_t)FESOM_PHASE1_WSPLIT_MAXCFL)
-            fprintf(stderr, "[wsplit] FESOM_WSPLIT_MAXCFL = %.3f (default %.2f)\n",
-                    (double)cached, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
     }
     return cached;
 }
@@ -306,7 +330,13 @@ real_t fesom_wsplit_maxcfl(void)
  * ng5 7,402,886). A heuristic on mesh size, hence a warning and never an abort. */
 void fesom_wsplit_mesh_notice(int nod2D_global, int mype)
 {
-    if (mype != 0 || fesom_wsplit_on() || nod2D_global < 500000) return;
+    if (mype != 0) return;
+    /* L80 guard: a threshold set on a splitter that is off does nothing. Say so — this is
+     * the exact shape of the dead knob L102 was written about. */
+    if (!fesom_wsplit_on() && getenv("FESOM_WSPLIT_MAXCFL"))
+        fprintf(stderr, "[wsplit] NOTE: FESOM_WSPLIT_MAXCFL is set but FESOM_WSPLIT is OFF — "
+                        "the threshold has no effect (the splitter never runs).\n");
+    if (fesom_wsplit_on() || nod2D_global < 500000) return;
     fprintf(stderr,
         "[wsplit] WARNING: %d surface nodes (high-resolution mesh) and the vertical-\n"
         "[wsplit]          velocity splitter is OFF (FESOM_WSPLIT unset).\n"

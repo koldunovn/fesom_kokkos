@@ -262,6 +262,13 @@ start dies without it (job 26360443, T-NaN at step 230) and completes 300 steps 
 | `FESOM_WSPLIT` | `0` \| `1` | `0` | enables the splitter (Fortran `use_wsplit`) |
 | `FESOM_WSPLIT_MAXCFL` | float > 0 | `1.0` | CFLz trigger threshold (Fortran namelist `wsplit_maxcfl`) |
 
+Both **abort loudly on an unrecognised value**, like the M6 options above — `FESOM_WSPLIT=true`,
+`=yes`, `=2` and `FESOM_WSPLIT_MAXCFL=0.3x`, `=abc`, `=0`, `=-1` are all refused by name rather
+than silently defaulted. That is not pedantry here: the old `e[0]=='1'` test read
+`FESOM_WSPLIT=true` as OFF, and a silent OFF on a high-resolution mesh is the exact failure the
+option exists to prevent. Setting the threshold while the splitter is off prints a NOTE that it
+has no effect (L80).
+
 The port warns on rank 0 when a mesh above 500k surface nodes runs with the splitter off, and
 repeats the hint if the run then blows up. It is a warning, never an abort — the real trigger is
 CFLz > maxcfl, which depends on dt and the state, not on mesh size alone.
@@ -272,15 +279,18 @@ off (measured: job 26695054). The certification set below therefore runs at
 `FESOM_WSPLIT_MAXCFL=0.3`, where the implicit share reaches ~63% of `w` — verified in the run,
 not assumed (L80).
 
+Gate ladder of record (the option's final binaries, `m7/bin/wsplit0`; the identical ladder ran
+one build earlier at 26695169-248 with the same verdicts — the re-run certifies the abort paths):
+
 | gate (CORE2 dist_8, 20 steps, dt1800) | job | verdict |
 |---|---|---|
-| knob-OFF byte (Serial) | 26695169 | ✅ rc=0 bit-identical |
-| knob-OFF fidelity (CUDA) | 26695244 | ✅ PASS |
-| wsplit ON, Serial — *must* differ from OFF | 26695170 | ✅ differs (splitter fired; `w_i/w` ≈ 0.63) |
-| **wsplit ON, CUDA vs Serial** | **26695245** | ✅ **PASS (worst 7.4e-03)** — first execution of the device vertical solver |
-| wsplit + TKE, CUDA vs Serial | 26695246 | ✅ PASS |
-| wsplit + mEVP, CUDA vs Serial | 26695247 | ✅ PASS |
-| wsplit + zstar, CUDA vs Serial | 26695248 | ✅ PASS (`Kv` 9.999e-02 = the L79 zstar control; 2 isolated `u` outliers, L75 class) |
+| knob-OFF byte (Serial) | 26695532 | ✅ rc=0 bit-identical |
+| knob-OFF fidelity (CUDA) | 26695587 | ✅ PASS (worst 4.180e-03) |
+| wsplit ON, Serial — *must* differ from OFF | 26695533 | ✅ differs (splitter fired; `w_i/w` ≈ 0.63) |
+| **wsplit ON, CUDA vs Serial** | **26695588** | ✅ **PASS (worst 8.325e-03)** — first execution of the device vertical solver |
+| wsplit + TKE, CUDA vs Serial | 26695589 | ✅ PASS (`h_ice` 1.468e-01 at **1 entry of 126,858** = the L75 clamp-flip class; reproduces 1.440e-01 at the same point on the previous build) |
+| wsplit + mEVP, CUDA vs Serial | 26695590 | ✅ PASS (worst 4.967e-04) |
+| wsplit + zstar, CUDA vs Serial | 26695591 | ✅ PASS (worst 4.457e-03) |
 
 Not covered: the device path has not been run at high resolution (the July evidence that the port
 tracks Fortran's arc on NG5 is CPU-only), and there is no multi-year climate leg with the splitter
