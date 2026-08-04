@@ -1,0 +1,97 @@
+#!/bin/bash
+#SBATCH --job-name=m9_opt3
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/opt3.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/opt3.%j.err
+#
+# M9 — the options x3 matrix (L91), run FROM THE ICE WORKTREE.
+#
+# L91 says every new lever must be re-gated across TKE / mEVP / zstar, because a lever is a
+# FIELD-OWNERSHIP change and old gates do not cover new ownership. For M9 the precise risk is
+# LEAKAGE: the knobs must be completely inert wherever whichEVP != 1.
+#
+# That claim is tested most directly by comparing the port against ITSELF rather than against
+# the C oracle: for each option config, run knob-OFF and knob-ON and diff. Under TKE and zstar
+# (both std EVP) the M9 knobs must produce BIT-IDENTICAL output — if they do not, something in
+# M9 reaches outside the mEVP branch, which is exactly what this gate exists to catch. The
+# C-oracle comparison for those configs was certified in M6 and nothing in M9 touches those
+# paths; the L0 gate (job_m9_mevp_bitid) re-proves the default every build.
+#
+# Legs:
+#   TKE     FESOM_MIX_SCHEME=TKE                          std EVP  -> MUST be bit-identical
+#   zstar   FESOM_ALE=zstar                               std EVP  -> MUST be bit-identical
+#   all3    TKE + mEVP + zstar                            mEVP     -> EXPECTED to differ
+#
+# Usage:
+#   sbatch --export=ALL,BIN=/work/.../m9/bin/wip/fesom_port_serial,\
+#     KNOBS="FESOM_SPEED_MEVPDIV=1 FESOM_SPEED_MEVPNOEPS=1" jobs/job_m9_options3
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+K_BIN=${BIN:?BIN required}
+KNOBS=${KNOBS:?KNOBS required — the M9 knobs whose inertness is being gated}
+
+MESH=/work/ab0995/a270088/port2/mesh/core2      # PRIVATE mesh (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DT=1800; NSTEPS=20; SNAP=10; YEAR=1958
+BASE=/work/ab0995/a270088/port2/m9/opt3; rm -rf "$BASE"; mkdir -p "$BASE"
+
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+
+echo "=== M9 options x3 (leakage gate) ==="
+echo "    BIN    = $K_BIN  ($(sha256sum "$K_BIN" | cut -c1-16))"
+echo "    KNOBS  = $KNOBS"
+RC=0
+
+run_leg () {                     # $1 label  $2 option-env  $3 expect: byte|differ
+    local lab=$1 optenv=$2 expect=$3
+    local off=$BASE/${lab}_off on=$BASE/${lab}_on
+    mkdir -p "$off" "$on"
+    echo
+    echo "############ $lab  [$optenv]  expect=$expect ############"
+    ( unset FESOM_MIX_SCHEME FESOM_ALE FESOM_WHICH_EVP
+      for kv in $optenv; do export "$kv"; done
+      srun -l "$K_BIN" "$MESH" "$off" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$off/run.log" 2> "$off/run.err" )
+    echo "  knob-OFF exit=$?"
+    ( unset FESOM_MIX_SCHEME FESOM_ALE FESOM_WHICH_EVP
+      for kv in $optenv; do export "$kv"; done
+      export FESOM_SPEED_FORCE_SERIAL=1          # else every lever is vetoed on Serial
+      for kv in $KNOBS; do export "$kv"; done
+      srun -l "$K_BIN" "$MESH" "$on" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$on/run.log" 2> "$on/run.err" )
+    echo "  knob-ON  exit=$?"
+    grep -hE '^\[fesom_speed\] FESOM_SPEED_MEVP|^\[m9\]' "$on/run.err" "$on/run.log" 2>/dev/null \
+        | sed 's/^/      /' | sort -u
+
+    if [ "$expect" = "byte" ]; then
+        "$PY" "$ROOT/scripts/diff_snap.py" "$off" "$on" >/dev/null 2>&1
+        if [ $? -eq 0 ]; then
+            echo "  PASS — bit-identical: the M9 knobs are INERT under $lab, as they must be"
+        else
+            echo "  FAIL — the M9 knobs changed a NON-mEVP option. Something reaches outside"
+            echo "         the whichEVP==1 branch. This is the leak this gate exists to find."
+            RC=1
+        fi
+    else
+        echo "  (solver class — magnitudes, a difference is expected here)"
+        "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$off" "$on" 2>/dev/null \
+            | grep -E "a_ice|m_ice|uice|vice|^\[gate\] (PASS|FAIL)" | sed 's/^/    /' || true
+        "$PY" "$ROOT/scripts/diff_snap.py" "$off" "$on" >/dev/null 2>&1 \
+            && { echo "  FAIL — bit-identical under mEVP means the knobs DID NOT FIRE"; RC=1; }
+    fi
+}
+
+run_leg tke   "FESOM_MIX_SCHEME=TKE"                              byte
+run_leg zstar "FESOM_ALE=zstar"                                   byte
+run_leg all3  "FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar" differ
+
+echo
+[ "$RC" -eq 0 ] && echo "=== M9 OPTIONS x3 PASS ===" || echo "=== M9 OPTIONS x3 FAIL ==="
+exit $RC

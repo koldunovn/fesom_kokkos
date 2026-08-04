@@ -145,7 +145,19 @@ if [ -n "$KNOBS" ]; then
     else
         echo "=========== L3: knob-OFF vs KNOBS (solver class — magnitudes, not bytes) ==========="
         echo "    A nonzero diff is EXPECTED here and is the measurement, not a failure."
-        echo "    Judge against the mEVP scheme floor in docs/REFERENCE_RUNS.md (L79)."
+        echo
+        echo "    🔴 READ THE NUMBERS, NOT THE VERDICT LINE. gpu_fidelity_check.py exists to"
+        echo "       separate CUDA atomic-order nondeterminism from a staleness bug, so its"
+        echo "       ceilings are calibrated for CUDA-vs-Serial at IDENTICAL arithmetic. A"
+        echo "       solver-class lever changes the arithmetic ON PURPOSE, so its PASS/FAIL"
+        echo "       line is meaningless here and is NOT this gate's verdict. There is no"
+        echo "       20-step ceiling for a scheme change: the CGPOLY precedent was certified"
+        echo "       by a 1-yr climate leg at the M5.23 bar, not by a short-window magnitude."
+        echo "       What these numbers ARE for: (a) a bring-up sanity check that nothing is"
+        echo "       wildly wrong, and (b) RELATIVE comparison between cells — e.g. MEVPDIV"
+        echo "       alone vs MEVPLAG=K tells you how much of the perturbation is the"
+        echo "       reformulation and how much is the stale halo."
+        echo
         "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$OUT_OFF" "$OUT_ON" || true
         "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON" >/dev/null 2>&1 \
             && echo "    NOTE: bit-identical — for a solver-class lever that means it DID NOT FIRE"
