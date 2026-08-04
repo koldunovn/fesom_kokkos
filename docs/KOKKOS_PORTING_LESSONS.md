@@ -1330,3 +1330,31 @@ user's calibration ("JUPITER is 3× A100 and dolpung ≥ JUPITER") is what re-op
   per-exchange halo selfcheck and `FESOM_CGPOLY_SELFCHECK` (both clean under STAGE), plus
   the untouched Serial byte gates. A "divergence" from an invalid gate nearly buried a
   correct 2× speedup.
+
+### L102 — A THRESHOLD-GATED CODE PATH CAN BE DEAD WHILE THE KNOB IS ALIVE: `FESOM_WSPLIT=1` announced itself, ran, and produced BIT-IDENTICAL output — because the CFLz never reached the trigger. (M7 wsplit certification, 2026-08-04)
+
+L80 says: verify the knob FIRED before believing a null A/B. Its usual failure mode is a knob
+that never got read (a `getenv` behind the wrong `#ifdef`, a value cached before the export).
+This is the *next* one out: the knob is read, the announce prints, the resolve is correct — and
+the guarded arithmetic still never executes, because the branch is `if (knob && quantity >
+threshold)` and the test configuration never crosses the threshold.
+
+| CORE2 dist_8, 20 steps, dt1800 | max CFLz | trigger | splitter | diff vs knob-off |
+|---|---|---|---|---|
+| `FESOM_WSPLIT=1` (default maxcfl 1.0) | 0.822 | 1.0 | never fires | **rc=0 BIT-IDENTICAL** (26695054) |
+| `FESOM_WSPLIT=1 FESOM_WSPLIT_MAXCFL=0.3` | 0.822 | 0.3 | `w_i/w` ≈ 0.63 | differs (26695170) |
+
+Both runs print `[wsplit] FESOM_WSPLIT = ON`. Read as a gate, the first says "wsplit is
+byte-safe"; it actually says nothing about wsplit at all. Had the certification stopped there,
+the ladder would have been 10/10 green on a device kernel that was never launched.
+
+**The rule: a lever whose code is behind a numerical threshold needs the threshold as a knob
+too, and the certification config must be shown to CROSS it — with an in-run measurement, not
+an argument.** Here that measurement is the `[cflzmax]` line printing `w` and `w_i` at the
+global-max cell: `w_i` ≠ 0 IS the proof the branch ran. Making `wsplit_maxcfl` settable also
+closed a Fortran-parity gap (it is a namelist parameter there), which is the usual shape of
+this fix — the constant was hardwired precisely because the reference config never varied it.
+
+**Corollary for the inert case:** the bit-identical result is not worthless — it is the *null
+rung* of the ladder, proving the path is inert below threshold, which is a real requirement.
+Record it as that, and never as evidence the machinery works.
