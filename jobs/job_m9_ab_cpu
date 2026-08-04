@@ -61,7 +61,9 @@ echo "    BIN    = $FESOM"
 echo "    sha256 = $(sha256sum "$FESOM" | cut -c1-16)"
 echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
 echo "    mode   = $([ -n "$PHST" ] && echo 'INSTRUMENTED (icedyn; do NOT quote SYPD from this run)' || echo 'CLEAN (SYPD; no phase split)')"
-echo "    every leg gets FESOM_SPEED=1 (rails off — see header)"
+echo "    every leg gets FESOM_SPEED=1 + FESOM_SPEED_FORCE_SERIAL=1 (the latter is MANDATORY on"
+echo "    Serial — without it every lever, PHASESTATS and every M9 knob included, resolves OFF)"
+echo "    io     = ${IOCFG:-$ROOT/jobs/io.config.m9_timing}"
 echo
 
 REF=""
@@ -76,7 +78,17 @@ for i in 1 2 3 4 5 6; do
     for r in $(seq 1 "$REPS"); do
         (
             export FESOM_WHICH_EVP=1 FESOM_SPEED=1
+            # 🔴🔴 WITHOUT THIS LINE THE ENTIRE CPU HALF OF THE STUDY MEASURES NOTHING.
+            # On the Serial backend fesom_speed_resolve_impl and fesom_speed_int BOTH force every
+            # lever OFF unless FESOM_SPEED_FORCE_SERIAL=1 (fesom_speed.hpp:111-113, :168-170).
+            # The first zero-point run (26697195) proved it: 15 levers shouted "WAS REQUESTED BUT
+            # RESOLVES TO OFF", PHASESTATS among them — so there was no phase split, and every M9
+            # knob would have been dead. A full CPU fleet would have returned a tidy table of
+            # 0.00% differences. The announce lines are the only reason this was visible; keep
+            # them printed at the end of every leg.
+            export FESOM_SPEED_FORCE_SERIAL=1
             [ -n "$PHST" ] && export FESOM_SPEED_PHASESTATS=1
+            export FESOM_IO_CONFIG=${IOCFG:-$ROOT/jobs/io.config.m9_timing}
             IFS=';'
             for kv in $KNOBS; do [ -n "$kv" ] && export "$kv"; done
             unset IFS

@@ -1,0 +1,13 @@
+# M9 timing-leg output config.
+#
+# The compiled-in default (no FESOM_IO_CONFIG) writes MONTHLY means for every default
+# variable — ~600 MB per leg on CORE2, which across the fleet (cells x K x reps x node
+# counts x CPU/GPU) is tens of GB of NetCDF nobody reads, plus per-step accumulation
+# inside the timed loop.
+#
+# Timing legs therefore write one small 2-D field. This is common-mode across every cell,
+# so it cannot bias an A/B; it just stops the fleet from filling /work.
+#
+# ⚠️ NOT for trajectory (L3) legs — those need the ice fields to diff. Use the default
+#    config (unset FESOM_IO_CONFIG) or an explicit ice-variable config there.
+sst     monthly

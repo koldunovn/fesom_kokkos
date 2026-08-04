@@ -127,12 +127,29 @@ if [ -n "$KNOBS" ]; then
         grep -E '^\[fesom_speed\]' "$OUT_ON/run.err" "$OUT_ON/run.log" | sed 's/^/    /' || true
     fi
 
+    # CLASS says which rung this lever belongs to. Getting it wrong in either direction is bad:
+    #   byte   — a null rung / a lever that must not perturb anything (LAG=1, NOEPS, EVPWIDE=1).
+    #            Anything but bit-identical is a FAILURE.
+    #   solver — a lever that is mathematically equivalent but NOT bitwise (MEVPDIV: the
+    #            recursion is applied after summation instead of before, and the ice_el mask
+    #            changes membership across steps). diff_snap can only say yes/no, so report
+    #            MAGNITUDES against the mEVP scheme floor instead. This is the L3 rung.
+    CLASS=${CLASS:-byte}
     echo
-    echo "=========== L1: knob-OFF vs KNOBS (null rung) ==========="
-    "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON"; L1=$?
-    echo "diff_snap rc=$L1"
-    [ "$L1" -eq 0 ] && echo "L1 PASS — the lever is byte-neutral" \
-                   || { echo "L1 FAIL — the lever perturbs the default trajectory"; RC=1; }
+    if [ "$CLASS" = "byte" ]; then
+        echo "=========== L1: knob-OFF vs KNOBS (null rung, must be bit-identical) ==========="
+        "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON"; L1=$?
+        echo "diff_snap rc=$L1"
+        [ "$L1" -eq 0 ] && echo "L1 PASS — the lever is byte-neutral" \
+                       || { echo "L1 FAIL — the lever perturbs the default trajectory"; RC=1; }
+    else
+        echo "=========== L3: knob-OFF vs KNOBS (solver class — magnitudes, not bytes) ==========="
+        echo "    A nonzero diff is EXPECTED here and is the measurement, not a failure."
+        echo "    Judge against the mEVP scheme floor in docs/REFERENCE_RUNS.md (L79)."
+        "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$OUT_OFF" "$OUT_ON" || true
+        "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON" >/dev/null 2>&1 \
+            && echo "    NOTE: bit-identical — for a solver-class lever that means it DID NOT FIRE"
+    fi
 fi
 
 echo

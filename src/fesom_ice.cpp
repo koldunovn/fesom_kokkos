@@ -218,6 +218,20 @@ void fesom_ice_init(fesom_ice           *ice,
         ice->work.mevp_ice_nod       = ice->work.mevp_ice_nod_fld.h();
         ice->work.mevp_pressure_fac  = ice->work.mevp_pressure_fac_fld.h();
         ice->work.mevp_ice_el        = ice->work.mevp_ice_el_fld.h();
+
+        /* M9: the divergence form's carried state. Allocated unconditionally within the mEVP
+         * branch (2 node arrays; .alloc zero-inits, which is the correct cold start — sigma is
+         * cold-start-zero too and there is no ice restart path, fesom_ice.cpp:582). The
+         * SELFCHECK pair is allocated only when asked: on a large mesh two extra node arrays
+         * for a diagnostic that never runs in a timing leg is not free. */
+        ice->work.mevp_Ru_fld.alloc("ice.mevp_Ru", n);  ice->work.mevp_Ru = ice->work.mevp_Ru_fld.h();
+        ice->work.mevp_Rv_fld.alloc("ice.mevp_Rv", n);  ice->work.mevp_Rv = ice->work.mevp_Rv_fld.h();
+        if (getenv("FESOM_MEVPDIV_SELFCHECK")) {
+            ice->work.mevp_Rchk_u_fld.alloc("ice.mevp_Rchk_u", n);
+            ice->work.mevp_Rchk_v_fld.alloc("ice.mevp_Rchk_v", n);
+            ice->work.mevp_Rchk_u = ice->work.mevp_Rchk_u_fld.h();
+            ice->work.mevp_Rchk_v = ice->work.mevp_Rchk_v_fld.h();
+        }
     }
 
     /* --- surface ocean state (T_ICE:140-142, ice_init:758-767) --- */
@@ -745,9 +759,17 @@ void fesom_ice_step(int                            step,
             ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
             ice->uice_fld.modify_host();    ice->uice_fld.sync_device();
             ice->vice_fld.modify_host();    ice->vice_fld.sync_device();
+            /* M9: sigma is DEAD under the divergence form (the carried state is R_u/R_v at
+             * nodes, which no host code reads and which therefore needs no rail at all). Skip
+             * its rail — not merely to save the copy, but because these rails execute INSIDE
+             * the icedyn phasestats bracket (marked at :676, above this branch), so railing
+             * sigma AND R would charge the reformulation extra PCIe inside its own metric.
+             * The fields above are host-produced and are railed regardless of form. */
+            if (!fesom_ice_maevp_div_active()) {
             ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
+            }
             }
             /* M7 E.EVP1 + L80: EVPWIDE's resolve lives in the std-EVP path, which this branch
              * never reaches — without this line, FESOM_SPEED_EVPWIDE + mEVP would be a SILENT
@@ -767,7 +789,10 @@ void fesom_ice_step(int                            step,
             fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
             if (!icerails) {
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+            /* M9: the OUT half of the same decision — see the IN rail above. */
+            if (!fesom_ice_maevp_div_active()) {
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+            }
             }
         } else {
             fprintf(stderr, "fesom_ice: whichEVP=%d not supported (0=EVP, 1=mEVP)\n",

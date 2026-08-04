@@ -151,6 +151,9 @@ static Kokkos::View<int*> g_maevp_coastal_mask;
  * the run completes, writes every snapshot, prints its timing — and THEN exits 134. */
 void fesom_ice_maevp_free(void) { g_maevp_coastal_mask = Kokkos::View<int*>(); }
 
+/* See the contract in fesom_ice_maevp.h. */
+int fesom_ice_maevp_div_active(void) { return maevp_div_on() ? 1 : 0; }
+
 static Kokkos::View<int*> maevp_coastal_mask(struct fesom_partit *partit, struct fesom_mesh *mesh)
 {
     if (g_maevp_coastal_mask.extent(0) != 0) return g_maevp_coastal_mask;
@@ -233,6 +236,11 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     auto ice_nod = ice->work.mevp_ice_nod_fld.d();
     auto pfac    = ice->work.mevp_pressure_fac_fld.d();
     auto ice_el  = ice->work.mevp_ice_el_fld.d();
+    /* M9: the divergence form's carried node state (and the selfcheck's reference pair). */
+    auto R_u     = ice->work.mevp_Ru_fld.d();
+    auto R_v     = ice->work.mevp_Rv_fld.d();
+    auto Rchk_u  = m9_selfcheck ? ice->work.mevp_Rchk_u_fld.d() : R_u;   /* alias when unused */
+    auto Rchk_v  = m9_selfcheck ? ice->work.mevp_Rchk_v_fld.d() : R_v;
     /* mesh */
     auto en       = mesh->elem_nodes_fld.d();
     auto ea       = mesh->elem_area_fld.d();
@@ -326,9 +334,69 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     Kokkos::parallel_for("maevp_rhs_uv_zero", Kokkos::RangePolicy<>(0, myDim),
         KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });
 
+    /* ── M9 SELFCHECK, step entry (plan §L2) ────────────────────────────────────────────────
+     * The naive check "R == div(sigma) for the whole run" CANNOT pass, and the reason is the
+     * scheme's own honest non-equivalence: the masks are recomputed every ocean step (above,
+     * outside this loop) and the classic assembly is restricted to ice_el, so div(sigma) drops a
+     * departing element's contribution INSTANTLY while R retains it decaying at det1 per
+     * subcycle. WITHIN a step the masks are fixed and the two forms are algebraically identical.
+     * So: measure the step-entry gap (that IS the mask-flip non-equivalence, a result to be
+     * reported), then re-baseline, then gate the INTRA-step drift at roundoff. */
+    double m9_jump = 0.0, m9_scale = 0.0, m9_drift = 0.0;
+    if (m9_div && m9_selfcheck) {
+        Kokkos::parallel_for("maevp_div_chk_zero", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+        /* div(sigma) under THIS step's masks, from the sigma carried out of the last step */
+        Kokkos::parallel_for("maevp_div_chk_asm", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+                const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * mfac(el);
+                const real_t S11 = s11(el), S12 = s12(el), S22 = s22(el);
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (n < myDim) {
+                        Kokkos::atomic_add(&Rchk_u(n), -(a * (S11*gsca(g+k) + S12*gsca(g+k+3)
+                                                              + S12*meancos)));
+                        Kokkos::atomic_add(&Rchk_v(n), -(a * (S12*gsca(g+k) + S22*gsca(g+k+3)
+                                                              - S11*meancos)));
+                    }
+                }
+            });
+        double jmax = 0.0, smax = 0.0;
+        Kokkos::parallel_reduce("maevp_div_chk_jump", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i, double &acc) {
+                const double du = Kokkos::fabs((double)R_u(i) - (double)Rchk_u(i));
+                const double dv = Kokkos::fabs((double)R_v(i) - (double)Rchk_v(i));
+                const double d  = du > dv ? du : dv;
+                if (d > acc) acc = d;
+            }, Kokkos::Max<double>(jmax));
+        Kokkos::parallel_reduce("maevp_div_chk_scale", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i, double &acc) {
+                const double au = Kokkos::fabs((double)Rchk_u(i));
+                const double av = Kokkos::fabs((double)Rchk_v(i));
+                const double a  = au > av ? au : av;
+                if (a > acc) acc = a;
+            }, Kokkos::Max<double>(smax));
+        m9_jump = jmax; m9_scale = smax;
+        /* re-baseline: from here the two forms start from the same state, so any gap that
+         * appears during the step is roundoff or a bug — nothing else. */
+        Kokkos::parallel_for("maevp_div_chk_rebase", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { R_u(i) = Rchk_u(i); R_v(i) = Rchk_v(i); });
+        /* Rchk is an ACCUMULATOR: it must be empty before the first subcycle assembles into it,
+         * or subcycle 1 would pile div(sigma^1) on top of this baseline. The in-loop zero (after
+         * each comparison) maintains the invariant from there on. */
+        Kokkos::parallel_for("maevp_div_chk_zero2", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+    }
+
     /* ================= mEVP pseudo-time iteration (:680-875) ================= */
     for (int shortstep = 1; shortstep <= steps; ++shortstep) {
 
+      if (!m9_div) {
         /* inlined stress_tensor_m + stress2rhs_m: element loop (:689-792) */
         Kokkos::parallel_for("maevp_stress", Kokkos::RangePolicy<>(0, Eo),
             KOKKOS_LAMBDA(const int el) {
@@ -348,7 +416,13 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
                                          + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
                                          + (U0 + U1 + U2) * meancos );          /* metrics */
-                eps11(el) = E11; eps22(el) = E22; eps12(el) = E12;
+                /* M9 confound control (FESOM_SPEED_MEVPNOEPS): these three element stores are
+                 * never read in the mEVP path — only std EVP reads those arrays
+                 * (fesom_ice_evp.cpp:117-129) — and they cost about what the reformulation
+                 * saves, so they are measured on their OWN leg. Branching around pure STORES
+                 * cannot change any computed value: E11/E22/E12 are already in registers and
+                 * nothing downstream reads the arrays. */
+                if (!m9_noeps) { eps11(el) = E11; eps22(el) = E22; eps12(el) = E12; }
 
                 /* switch to eps1, eps2 (:708-709) */
                 const real_t eps1 = E11 + E22;
@@ -378,6 +452,82 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                     }
                 }
             });
+      } else {
+        /* ══ M9 DIVERGENCE FORM — element kernel ═════════════════════════════════════════════
+         * TWIN OF maevp_stress ABOVE — EDIT BOTH OR NEITHER. Everything through `pressure` is
+         * character-for-character the classic kernel; the difference is confined to the three
+         * stress lines and the absence of the sigma stores.
+         *
+         * Why a separate kernel rather than a branch inside the classic one: the classic path
+         * must stay BYTE-IDENTICAL with the knob off, and folding `det1*s11(el)` behind a
+         * ternary would let the compiler contract the FMA differently. Duplication is the
+         * cheaper of the two risks here.
+         *
+         * pfac already carries det2 (:213), so what this assembles into u_rhs/v_rhs is exactly
+         * det2*div(sigma~) — the increment the node recursion needs. No carried term, no store:
+         * 3 element loads and 3 element stores per element per subcycle disappear. */
+        Kokkos::parallel_for("maevp_stress_div", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+
+                const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * mfac(el);
+                const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+
+                const real_t E11 = gsca(g+0)*U0 + gsca(g+1)*U1 + gsca(g+2)*U2
+                                 - (V0 + V1 + V2) * meancos;
+                const real_t E22 = gsca(g+3)*V0 + gsca(g+4)*V1 + gsca(g+5)*V2;
+                const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
+                                         + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
+                                         + (U0 + U1 + U2) * meancos );
+                if (!m9_noeps) { eps11(el) = E11; eps22(el) = E22; eps12(el) = E12; }
+
+                const real_t eps1 = E11 + E22;
+                const real_t eps2 = E11 - E22;
+
+                const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                const real_t pressure = pfac(el) / (delta + delta_min);
+
+                /* the VP stress itself — trap 2 still holds: the 0.5 is on 11/22, not on 12 */
+                const real_t S12 =     pressure * E12 * vale;
+                const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
+                const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
+
+                if (m9_selfcheck) {
+                    /* diagnostic only: advance the classic sigma alongside and assemble
+                     * div(sigma^{p+1}) into Rchk, so R can be compared against it. */
+                    const real_t C12 = det1*s12(el) + S12;
+                    const real_t C11 = det1*s11(el) + S11;
+                    const real_t C22 = det1*s22(el) + S22;
+                    s12(el) = C12; s11(el) = C11; s22(el) = C22;
+                    const real_t ac = ea(el);
+                    for (int k = 0; k < 3; ++k) {
+                        const int n = eln[k];
+                        if (n < myDim) {
+                            Kokkos::atomic_add(&Rchk_u(n), -(ac * (C11*gsca(g+k) + C12*gsca(g+k+3)
+                                                                   + C12*meancos)));
+                            Kokkos::atomic_add(&Rchk_v(n), -(ac * (C12*gsca(g+k) + C22*gsca(g+k+3)
+                                                                   - C11*meancos)));
+                        }
+                    }
+                }
+
+                /* same assembly as the classic kernel, same owned-node guard (trap 6) */
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (n < myDim) {
+                        Kokkos::atomic_add(&u_rhs(n), -(a * (S11*gsca(g+k) + S12*gsca(g+k+3)
+                                                             + S12*meancos)));
+                        Kokkos::atomic_add(&v_rhs(n), -(a * (S12*gsca(g+k) + S22*gsca(g+k+3)
+                                                             - S11*meancos)));
+                    }
+                }
+            });
+      }
 
         /* node solve (:795-819). ⚠️ TRAP 13: non-ice nodes are SKIPPED — there is NO else branch;
          * a non-ice node KEEPS its u_ice_aux value (std EVP zeroes here; mEVP must not).
@@ -385,6 +535,7 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
          * ⚠️ TRAP 1: the drag CARRIES rdt; drag·u_w sits OUTSIDE the rdt·(…) group;
          *            +beta·u_aux closes the rhs (:806-811).
          * ⚠️ TRAP 3: NO theta_io rotation anywhere. */
+      if (!m9_div) {
         Kokkos::parallel_for("maevp_node_solve", Kokkos::RangePolicy<>(0, myDim),
             KOKKOS_LAMBDA(const int i) {
                 if (ulev_n(i) > 1) return;                  /* (:797) */
@@ -414,6 +565,84 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 u_aux(i) = det * (obd*rhsu + rf*rhsv);
                 v_aux(i) = det * (obd*rhsv - rf*rhsu);
             });
+      } else {
+        /* ══ M9 DIVERGENCE FORM — node solve ═════════════════════════════════════════════════
+         * TWIN OF maevp_node_solve ABOVE — EDIT BOTH OR NEITHER. Identical from the drag line
+         * down; the two differences are the R recursion and where it sits.
+         *
+         * 🔴🔴 THE M9 TRAP. The R recursion runs for EVERY owned node, OUTSIDE the ice_nod
+         * guard. The element mask is mean(m_ice) > 0.01 (trap 4, :210) and the node mask is
+         * a_ice >= 0.01 (:185) — DIFFERENT CRITERIA — so sigma genuinely evolves on elements
+         * whose vertices are not ice nodes. Put the recursion inside the guard and R freezes at
+         * those nodes, then hands the solve a stale divergence the moment they ice over. The
+         * classic form has no equivalent bug because sigma lives on the elements, which have
+         * their own mask. Only the VELOCITY solve stays masked, exactly as in the twin.
+         * (Cavity nodes are likewise updated: div(sigma) there is the sum over incident
+         * non-cavity ice elements, which is precisely what u_rhs already holds.) */
+        Kokkos::parallel_for("maevp_node_solve_div", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) {
+                const real_t Ru = det1*R_u(i) + u_rhs(i);
+                const real_t Rv = det1*R_v(i) + v_rhs(i);
+                R_u(i) = Ru; R_v(i) = Rv;
+
+                if (ulev_n(i) > 1) return;                  /* (:797) */
+                if (!ice_nod(i))   return;                  /* skip if ice is absent — NO else */
+
+                /* the classic kernel writes the scaled value back into u_rhs; here u_rhs stays
+                 * the pure per-subcycle accumulator and R carries the state, so the scaling
+                 * lands in a local. `mass` is applied AT USE — R itself is stored unscaled. */
+                const real_t urhs = Ru * mass(i) + rhs_a(i);
+                const real_t vrhs = Rv * mass(i) + rhs_m(i);
+
+                const real_t du   = u_aux(i) - u_w(i);
+                const real_t dv   = v_aux(i) - v_w(i);
+                const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                const real_t drag = rdt * cd * umod * rho0 * inv_th(i);
+
+                const real_t rhsu = u_ice(i) + drag*u_w(i)
+                                  + rdt*(inv_th(i)*sax(i) + urhs)
+                                  + beta_evp*u_aux(i);
+                const real_t rhsv = v_ice(i) + drag*v_w(i)
+                                  + rdt*(inv_th(i)*say(i) + vrhs)
+                                  + beta_evp*v_aux(i);
+
+                const real_t obd = 1.0 + beta_evp + drag;
+                const real_t rf  = rdt * cor(i);
+                const real_t det = bc_index(i) / (obd*obd + rf*rf);
+
+                u_aux(i) = det * (obd*rhsu + rf*rhsv);
+                v_aux(i) = det * (obd*rhsv - rf*rhsu);
+            });
+
+        if (m9_selfcheck) {
+            /* intra-step drift: with both forms started from the same state at step entry, any
+             * gap here is roundoff or a bug. Reduced every subcycle, reported once per step. */
+            double dmax = 0.0;
+            Kokkos::parallel_reduce("maevp_div_chk_drift", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    const double du = Kokkos::fabs((double)R_u(i) - (double)Rchk_u(i));
+                    const double dv = Kokkos::fabs((double)R_v(i) - (double)Rchk_v(i));
+                    const double d  = du > dv ? du : dv;
+                    if (d > acc) acc = d;
+                }, Kokkos::Max<double>(dmax));
+            if (dmax > m9_drift) m9_drift = dmax;
+            /* Scale for the RELATIVE criterion, measured over the step rather than only at its
+             * entry: at step 1 the carried sigma is zero, so an entry-derived scale is 0 and the
+             * relative number degenerates into an absolute one exactly where the check matters
+             * most (the cold start is the one place the gap must be identically zero). */
+            double smax2 = 0.0;
+            Kokkos::parallel_reduce("maevp_div_chk_scale2", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    const double au = Kokkos::fabs((double)Rchk_u(i));
+                    const double av = Kokkos::fabs((double)Rchk_v(i));
+                    const double a  = au > av ? au : av;
+                    if (a > acc) acc = a;
+                }, Kokkos::Max<double>(smax2));
+            if (smax2 > m9_scale) m9_scale = smax2;
+            Kokkos::parallel_for("maevp_div_chk_rezero", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+        }
+      }
 
         /* edge BC (:823-857): coastal boundary edges -> zero the aux velocity at both endpoints.
          * Expressed as the equivalent per-node mask (identical node set; all writes are 0 =>
@@ -433,6 +662,30 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
             KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });
     }
 
+    /* ── M9 SELFCHECK report (one line per ocean step, rank 0) ──────────────────────────────
+     * Two numbers with completely different meanings, which is exactly why they are reported
+     * separately rather than as one "error":
+     *   maskjump — |R - div(sigma)| at step ENTRY, relative. This IS non-equivalence (ii): the
+     *              ice_el mask changed between steps, so div(sigma) dropped a departing
+     *              element's contribution instantly while R decayed it over ~251 subcycles (and
+     *              on re-entry the classic form resumes from its FROZEN stale sigma, trap 12,
+     *              while R has decayed). A RESULT to be reported, not a failure.
+     *   drift    — max over this step's subcycles of |R - div(sigma)| AFTER the re-baseline,
+     *              relative. The masks are fixed within a step, so the two forms are
+     *              algebraically identical here: anything above roundoff is a BUG. This is the
+     *              number the L2 gate reads. Serial must stay ~1e-16..1e-13 relative. */
+    if (m9_div && m9_selfcheck) {
+        double loc[3] = { m9_jump, m9_drift, m9_scale }, glb[3] = { 0.0, 0.0, 0.0 };
+        MPI_Reduce(loc, glb, 3, MPI_DOUBLE, MPI_MAX, 0, partit->MPI_COMM_FESOM);
+        if (partit->mype == 0) {
+            const double s = glb[2] > 0.0 ? glb[2] : 1.0;
+            fprintf(stderr, "[m9-selfcheck] maskjump=%.3e drift=%.3e  (relative: %.3e / %.3e, "
+                            "scale=%.3e)\n",
+                    glb[0], glb[1], glb[0] / s, glb[1] / s, glb[2]);
+            fflush(stderr);
+        }
+    }
+
     /* final copy over myDim+eDim (:876-881, ⚠️ TRAP 8) — NO extra exchange: the aux halo is
      * already current from the last substep's exchange. */
     Kokkos::parallel_for("maevp_final_copy", Kokkos::RangePolicy<>(0, N),
@@ -447,6 +700,15 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     ice->work.eps22_fld.modify_device();
     ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device();
     ice->work.sigma22_fld.modify_device();
+    /* M9: R_u/R_v are device-authoritative carried state — the same rail class as sigma, but
+     * with no host consumer, so they are marked dirty and never synced back. (When a restart
+     * path is eventually added, this is where it plugs in; the divergence form's restart set is
+     * these two node arrays instead of three element arrays, and R = div(sigma) is computable
+     * from a restored sigma but NOT the reverse.) */
+    if (m9_div) { ice->work.mevp_Ru_fld.modify_device(); ice->work.mevp_Rv_fld.modify_device(); }
+    if (m9_div && m9_selfcheck) {
+        ice->work.mevp_Rchk_u_fld.modify_device(); ice->work.mevp_Rchk_v_fld.modify_device();
+    }
     ice->uice_rhs_fld.modify_device();  ice->vice_rhs_fld.modify_device();
     ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
     ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();
