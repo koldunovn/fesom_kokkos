@@ -106,6 +106,14 @@ static int maevp_lag_K(const struct fesom_ice *ice, const struct fesom_partit *p
                             "1 — the lever is NOT running. (Serial backend without "
                             "FESOM_SPEED_FORCE_SERIAL=1?)\n", e);
             fflush(stderr);
+        } else if (e && atoi(e) == 1 && partit->mype == 0) {
+            /* K=1 explicitly requested = the NULL RUNG. It must announce, or the byte gate that
+             * proves it neutral cannot tell "neutral" from "knob never resolved" — the whole
+             * point of the rung. (The lever is genuinely inert at K=1: `shortstep % 1 == 0` is
+             * always true, so the exchange fires every subcycle exactly as it does by default.) */
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_MEVPLAG = 1 (NULL RUNG: exchange every "
+                            "subcycle = default behaviour; must be byte-identical)\n");
+            fflush(stderr);
         }
     }
     return K;
@@ -655,8 +663,26 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
         /* halo exchange of (u_ice_aux, v_ice_aux). The Fortran overlaps exchange_nod_begin/end
          * around the rhs zeroing (:861-872); two blocking exchanges plus the zero loop are
          * result-identical (the zero loop touches only u_rhs/v_rhs, never the exchanged fields).
-         * Same-kind + adjacent => ONE fused message per neighbour (M5.23 L1, bit-id-neutral). */
-        fesom_halo_field2(ice->uice_aux_fld, ice->vice_aux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+         * Same-kind + adjacent => ONE fused message per neighbour (M5.23 L1, bit-id-neutral).
+         *
+         * ── M9 CELL ⑤ (FESOM_SPEED_MEVPLAG=K): the LAGGED single halo ──────────────────────
+         * Exchange only every K-th subcycle. Ghosts are never updated locally (the node solve
+         * runs over [0,myDim) and only this exchange and the coastal-BC kernel touch halo
+         * entries), so ring 1 simply goes up to K-1 subcycles stale and the owned elements that
+         * share it read slightly old velocities. That is the whole approximation — no rings, no
+         * ghost kernels, no extra fields — and it is form-agnostic, so it composes with MEVPDIV
+         * to give cells ⑤a and ⑤b.
+         *
+         * K must divide evp_rheol_steps (guarded at resolve): with shortstep running 1..steps,
+         * `shortstep % K == 0` then always fires on the LAST subcycle, which is what keeps the
+         * final u_ice = u_aux copy over myDim+eDim (trap 8) from publishing a stale halo into
+         * the ocean coupling. K=1 makes the condition identically true => byte-identical.
+         *
+         * ⚠️ This is an approximation by construction. It never gets a byte gate above K=1; it
+         *    gets the L3 trajectory comparison, and a measurable ice difference here is the
+         *    RESULT (it is what brackets the exact wide halo of cell ④). */
+        if (shortstep % m9_lagK == 0)
+            fesom_halo_field2(ice->uice_aux_fld, ice->vice_aux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
 
         Kokkos::parallel_for("maevp_rhs_uv_rezero", Kokkos::RangePolicy<>(0, myDim),
             KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });

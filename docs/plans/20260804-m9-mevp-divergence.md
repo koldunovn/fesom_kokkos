@@ -199,6 +199,51 @@ to Sergey's sentence. **H3 below is written for (c).**
 
 ---
 
+## Progress log (2026-08-04)
+
+Branch fast-forwarded onto `main` (`65a1a71`) **before** the first code commit — free then (no
+commits of our own), and it avoids invalidating frozen-binary provenance mid-study. The three
+wsplit commits touch only `fesom_ale`/`fesom_main`/README/lessons: no ice files, no conflict.
+
+| commit | content |
+|---|---|
+| `32d33b3` | the plan (REV 2) |
+| `fe05218` | Task 2 + 4 — gate jobs, knob plumbing |
+| `6b2636a` | Task 5 + 7 — the divergence form, selfcheck, MEVPNOEPS |
+
+**Binaries** (`/work/ab0995/a270088/port2/m9/bin/`): `base/` Serial `07b88219` · CUDA `2eb14a6a`
+(unmodified `main`). `wip/` Serial `2044312e` · CUDA `368c5674` (through Task 6).
+
+**Gates green so far** (Serial, CORE2 np8, private mesh, 20 steps):
+
+| job | rung | result |
+|---|---|---|
+| 26696957 | L0 baseline | bit-identical to the C oracle |
+| 26697244 | L0 + L1, all knobs | PASS; knob-fired matched; byte-neutral (plumbing inert) |
+| 26697714 | L1 `MEVPNOEPS` | **exactly bit-identical** ⇒ `eps11/12/22` really are never read |
+| 26697715 | L3 `MEVPDIV` | `a_ice` 1.4e-4 (ceil 5e-2) · `m_ice` 1.5e-4 · `T` 9.8e-4 (ceil 1e-2) · `eta` 4.9e-6 |
+| 26697800 | L2 `MEVPDIV` selfcheck | **intra-step drift 1e-15…2.5e-15 RELATIVE = roundoff, flat across steps** (the recursion contracts); `maskjump` peaks 2.1e-11 relative |
+
+⭐ **The L2 result is the scientific core**: within an ocean step the masks are fixed and
+`R ≡ ∇·σ` holds to machine precision, with no growth over 120 subcycles × 20 steps. The
+reformulation is doing what the algebra says, not merely producing plausible ice. And
+non-equivalence (ii) is now **bounded by measurement** (2.1e-11 relative, firing only on steps
+where `ice_el` membership actually changes) instead of by argument.
+
+### ⚠️ Two traps hit during implementation — both recorded as lessons
+
+1. **🔴 On Serial, EVERY `FESOM_SPEED_*` lever is vetoed without `FESOM_SPEED_FORCE_SERIAL=1`**
+   (`fesom_speed.hpp:111-113`, `:168-170`). The first zero-point run (26697195) shouted it 15
+   times — PHASESTATS among them. The A/B job had `FESOM_SPEED=1` only, so **the entire CPU half
+   of the study would have run with every M9 knob dead and no phase split**, returning a tidy
+   table of 0.00 % differences that reads exactly like "the lever does not pay". Fixed in
+   `job_m9_ab_cpu`; the announce lines are printed at the end of every leg precisely so this
+   class of failure stays visible.
+2. **A diagnostic needs its own scale.** The selfcheck's relative criterion divided by a scale
+   taken at step *entry*; at step 1 the carried σ is zero, so the criterion degenerated to an
+   absolute one exactly at the cold start, where the gap must be identically zero. Scale is now
+   measured over the step.
+
 ## Implementation Steps
 
 ### Stage 0 — bring-up
