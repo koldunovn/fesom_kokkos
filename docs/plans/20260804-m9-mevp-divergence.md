@@ -385,6 +385,50 @@ ablation that disproves your own explanation is worth more than the one that con
 - [ ] mechanism panel from `fesom_halo_prof_*`: messages/step, bytes/partner
 - [ ] gate: every leg rc=0, announce present in each, L3 diffs recorded per leg
 
+### 🔴 STAGE-3 HANDOFF (written 2026-08-05, cells ② ④ NOT BUILT)
+
+**Status: Task 11 DONE and gated; Task 12a DONE and gated; Tasks 12b and 13 NOT STARTED.**
+Stopped deliberately rather than half-built: cells ②/④ are opt-in, so an incomplete path would
+pass every knob-off gate while being silently wrong when enabled — the worst possible state.
+
+**What is already in place (all gated, all committed):**
+- `evpw_exchange` takes a caller-supplied `EvpwPlan` (`fesom_ice_evpwide.cpp`), so mEVP can
+  reuse the machinery. Regression 26698811: K=1/2/4 byte-identical **and** diagnostics provably
+  alive (1200 drift lines, 20 echo lines, echo `0.000e+00`).
+- All node-side mEVP scratch allocates at `nw` (`fesom_ice.cpp` mEVP block). Three arrays had
+  been `myDim`-sized — no room even for the ordinary `eDim` halo.
+- The ghost-node pattern to mirror is `fesom_ice_evp.cpp:832-916`: ONE kernel over
+  `[0, N+W.next)` with three branches — owned (byte-twin), dist-halo slot, ghost replay via the
+  owner-order gather (`W.gath_ptr/gath_elem/gath_k`). It does **not** read `ulev_n` at ghost
+  slots (`evpw_build` asserts `ulevels==1` there), so that array needs no tail.
+
+**What remains, in order:**
+1. **Dev arrays** (`fesom_ice_evpwide.h`, built at `fesom_ice_evpwide.cpp:687-693` next to
+   `istr_g`): `pfac_g[Eg]`, `ice_el_g[Eg]` (per-step, recomputed by running the owned element
+   map over the extended range), and `bcx[N+next]` for `bc_index_nod2D`.
+   ⚠️ `bc_index` is **time-invariant**, so ship it ONCE at build by widening the existing
+   owner reply from 2 doubles to 3 (`:548-589` currently carries `area0` and `cor`). Do NOT
+   recompute it locally — the libmvec lesson.
+2. **Refusals + resolve.** Lift BOTH `fesom_ice_evpwide.cpp:719` **and** `fesom_ice.cpp:752-766`,
+   and add the `fesom_evpwide_K()` call to the mEVP path — it is currently called only from
+   `fesom_ice_evp.cpp:611`, so without it the wide zone never builds while the announce claims
+   it did.
+3. **Ghost per-step maps**: run `maevp_node_pre` and `maevp_elem_pre` over extended ranges after
+   the prestep 11-field ship (mEVP's `rhs_a/rhs_m` must be shipped AFTER their area scaling,
+   trap 7). Do not forget `maevp_aux_init` (spans `[0,N)` today) and the coastal BC (replay via
+   `W.coastx`, as std EVP does at `fesom_ice_evp.cpp:915`).
+4. **Ghost twin kernels** in `fesom_ice_maevp.cpp` (same TU as the owned kernels): element
+   kernel over `[0, Eo+Eg)`; node kernel over `[0, N+next)` mirroring the std-EVP branch shape.
+   For ② the ghost σ comes from `s11_g/s12_g/s22_g` (already exist); for ④ ghost `R_u/R_v` come
+   from the extended Fields.
+5. **Window plans**: ④ = `(u,v,R_u,R_v)`, one segment; ② = node segment + σ element segment,
+   built **fused and unfused** behind a flag (decision D1).
+6. **Gates**: K=1 null rung byte-identical (with `FORCE_SERIAL` + announce grep); prestep echo
+   exactly `0.000e+00`; L3; CUDA fidelity; options ×3.
+
+**Read before starting:** L103 below/in `docs/KOKKOS_PORTING_LESSONS.md` — do not put the
+selfcheck inside a kernel that will be timed.
+
 ### Stage 3 — the framework and cells ② ④
 
 ### Task 11: Generalize `evpw_exchange` to a caller-supplied field list
