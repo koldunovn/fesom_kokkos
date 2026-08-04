@@ -230,6 +230,28 @@ reformulation is doing what the algebra says, not merely producing plausible ice
 non-equivalence (ii) is now **bounded by measurement** (2.1e-11 relative, firing only on steps
 where `ice_el` membership actually changes) instead of by argument.
 
+### ⚠️ CORRECTION TO THE RECORD (2026-08-05) — a claim I made too early
+
+Commit `e7882b9` states "WIN A IS NEGATIVE, NOT ZERO" and attributes it to the ice_nod trap
+forcing a full-domain R recursion. **Both halves were premature.**
+
+- The **attribution was wrong**: the masked/unmasked ablation (26699045/46) measured
+  `icedyn` 10.9 vs 10.8 ms — the mask changed nothing, so the node kernel was never the cause.
+- The **measurement was confounded**: the selfcheck lived as an `if (m9_selfcheck)` block INSIDE
+  the hot element kernel. On CUDA a never-taken branch still costs the registers its body needs,
+  and the occupancy those registers buy; on CPU it inhibits vectorisation. Every timed `div` leg
+  carried that. The number was real for those binaries, but it was not a measurement of the
+  scheme.
+
+What WAS established, and should have been stated alongside the number the first time:
+noise floor **~0.2 %** (`classic` leg 1 vs `classic_noeps` leg 4, which must be identical, differ
+by 0.16 %); rep-1-of-leg-1 runs ~3 % slow from job warm-up and `min`-of-2 absorbs it; **leg-order
+and thermal drift are excluded** because leg 4 is as fast as leg 1.
+
+🔴 **LESSON (M9-1): never leave a diagnostic branch inside a kernel you intend to time**, and do
+not publish a causal story for a performance delta until the confound list has been walked. The
+ablation that disproves your own explanation is worth more than the one that confirms it.
+
 ### ⚠️ Two traps hit during implementation — both recorded as lessons
 
 1. **🔴 On Serial, EVERY `FESOM_SPEED_*` lever is vetoed without `FESOM_SPEED_FORCE_SERIAL=1`**

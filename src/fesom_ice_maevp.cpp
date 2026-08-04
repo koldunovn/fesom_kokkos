@@ -548,25 +548,6 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
                 const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
 
-                if (m9_selfcheck) {
-                    /* diagnostic only: advance the classic sigma alongside and assemble
-                     * div(sigma^{p+1}) into Rchk, so R can be compared against it. */
-                    const real_t C12 = det1*s12(el) + S12;
-                    const real_t C11 = det1*s11(el) + S11;
-                    const real_t C22 = det1*s22(el) + S22;
-                    s12(el) = C12; s11(el) = C11; s22(el) = C22;
-                    const real_t ac = ea(el);
-                    for (int k = 0; k < 3; ++k) {
-                        const int n = eln[k];
-                        if (n < myDim) {
-                            Kokkos::atomic_add(&Rchk_u(n), -(ac * (C11*gsca(g+k) + C12*gsca(g+k+3)
-                                                                   + C12*meancos)));
-                            Kokkos::atomic_add(&Rchk_v(n), -(ac * (C12*gsca(g+k) + C22*gsca(g+k+3)
-                                                                   - C11*meancos)));
-                        }
-                    }
-                }
-
                 /* same assembly as the classic kernel, same owned-node guard (trap 6) */
                 const real_t a = ea(el);
                 for (int k = 0; k < 3; ++k) {
@@ -579,6 +560,54 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                     }
                 }
             });
+
+        /* ── M9 selfcheck: the reference sigma path, in its OWN kernel ──────────────────────
+         * This used to be an `if (m9_selfcheck)` block INSIDE the kernel above. That was a
+         * measurement bug of the first order: on CUDA a never-taken branch still costs the
+         * registers its body needs, and the occupancy that buys. Fleet 1A measured the
+         * divergence form 30% slower on icedyn (GPU np8) and 39% slower at CPU np1 — a
+         * penalty that scaled with per-rank workload, i.e. per element, while the mask
+         * ablation showed the node kernel was innocent. The only remaining difference in the
+         * hot element kernel was this diagnostic. It is a separate launch now; it only ever
+         * runs in SELFCHECK mode, where speed is irrelevant, so it recomputes the strain
+         * rather than sharing registers with the path being timed.
+         * 🔴 LESSON: never leave a diagnostic branch inside a kernel you intend to time. */
+        if (m9_selfcheck) {
+            Kokkos::parallel_for("maevp_div_chk_elem", Kokkos::RangePolicy<>(0, Eo),
+                KOKKOS_LAMBDA(const int el) {
+                    if (ulev_e(el) > 1) return;
+                    if (!ice_el(el))    return;
+                    const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                    const size_t g = (size_t)6 * el;
+                    const real_t meancos = val3 * mfac(el);
+                    const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                    const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+                    const real_t E11 = gsca(g+0)*U0 + gsca(g+1)*U1 + gsca(g+2)*U2
+                                     - (V0 + V1 + V2) * meancos;
+                    const real_t E22 = gsca(g+3)*V0 + gsca(g+4)*V1 + gsca(g+5)*V2;
+                    const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
+                                             + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
+                                             + (U0 + U1 + U2) * meancos );
+                    const real_t eps1 = E11 + E22, eps2 = E11 - E22;
+                    const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                    const real_t pressure = pfac(el) / (delta + delta_min);
+                    /* the classic recursion, verbatim — this is the reference being compared */
+                    const real_t C12 = det1*s12(el) +     pressure * E12 * vale;
+                    const real_t C11 = det1*s11(el) + 0.5*pressure * (eps1 - delta + eps2*vale);
+                    const real_t C22 = det1*s22(el) + 0.5*pressure * (eps1 - delta - eps2*vale);
+                    s12(el) = C12; s11(el) = C11; s22(el) = C22;
+                    const real_t ac = ea(el);
+                    for (int k = 0; k < 3; ++k) {
+                        const int n = eln[k];
+                        if (n < myDim) {
+                            Kokkos::atomic_add(&Rchk_u(n), -(ac * (C11*gsca(g+k) + C12*gsca(g+k+3)
+                                                                   + C12*meancos)));
+                            Kokkos::atomic_add(&Rchk_v(n), -(ac * (C12*gsca(g+k) + C22*gsca(g+k+3)
+                                                                   - C11*meancos)));
+                        }
+                    }
+                });
+        }
       }
 
         /* node solve (:795-819). ⚠️ TRAP 13: non-ice nodes are SKIPPED — there is NO else branch;
