@@ -20,13 +20,113 @@
  */
 #include "fesom_ice_maevp.h"
 #include "fesom_ice_types.h"
+#include "fesom_types.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"
 
 #include <Kokkos_Core.hpp>
+#include <cstdio>
+#include <cstdlib>
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ *  M9 — divergence-subcycled mEVP.  docs/plans/20260804-m9-mevp-divergence.md
+ *
+ *  S. Danilov's reformulation (ice_sergey/evp_div.tex): applying div to the mEVP stress
+ *  recursion turns  sigma^{p+1} = det1*sigma^p + det2*sigma~  into
+ *  d^{p+1} = det1*d^p + det2*div(sigma~)  EXACTLY — div is linear and the discrete divergence
+ *  operator is time-invariant. The carried state therefore moves from 3 ELEMENT arrays
+ *  (sigma11/12/22) to 2 NODE arrays (R_u/R_v). Possible only for mEVP, where all sigma
+ *  components share one alpha; standard EVP subcycles them differently.
+ *
+ *  All knobs are default-off and announce once on rank 0. The announce is not cosmetic:
+ *  FESOM_SPEED_SWSKIP and _IOACC once shipped SILENTLY DEAD on CUDA and passed EVERY
+ *  correctness gate while doing so (fesom_speed.hpp:93-102) — knob-OFF bytes are exactly what
+ *  a dead knob gives you. L102 (wsplit, 2026-08-04) sharpened it: a knob can be alive and
+ *  announcing while its code path is dead. So the M9 gates grep for evidence that the PATH
+ *  ran, and this file emits one [m9] provenance line naming the active cell.
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* Cell ③④⑤b — carry R_u/R_v at nodes instead of sigma at elements. Mathematically identical,
+ * NOT bitwise (det1*sum(sigma) vs sum(det1*sigma) rounds differently, and the ice_el mask
+ * changes membership across ocean steps) => solver class, the CGPOLY precedent. */
+static bool maevp_div_on(void)   { static int c = -1; return fesom_speed_on_exp("MEVPDIV",   &c); }
+
+/* Confound control. eps11/12/22 are written by the element kernel every subcycle and read
+ * NOWHERE in the mEVP path (only std EVP reads those arrays, fesom_ice_evp.cpp:117-129), and
+ * they cost about what the reformulation saves. Measured on its OWN leg so the reformulation
+ * and the dead-write removal are never reported as one number. */
+static bool maevp_noeps_on(void) { static int c = -1; return fesom_speed_on_exp("MEVPNOEPS", &c); }
+
+/* Diagnostic: carry sigma AND R and compare. Perturbs the trajectory (it re-baselines R at
+ * each step entry), so it is NEVER a timing or trajectory leg. See the plan §L2. */
+static int maevp_div_selfcheck(void)
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("FESOM_MEVPDIV_SELFCHECK"); c = e ? atoi(e) : 0; }
+    return c;
+}
+
+/* Cell ⑤ — exchange (u_aux,v_aux) every K-th subcycle; ring 1 goes up to K-1 subcycles stale.
+ * An explicit APPROXIMATION, never byte-neutral for K>1.
+ *
+ * fesom_speed_int is the SILENT helper (only the boolean resolvers announce), so this one owns
+ * its announce, its guard, and its own asked-but-off shout — on Serial a value knob silently
+ * returns the default unless FESOM_SPEED_FORCE_SERIAL=1, which would make an L1 null rung pass
+ * because the knob is DEAD rather than because the lever is neutral. */
+static int maevp_lag_K(const struct fesom_ice *ice, const struct fesom_partit *partit)
+{
+    static int cache = -2;
+    static int announced = 0;
+    const int K = fesom_speed_int("MEVPLAG", 1, &cache);
+    if (announced) return K;
+    announced = 1;
+
+    if (K > 1) {
+        /* The LAST subcycle must exchange. Otherwise the final u_ice = u_aux copy spanning
+         * myDim+eDim (trap 8) publishes a STALE HALO into the ocean coupling — a different and
+         * far worse error than a stale subcycle read. */
+        FESOM_CHECK(ice->evp_rheol_steps % K == 0,
+                    "MEVPLAG: K=%d must divide evp_rheol_steps=%d so the last subcycle exchanges",
+                    K, ice->evp_rheol_steps);
+        if (partit->mype == 0) {
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_MEVPLAG = %d (LAGGED single halo: exchange "
+                            "every %d-th subcycle, ring 1 up to %d subcycles stale; mEVP exchanges/"
+                            "step %d -> %d) — APPROXIMATION, not byte-neutral\n",
+                    K, K, K - 1, ice->evp_rheol_steps, ice->evp_rheol_steps / K);
+            fflush(stderr);
+        }
+    } else {
+        const char *e = getenv("FESOM_SPEED_MEVPLAG");
+        if (e && atoi(e) > 1 && partit->mype == 0) {
+            fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_MEVPLAG=%s WAS REQUESTED BUT RESOLVES TO "
+                            "1 — the lever is NOT running. (Serial backend without "
+                            "FESOM_SPEED_FORCE_SERIAL=1?)\n", e);
+            fflush(stderr);
+        }
+    }
+    return K;
+}
+
+/* One provenance line naming the active cell of the 2x3 study matrix. Every M9 gate and every
+ * A/B leg greps this; it is the single place that says what actually ran. */
+static void maevp_announce_cell(const struct fesom_partit *partit,
+                                bool div_on, bool noeps_on, int lagK, int selfcheck)
+{
+    static int announced = 0;
+    if (announced || partit->mype != 0) return;
+    announced = 1;
+    fprintf(stderr, "[m9] mEVP cell: form=%s halo=%s eps=%s%s\n",
+            div_on   ? "divergence(R_u,R_v @nodes)" : "classic(sigma @elements)",
+            lagK > 1 ? "lagged"                     : "every-subcycle",
+            noeps_on ? "dropped"                    : "kept",
+            selfcheck ? "  [SELFCHECK ON — diagnostic mode, not a timing leg]" : "");
+    if (lagK > 1) fprintf(stderr, "[m9] mEVP cell: lag K=%d\n", lagK);
+    fflush(stderr);
+}
 
 /*
  * Coastal-node mask for the edge BC (:823-857). The C zeros u_ice_aux/v_ice_aux at the two
@@ -71,6 +171,14 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                                  struct fesom_partit *partit,
                                  struct fesom_mesh   *mesh)
 {
+    /* M9 knobs — resolved and announced at the TOP, before any kernel output, so the gate greps
+     * find the lines in a known place. Resolution is cached; the announce fires once. */
+    const bool m9_div       = maevp_div_on();
+    const bool m9_noeps     = maevp_noeps_on();
+    const int  m9_selfcheck = maevp_div_selfcheck();
+    const int  m9_lagK      = maevp_lag_K(ice, partit);
+    maevp_announce_cell(partit, m9_div, m9_noeps, m9_lagK, m9_selfcheck);
+
     const int N     = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* node_size */
     const int myDim = mesh->myDim_nod2D;
     const int Eo    = mesh->myDim_elem2D;

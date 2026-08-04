@@ -1,0 +1,109 @@
+#!/bin/bash
+#SBATCH --job-name=m9_abcpu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/abcpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/abcpu.%j.err
+#
+# M9 — same-allocation CPU A/B across cells, run FROM THE ICE WORKTREE.
+# Pattern lifted from jobs/job_m7_ab_env: up to 6 legs as LEG1..LEG6, each "label::k1=v1;k2=v2",
+# every leg in a SUBSHELL so its env dies with it, REPS reps each, MIN reported. Leg 1 is the
+# reference and every other leg is reported as a % delta against it.
+#
+# 🔴 PROTOCOL (plan §Task 9). The two headline numbers NEVER come from the same run:
+#      - SYPD / s-per-step  <- CLEAN legs (no PHASESTATS; the instrument perturbs)
+#      - icedyn phase time  <- MATCHED INSTRUMENTED legs (PHST=1 adds FESOM_SPEED_PHASESTATS=1
+#                              to every leg, so the perturbation is common-mode across the A/B)
+#    Run the job twice with the same LEGs, once with PHST unset and once with PHST=1.
+#
+# 🔴 EVERY TIMING LEG RUNS FESOM_SPEED=1. Without it, `icerails` is off (fesom_ice.cpp:559) and
+#    the mEVP sigma H2D/D2H rails (:737-751, :768-771) execute INSIDE the icedyn phasestats
+#    bracket (the mark is at :676, before the rheology branch). Those rails would charge the
+#    divergence form extra PCIe inside the very metric it is being judged on. This job therefore
+#    injects FESOM_SPEED=1 into every leg and says so in the header of its output.
+#
+# 🔴 ALWAYS PIN BIN= — a multi-srun script re-execs the binary at every srun.
+#
+# Usage (the study's zero point, CORE2 np8, clean + instrumented):
+#   sbatch -N1 --ntasks=8 --export=ALL,MESH=/work/ab0995/a270088/port2/mesh/core2,DT=1800,\
+#     TAG=zero,BIN=/work/ab0995/a270088/port2/m9/bin/base/fesom_port_serial,\
+#     LEG1="base::" jobs/job_m9_ab_cpu
+#   ... then the same with PHST=1,TAG=zero_phst
+#
+# Usage (Fleet 1A, Win A isolated):
+#   LEG1="classic::" LEG2="div::FESOM_SPEED_MEVPDIV=1" \
+#   LEG3="div_noeps::FESOM_SPEED_MEVPDIV=1;FESOM_SPEED_MEVPNOEPS=1"
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+
+FESOM=${BIN:?BIN required — pin the frozen binary, never a build dir}
+MESH=${MESH:?MESH required}
+DT=${DT:?DT required}
+TAG=${TAG:?TAG required}
+NSTEPS=${NSTEPS:-300}
+SNAP=${SNAP:--1}          # -1 = no snapshots; mandatory >=4096 ranks, harmless here
+YEAR=${YEAR:-1958}
+REPS=${REPS:-2}
+PHST=${PHST:-}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+OUT=/work/ab0995/a270088/port2/m9/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+echo "=== M9 CPU A/B  TAG=$TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=$DT steps=$NSTEPS reps=$REPS ==="
+echo "    ROOT   = $ROOT"
+echo "    BIN    = $FESOM"
+echo "    sha256 = $(sha256sum "$FESOM" | cut -c1-16)"
+echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
+echo "    mode   = $([ -n "$PHST" ] && echo 'INSTRUMENTED (icedyn; do NOT quote SYPD from this run)' || echo 'CLEAN (SYPD; no phase split)')"
+echo "    every leg gets FESOM_SPEED=1 (rails off — see header)"
+echo
+
+REF=""
+for i in 1 2 3 4 5 6; do
+    eval "SPEC=\${LEG$i:-}"
+    [ -z "$SPEC" ] && continue
+    LABEL=${SPEC%%::*}
+    KNOBS=${SPEC#*::}
+    LOUT=$OUT/$LABEL; mkdir -p "$LOUT"
+
+    BEST=""
+    for r in $(seq 1 "$REPS"); do
+        (
+            export FESOM_WHICH_EVP=1 FESOM_SPEED=1
+            [ -n "$PHST" ] && export FESOM_SPEED_PHASESTATS=1
+            IFS=';'
+            for kv in $KNOBS; do [ -n "$kv" ] && export "$kv"; done
+            unset IFS
+            srun "$FESOM" "$MESH" "$LOUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" "$YEAR" \
+                 > "$LOUT/run.$r.log" 2>&1
+        )
+        # line is: "[fesom_port] loop timing: N steps (excl M warmup) = TOT s  ->  PER s/step"
+        # take PER, not TOT — a bare float grep picks up the total and silently reports garbage.
+        T=$(grep -m1 'loop timing' "$LOUT/run.$r.log" \
+            | sed -E 's|.*->[[:space:]]*([0-9.]+)[[:space:]]*s/step.*|\1|')
+        case "$T" in ''|*[!0-9.]*) T="" ;; esac
+        [ -z "$T" ] && { echo "  leg $LABEL rep $r: NO TIMING (rc/NaN?) — see $LOUT/run.$r.log"; continue; }
+        echo "  leg $LABEL rep $r: $T s/step"
+        if [ -z "$BEST" ] || awk "BEGIN{exit !($T < $BEST)}"; then BEST=$T; fi
+    done
+
+    [ -z "$BEST" ] && { echo "LEG $LABEL: FAILED (no rep produced a timing)"; continue; }
+    if [ -z "$REF" ]; then
+        REF=$BEST
+        printf "LEG %-14s min %s s/step   (reference)\n" "$LABEL" "$BEST"
+    else
+        printf "LEG %-14s min %s s/step   %+.2f%%\n" "$LABEL" "$BEST" \
+               "$(awk "BEGIN{printf \"%.4f\", 100*($BEST-$REF)/$REF}")"
+    fi
+    # knob-fired evidence, always printed (L80/L102)
+    grep -hE '^\[fesom_speed\]' "$LOUT/run.1.log" | sort -u | sed 's/^/      /' || true
+done
+
+echo
+echo "=== legs complete: $OUT ==="

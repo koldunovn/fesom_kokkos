@@ -1,0 +1,135 @@
+#!/bin/bash
+#SBATCH --job-name=m9_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/gpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/gpu.%j.err
+#
+# M9 — CUDA-vs-Serial fidelity gate at the mEVP config, run FROM THE ICE WORKTREE.
+#
+# Derived from jobs/job_m6_mevp_gpu_gate. Serial IS ground truth here: the Serial reference
+# dirs are produced by jobs/job_m9_mevp_bitid, which certifies them bit-identical to the C
+# oracle in the same run.
+#
+# 🔴 WHY THIS GATE IS NOT OPTIONAL FOR M9 (L86, and the precedent is specifically mEVP):
+#    NO SERIAL GATE CAN EVER VALIDATE A COHERENCE INVARIANT (src/fesom_ice.cpp:548-551,
+#    :572-580). The ICERAILS + FESOM_WHICH_EVP=1 clobber at :722-736 passed every Serial gate
+#    that ever ran. M9 moves carried rheology state from element arrays to node arrays and
+#    touches those very rails, so every task that changes them gets this gate in the SAME task
+#    — not deferred to a certification task at the end.
+#    Second reason: under the wide halo (cells 2/4) an out-of-bounds ghost read is SILENT
+#    GARBAGE on CUDA, not a crash. Serial may be in-bounds where CUDA is not.
+#
+#   LEG 1  CUDA knob-OFF  vs  SREF_OFF   -> the campaign-long invariant, always run
+#   LEG 2  CUDA + KNOBS   vs  SREF_ON    -> the new path (only when KNOBS is set)
+#
+# PASS = the documented CUDA climate-close floor (~1e-3 T / ~1e-4 Kv; element->node atomic
+# scatter is order-nondeterministic on CUDA, D22). A real regression saturates to ~1e-1..1e0,
+# which gpu_fidelity_check.py separates cleanly.
+#
+# Usage:
+#   sbatch --export=ALL,BIN=/work/ab0995/a270088/port2/m9/bin/base/fesom_port_cuda,\
+#          SREF_OFF=/work/ab0995/a270088/port2/m9/bitid_base/kk_off jobs/job_m9_gpu_gate
+#
+#   sbatch --export=ALL,BIN=...,TAG=div,KNOBS="FESOM_SPEED_MEVPDIV=1",\
+#          SREF_OFF=/work/.../m9/bitid_base/kk_off,SREF_ON=/work/.../m9/bitid_div/kk_on,\
+#          EXPECT="FESOM_SPEED_MEVPDIV = ON" jobs/job_m9_gpu_gate
+#
+# ⚠️ CUDA-aware MPI needs openmpi/4.1.5-nvhpc (env_cuda.sh); env.sh's openmpi/4.1.2 is
+#    --without-cuda and SEGFAULTs on device pointers.
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+K_BIN=${BIN:?BIN required — pin the frozen CUDA binary (multi-srun re-execs at every srun)}
+SREF_OFF=${SREF_OFF:?SREF_OFF required — the Serial knob-OFF reference from job_m9_mevp_bitid}
+
+source /sw/etc/profile.levante
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321
+export HDF5_USE_FILE_LOCKING=FALSE
+
+MESH=/work/ab0995/a270088/port2/mesh/core2       # the PRIVATE mesh (L73) -- NOT /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DT=1800; NSTEPS=20; SNAP=10; YEAR=1958
+
+TAG=${TAG:-base}
+KNOBS=${KNOBS:-}
+EXPECT=${EXPECT:-}
+SREF_ON=${SREF_ON:-}
+
+BASE=/work/ab0995/a270088/port2/m9/gpu_$TAG
+OFF=$BASE/cuda_off; ON=$BASE/cuda_on
+rm -rf "$BASE"; mkdir -p "$OFF"
+[ -n "$KNOBS" ] && mkdir -p "$ON"
+
+echo "=== M9 CUDA fidelity gate  TAG=$TAG ==="
+echo "    ROOT     = $ROOT"
+echo "    BIN      = $K_BIN"
+echo "    sha256   = $(sha256sum "$K_BIN" | cut -c1-16)"
+echo "    SREF_OFF = $SREF_OFF"
+echo "    SREF_ON  = ${SREF_ON:-<none>}"
+echo "    KNOBS    = ${KNOBS:-<none>}"
+[ -d "$SREF_OFF" ] || { echo "ERROR: SREF_OFF missing — run jobs/job_m9_mevp_bitid first"; exit 2; }
+
+export FESOM_WHICH_EVP=1
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_EVP_DUMP_DIR
+RC=0
+
+echo
+echo "################ LEG 1: CUDA, knob-OFF (mEVP default) ################"
+( env | grep -E '^FESOM_SPEED' && { echo "!! FESOM_SPEED leaked into the knob-OFF leg"; exit 2; }
+  srun "$K_BIN" "$MESH" "$OFF" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OFF/log" 2>&1
+  echo "leg 1 exit=$?" )
+grep -m1 "loop timing" "$OFF/log" || true
+"$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_OFF" "$OFF" || RC=1
+
+if [ -n "$KNOBS" ]; then
+    [ -n "$SREF_ON" ] || { echo "ERROR: KNOBS set but SREF_ON missing — a knob-ON CUDA leg must"; \
+                           echo "       be judged against the SAME knobs on Serial, not against"; \
+                           echo "       the knob-OFF reference."; exit 2; }
+    [ -d "$SREF_ON" ] || { echo "ERROR: SREF_ON $SREF_ON missing"; exit 2; }
+    echo
+    echo "################ LEG 2: CUDA, KNOBS=$KNOBS ################"
+    (
+        for kv in $KNOBS; do export "$kv"; done
+        env | grep -E '^FESOM_(SPEED|MEVPDIV)' | sed 's/^/    knob: /'
+        srun "$K_BIN" "$MESH" "$ON" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$ON/log" 2>&1
+        echo "leg 2 exit=$?"
+    )
+    grep -m1 "loop timing" "$ON/log" || true
+
+    echo
+    echo "=========== KNOB-FIRED CHECK (L80 / L102) ==========="
+    if [ -n "$EXPECT" ]; then
+        if grep -qE "$EXPECT" "$ON/log"; then
+            echo "PASS — matched: $(grep -hoE "$EXPECT" "$ON/log" | head -1)"
+        else
+            echo "FAIL — EXPECT regex '$EXPECT' not found. The knob did not fire;"
+            echo "       a PASS below would be vacuous."
+            RC=1
+        fi
+    else
+        echo "!! no EXPECT given — cannot distinguish 'within floor' from 'knob dead'"
+        grep -E '^\[fesom_speed\]' "$ON/log" | sed 's/^/    /' || true
+    fi
+
+    "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$SREF_ON" "$ON" || RC=1
+fi
+
+echo
+echo "################ perf sanity (same job, same nodes, same day) ################"
+printf "  knob-OFF: %s\n" "$(grep -m1 'loop timing' "$OFF/log" | sed 's/.*= //')"
+[ -n "$KNOBS" ] && printf "  knob-ON : %s\n" "$(grep -m1 'loop timing' "$ON/log" | sed 's/.*= //')"
+
+echo
+[ "$RC" -eq 0 ] && echo "=== M9 CUDA GATE PASS (TAG=$TAG) ===" \
+               || echo "=== M9 CUDA GATE FAIL (TAG=$TAG) ==="
+exit $RC
