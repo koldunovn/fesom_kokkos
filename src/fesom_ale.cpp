@@ -268,9 +268,54 @@ int fesom_wsplit_on(void)
         cached = (e && e[0] == '1') ? 1 : (int)FESOM_PHASE1_USE_WSPLIT;
         if (cached)
             fprintf(stderr, "[wsplit] FESOM_WSPLIT = ON (maxcfl=%.2f)\n",
-                    (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+                    (double)fesom_wsplit_maxcfl());
     }
     return cached;
+}
+
+/* M7-wsplit: the CFLz trigger threshold. Fortran carries it as the namelist
+ * parameter wsplit_maxcfl (F1 runs 1.0); the port had it as a compile-time
+ * constant, so the splitter's branch could only be exercised by a configuration
+ * that happens to exceed it. Making it settable closes that parity gap AND makes
+ * the branch reachable on the cheap certified config: CORE2 dt1800 peaks at
+ * CFLz 0.822 in 20 steps, so at the default 1.0 the splitter never fires there
+ * (measured, job 26695054 — wsplit-ON was bit-identical to OFF). Default
+ * unchanged, so every certified configuration is byte-untouched. */
+real_t fesom_wsplit_maxcfl(void)
+{
+    static real_t cached = -1.0;
+    if (cached < 0.0) {
+        const char *e = getenv("FESOM_WSPLIT_MAXCFL");
+        cached = (e && e[0]) ? (real_t)atof(e) : (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
+        if (!(cached > 0.0)) {
+            fprintf(stderr, "[wsplit] FESOM_WSPLIT_MAXCFL='%s' invalid (must be > 0) — "
+                            "falling back to %.2f\n", e, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+            cached = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
+        }
+        if (cached != (real_t)FESOM_PHASE1_WSPLIT_MAXCFL)
+            fprintf(stderr, "[wsplit] FESOM_WSPLIT_MAXCFL = %.3f (default %.2f)\n",
+                    (double)cached, (double)FESOM_PHASE1_WSPLIT_MAXCFL);
+    }
+    return cached;
+}
+
+/* M7-wsplit: startup safety notice (see fesom_ale.h). Threshold 500k surface
+ * nodes separates the certified low-resolution reference config (CORE2 126,858,
+ * which runs stably with the splitter off) from the production high-resolution
+ * meshes whose namelists set use_wsplit=.true. (farc 638,387 · dars 3,160,340 ·
+ * ng5 7,402,886). A heuristic on mesh size, hence a warning and never an abort. */
+void fesom_wsplit_mesh_notice(int nod2D_global, int mype)
+{
+    if (mype != 0 || fesom_wsplit_on() || nod2D_global < 500000) return;
+    fprintf(stderr,
+        "[wsplit] WARNING: %d surface nodes (high-resolution mesh) and the vertical-\n"
+        "[wsplit]          velocity splitter is OFF (FESOM_WSPLIT unset).\n"
+        "[wsplit]          Production high-resolution setups run it ON; without it the\n"
+        "[wsplit]          model is prone to vertical-CFL blow-up (Fortran NG5 dt180\n"
+        "[wsplit]          cold start dies without it, completes with it).\n"
+        "[wsplit]          Set FESOM_WSPLIT=1 unless you mean to leave it off.\n",
+        nod2D_global);
+    fflush(stderr);
 }
 
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
@@ -278,7 +323,7 @@ void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
-    const real_t maxcfl     = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
+    const real_t maxcfl     = fesom_wsplit_maxcfl();   /* M7-wsplit runtime threshold */
     const real_t use_wsplit = (real_t)fesom_wsplit_on();
     const real_t inv_maxcfl = 1.0 / ((maxcfl > 1e-12) ? maxcfl : 1e-12);
 
@@ -566,7 +611,7 @@ void fesom_ale_compute_wvel_split_kk(const struct fesom_mesh *mesh,
 {
     const int nl = mesh->nl;
     const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    const real_t maxcfl     = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
+    const real_t maxcfl     = fesom_wsplit_maxcfl();   /* M7-wsplit runtime threshold */
     const real_t use_wsplit = (real_t)fesom_wsplit_on();   /* M7-wsplit runtime knob */
     const real_t inv_maxcfl = 1.0 / ((maxcfl > 1e-12) ? maxcfl : 1e-12);
 

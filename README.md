@@ -251,6 +251,41 @@ to the pre-M6 model, and each was ported strictly faithfully to the C reference 
 
 An unrecognised value **aborts loudly** rather than silently falling back.
 
+**Vertical-velocity splitter (`use_wsplit`, M7 — certified 2026-08-04).** Where the vertical CFL
+exceeds a threshold, the vertical advection velocity is split into an explicit part (`w_e`, kept
+under the CFL bound) and an implicit part (`w_i`, transported by an unconditionally stable
+vertical solve). **High-resolution meshes need it**: Fortran NG5 dist_4096 at dt=180 from a cold
+start dies without it (job 26360443, T-NaN at step 230) and completes 300 steps with it (26360444).
+
+| knob | values | default | what it does |
+|---|---|---|---|
+| `FESOM_WSPLIT` | `0` \| `1` | `0` | enables the splitter (Fortran `use_wsplit`) |
+| `FESOM_WSPLIT_MAXCFL` | float > 0 | `1.0` | CFLz trigger threshold (Fortran namelist `wsplit_maxcfl`) |
+
+The port warns on rank 0 when a mesh above 500k surface nodes runs with the splitter off, and
+repeats the hint if the run then blows up. It is a warning, never an abort — the real trigger is
+CFLz > maxcfl, which depends on dt and the state, not on mesh size alone.
+
+⚠️ **The threshold matters when testing.** On CORE2 at dt=1800 the CFLz peaks at 0.822 in 20
+steps, so at the default 1.0 the splitter never fires and `FESOM_WSPLIT=1` is bit-identical to
+off (measured: job 26695054). The certification set below therefore runs at
+`FESOM_WSPLIT_MAXCFL=0.3`, where the implicit share reaches ~63% of `w` — verified in the run,
+not assumed (L80).
+
+| gate (CORE2 dist_8, 20 steps, dt1800) | job | verdict |
+|---|---|---|
+| knob-OFF byte (Serial) | 26695169 | ✅ rc=0 bit-identical |
+| knob-OFF fidelity (CUDA) | 26695244 | ✅ PASS |
+| wsplit ON, Serial — *must* differ from OFF | 26695170 | ✅ differs (splitter fired; `w_i/w` ≈ 0.63) |
+| **wsplit ON, CUDA vs Serial** | **26695245** | ✅ **PASS (worst 7.4e-03)** — first execution of the device vertical solver |
+| wsplit + TKE, CUDA vs Serial | 26695246 | ✅ PASS |
+| wsplit + mEVP, CUDA vs Serial | 26695247 | ✅ PASS |
+| wsplit + zstar, CUDA vs Serial | 26695248 | ✅ PASS (`Kv` 9.999e-02 = the L79 zstar control; 2 isolated `u` outliers, L75 class) |
+
+Not covered: the device path has not been run at high resolution (the July evidence that the port
+tracks Fortran's arc on NG5 is CPU-only), and there is no multi-year climate leg with the splitter
+on. Both are single runs if wanted, not campaigns.
+
 **Cost:** no measurable cost on CORE2 at 8 ranks (8×A100) — every knob's delta (−0.8% to +1.5%)
 is smaller than the 5.6% run-to-run spread of the *identical* default configuration across jobs.
 ⚠️ That is the only size measured: **no large mesh, no strong scaling, no SYPD.** CORE2/8 is

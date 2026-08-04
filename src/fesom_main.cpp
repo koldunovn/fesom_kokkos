@@ -415,6 +415,10 @@ int main(int argc, char **argv)
 
     print_sanity(&mesh);
 
+    /* M7-wsplit: warn once if a high-resolution mesh is running with the splitter
+     * off (print-only; the knob itself is unchanged). */
+    fesom_wsplit_mesh_notice(mesh.nod2D, mpi.mype);
+
     /* Phase 1 step 2: allocate the rest of the model state. All zeros until
        step 3 sets initial conditions. */
     fesom_dyn     dyn;     fesom_dyn_alloc    (&dyn,    &mesh);
@@ -1448,6 +1452,12 @@ skip_rest_state:
                         fprintf(stderr, "[fesom_port] BLOWUP at step %d "
                                 "(uv=%.3e eta=%.3e w=%.3e) — aborting all ranks\n",
                                 n, (double)uv_max, (double)eta_max, (double)w_max);
+                        /* M7-wsplit: the commonest curable cause of this class on large
+                         * meshes is the splitter being off. Print-only hint. */
+                        if (!fesom_wsplit_on() && mesh.nod2D >= 500000)
+                            fprintf(stderr, "[fesom_port]   hint: FESOM_WSPLIT is OFF on a "
+                                    "high-resolution mesh — the vertical-velocity splitter "
+                                    "cures this blow-up class (see [wsplit] warning above).\n");
                         fflush(stderr);
                         fflush(stdout);
                     }

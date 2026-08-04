@@ -60,6 +60,21 @@ void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
  * FCT tracer driver (the adv_tra_vert_impl w_i step + full-w LO-flux recompute). */
 int fesom_wsplit_on(void);
 
+/* M7-wsplit: the CFLz threshold above which the splitter engages — Fortran's
+ * namelist wsplit_maxcfl. FESOM_WSPLIT_MAXCFL overrides it; default 1.0 =
+ * FESOM_PHASE1_WSPLIT_MAXCFL, so every certified configuration is unchanged.
+ * Lowering it is how the splitter's branch is exercised on CORE2, whose CFLz
+ * peaks at 0.822 in the 20-step gate (measured, job 26695054). */
+real_t fesom_wsplit_maxcfl(void);
+
+/* M7-wsplit safety notice (print-only, rank 0, once at startup). High-resolution
+ * meshes are prone to vertical-CFL blow-up with the splitter off — measured, not
+ * asserted: Fortran NG5 dist_4096 dt180 cold dies without it (job 26360443, T-NaN
+ * step 230) and completes 300 steps with it (26360444). Warns, never aborts: the
+ * real trigger is CFLz > maxcfl, which depends on dt and the state, not on mesh
+ * size alone. */
+void fesom_wsplit_mesh_notice(int nod2D_global, int mype);
+
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
                                   struct fesom_dyn        *dyn);
 
