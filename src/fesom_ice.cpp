@@ -204,13 +204,22 @@ void fesom_ice_init(fesom_ice           *ice,
      * (fesom_ice.c) and the Fortran (which allocates these only for whichEVP != 0). Under the
      * default (std EVP) nothing here is touched, so the knob-OFF byte gate is unaffected. */
     if (ice->whichEVP == 1) {
-        const size_t nn = (size_t)mesh->myDim_nod2D;
-        const size_t ne = (size_t)mesh->myDim_elem2D;
-        ice->uice_aux_fld.alloc("ice.uice_aux", n);  ice->uice_aux = ice->uice_aux_fld.h();
-        ice->vice_aux_fld.alloc("ice.vice_aux", n);  ice->vice_aux = ice->vice_aux_fld.h();
-        ice->work.mevp_inv_thickness_fld.alloc("ice.mevp_inv_thickness", nn);
-        ice->work.mevp_mass_fld.alloc          ("ice.mevp_mass",          nn);
-        ice->work.mevp_ice_nod_fld.alloc       ("ice.mevp_ice_nod",       nn);
+        const size_t ne = (size_t)mesh->myDim_elem2D;   /* element-side ghosts live in FesomEvpwideDev, not here */
+        /* M9 Task 12 — STORAGE AUDIT for the wide halo (cells ②/④).
+         * The ghost node solve indexes these at extended slots [N, N+next). std EVP never
+         * needed them, so nothing extended them before; three were sized myDim, i.e. they had
+         * no room even for the ORDINARY eDim halo. An out-of-bounds ghost read is SILENT
+         * GARBAGE on CUDA, not a crash, so this is a correctness prerequisite and not a
+         * tidy-up. `nw` == n when the knob is off, so knob-off allocations are unchanged in
+         * size for everything that was already `n`; the three myDim ones grow to n (+tail),
+         * which is behaviour-neutral (zero-init, and nothing reads past myDim today).
+         * Element-side ghosts (pressure_fac, ice_el) do NOT live here — they follow std EVP's
+         * istr_g precedent and are Dev-struct arrays sized [Eg], built in evpw_build. */
+        ice->uice_aux_fld.alloc("ice.uice_aux", nw);  ice->uice_aux = ice->uice_aux_fld.h();
+        ice->vice_aux_fld.alloc("ice.vice_aux", nw);  ice->vice_aux = ice->vice_aux_fld.h();
+        ice->work.mevp_inv_thickness_fld.alloc("ice.mevp_inv_thickness", nw);
+        ice->work.mevp_mass_fld.alloc          ("ice.mevp_mass",          nw);
+        ice->work.mevp_ice_nod_fld.alloc       ("ice.mevp_ice_nod",       nw);
         ice->work.mevp_pressure_fac_fld.alloc  ("ice.mevp_pressure_fac",  ne);
         ice->work.mevp_ice_el_fld.alloc        ("ice.mevp_ice_el",        ne);
         ice->work.mevp_inv_thickness = ice->work.mevp_inv_thickness_fld.h();

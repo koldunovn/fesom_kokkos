@@ -46,7 +46,9 @@ K_BIN=${BIN:?BIN required — pin the frozen binary, never a build dir (multi-sr
 MESH=/work/ab0995/a270088/port2/mesh/core2      # the PRIVATE mesh (L73) -- NOT /pool
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
-DT=1800; NSTEPS=20; SNAP=10; YEAR=1958
+DT=${DT:-1800}; NSTEPS=${NSTEPS:-20}; SNAP=${SNAP:-10}; YEAR=${YEAR:-1958}
+# 20 steps / snap 10 is the GATE protocol (cheap, catches transcription errors). The L3
+# trajectory rung wants the full 300 steps with a single end snapshot: NSTEPS=300 SNAP=300.
 
 TAG=${TAG:-base}
 KNOBS=${KNOBS:-}
