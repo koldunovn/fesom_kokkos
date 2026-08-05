@@ -1409,3 +1409,29 @@ the ones that remove whole launches or whole exchanges. Cell ⑤ (exchange every
 removes 120 → 120/K exchanges and delivers **−15 % to −21 % of the whole model step** at np8 and
 np32 respectively. **Size an ice-dynamics lever against the launch/exchange count first, and
 against kernel bytes second.**
+
+## L105 — Three campaign-hygiene traps from M9, each of which silently produced a wrong or wasted run
+
+**(a) On the Serial backend EVERY `FESOM_SPEED_*` lever is vetoed unless
+`FESOM_SPEED_FORCE_SERIAL=1`** (`fesom_speed.hpp:111-113` for the boolean resolvers, `:168-170`
+for `fesom_speed_int`). The M9 zero-point run set `FESOM_SPEED=1` and nothing else; **fifteen**
+levers shouted `WAS REQUESTED BUT RESOLVES TO OFF`, PHASESTATS among them. Had that gone
+unnoticed, the entire CPU half of the campaign would have run with every knob dead and no phase
+split, and would have returned a tidy table of 0.00 % differences — indistinguishable from
+"the lever does not pay". The announce lines were the only evidence; every A/B leg in
+`jobs/job_m9_ab_*` now prints them at the end of the leg for exactly this reason.
+**Any CPU A/B of a `FESOM_SPEED_*` lever must export `FORCE_SERIAL=1` and grep its announce.**
+
+**(b) Never overwrite a frozen-binary path while jobs may be executing it.** `cp` onto the
+reused `bin/wip/` path failed with `Text file busy` mid-campaign; the failure was non-fatal in
+the shell, so two gate jobs went out pinned to the *previous* build. It was caught only because
+the job's `EXPECT=` announce regex would not have matched. Freeze to **immutable
+`bin/b_<sha8>/` paths** — the sha in the path makes a stale pin impossible to express.
+
+**(c) Ranks-per-node is a memory constraint on large meshes, not just a scheduling choice.**
+`ng5_w3d` (7.4 M nodes) at 64 ranks packed onto one 256 GB node OOM-killed at task 47. The same
+64 ranks spread over 4 nodes ran fine. A probe run of the new mesh/rank combination cost ~2
+minutes and saved the night; **probe an unfamiliar mesh×ranks point before committing a fleet
+to it.** Note the corollary for cross-mesh comparison: runs at different ranks-per-node are
+valid *within* a mesh (which is all an A/B needs) but are not directly comparable *across*
+meshes.

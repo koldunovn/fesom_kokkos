@@ -91,6 +91,11 @@ for i in 1 2 3 4 5 6; do
             # The announce lines are printed at the end of every leg on both jobs regardless.
             [ -n "$PHST" ] && export FESOM_SPEED_PHASESTATS=1
             export FESOM_IO_CONFIG=${IOCFG:-$ROOT/jobs/io.config.m9_timing}
+            # At thousands of ranks the per-step diagnostic line is an MPI_Gatherv over
+            # every rank and can dominate the step, inflating the denominator and masking
+            # the ice signal. Suppress it (job_m7_ab_env does the same). Common-mode across
+            # legs either way, but it wastes the measurement.
+            export FESOM_PRINT_EVERY=${PRINT_EVERY:-999}
             IFS=';'
             for kv in $KNOBS; do [ -n "$kv" ] && export "$kv"; done
             unset IFS
