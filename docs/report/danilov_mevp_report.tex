@@ -42,6 +42,13 @@ so its accuracy had to be established rather than assumed.
 Everything below is measured on production configurations. Where something is not measured, that
 is said.
 
+\textbf{Two things are worth knowing before the detail.} First, we report every speed number in two
+currencies --- percent of the whole model step and percent of the ice cost --- because the first
+divides an ice-only change by ten and made us report your reformulation as a null result when it is
+not (section~6.2). Second, the cheap option, the one that gives up exactness, turns out to
+\textbf{imprint the domain decomposition on the ice} (section~6.6), and that, rather than its
+speed, is what decides the recommendation.
+
 \section*{2. Terms, configurations, meshes, machine}
 
 \textbf{The sub-cycle and the halo.} mEVP advances the ice momentum with 120 sub-cycles per model
@@ -169,10 +176,20 @@ introduced as a scheme change rather than as an optimisation.
 
 \subsection*{6.2 The reformulation alone does not save time}
 
-On CPU the difference is within noise everywhere we measured: between $-0.34\%$ and $+0.07\%$ of
-the model step, from 1 to 512 processes. On GPU it is a small \emph{cost}: the ice-dynamics phase
-grows by 13\% on CORE2 with 8 GPUs and by about 7\% on NG5 --- though, that phase being a
-minority of the step, only $+0.02$ to $+1.6\%$ of the step itself.
+\textbf{First, the denominator, because it decides how this reads.} Percent of the \emph{model
+step} is what a production run feels, but the ice is only a small part of a step --- 5 to 13\% on
+CPU --- so an ice-only change is divided by 10 before it reaches that number. Percent of the
+\emph{ice cost} (ice + ice dynamics + ice advection, computation \emph{and} MPI wait, which is the
+definition Koldunov et al.\ 2019 used) is what judges a sea-ice scheme. We report both from here
+on; quoting only the first is what made our first reading of this result wrong.
+
+Measured against the ice cost, the reformulation \textbf{does} pay on CPU, and the more so the more
+processes are used: $-2.2\%$ at 512 processes on fArc, $-3.2\%$ at 1024, $-5.6\%$ at 1536,
+$-6.7\%$ at 2048, and $-8.5\%$ on CORE2 at 512. Against the model step the same runs read
+$-0.5\%$ to $0\%$ --- which is why we first reported it as nothing.
+
+On GPU it is a \emph{cost} in both currencies: $+2$ to $+17\%$ of the ice cost, $0$ to $+1.6\%$ of
+the model step (the ice-dynamics phase alone grows 13\% on CORE2 with 8 GPUs, 7\% on NG5).
 
 The reason is section~3. To bound the largest saving the reformulation could possibly deliver we
 ran a control: three element-sized arrays that the mEVP path writes every sub-cycle and never
@@ -181,8 +198,17 @@ does, and it changed the run time by \textbf{exactly 0.00\%}. There was no memor
 available to collect. Profiling agrees from the other side: total GPU arithmetic time is identical
 in the two forms, 21.8 against 21.7\,ms per step.
 
-This is a clean negative result rather than a disappointing one. It says the sub-cycle's cost is
-not where the reformulation acts.
+So the honest verdict is \textbf{backend-split, not null}: the reformulation removes real work,
+but on GPU it removes work that was not being paid for, because there the sub-cycle is limited by
+the number of operations issued rather than by arithmetic or memory traffic. On CPU, where that is
+not the case, it is worth having.
+
+\textbf{One caveat} we would rather state than hide: the CPU numbers at the largest process counts are
+wait-dominated and noisy --- at fArc with 2048 processes the ice cost falls 6.7\% while the model
+step \emph{rises} 1.0\%, which is not internally consistent and is probably load-imbalance jitter.
+The CORE2 512-process point ($-8.5\%$ of the ice, $-0.34\%$ of the step, same sign) is the cleaner
+one. These deserve a re-measurement on matched instrumented pairs before they are quoted in a
+paper.
 
 \begin{figure}[tb]
 \centering
@@ -211,8 +237,10 @@ Reading the figure:
 
 \begin{itemize}\itemsep0.12em
 \item The wide halo is a real gain and it is \emph{exact} --- there is no accuracy argument to
-make --- but at realistic operating points it is worth $-1.8$ to $-6.8\%$ of the model step,
-not the double-digit numbers reachable past the scaling limit.
+make --- worth $-1.8$ to $-6.8\%$ of the model step at realistic operating points, which is
+\textbf{$-12$ to $-19\%$ of the ice cost} (fArc, 16 GPU nodes, $K$=8: $-11.9\%$ in the classic
+form, $-19.1\%$ in the divergence form). \textbf{That $-19.1\%$ is the same configuration and the
+same number as your own $\sim$20\%} --- there was never a disagreement, only a denominator.
 \item It is worth substantially less than the delayed exchange on every mesh.
 \item On CPU it never wins, on any mesh, at any $K$.
 \item It needs large $K$. At $K=2$ it is a net \emph{cost} on most configurations, because the
@@ -255,6 +283,8 @@ $-3.4\%$, because a CPU process holds far less of the mesh and the ice exchange 
 share of its step. For scale, the largest single code optimisation this port had previously
 achieved was about 8\%.
 
+Against the ice cost the same option is worth \textbf{$-37$ to $-58\%$ on GPU} and $-5$ to $-25\%$
+on CPU (growing with process count: $-5\%$ at 128, $-25\%$ at 2048).
 \textbf{$K=4$ retains about 90\% of the gain of $K=8$}, which matters because the accuracy evidence
 pushes the other way.
 
@@ -344,7 +374,73 @@ tested, by a factor of 1.1 to 1.5.}
 \label{fig:accuracy}
 \end{figure}
 
-\subsection*{6.6 Why the divergence form's expected advantage did not survive}
+\subsection*{6.6 The delayed exchange imprints the domain decomposition}
+
+This was raised as an objection --- would the stale halo show up as partition artefacts in the ice?
+--- and it turned out to be the finding that decides the recommendation.
+
+The concern is well posed. The stale values sit on exactly the one-cell rim of each sub-domain,
+and the partition is fixed for the whole run, so the same nodes are perturbed at every step of
+every day. A global correlation cannot see it: a one-cell-wide feature along sub-domain edges is a
+small fraction of the mesh and can leave a domain-wide correlation at 0.99999 while being obvious
+on a map.
+
+\textbf{Test.} fArc, 16 GPUs, 60 days with daily ice output, all configurations from the same
+binary and the same 16-way partition. For each node we take its distance in elements from a
+sub-domain boundary and average $|\Delta$ ice thickness$|$ over the 60 days within each ring. If
+the option imprints the decomposition the average must peak at the boundary and decay; if it does
+not, the profile is flat. \textbf{Two negative controls make the test falsifiable}: two identical
+runs (whose only difference is the order of summation on the GPU), and the exact wide halo (which
+is bit-identical in exact arithmetic, so it should behave like the control).
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+& rim & interior & \textbf{edge/interior} \\
+\midrule
+two identical runs --- control & 0.00105\,m & 0.00124\,m & \textbf{0.85} \\
+\textbf{wide halo, exact, $K$=8} & 0.00104 & 0.00120 & \textbf{0.87} \\
+delayed exchange, $K$=2 & 0.00432 & 0.00249 & \textbf{1.70} \\
+delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{The delayed exchange imprints the partition; the exact wide halo does not.} The two
+controls land together at 0.85 and 0.87, which is what validates the diagnostic --- an exact
+option is measured as having no imprint, by the same statistic that finds one in the
+approximation. The effect is present on \textbf{day one} (ratio 3.1, when the difference is still
+$10^{-4}$\,m), persists for two months, scales with $K$, and appears in ice concentration (2.86)
+and ice velocity (1.76) as well as thickness. Figure~\ref{fig:artefact} shows both the ring
+profiles and the map: the difference field traces the sub-domain boundaries.
+
+\textbf{Why this is a different kind of defect from an accuracy cost.} Section~6.5 says the
+delayed exchange stays inside mEVP's own implementation spread, and that remains true. But the
+error is not distributed like an implementation difference --- it is organised along artificial
+lines, and \emph{it depends on how the mesh was partitioned}. The same experiment run on a
+different number of cores has a different error pattern. That is a property a climate model
+should not acquire lightly, and it is not visible in any of the integral diagnostics of
+section~6.5.
+
+\textbf{It also draws the line your own message drew, and confirms it.} Giving up bit-identity by
+\emph{recomputing} a shared quantity independently --- each core changing the last bit on a
+triangle it shares --- is harmless: that is precisely our control, and it measures 0.85. Giving it
+up by \emph{reading a halo that is $K-1$ sub-cycles old} is not the same thing at all: that is a
+physical-magnitude error injected at the rim, and it measures 2.52. The wide halo recomputes; the
+delayed exchange stales. Only the second imprints.
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{fig4_artefact.pdf}
+\caption{\emph{Left}: mean $|\Delta$ ice thickness$|$ over 60 days against distance from a
+sub-domain boundary, fArc on 16 GPUs; open markers are the interior. The two exact configurations
+(control, wide halo) are flat; the two approximate ones peak at the boundary and decay. Bracketed
+numbers are the edge/interior ratio --- 1 means no imprint. \emph{Right}: the day-60 difference
+for the delayed exchange at $K$=4 with the 16 sub-domain boundaries drawn on top.}
+\label{fig:artefact}
+\end{figure}
+
+\subsection*{6.7 Why the divergence form's expected advantage did not survive}
 
 This is the result we would most like your view on, because it corrects something we believed
 until two days ago.
@@ -379,25 +475,30 @@ and NG5 --- it wins by about one point. Neither is systematically better.
 \section*{7. Where this leaves the three ideas}
 
 \begin{center}\small
-\begin{tabular}{@{}p{3.3cm}p{4.6cm}p{7.6cm}@{}}
+\begin{tabular}{@{}p{3.0cm}p{5.2cm}p{7.3cm}@{}}
 \toprule
 & \textbf{status} & \textbf{our reading} \\
 \midrule
 divergence form &
-exact to round-off; no speed benefit on either backend &
-correct and elegant, but it acts on a cost the sub-cycle does not have. It would matter where
-memory traffic or message volume limits the sub-cycle; nothing we can run is in that regime. \\[0.3em]
+exact to round-off; on CPU $-2$ to $-8.5\%$ of the ice cost, growing with process count; on GPU a
+cost of $+2$ to $+17\%$ &
+\textbf{not a null result} --- our first report of it as one came from quoting percent of the model
+step, where the ice is a tenth of the total. It removes real work; on GPU that work was not being
+paid for, because the sub-cycle there is limited by operation count. \\[0.3em]
 wide halo (either form) &
-exact, bit for bit; $-1.8$ to $-6.8\%$ of the model step at GPU operating points, and it needs
-$K=8$; never profitable on CPU &
-usable today where exactness is required, and the only option that needs no accuracy argument. The
-decision rule is the ghost-to-owned ratio, $K\times$\,perimeter/area of the sub-domain, together
-with how expensive a message is on the machine. \\[0.3em]
+exact, bit for bit; $-12$ to $-19\%$ of the ice cost on GPU at $K$=8 ($-2$ to $-7\%$ of the model
+step); never profitable on CPU; \textbf{no partition imprint} &
+\textbf{the option we would put into production.} It is the only one that is both worth having and
+free of an accuracy or reproducibility argument. Its $-19.1\%$ of the ice cost on fArc is the same
+measurement as your $\sim$20\%. \\[0.3em]
 delayed exchange &
-approximate; $-8.5$ to $-15.5\%$ at GPU operating points, $-1$ to $-3.4\%$ on CPU; error inside
-mEVP's own implementation spread at $K\le8$ &
-the best value by a wide margin, and the one we would put into production at $K=4$ --- subject to
-the high-resolution check below. \\
+approximate; $-37$ to $-58\%$ of the ice cost on GPU --- three times the wide halo --- but
+\textbf{it imprints the domain decomposition} (edge/interior 2.52 at $K$=4 against a control of
+0.85) &
+\textbf{not recommended as it stands}, despite being much the fastest. Its error is inside mEVP's
+own implementation spread but is organised along sub-domain boundaries and depends on the core
+count. Worth revisiting only with evidence about a decade-scale integration, or with a hybrid that
+refreshes exactly now and then. \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -405,10 +506,19 @@ the high-resolution check below. \\
 \section*{8. What has not been measured}
 
 \begin{itemize}\itemsep0.12em
-\item \textbf{The accuracy of the delayed exchange at high resolution.} It is established at CORE2
-resolution over one year. The speed results that motivate its use are on fArc, DARS and NG5, where
-the ice is better resolved and the velocity field is rougher. The recommendation of $K=4$ should be
-read as scoped to CORE2 until a high-resolution year has been run. This is the largest gap.
+\item \textbf{Whether the partition imprint matters on climate time scales.} Two months on fArc
+establish that it exists, is immediate and is visible; they say nothing about whether it biases
+ice thickness or drift over decades, which is the question that would decide whether the delayed
+exchange is usable at all. This is now the largest gap.
+\item \textbf{The accuracy of the delayed exchange at high resolution.} Established at CORE2
+resolution over one year; the speed results that motivate it are on fArc, DARS and NG5, where the
+ice is better resolved and the velocity field is rougher.
+\item \textbf{A leaner wide halo.} Our implementation ships eleven auxiliary fields once per step
+so that rings 2\dots$K$ --- which do not exist in FESOM's data structures --- have any values at
+all. Measured, that ship is 1.6--6.2\% of the wide halo's messages and 3.6--9.2\% of its bytes, so
+removing it entirely could buy at most a few tenths of a percent of the model step. Your scheme
+avoids it by staying inside the halo FESOM already maintains, which is also why it is limited to
+$K$=2. We have not implemented that variant.
 \item \textbf{The divergence form over a long integration.} Since it showed no speed benefit we did
 not carry it through a one-year test, so the $2.1\times10^{-11}$ per-step non-equivalence of
 section~6.1 has not been followed to its long-term consequences.

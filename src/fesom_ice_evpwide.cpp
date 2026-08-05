@@ -96,6 +96,13 @@ struct EvpwState {
     long exch_count = 0;
     long msg_count = 0;                         /* MPI_Isend+Irecv POSTED (fused halves it) */
     double dbl_count = 0.0;                     /* doubles received (fusing must not change it) */
+    /* Split by WHICH ship, because the two are criticised separately. S. Danilov's objection to
+     * this design is that the per-step 11-field ship is far more than the 2 or 4 fields the
+     * sub-cycle actually needs, and that it exists only to buy bit-identity. The counter-argument
+     * is that it fires ONCE per step against 120/K window ships -- so the objection is about
+     * field count and the answer is about frequency, and only the measured split settles it. */
+    long msg_pre = 0, msg_win = 0;
+    double dbl_pre = 0.0, dbl_win = 0.0;
     const real_t *gs_h = nullptr, *ea_h = nullptr, *mf_h = nullptr;   /* dump aids (host mesh) */
 };
 EvpwState g_w;
@@ -1056,6 +1063,8 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
     }
     S.msg_count += nreq;                  /* the ONLY observable that separates the two forms */
     S.dbl_count += bytes / (double)sizeof(real_t);
+    if (P.diag == EvpwPlan::PRESTEP_ECHO) { S.msg_pre += nreq; S.dbl_pre += bytes / (double)sizeof(real_t); }
+    else                                  { S.msg_win += nreq; S.dbl_win += bytes / (double)sizeof(real_t); }
     fesom_halo_prof_waitall(nreq, S.reqs.data());
     fesom_halo_prof_bytes(bytes);
 
@@ -1404,15 +1413,22 @@ void fesom_evpwide_msg_report(int timed_steps, struct fesom_partit *p)
     if (!any) return;                     /* lever off everywhere: say nothing */
     /* msg_count spans the WHOLE run, timed_steps only the timed window; the ratio is what is
      * comparable across legs, and it is exact because the exchange cadence is per-step. */
-    double loc[2] = { (double)g_w.msg_count, g_w.dbl_count }, mx[2], sum[2];
-    MPI_Reduce(loc, mx,  2, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
-    MPI_Reduce(loc, sum, 2, MPI_DOUBLE, MPI_SUM, 0, p->MPI_COMM_FESOM);
+    double loc[6] = { (double)g_w.msg_count, g_w.dbl_count,
+                      (double)g_w.msg_pre, g_w.dbl_pre,
+                      (double)g_w.msg_win, g_w.dbl_win }, mx[6], sum[6];
+    MPI_Reduce(loc, mx,  6, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+    MPI_Reduce(loc, sum, 6, MPI_DOUBLE, MPI_SUM, 0, p->MPI_COMM_FESOM);
     if (p->mype != 0) return;
     const double st = (double)timed_steps;
     printf("[evpwide-wire] transport=%s  msgs/step: max-rank %.1f, all-ranks %.1f | "
            "doubles recv/step: max-rank %.0f, all-ranks %.0f  (bytes MUST match between the "
            "fused and unfused forms; only the message count may differ)\n",
            g_w.fuse ? "FUSED" : "unfused", mx[0]/st, sum[0]/st, mx[1]/st, sum[1]/st);
+    printf("[evpwide-wire] split per step (all-ranks): PRESTEP 11-field ship %.1f msgs / %.0f "
+           "doubles (%.1f%% of msgs, %.1f%% of doubles) | WINDOW ships %.1f msgs / %.0f doubles\n",
+           sum[2]/st, sum[3]/st,
+           sum[0] > 0 ? 100.0*sum[2]/sum[0] : 0.0, sum[1] > 0 ? 100.0*sum[3]/sum[1] : 0.0,
+           sum[4]/st, sum[5]/st);
     fflush(stdout);
 }
 
