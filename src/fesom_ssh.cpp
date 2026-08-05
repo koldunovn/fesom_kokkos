@@ -690,6 +690,12 @@ struct CgPipeState {
 };
 CgPipeState g_cgpipe;
 
+/* M10: when non-NULL, cgpipe_build ships THESE preconditioner values for the ring1 rows
+ * instead of S->pr_values (the symmetrised M̃⁻¹ — derivations §0.5). NULL for every M7 path,
+ * so the certified CGPIPE behaviour is untouched. Set before cgpipe_build, never after
+ * (the rows ship once). */
+const real_t *cgpipe_ship_pr = NULL;
+
 void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                   const struct fesom_mesh *mesh, fesom_partit *p)
 {
@@ -742,7 +748,11 @@ void cgpipe_build(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                 const int col = S->colind[n];                      /* col < N+eDim always */
                 b.ints.push_back(p->myList_nod2D[col]);            /* col gid */
                 b.ints.push_back(owner_l[(size_t)col]);            /* col OWNER rank */
-                b.dbls.push_back((double)S->pr_values[n]);         /* VERBATIM, row order */
+                /* VERBATIM, row order. M10: when a variant runs on the SYMMETRISED
+                 * preconditioner, the ring1 rows must be the symmetrised ones too — mixing
+                 * the two would make the recurred ring1 `u` differ from the owner's, which
+                 * is exactly the byte-identity property this shipping exists to provide. */
+                b.dbls.push_back((double)(cgpipe_ship_pr ? cgpipe_ship_pr[n] : S->pr_values[n]));
             }
         }
         b.hdr[0] = nrows; b.hdr[1] = nent;
@@ -2322,6 +2332,592 @@ void fesom_ssh_wire_report(void)
 #endif
 }
 
+/* ======================================================================= *
+ * M10 T5a — FESOM_SSH_SOLVER dispatch + shared guard infrastructure
+ * (plan docs/plans/20260805-m10-ssh-solvers.md; math
+ *  docs/plans/20260805-m10-ssh-derivations.md).
+ *
+ * The M10 solvers are SOLVER OPTIONS, not FESOM_SPEED levers: they are valid
+ * on every backend (the serial solution-class gates and the login testbed run
+ * them) and the FESOM_SPEED master never implies one. `cg` = the existing
+ * path, byte-untouched: with FESOM_SSH_SOLVER unset or `cg`, nothing below
+ * this banner executes and the binary is bit-identical to HEAD.
+ *
+ * ⭐ FESOM_SSH_SYMPRE — the derivations' headline (§0.4/§0.5). The built
+ * preconditioner is M⁻¹ = D⁻¹C with C symmetric and D = diag(A); the D⁻¹ on
+ * the LEFT makes M⁻¹ non-symmetric (measured defect ratio 0.638). Every
+ * CG-CG-family solver replaces PCG's explicit (p,Ap) with the recurrence
+ * σ_i = δ_i − β_i²σ_{i-1}, whose derivation needs (r_i, M⁻ᵀ r_{i-1}) = 0 —
+ * i.e. a SYMMETRIC M⁻¹. On CORE2 the as-built preconditioner drives that
+ * recurrence 21.8 % away from the truth by iteration 60 (lab --sigma-drift),
+ * so α is wrong by the same amount. M̃⁻¹ = D^{-1/2} C D^{-1/2} is symmetric,
+ * SIMILAR to M⁻¹ (identical spectrum: D^{1/2}(D⁻¹C)D^{-1/2} = D^{-1/2}CD^{-1/2}),
+ * same sparsity, and costs one scaling at setup. Default ON for every non-cg
+ * solver; `=0` reproduces the literal MITgcm form (Sergey's configuration) for
+ * the falsification leg. Baseline `cg` NEVER consults it.
+ * ======================================================================= */
+
+enum fesom_ssh_solver_kind {
+    FESOM_SSHSOLV_CG = 0, FESOM_SSHSOLV_CG2, FESOM_SSHSOLV_PIPECG,
+    FESOM_SSHSOLV_OATI, FESOM_SSHSOLV_PCSI
+};
+
+static const char *ssh_solver_name(int k)
+{
+    switch (k) {
+        case FESOM_SSHSOLV_CG:     return "cg";
+        case FESOM_SSHSOLV_CG2:    return "cg2";
+        case FESOM_SSHSOLV_PIPECG: return "pipecg";
+        case FESOM_SSHSOLV_OATI:   return "oati";
+        case FESOM_SSHSOLV_PCSI:   return "pcsi";
+    }
+    return "?";
+}
+
+/* Resolve once; abort loudly on an unrecognised value (house idiom), announce on rank 0
+ * so a dead knob is impossible to miss (L80). */
+static int ssh_solver_kind()
+{
+    static int k = -1;
+    if (k >= 0) return k;
+    const char *e = getenv("FESOM_SSH_SOLVER");
+    if      (!e || !e[0] || strcmp(e, "cg") == 0) k = FESOM_SSHSOLV_CG;
+    else if (strcmp(e, "cg2")    == 0)            k = FESOM_SSHSOLV_CG2;
+    else if (strcmp(e, "pipecg") == 0)            k = FESOM_SSHSOLV_PIPECG;
+    else if (strcmp(e, "oati")   == 0)            k = FESOM_SSHSOLV_OATI;
+    else if (strcmp(e, "pcsi")   == 0)            k = FESOM_SSHSOLV_PCSI;
+    else {
+        fprintf(stderr, "[fesom_ssh] unrecognised FESOM_SSH_SOLVER='%s' "
+                        "(valid: cg, cg2, pipecg, oati, pcsi)\n", e);
+        fflush(stderr);
+        MPI_Abort(MPI_COMM_WORLD, 1);
+    }
+    int rank = 0, ini = 0;
+    MPI_Initialized(&ini);
+    if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if (rank == 0 && k != FESOM_SSHSOLV_CG) {
+        fprintf(stderr, "[ssh-solver] FESOM_SSH_SOLVER = %s (M10)\n", ssh_solver_name(k));
+        fflush(stderr);
+    }
+    return k;
+}
+
+/* FESOM_SSH_RING=0 — literal multi-exchange forms. Bring-up/debug and the npes==1
+ * degradation ONLY; never a gated or recommended configuration. */
+static bool ssh_ring_on()
+{
+    static int c = -1;
+    if (c < 0) {
+        const char *e = getenv("FESOM_SSH_RING");
+        c = (e && e[0]) ? fesom_ssh_env01("FESOM_SSH_RING") : 1;
+    }
+    return c != 0;
+}
+
+/* FESOM_SSH_FALLBACK (default 1 = armed). 0 exists only for lab/probe experiments. */
+static bool ssh_fallback_armed()
+{
+    static int c = -1;
+    if (c < 0) {
+        const char *e = getenv("FESOM_SSH_FALLBACK");
+        c = (e && e[0]) ? fesom_ssh_env01("FESOM_SSH_FALLBACK") : 1;
+        int rank = 0, ini = 0;
+        MPI_Initialized(&ini);
+        if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+        if (!c && rank == 0) {
+            fprintf(stderr, "[ssh-solver] !! FESOM_SSH_FALLBACK=0 — the auto-fallback guard is "
+                            "DISARMED (experiments only; never in a certified run)\n");
+            fflush(stderr);
+        }
+    }
+    return c != 0;
+}
+
+/* FESOM_SSH_SYMPRE (default 1 for non-cg solvers). */
+static bool ssh_sympre_on()
+{
+    static int c = -1;
+    if (c < 0) {
+        const char *e = getenv("FESOM_SSH_SYMPRE");
+        c = (e && e[0]) ? fesom_ssh_env01("FESOM_SSH_SYMPRE") : 1;
+    }
+    return c != 0;
+}
+
+/* The symmetrised preconditioner M̃⁻¹ = D^{-1/2} C D^{-1/2}, i.e.
+ *     p̃r[i,j] = pr[i,j] · sqrt(d_i/d_j),   p̃r[i,i] = pr[i,i] = 1/d_i.
+ * Built ONCE (pr_values is frozen — the Fortran precedent), device-resident, same CSR
+ * sparsity as pr_values so the cgpipe ring-shipping machinery is untouched. The diagonal
+ * of A is needed on owned+ring1 rows, which is exactly what the existing host halo
+ * exchange provides at setup (this runs once, off the hot path).
+ * NOTE the ring1 rows shipped by cgpipe_build carry the ORIGINAL pr_values; a solver that
+ * uses SYMPRE must therefore not mix them — T5b ships the symmetrised rows instead. */
+struct SshSymPreState {
+    bool built = false;
+    Kokkos::View<double*> pr_d;                       /* [nnz] symmetrised */
+    std::vector<real_t>   pr_h;                       /* host copy (ring shipping, lab) */
+    std::vector<real_t>   diag_h;                     /* [N+eDim] diag(A), halo-current */
+};
+static SshSymPreState g_sympre;
+
+static void ssh_sympre_build(const fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
+                             fesom_partit *partit)
+{
+    SshSymPreState &s = g_sympre;
+    if (s.built) return;
+    const int N    = mesh->myDim_nod2D;
+    const int Next = N + mesh->eDim_nod2D;
+
+    /* diag(A) on owned+ring1. Read the DEVICE-authoritative values (under zstar the host
+     * mirror can be stale — the cgpoly frozen-Ã precedent). */
+    std::vector<real_t> vals_h((size_t)S->nnz);
+    {
+        auto m = Kokkos::create_mirror_view(S->values_fld.d());
+        Kokkos::deep_copy(m, S->values_fld.d());
+        for (int i = 0; i < S->nnz; ++i) vals_h[(size_t)i] = m(i);
+    }
+    s.diag_h.assign((size_t)Next, 0.0);
+    for (int r = 0; r < N; ++r) s.diag_h[(size_t)r] = vals_h[(size_t)S->rowptr[r]];
+    if (partit && partit->npes > 1)
+        fesom_halo_exchange(s.diag_h.data(), FESOM_HALO_NOD2D, 1, 1, partit);
+
+    std::vector<real_t> pr_h((size_t)S->nnz);
+    {
+        auto m = Kokkos::create_mirror_view(S->pr_values_fld.d());
+        Kokkos::deep_copy(m, S->pr_values_fld.d());
+        for (int i = 0; i < S->nnz; ++i) pr_h[(size_t)i] = m(i);
+    }
+    long bad = 0;
+    for (int r = 0; r < N; ++r)
+        for (int n = S->rowptr[r]; n < S->rowptr[r + 1]; ++n) {
+            const int c = S->colind[n];
+            if (c == r) continue;
+            const real_t di = s.diag_h[(size_t)r], dj = s.diag_h[(size_t)c];
+            if (!(di > 0.0) || !(dj > 0.0)) { ++bad; continue; }
+            pr_h[(size_t)n] *= sqrt(di / dj);
+        }
+    long gbad = bad;
+    if (partit && partit->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, &gbad, 1, MPI_LONG, MPI_SUM, partit->MPI_COMM_FESOM);
+    FESOM_CHECK(gbad == 0, "ssh-sympre: %ld non-positive diagonal(s) — D^{-1/2} undefined", gbad);
+
+    s.pr_h = pr_h;
+    s.pr_d = Kokkos::View<double*>("ssh.sympre.pr", (size_t)S->nnz);
+    {
+        auto h = Kokkos::create_mirror_view(s.pr_d);
+        for (int i = 0; i < S->nnz; ++i) h(i) = pr_h[(size_t)i];
+        Kokkos::deep_copy(s.pr_d, h);
+    }
+    s.built = true;
+
+    /* the L80 observable: print the defect BEFORE and AFTER on owned pairs, so a log proves
+     * the knob fired and by how much (derivations §0.2 numbers reproduce here). */
+    double d_before = 0.0, d_after = 0.0, mx = 0.0;
+    for (int r = 0; r < N; ++r)
+        for (int n = S->rowptr[r]; n < S->rowptr[r + 1]; ++n) {
+            const int c = S->colind[n];
+            if (c == r || c >= N) continue;
+            for (int m2 = S->rowptr[c]; m2 < S->rowptr[c + 1]; ++m2)
+                if (S->colind[m2] == r) {
+                    d_before = fmax(d_before, fabs((double)pr_h[(size_t)n] * sqrt(s.diag_h[(size_t)c] / s.diag_h[(size_t)r])
+                                                 - (double)pr_h[(size_t)m2] * sqrt(s.diag_h[(size_t)r] / s.diag_h[(size_t)c])));
+                    d_after  = fmax(d_after,  fabs((double)pr_h[(size_t)n] - (double)pr_h[(size_t)m2]));
+                    mx       = fmax(mx, fabs((double)pr_h[(size_t)n]));
+                    break;
+                }
+        }
+    double red[3] = { d_before, d_after, mx };
+    if (partit && partit->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, red, 3, MPI_DOUBLE, MPI_MAX, partit->MPI_COMM_FESOM);
+    if (!partit || partit->mype == 0) {
+        fprintf(stderr, "[ssh-sympre] BUILT: M~ = D^-1/2 C D^-1/2 — symmetry defect ratio "
+                        "%.3e -> %.3e (max|M~_ij| = %.3e)\n",
+                red[2] > 0 ? red[0] / red[2] : 0.0, red[2] > 0 ? red[1] / red[2] : 0.0, red[2]);
+        fflush(stderr);
+    }
+}
+
+void fesom_ssh_m10_free(void);   /* defined after the per-solver states (T5b+) */
+
+/* Interaction matrix (plan §Technical Details) — one cell, one behaviour. Evaluated once,
+ * on the first solve, with the solver kind already resolved. */
+static void ssh_solver_check_interactions(int kind, int npes)
+{
+    if (kind == FESOM_SSHSOLV_CG) return;
+    static bool done = false;
+    if (done) return;
+    done = true;
+
+    const char *v = getenv("FESOM_KK_VERIFY");
+    FESOM_CHECK(!(v && strcmp(v, "ssh") == 0),
+                "FESOM_SSH_SOLVER=%s is incompatible with FESOM_KK_VERIFY=ssh "
+                "(the C twin runs the legacy solver; the iterates differ within tolerance)",
+                ssh_solver_name(kind));
+
+    static int s_cgpoly = -2;
+    const int cgpoly_d = fesom_speed_int("CGPOLY", 0, &s_cgpoly);
+    FESOM_CHECK(!(cgpoly_d >= 1 && (kind == FESOM_SSHSOLV_PCSI || kind == FESOM_SSHSOLV_OATI)),
+                "FESOM_SSH_SOLVER=%s is incompatible with FESOM_SPEED_CGPOLY "
+                "(pcsi: nested Chebyshev; oati: the deep aux chain has no poly composition)",
+                ssh_solver_name(kind));
+
+    FESOM_CHECK(!(kind == FESOM_SSHSOLV_PCSI && !ssh_sympre_on()),
+                "FESOM_SSH_SOLVER=pcsi requires FESOM_SSH_SYMPRE=1 — the Chebyshev/Lanczos "
+                "theory needs a self-adjoint preconditioner (derivations sec 4.4)");
+
+    const bool host_halo = getenv("FESOM_HOST_HALO") != NULL;
+    int rank = 0, ini = 0;
+    MPI_Initialized(&ini);
+    if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    if ((npes == 1 || host_halo) && ssh_ring_on() && rank == 0) {
+        fprintf(stderr, "[ssh-solver] !! ring composition unavailable (%s) — %s degrades to "
+                        "the FESOM_SSH_RING=0 literal form (bring-up path, not a gated config)\n",
+                npes == 1 ? "npes==1" : "FESOM_HOST_HALO=1", ssh_solver_name(kind));
+        fflush(stderr);
+    }
+}
+
+/* Shared fallback guard. Every trigger derives from an ALLREDUCED scalar, so the decision is
+ * collective by construction (R6 — a rank-local branch would deadlock; the farc hang shows
+ * the fleet cost). The caller snapshots X0 at solve entry and restores it before redoing the
+ * solve with baseline cg. */
+enum { SSH_FB_NONE = 0, SSH_FB_NAN, SSH_FB_STALL, SSH_FB_INDEF, SSH_FB_MAXITER };
+
+static const char *ssh_fb_reason(int r)
+{
+    switch (r) {
+        case SSH_FB_NAN:     return "NaN/Inf in a reduced scalar";
+        case SSH_FB_STALL:   return "residual stalled or grew over the watch window";
+        case SSH_FB_INDEF:   return "r.u <= 0 (indefinite preconditioner)";
+        case SSH_FB_MAXITER: return "maxiter exhausted without convergence";
+    }
+    return "none";
+}
+
+static void ssh_fb_announce(int reason, int iters, double res, fesom_partit *partit, long solve)
+{
+    ++g_sshwire.t_fallback;
+    if (!partit || partit->mype == 0) {
+        fprintf(stderr, "[ssh-solver] !! FALLBACK on solve %ld after %d iters (res=%.4e): %s "
+                        "— restoring X0 and redoing this solve with baseline cg\n",
+                solve, iters, res, ssh_fb_reason(reason));
+        fflush(stderr);
+    }
+}
+
+/* The variant entry point. Returns the iteration count, or -1 to mean "guard tripped, X0
+ * restored, redo this solve with baseline cg". Implemented per solver in T5b–T8b. */
+static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                             const struct fesom_mesh *mesh, struct fesom_dyn *dyn);
+
+/* ======================================================================= *
+ * M10 T5b — `cg2`: Chronopoulos–Gear preconditioned CG
+ * (derivations §1; sources: own derivation, Sergey solvers.F90:3,
+ *  Cools–Vanroose Alg. 4, and [P] App. B2 ChronGear as a 4th cross-check).
+ *
+ *   p_i = u_i + β_i p_{i-1}          s_i = w_i + β_i s_{i-1}
+ *   x_{i+1} = x_i + α_i p_i          r_{i+1} = r_i − α_i s_i
+ *   u_{i+1} = M⁻¹ r_{i+1}            w_{i+1} = A u_{i+1}
+ *   ONE fused 3-element Allreduce: γ=(r,u), δ=(w,u), ρ=(r,r)
+ *   β_{i+1} = γ_{i+1}/γ_i            α_{i+1} = (δ/γ_{i+1} − β_{i+1}/α_i)⁻¹
+ *
+ * vs baseline PCG: 2 blocking Allreduce/iter → 1. The α recurrence replaces PCG's explicit
+ * (p,Ap); ⚠️ that substitution is valid ONLY for a symmetric M⁻¹ (derivations §0.4 — with
+ * the as-built pr_values it is 21.8 % wrong on CORE2), hence FESOM_SSH_SYMPRE, default ON.
+ *
+ * RING COMPOSITION (ours; no source does this): exchange r on rings 1+2 in ONE fused
+ * message ⇒ u = M⁻¹r is computable on owned AND ring1 (ring1 preconditioner rows are
+ * shipped verbatim at setup), so w = Au at owned rows needs no second message; p and s
+ * keep their ring1 values by recurrence. ⇒ 1 exchange + 1 Allreduce per iteration.
+ * FESOM_SSH_RING=0 gives the literal 2-exchange form (bring-up/npes==1 only).
+ * ======================================================================= */
+
+struct SshCg2State {
+    fesom::Field uu, ww, pp2, ss;                     /* ring-extent scratch */
+    int ext = 0;
+};
+static SshCg2State g_cg2;
+
+/* All four vectors are sized owned+ring1 regardless of composition: `uu` is gathered at
+ * halo columns by the w = A·u SpMV in BOTH forms (in the literal form it is halo-exchanged
+ * there, which writes [N, N+eDim)), and pp/ss carry ring1 values by recurrence in the ring
+ * form. Sizing `uu` owned-only overflows the halo write — caught by the np2 literal-form
+ * smoke, which aborted. The recurrence EXTENT still follows the active composition. */
+static void ssh_cg2_alloc(const struct fesom_mesh *mesh, bool /*ring*/)
+{
+    const int want = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    if (g_cg2.ext == want) return;
+    g_cg2.uu .alloc("ssh.cg2.uu",  (size_t)want);
+    g_cg2.ww .alloc("ssh.cg2.ww",  (size_t)want);
+    g_cg2.pp2.alloc("ssh.cg2.pp",  (size_t)want);
+    g_cg2.ss .alloc("ssh.cg2.ss",  (size_t)want);
+    g_cg2.ext = want;
+}
+
+static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                         const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
+{
+    const int     N        = mesh->myDim_nod2D;
+    fesom_partit *partit   = si->partit;
+    const int     parallel = (partit && partit->npes > 1);
+    const int     N_global = parallel ? mesh->nod2D : N;
+    const long    solve_id = g_sshwire.solves + 1;
+
+    /* ring composition needs the cgpipe 2-ring graph; it is unavailable at npes==1 and under
+     * FESOM_HOST_HALO (announced in the interaction check). */
+#ifdef KOKKOS_ENABLE_CUDA
+    const bool transport_ok = fesom_halo_device_active();
+#else
+    const bool transport_ok = true;
+#endif
+    const bool ring = ssh_ring_on() && parallel && transport_ok;
+    /* ⚠️ ORDER IS LOAD-BEARING: the symmetrised preconditioner must exist BEFORE
+     * cgpipe_build, because the ring1 rows are shipped once and must be the same values the
+     * owner uses on its owned rows. Mixing them silently corrupts every ring1 `u`. */
+    if (ssh_sympre_on()) {
+        ssh_sympre_build(S, mesh, partit);
+        FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
+                    "ssh-sympre: the CGPIPE ring1 rows were shipped with a DIFFERENT "
+                    "preconditioner (FESOM_SPEED_CGPIPE ran first?) — refusing to mix");
+        cgpipe_ship_pr = g_sympre.pr_h.data();
+    }
+    if (ring && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
+    ssh_cg2_alloc(mesh, ring);
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto vals   = S->values_fld.d();
+    auto prvals = ssh_sympre_on() ? Kokkos::View<const double*>(g_sympre.pr_d)
+                                  : Kokkos::View<const double*>(S->pr_values_fld.d());
+    auto X   = dyn->d_eta_fld.d();
+    auto rhs = dyn->ssh_rhs_fld.d();
+    auto rr  = si->rr_fld.d();
+    auto uu  = g_cg2.uu.d();
+    auto ww  = g_cg2.ww.d();
+    auto pp  = g_cg2.pp2.d();
+    auto ss  = g_cg2.ss.d();
+    const int E = ring ? N + mesh->eDim_nod2D : N;
+
+    auto exch = [&](fesom::Field &f) {
+        if (!parallel) return;
+        ++g_sshwire.s_exch;
+#ifdef KOKKOS_ENABLE_CUDA
+        if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
+#endif
+        f.modify_device(); f.sync_host();
+        fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+        f.modify_host();   f.sync_device();
+    };
+    /* the residual-class exchange: ring form = ONE fused 2-ring message, else the 1-ring bracket */
+    auto exch_r = [&]() {
+        if (!parallel) return;
+        if (ring) { ++g_sshwire.s_exch; cgpipe_exchange_rr(si->rr_fld, partit); }
+        else      exch(si->rr_fld);
+    };
+    /* u = M⁻¹ r on owned rows (+ ring1 by shipped rows in the ring form) */
+    auto apply_M = [&]() {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_cg2_psolve", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n = a; n < e; ++n) s += prvals(n) * rr(colind(n));
+                uu(row) = s;
+            });
+        if (ring) { SSH_WIRE_LAUNCH(1); cgpipe_zz_ring1(rr, uu); }
+        else      { g_cg2.uu.modify_device(); exch(g_cg2.uu); }
+    };
+
+    /* ---- initialisation: r₀ = b − Ax₀, u₀ = M⁻¹r₀, w₀ = Au₀ ---- */
+    SSH_WIRE_LAUNCH(1);
+    real_t s0 = cg_dot(rhs, rhs, N);
+    if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &s0, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+    const real_t rtol = si->soltol * sqrt(s0 / (real_t)N_global);
+    if (s0 == 0.0) {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_cg2_zeroX", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { X(row) = 0.0; });
+        dyn->d_eta_fld.modify_device();
+        si->last_iters = 0;
+        ssh_wire_close_solve(0, 0.0, (double)rtol, partit);
+        return 0;
+    }
+
+    exch(dyn->d_eta_fld);
+    SSH_WIRE_LAUNCH(2);
+    cg_spmv(rowptr, colind, vals, X, rr, N);
+    Kokkos::parallel_for("fesom_cg2_r0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
+    si->rr_fld.modify_device();
+    exch_r();
+    apply_M();
+    SSH_WIRE_LAUNCH(1);
+    Kokkos::parallel_for("fesom_cg2_w0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int a = rowptr(row), e = rowptr(row + 1);
+            for (int n = a; n < e; ++n) s += vals(n) * uu(colind(n));
+            ww(row) = s;
+        });
+    /* p₋₁ = s₋₁ = 0 over the ACTIVE extent (β₀ = 0 makes the first update p₀ = u₀) */
+    SSH_WIRE_LAUNCH(1);
+    Kokkos::parallel_for("fesom_cg2_zero_ps", Kokkos::RangePolicy<>(0, E),
+        KOKKOS_LAMBDA(const int row) { pp(row) = 0.0; ss(row) = 0.0; });
+
+    real_t g3[3] = { 0.0, 0.0, 0.0 };
+    SSH_WIRE_LAUNCH(1);
+    Kokkos::parallel_reduce("fesom_cg2_dots0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int i, real_t &l0, real_t &l1, real_t &l2) {
+            l0 += rr(i) * uu(i); l1 += ww(i) * uu(i); l2 += rr(i) * rr(i);
+        }, g3[0], g3[1], g3[2]);
+    if (parallel) { MPI_Allreduce(MPI_IN_PLACE, g3, 3, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+
+    double gamma = (double)g3[0], delta = (double)g3[1];
+    double alpha = 0.0, beta = 0.0, resid = sqrt((double)g3[2] / (double)N_global);
+    int fb = SSH_FB_NONE;
+    if (!(gamma == gamma) || !(delta == delta)) fb = SSH_FB_NAN;
+    else if (gamma <= 0.0)                       fb = SSH_FB_INDEF;   /* r·M⁻¹r ≤ 0 */
+    else if (delta == 0.0)                       fb = SSH_FB_NAN;
+    else alpha = gamma / delta;
+
+    /* ---- iterations ---- */
+    int iter = 0;
+    double best = resid;
+    int stall = 0;
+    const int STALL_WINDOW = 20;
+    if (fb == SSH_FB_NONE && resid >= rtol)
+    for (iter = 1; iter <= si->maxiter; ++iter) {
+        const real_t al = (real_t)alpha, be = (real_t)beta;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_cg2_update", Kokkos::RangePolicy<>(0, E),
+            KOKKOS_LAMBDA(const int row) {
+                const real_t p = uu(row) + be * pp(row);
+                const real_t s = ww(row) + be * ss(row);
+                pp(row) = p; ss(row) = s;
+                if (row < 0) return;                   /* (no-op; keeps the lambda uniform) */
+            });
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_cg2_xr", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                X (row) += al * pp(row);
+                rr(row) -= al * ss(row);
+            });
+        si->rr_fld.modify_device();
+        exch_r();
+        apply_M();
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_reduce("fesom_cg2_spmv_dots", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1, real_t &l2) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n = a; n < e; ++n) s += vals(n) * uu(colind(n));
+                ww(row) = s;
+                l0 += rr(row) * uu(row);
+                l1 += s       * uu(row);
+                l2 += rr(row) * rr(row);
+            }, g3[0], g3[1], g3[2]);
+        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, g3, 3, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+
+        const double gnew = (double)g3[0], dnew = (double)g3[1];
+        resid = sqrt((double)g3[2] / (double)N_global);
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+            fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=%.17g\n",
+                    iter, alpha, beta, resid);
+
+        if (!(gnew == gnew) || !(dnew == dnew) || !(resid == resid)) { fb = SSH_FB_NAN;   break; }
+        if (resid < rtol) break;
+        if (gnew <= 0.0)                                             { fb = SSH_FB_INDEF; break; }
+        if (resid < best * 0.999) { best = resid; stall = 0; }
+        else if (++stall >= STALL_WINDOW || resid > 1e3 * best)      { fb = SSH_FB_STALL; break; }
+
+        beta  = gnew / gamma;
+        const double inv = dnew / gnew - beta / alpha;
+        if (!(inv == inv) || inv == 0.0)                             { fb = SSH_FB_NAN;   break; }
+        alpha = 1.0 / inv;
+        gamma = gnew; delta = dnew;
+    }
+    if (fb == SSH_FB_NONE && iter > si->maxiter) fb = SSH_FB_MAXITER;
+
+    if (fb != SSH_FB_NONE) {
+        ssh_fb_announce(fb, iter, resid, partit, solve_id);
+        return -1;                                   /* caller restores X0 and redoes with cg */
+    }
+
+    if (ssh_verify_on()) {
+        exch(dyn->d_eta_fld);
+        --g_sshwire.s_exch;                          /* verify comm is not wire-counted */
+        real_t tn = 0.0;
+        Kokkos::parallel_reduce("fesom_cg2_verify", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n = a; n < e; ++n) s += vals(n) * X(colind(n));
+                const real_t d = rhs(row) - s;
+                l += d * d;
+            }, tn);
+        if (parallel) MPI_Allreduce(MPI_IN_PLACE, &tn, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+        const double tr = sqrt((double)tn / (double)N_global);
+        SshWireState &w = g_sshwire;
+        if (tr > w.v_maxtrue) w.v_maxtrue = tr;
+        const double gap = fabs(tr - resid);
+        if (gap > w.v_maxgap) w.v_maxgap = gap;
+        if (tr > (double)rtol) ++w.v_fail;
+        if (partit == NULL || partit->mype == 0) {
+            fprintf(stderr, "[ssh-verify] solve %ld: true=%.6e rec=%.6e rtol=%.6e gap=%.3e%s\n",
+                    solve_id, tr, resid, (double)rtol, gap,
+                    tr > (double)rtol ? "  <-- TRUE RESIDUAL ABOVE rtol" : "");
+            fflush(stderr);
+        }
+    }
+
+    dyn->d_eta_fld.modify_device();
+    si->last_iters = iter;
+    ssh_wire_close_solve(iter, resid, (double)rtol, partit);
+    return iter;
+}
+
+static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                             const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
+{
+    const int  N        = mesh->myDim_nod2D;
+    const bool armed    = ssh_fallback_armed();
+    /* X0 snapshot at solve entry (R6): the failed solver has already written X, and a NaN X
+     * would poison the baseline restart. Host-side, one vector, only for non-cg solvers. */
+    std::vector<real_t> X0;
+    if (armed) {
+        dyn->d_eta_fld.sync_host();
+        X0.assign(dyn->d_eta, dyn->d_eta + N);
+    }
+
+    int rc = -1;
+    switch (kind) {
+        case FESOM_SSHSOLV_CG2: rc = ssh_solve_cg2(S, si, mesh, dyn); break;
+        default:
+            FESOM_DIE("FESOM_SSH_SOLVER=%s is not implemented yet (M10 tasks T6-T8b)",
+                      ssh_solver_name(kind));
+    }
+    if (rc >= 0) return rc;
+
+    FESOM_CHECK(armed, "FESOM_SSH_SOLVER=%s tripped its guard with FESOM_SSH_FALLBACK=0 — "
+                       "no X0 snapshot exists, so the solve cannot be redone safely",
+                ssh_solver_name(kind));
+    /* restore X0 and let the caller run baseline cg on the SAME inputs */
+    memcpy(dyn->d_eta, X0.data(), (size_t)N * sizeof(real_t));
+    dyn->d_eta_fld.modify_host();
+    dyn->d_eta_fld.sync_device();
+    return -1;
+}
+
+/* Release every M10 persistent View before Kokkos::finalize (the cgpipe_free pattern). */
+void fesom_ssh_m10_free(void)
+{
+    g_sympre.pr_d = Kokkos::View<double*>();
+    g_sympre.pr_h.clear();
+    g_sympre.diag_h.clear();
+    g_sympre.built = false;
+    g_cg2 = SshCg2State{};
+}
+
 int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
                           fesom_solverinfo      *si,
                           const struct fesom_mesh *mesh,
@@ -2335,6 +2931,21 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
 
     /* M10 [ssh-wire]: per-solve counter reset (fold + print in ssh_wire_close_solve). */
     g_sshwire.s_exch = 0; g_sshwire.s_arb = 0; g_sshwire.s_ari = 0; g_sshwire.s_launch = 0;
+
+    /* M10 T5a — dispatch. `cg` (default/unset) falls straight through to the certified body
+     * below: one integer compare, nothing else changes, so knob-OFF stays byte-identical.
+     * A variant that trips its guard restores the solve-entry X0 itself and returns -1; we
+     * then fall through and redo THIS solve with baseline cg (the armed fallback, R6). */
+    {
+        const int kind = ssh_solver_kind();
+        if (kind != FESOM_SSHSOLV_CG) {
+            ssh_solver_check_interactions(kind, parallel ? partit->npes : 1);
+            const int rc = ssh_solve_variant(kind, S, si, mesh, dyn);
+            if (rc >= 0) return rc;
+            g_sshwire.s_exch = 0; g_sshwire.s_arb = 0;
+            g_sshwire.s_ari = 0;  g_sshwire.s_launch = 0;
+        }
+    }
 
     /* M7 E.CG1 — FESOM_SPEED_CGPIPE (see the banner above cg_dot). ADOPTED into
      * the FESOM_SPEED=1 blessed set 2026-07-16 (user decision) after the full

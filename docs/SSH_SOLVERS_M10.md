@@ -46,6 +46,51 @@ Every gate/A-B row: date · gate · job id · binary md5 (from the log — R9) �
 | 2026-08-06 | T1 base: knob-free serial 20-step CORE2 byte gate (worktree ROOT, HEAD f42c453) | 26722627 | `54433326…` (log also shows main-checkout `9743f602…` ≠ — R9 armed) | **PASS** diff_snap rc=0 |
 | 2026-08-06 | T2 knob-off byte gate on the [ssh-wire]+VERIFY instrumentation commit | 26722771 | `8f2be32b…` ≠ main `9743f602…` (R9) | **PASS** diff_snap rc=0 |
 | 2026-08-06 | T3 (R7) knob-off byte gate on the CMake OBJECT split + dump/trace/lab code | 26723005 | (in log) ≠ main (R9) | **PASS** diff_snap rc=0 |
+| 2026-08-06 | T5a knob-off byte gate on the dispatch + guard + sympre + cg2 commit | 26723543 | (in log) | *(pending)* |
+| 2026-08-06 | T5a explicit `FESOM_SSH_SOLVER=cg` byte gate (proves the default branch is the certified path) | 26723544 | (in log) | *(pending)* |
+| 2026-08-06 | T5b CUDA fidelity, `cg2` (CUDA vs Serial, same knobs) | 26723550 | (in log) | *(pending)* |
+| 2026-08-06 | T5b CUDA fidelity control, `cg` | 26723551 | (in log) | *(pending)* |
+| 2026-08-06 | T5b options ×3 (TKE/mEVP/zstar) under `cg2` | 26723560 | (in log) | *(pending)* |
+
+### T5b `cg2` — solution-class gate vs baseline `cg` (serial CORE2 np8, dt1800, 20 steps, login)
+
+**Every field inside the pre-registered P-L2 bound. PASS.**
+
+| field | measured max\|Δ\| | P-L2 bound | margin |
+|---|--:|--:|--:|
+| `eta_n` | 5.238e-05 | 1.5e-04 | 2.9× |
+| `u` / `v` | 5.134e-03 / 4.922e-03 | 5e-02 | ~10× |
+| `T` | 5.372e-02 | 2e-01 | 3.7× |
+| `S` | 2.465e-03 | 2e-02 | 8.1× |
+| `Kv` / `Av` | 9.999e-02 / 9.990e-02 | 2e-01 | 2.0× (the known floor) |
+| `w` | 2.050e-06 | 5e-05 | 24× |
+| `bvfreq` | 2.449e-06 | 2e-05 | 8.2× |
+| `pgf_x` / `pgf_y` | 1.073e-08 / 1.032e-08 | 1e-07 | ~9× |
+| `density_m_rho0` | 1.931e-03 | 2e-02 | 10× |
+| `h_ice` / `h_snow` | 6.546e-03 / 3.358e-04 | 2e-02 | 3.1× / 60× |
+| `a_ice` / `m_ice` / `m_snow` | 2.212e-04 / 4.439e-04 / 1.177e-04 | 5e-03 | ≥11× |
+| `uice` / `vice` | 6.678e-04 / 6.894e-04 | 5e-03 | 7.3× |
+
+**Wire observable (proves the knob fired, L80):** allreduces/solve **266.70 → 125.35** and
+exchanges/solve **266.70 → 125.35** at 123.35 iters — i.e. exactly `2 + k` of each, against
+baseline's `2 + 2k`. **⭐ Ring-composition self-check:** `FESOM_SSH_RING=0` (literal
+2-exchange form) gives *identical* iteration counts and *identical* verify residuals
+(6.964e-11 both) with 249.70 exchanges — so the ring composition is numerically equivalent
+to the literal form and only the message count differs.
+
+**⚠️ Iteration parity: pre-registration MISSED (recorded per house style).** P-L2 asked for
+cg2 within ±3 iterations of cg; measured **123.35 vs 132.35 = −9.0 (−6.8 %)**. The
+pre-registration rested on "same Krylov space, rounding-level drift", which the T4 finding
+invalidated: with `SYMPRE=1` cg2 runs on `M̃⁻¹ ≠ M⁻¹`, so it is a *different* preconditioner
+and a different Krylov space by construction — fewer iterations is a legitimate outcome, not
+a defect. **Revised criterion (registered now, for T6/T7):** iteration parity is asserted
+between variants *at equal `SYMPRE`*, and the cg-vs-variant count is reported, not gated.
+The "same Krylov space to rounding" claim is instead tested where it actually holds — the
+lab α-sequence at `SYMPRE=0`, iteration 1: cg 2.944659607044791 vs cg2 2.944659607044791,
+**relative difference 0.000e+00** (bitwise), before the σ drift takes over from iteration 2.
+
+**Lab certification (np1 CORE2 step-20 dump):** baseline `cg` replay — iters 126 = 126 and
+x_final **BITWISE** on all 126858 owned nodes, `CERT PASS`.
 
 **T2 instrumentation smoke (login pi np2, dt100, 20 steps, STATS+VERIFY on):** counts EXACT
 vs hand count (3-iter solve: exch=8=2+2k, ar_blk=8=2+2k, body-launches=17=6+4k−1(break));
@@ -181,6 +226,25 @@ up to 22 % on the production matrix** — a confirmed candidate explanation for 
 instability, and a scope change: the preconditioner-symmetry decision the plan scoped to
 P-CSI now governs all four solvers (knob `FESOM_SSH_SYMPRE`, default 1 for non-`cg`).
 Baseline `cg` is unaffected — it computes `(p,Ap)` explicitly and recurs nothing.
+
+**F1c ⭐⭐⭐ (T5b, 2026-08-06) — THE INSTABILITY REPRODUCED IN-MODEL AND CURED.** With `cg2`
+running on the literal MITgcm preconditioner (`FESOM_SSH_SYMPRE=0` — Sergey's exact
+configuration), a 20-step CORE2 np8 serial run fires the armed fallback on **18 of 20
+solves**: the residual *grows* to 2.9e+04 against an rtol of ~4 after ~30 iterations. The
+same binary with `FESOM_SSH_SYMPRE=1` (the symmetrised `M̃⁻¹`): **0 fallbacks**, 123.35
+iters/solve, true residual ≤ rtol on every solve. The lab α-sequence pins the mechanism
+quantitatively — at `SYMPRE=0`, `cg2`'s α departs from reference PCG's by **2.017 % at
+iteration 2**, matching the independently measured σ-recurrence drift of **1.977 %** at the
+same iteration (§F1b) term-for-term, then grows to 6.5 % by iteration 8.
+
+> **This is Sergey's CG² instability, reproduced on demand and removed by a one-line change
+> to the preconditioner** — and it was found by re-deriving the algorithm rather than
+> transcribing it (the user's Layer-0 directive). Report to Sergey with §0.4/§0.4b of the
+> derivations doc.
+
+Corollary — the armed fallback earned its keep on its first outing: it caught all 18
+divergences, restored `X0`, redid each solve with baseline `cg`, and the run finished with
+0 `true>rtol` events. A silent-divergence failure mode became a logged, recovered event.
 
 **F2 (R2) — no async Iallreduce progression** (see §Baseline census: probe verdict +
 binding pipecg attribution rule).

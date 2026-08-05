@@ -361,18 +361,31 @@ int main(int argc, char **argv)
         MPI_Allreduce(&lN,   &gN,   1, MPI_LONG,   MPI_SUM, mpi.MPI_COMM_FESOM);
         const int bitwise = (gbit == gN);
         const int iters_ok = (iters == ref_iters);
-        /* certification: np1 → bitwise + iters; np>1 → iters (bitwise reported) */
-        const int rc = mpi.npes == 1 ? !(bitwise && iters_ok) : !iters_ok;
+        /* Certification compares against the DUMP, which was produced by baseline `cg`.
+         * That comparison is a certification only when the replay runs the same solver;
+         * for a variant it is a REPORT (a different solver is expected to take a different
+         * number of iterations and land on a different — equally valid — iterate). */
+        const char *sv = getenv("FESOM_SSH_SOLVER");
+        const bool is_baseline = !sv || !sv[0] || strcmp(sv, "cg") == 0;
+        const int rc = !is_baseline ? 0
+                     : (mpi.npes == 1 ? !(bitwise && iters_ok) : !iters_ok);
         if (rc > worst_rc) worst_rc = rc;
         if (mpi.mype == 0)
-            printf("[lab] rep %d: iters=%d (dump %d %s)  max|X-x_final|=%.3e  "
+            printf("[lab] rep %d: solver=%s iters=%d (dump/cg %d, %s)  max|X-x_final|=%.3e  "
                    "bitwise %ld/%ld %s\n",
-                   rep, iters, ref_iters, iters_ok ? "OK" : "MISMATCH",
-                   gmx, gbit, gN, bitwise ? "(EXACT)" : "");
+                   rep, is_baseline ? "cg" : sv, iters, ref_iters,
+                   iters_ok ? "same" : "differs", gmx, gbit, gN, bitwise ? "(EXACT)" : "");
     }
-    if (mpi.mype == 0)
-        printf("[lab] CERT %s (criteria: %s)\n", worst_rc == 0 ? "PASS" : "FAIL",
-               mpi.npes == 1 ? "bitwise x_final + iters" : "iters (np>1)");
+    if (mpi.mype == 0) {
+        const char *sv = getenv("FESOM_SSH_SOLVER");
+        const bool is_baseline = !sv || !sv[0] || strcmp(sv, "cg") == 0;
+        if (is_baseline)
+            printf("[lab] CERT %s (criteria: %s)\n", worst_rc == 0 ? "PASS" : "FAIL",
+                   mpi.npes == 1 ? "bitwise x_final + iters" : "iters (np>1)");
+        else
+            printf("[lab] REPORT only — solver '%s' != the dump's baseline cg; iterate and "
+                   "iteration-count differences above are expected, not failures\n", sv);
+    }
     if (worst_rc) { MPI_Abort(MPI_COMM_WORLD, 1); }
     }
 
@@ -385,6 +398,7 @@ int main(int argc, char **argv)
     fesom_halo_device_free();
     fesom_ssh_cgpipe_free();
     fesom_ssh_cgpoly_free();
+    fesom_ssh_m10_free();      /* M10 solver scratch — else Kokkos aborts at static destruction */
     }
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);

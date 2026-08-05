@@ -1548,6 +1548,7 @@ skip_rest_state:
     fesom_ssh_wire_report();    // M10 T2: [ssh-wire] aggregate + launch probe (needs live Kokkos)
     fesom_ssh_cgpipe_free();    // M7 E.CG1: same — CGPIPE comm lists/buffers/shipped CSR
     fesom_ssh_cgpoly_free();    // M7 E.CG2: same — CGPOLY R-ring lists/frozen-Ã/cheb scratch
+    fesom_ssh_m10_free();       // M10 T5a: same — symmetrised preconditioner + solver scratch
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;

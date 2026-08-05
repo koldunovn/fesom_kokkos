@@ -1,6 +1,7 @@
 # M10 — SSH solver track: communication-avoiding CG variants + P-CSI
 
-**Date:** 2026-08-05 · **Status:** PLANNED (brainstorm approved; plan-review findings 1–19 incorporated 2026-08-05)
+**Date:** 2026-08-05 · **Status:** IN PROGRESS — T1–T4 complete (2026-08-06); T5a underway.
+**Base:** `f42c453` (= `65a1a71` + this plan commit) — deviation documented in `docs/SSH_SOLVERS_M10.md` §Provenance.
 **Branch:** `m10-ssh-solvers` in worktree `~/port_kokkos_ssh`, base `65a1a71` (= `m7-jupiter` tip = `main`)
 **Source material:** `ssh_sergey/` — Sergey Danilov's `solvers.F90` + three papers (gitignored, third-party)
 **Docs of record (to be created):** `docs/SSH_SOLVERS_M10.md` (ledger/findings) · `docs/plans/20260805-m10-ssh-derivations.md` (Layer-0 math + typo report — paper appendix seed)
@@ -288,26 +289,27 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp` (`FESOM_SSH_DUMP=<csv-steps>` — write per-rank CSR
   rowptr/colind/values/pr_values + b + x0 + x_final to `/work/.../m10/labdumps/<mesh>_np<N>/step<NNNN>/`)
 
-- [ ] dump knob + binary format (header: magic, version, step, dt, npes, myDim, eDim, nnz,
-      mesh-id hash)
-- [ ] lab driver: same mesh+dist init path as the model (exact partitioning + halo machinery),
-      loads a dump, runs the selected solver R repetitions; reports convergence history, α/β
-      sequences, iterate diffs vs a reference run; `--solver`, `--tol`, `--maxiter`, `--eig`
-      flags mirror the env knobs. **Scope note:** CORE2 np8 dumps run on login; dars np≥64 and
-      NG5 np≥256 replays are small SLURM jobs (cheap-walltime class) — tuning sweeps at scale
-      are fleets, planned as such in T8
-- [ ] **post-refactor byte gate** (R7): knob-off serial byte gate re-run immediately after the
-      CMake change, before any solver code lands
-- [ ] dumps taken: CORE2 np8 step 1 + step ~300; dars np≥64 + NG5 np≥256 one step each; under
-      zstar additionally two CORE2 dumps ~6 months apart (bound/matrix drift material)
-- [ ] **symmetry-defect measurement** (R1): `max|M_ij−M_ji|/max|M_ij|` for pr_values on every
-      dump; A-matrix symmetry as control; numbers → derivations doc §preconditioner
-- [ ] test (lab certification): replaying the dumped baseline `cg` reproduces the in-model
-      iteration count and final residual EXACTLY (bitwise at np1 serial; identical iters at np8)
-- [ ] test: dump→load roundtrip checksum on every array
-- [ ] rule recorded in the doc: **lab numbers are never performance numbers of record**; and the
-      R4 promotion rule (lab-tuned constant → default only after an in-model 20-step gate
-      reproduces lab iters/solve within ±10 %)
+- [x] dump knob `FESOM_SSH_DUMP=<csv>` + `FESOM_SSH_DUMP_DIR` + binary format
+      (`src/fesom_ssh_dump.h`; FNV-64 per array + trailer magic)
+- [x] lab driver `tools/fesom_ssh_lab.cpp` — the model's OWN init path + the model's OWN
+      solver (zero reimplementation), `--solver/--tol/--maxiter/--reps/--trace/--knob`;
+      ➕ `--sym-check` (R1) and ➕ `--sigma-drift` (the Layer-0 falsification experiment).
+      The dumped rowptr/colind are asserted BITWISE vs the freshly built CSR = proof the lab
+      rebuilt the same partitioning. `FESOM_SSH_TRACE=1` gives the α/β sequences (%.17g)
+- [x] **post-refactor byte gate** (R7): **PASS** job 26723005, diff_snap rc=0, run immediately
+      after the CMake OBJECT-library split and before any solver code
+- [x] dumps taken: CORE2 np8 steps 1/20/300 · ➕ CORE2 np1 step 20 (100 %% sym coverage +
+      bitwise cert) · dars np64 (26723046) · NG5 np256 (26723047) · zstar CORE2 np1 steps
+      100/8740 = 180 days apart (26723048)
+- [x] **symmetry-defect measurement** (R1): pr_values **0.638**, A control **1.42e-13**
+      (99.3 %% pair coverage, identical at steps 1 and 20) → derivations §0.2. ⭐⭐ This grew
+      into the track's headline finding (§0.4/§0.4b): the defect BREAKS the σ recurrence that
+      cg2/pipecg/oati all share — α wrong by **21.8 %%** on CORE2, 1.2e-13 once symmetrised
+- [x] test (lab certification): CORE2 np8 step-20 replay — iters 125=125 AND x_final
+      **BITWISE** on all 126858 owned nodes (stronger than the np>1 criterion required)
+- [x] test: FNV-64 per array, verified at every load; loader hard-fails on mismatch
+- [x] rules recorded in `SSH_SOLVERS_M10.md` §Findings ledger (lab-never-of-record + R4
+      promotion rule + CUDA-dumps-are-matrix-material-only)
 
 ### Task 4: Layer-0 derivations + typo triple-check + testbed scaffold
 
@@ -315,22 +317,32 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Create: `docs/plans/20260805-m10-ssh-derivations.md`
 - Create: `tests/test_ssh_solvers.cpp` · Modify: `CMakeLists.txt` (host-only unit test)
 
-- [ ] derive cg2, pipecg, oati, pcsi per Layer 0.1 (paper-appendix quality)
-- [ ] cross-source table per algorithm (derivation / Sergey F90 / paper / P-CSI App B for cg2);
-      **typo report section** — every discrepancy with evidence + severity; resolve the P-CSI ω
-      ambiguity against the PDF layout + Golub–Varga
-- [ ] **decide P-CSI's preconditioner** (R1, using T3's symmetry numbers): symmetric
-      `D^{−1/2}AD^{−1/2}` vs symmetrised MITgcm form; decision + rationale in the derivations
-      doc BEFORE T8 codes anything; the non-symmetry finding written up as a testable hypothesis
-      for the CG² instability (paper appendix material)
-- [ ] report Layer-0 findings to the user in-session (forwardable to Sergey) — even if the
-      report is "no discrepancies found"
-- [ ] testbed SCAFFOLD in `test_ssh_solvers.cpp`: SPD 2-D Laplacian fixture (~1k unknowns,
-      serial, exact eigs known) built directly as `fesom_ssh_stiff`-shaped CSR + minimal
-      solverinfo (npes==1 path); reference PCG on it; α/β-sequence comparator; Chebyshev-rate
-      checker. Acceptance: scaffold builds + reference PCG converges + comparator detects an
-      injected 1e-9 perturbation. Per-solver assertions are added in T5–T8 as each solver lands
-- [ ] run testbed on login — must pass before Task 5
+- [x] derived all four in `docs/plans/20260805-m10-ssh-derivations.md` (paper-appendix quality;
+      cg2 from PCG via the S/R substitutions, pipecg from cg2 via the aux vectors, oati by our
+      own 2-iteration unroll, pcsi from Golub-Varga)
+- [x] cross-source tables per algorithm (4 sources for cg2 incl. [P] App B2 — which proves
+      ChronGear's `σ_k = δ_k − β_k²σ_{k-1}` is algebraically IDENTICAL to CG-CG's α form);
+      **typo report T-1…T-9**; ⭐ P-CSI ω **RESOLVED to `1/(4α²)`** by derivation + [P]'s own
+      `ω₀ = 2/γ` seed + Golub-Varga, and the testbed proves the misread coefficient misses the
+      Chebyshev bound while the derived one meets it
+- [x] **preconditioner DECIDED** — `M̃⁻¹ = D^{−1/2} C D^{−1/2}` (derivations §0.5): symmetric,
+      SAME preconditioner spectrum (similar matrix, verified to 10 s.f.), same sparsity, cost =
+      one setup-time scaling. ➕ **SCOPE CHANGE: the decision governs ALL FOUR solvers, not just
+      pcsi** — §0.4 shows cg2/pipecg/oati share the σ recurrence that needs it. Knob
+      `FESOM_SSH_SYMPRE` (T5a), pcsi rejects `=0`. Hypothesis for the CG² instability written up
+      AND numerically confirmed (§0.4b)
+- [x] Layer-0 findings reported to the user in-session (T-1…T-9 + the §0.4b measurement),
+      forwardable to Sergey
+- [x] testbed `tests/test_ssh_solvers.cpp` (+ ctest `ssh_solvers`): 32×32 SPD Laplacian in
+      `fesom_ssh_stiff` CSR shape (diag at offset 0), reference PCG, α/β comparator (detects an
+      injected 1e-9 perturbation ✅), Chebyshev-rate checker measured in the **A-norm of the
+      error** (a residual ratio is not what the theory bounds — first draft was wrong and the
+      test caught it). ➕ a VARIABLE-diagonal fixture: the uniform Laplacian has a constant
+      diagonal, which makes the MITgcm preconditioner accidentally symmetric and would have
+      hidden §0.4 entirely. ➕ Lanczos + Sturm bisection (the T8a prototype) proving Ritz values
+      converge OUTWARD (justifies deflate-ν/inflate-µ) and that [P]'s un-rooted `q₁` costs
+      2270× in θmin
+- [x] testbed green on login: **PASS (0 failures)**, 18 assertions, <1 s
 
 ### Task 5a: Dispatch + shared guard infrastructure
 

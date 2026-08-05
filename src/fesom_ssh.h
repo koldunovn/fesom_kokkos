@@ -141,6 +141,11 @@ void fesom_ssh_cgpoly_free(void);   /* M7 E.CG2: CGPOLY comm lists/frozen-Ã/scr
  * No-op unless FESOM_SSH_STATS=1. Launches kernels → call BEFORE Kokkos::finalize. */
 void fesom_ssh_wire_report(void);
 
+/* M10 T5a: release the M10 persistent Views (symmetrised preconditioner, per-solver
+ * scratch). MUST run before Kokkos::finalize() — the fesom_ssh_cgpipe_free() pattern.
+ * No-op when no M10 solver ever ran. */
+void fesom_ssh_m10_free(void);
+
 /*
  * FESOM_KK_VERIFY=ssh gate: the §5 block (substeps 7-11) read-modify-writes
  * ssh_rhs/d_eta/uv/ssh_rhs_old/hbar/hbar_old/eta_n, so this is the L26
