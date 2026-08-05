@@ -35,3 +35,4 @@ __pycache__/
 # Third-party reference material dropped into the worktree for reading (not ours to
 # redistribute from a public repo): Sergey's double-halo mEVP Fortran + its note.
 ice_sergey/
+ssh_sergey/
