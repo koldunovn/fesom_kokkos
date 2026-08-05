@@ -184,10 +184,13 @@ void fesom_ice_init(fesom_ice           *ice,
     // kept verbatim.
     /* --- velocities (T_ICE:132-133, ice_init:719-740) --- */
     ice->uice_fld.alloc("ice.uice", nw);                      ice->uice            = ice->uice_fld.h();
-    ice->uice_rhs_fld.alloc("ice.uice_rhs", n);               ice->uice_rhs        = ice->uice_rhs_fld.h();
+    /* M9 cell ④: the wide-halo GHOST GATHER stages its assembled div(sigma~) per ghost slot in
+     * these two arrays, so they need the extended tail. It is per-subcycle scratch, NOT carried
+     * state and NOT shipped — cell ④'s window message stays (u,v,R_u,R_v) = 4*Ng doubles. */
+    ice->uice_rhs_fld.alloc("ice.uice_rhs", nw);              ice->uice_rhs        = ice->uice_rhs_fld.h();
     ice->uice_old_fld.alloc("ice.uice_old", n);               ice->uice_old        = ice->uice_old_fld.h();
     ice->vice_fld.alloc("ice.vice", nw);                      ice->vice            = ice->vice_fld.h();
-    ice->vice_rhs_fld.alloc("ice.vice_rhs", n);               ice->vice_rhs        = ice->vice_rhs_fld.h();
+    ice->vice_rhs_fld.alloc("ice.vice_rhs", nw);              ice->vice_rhs        = ice->vice_rhs_fld.h();
     ice->vice_old_fld.alloc("ice.vice_old", n);               ice->vice_old        = ice->vice_old_fld.h();
 
     /* --- stresses (T_ICE:136-137) --- */
@@ -232,10 +235,16 @@ void fesom_ice_init(fesom_ice           *ice,
          * branch (2 node arrays; .alloc zero-inits, which is the correct cold start — sigma is
          * cold-start-zero too and there is no ice restart path, fesom_ice.cpp:582). The
          * SELFCHECK pair is allocated only when asked: on a large mesh two extra node arrays
-         * for a diagnostic that never runs in a timing leg is not free. */
-        ice->work.mevp_Ru_fld.alloc("ice.mevp_Ru", n);  ice->work.mevp_Ru = ice->work.mevp_Ru_fld.h();
-        ice->work.mevp_Rv_fld.alloc("ice.mevp_Rv", n);  ice->work.mevp_Rv = ice->work.mevp_Rv_fld.h();
-        ice->work.mevp_nod_has_el_fld.alloc("ice.mevp_nod_has_el", n);
+         * for a diagnostic that never runs in a timing leg is not free.
+         *
+         * ⚠️ M9 Task 12b: R_u/R_v and the node mask allocate at `nw`, NOT `n`. Cell ④ ships the
+         * ghost R_u/R_v INTO the extended slots and the ghost node solve recurses R there, so an
+         * `n`-sized R is a silent out-of-bounds write on the very field the cell exists to move.
+         * (Task 12a extended the other node-side mEVP arrays and stopped short of these three,
+         * because nothing indexed them past `n` until the ghost node kernel existed.) */
+        ice->work.mevp_Ru_fld.alloc("ice.mevp_Ru", nw);  ice->work.mevp_Ru = ice->work.mevp_Ru_fld.h();
+        ice->work.mevp_Rv_fld.alloc("ice.mevp_Rv", nw);  ice->work.mevp_Rv = ice->work.mevp_Rv_fld.h();
+        ice->work.mevp_nod_has_el_fld.alloc("ice.mevp_nod_has_el", nw);
         ice->work.mevp_nod_has_el = ice->work.mevp_nod_has_el_fld.h();
         if (getenv("FESOM_MEVPDIV_SELFCHECK")) {
             ice->work.mevp_Rchk_u_fld.alloc("ice.mevp_Rchk_u", n);
@@ -781,21 +790,6 @@ void fesom_ice_step(int                            step,
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
             }
-            }
-            /* M7 E.EVP1 + L80: EVPWIDE's resolve lives in the std-EVP path, which this branch
-             * never reaches — without this line, FESOM_SPEED_EVPWIDE + mEVP would be a SILENT
-             * no-op (correct but mute; the dead-knob trap). Announce loudly, once. */
-            {
-                static int s_warned = 0;
-                if (!s_warned && fesom_evpwide_env_K() > 0) {
-                    s_warned = 1;
-                    if (partit->mype == 0) {
-                        fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE requested but "
-                                        "whichEVP=1 (mEVP has its own subcycle exchange) — the "
-                                        "lever is NOT running.\n");
-                        fflush(stderr);
-                    }
-                }
             }
             fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
             if (!icerails) {

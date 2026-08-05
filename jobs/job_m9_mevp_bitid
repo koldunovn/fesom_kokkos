@@ -53,11 +53,19 @@ DT=${DT:-1800}; NSTEPS=${NSTEPS:-20}; SNAP=${SNAP:-10}; YEAR=${YEAR:-1958}
 TAG=${TAG:-base}
 KNOBS=${KNOBS:-}
 EXPECT=${EXPECT:-}
+# M9 cells ②/④: the null rung's REFERENCE is not always knob-OFF.
+#   cell ② (EVPWIDE alone)      is exact wrt the CLASSIC form   -> REFKNOBS empty (use kk_off)
+#   cell ④ (EVPWIDE + MEVPDIV)  is exact wrt the DIVERGENCE form -> REFKNOBS="FESOM_SPEED_MEVPDIV=1"
+# Comparing ④ against knob-OFF would fail for a reason that has nothing to do with the wide
+# halo (the divergence form is solver-class BY DESIGN, that is cell ③'s whole content), and
+# would hide the only thing this rung asks: is the WIDE HALO ITSELF exact?
+REFKNOBS=${REFKNOBS:-}
 
 BASE=/work/ab0995/a270088/port2/m9/bitid_$TAG
-OUT_C=$BASE/c_mevp; OUT_OFF=$BASE/kk_off; OUT_ON=$BASE/kk_on
+OUT_C=$BASE/c_mevp; OUT_OFF=$BASE/kk_off; OUT_ON=$BASE/kk_on; OUT_REF=$BASE/kk_ref
 rm -rf "$BASE"; mkdir -p "$OUT_C" "$OUT_OFF"
 [ -n "$KNOBS" ] && mkdir -p "$OUT_ON"
+[ -n "$REFKNOBS" ] && mkdir -p "$OUT_REF"
 
 echo "=== M9 mEVP byte gate  TAG=$TAG ==="
 echo "    ROOT   = $ROOT"
@@ -137,13 +145,34 @@ if [ -n "$KNOBS" ]; then
     #            changes membership across steps). diff_snap can only say yes/no, so report
     #            MAGNITUDES against the mEVP scheme floor instead. This is the L3 rung.
     CLASS=${CLASS:-byte}
+    # Optional REFERENCE leg: the baseline the KNOBS leg must reproduce, when that baseline is
+    # not the default path (cell ④, above).
+    REFDIR=$OUT_OFF; REFNAME="knob-OFF"
+    if [ -n "$REFKNOBS" ]; then
+        echo
+        echo "=============== LEG D: Kokkos-Serial REFERENCE, REFKNOBS=$REFKNOBS ==============="
+        (
+            export FESOM_SPEED_FORCE_SERIAL=1
+            for kv in $REFKNOBS; do export "$kv"; done
+            env | grep -E '^FESOM_(SPEED|MEVPDIV)' | sed 's/^/    refknob: /'
+            srun -l "$K_BIN" "$MESH" "$OUT_REF" $DT $NSTEPS $SNAP "$PHC" $YEAR \
+                 > "$OUT_REF/run.log" 2> "$OUT_REF/run.err"
+            echo "leg D exit: $?"
+        )
+        tail -2 "$OUT_REF/run.log"
+        REFDIR=$OUT_REF; REFNAME="REFKNOBS[$REFKNOBS]"
+        # A reference leg that did not itself fire is the same vacuum as a dead KNOBS leg.
+        grep -hE '\[m9\]' "$OUT_REF/run.err" "$OUT_REF/run.log" | sed 's/^ *//' | sort -u \
+            | sed 's/^/    ref cell: /'
+    fi
+
     echo
     if [ "$CLASS" = "byte" ]; then
-        echo "=========== L1: knob-OFF vs KNOBS (null rung, must be bit-identical) ==========="
-        "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON"; L1=$?
+        echo "=========== L1: $REFNAME vs KNOBS (null rung, must be bit-identical) ==========="
+        "$PY" "$ROOT/scripts/diff_snap.py" "$REFDIR" "$OUT_ON"; L1=$?
         echo "diff_snap rc=$L1"
         [ "$L1" -eq 0 ] && echo "L1 PASS — the lever is byte-neutral" \
-                       || { echo "L1 FAIL — the lever perturbs the default trajectory"; RC=1; }
+                       || { echo "L1 FAIL — the lever perturbs the reference trajectory"; RC=1; }
     else
         echo "=========== L3: knob-OFF vs KNOBS (solver class — magnitudes, not bytes) ==========="
         echo "    A nonzero diff is EXPECTED here and is the measurement, not a failure."
@@ -160,8 +189,8 @@ if [ -n "$KNOBS" ]; then
         echo "       alone vs MEVPLAG=K tells you how much of the perturbation is the"
         echo "       reformulation and how much is the stale halo."
         echo
-        "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$OUT_OFF" "$OUT_ON" || true
-        "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_OFF" "$OUT_ON" >/dev/null 2>&1 \
+        "$PY" "$ROOT/scripts/gpu_fidelity_check.py" "$REFDIR" "$OUT_ON" || true
+        "$PY" "$ROOT/scripts/diff_snap.py" "$REFDIR" "$OUT_ON" >/dev/null 2>&1 \
             && echo "    NOTE: bit-identical — for a solver-class lever that means it DID NOT FIRE"
     fi
 fi

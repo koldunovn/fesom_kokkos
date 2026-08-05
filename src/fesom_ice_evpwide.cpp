@@ -410,11 +410,21 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             }
     }
 
-    /* replies + the runtime SEND lists (owned indices, requester's want order). */
-    std::vector<std::vector<real_t>> rep_d((size_t)npes);    /* area0 per want */
+    /* replies + the runtime SEND lists (owned indices, requester's want order).
+     * M9: the per-want double reply is (area0, coriolis, bc_index) — THREE doubles, was two.
+     * bc_index_nod2D joined it because the mEVP node solve multiplies its determinant by it
+     * (trap 9) and it is built from LOCAL edges (fesom_ice.cpp:314), so a ghost slot cannot
+     * compute its own. It is time-invariant, so shipping it here — once, at build — costs one
+     * double per ghost slot forever instead of one per step. */
+    std::vector<std::vector<real_t>> rep_d((size_t)npes);    /* (area0, cor, bc_index) per want */
     std::vector<std::vector<int>>    rep_i((size_t)npes);    /* per flagged want: cnt, egid1... */
     std::vector<std::vector<int>>    slist((size_t)npes);
     const int nl = m->nl;
+    /* Built unconditionally in fesom_ice_init (fesom_ice.cpp:308), i.e. long before this lazy
+     * build runs. If it is ever NULL we would ship garbage into the ghost determinant and the
+     * damage would be invisible on Serial; abort instead of defaulting. */
+    FESOM_CHECK(m->bc_index_nod2D != NULL,
+                "evpwide: bc_index_nod2D not built before the wide-halo build");
     for (int q = 0; q < npes; ++q) {
         const std::vector<int> &win = wantin[(size_t)q];
         for (size_t j = 0; j + 1 < win.size(); j += 2) {
@@ -426,6 +436,7 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             slist[(size_t)q].push_back(n);
             rep_d[(size_t)q].push_back(m->area[(size_t)n * (size_t)nl + 0]);
             rep_d[(size_t)q].push_back(m->coriolis_node[n]);   /* shipped, not recomputed */
+            rep_d[(size_t)q].push_back(m->bc_index_nod2D[n]);
             if (need) {
                 rep_i[(size_t)q].push_back(adj_ptr[(size_t)n + 1] - adj_ptr[(size_t)n]);
                 for (int a = adj_ptr[(size_t)n]; a < adj_ptr[(size_t)n + 1]; ++a)
@@ -444,9 +455,9 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     for (int q = 0; q < npes; ++q) {
         const int nw = (int)wslot[(size_t)q].size();
         if (nw > 0) {
-            ind[(size_t)q].resize((size_t)nw * 2);            /* (area0, cor) per want */
+            ind[(size_t)q].resize((size_t)nw * 3);            /* (area0, cor, bc_index) per want */
             rq.push_back(MPI_Request());
-            MPI_Irecv(ind[(size_t)q].data(), nw * 2, MPI_DOUBLE, q, 2202, comm, &rq.back());
+            MPI_Irecv(ind[(size_t)q].data(), nw * 3, MPI_DOUBLE, q, 2202, comm, &rq.back());
         }
         if (ricnt[(size_t)q] > 0) {
             ini[(size_t)q].resize((size_t)ricnt[(size_t)q]);
@@ -546,10 +557,12 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
 
     /* -------- unified statics + gather CSR. */
     std::vector<real_t> area0x((size_t)(N + next), 0.0), corx((size_t)(N + next), 0.0);
+    std::vector<real_t> bcx((size_t)(N + next), 0.0);
     std::vector<int>    coastx((size_t)(N + next), 0);
     for (int n = 0; n < N; ++n) {
         area0x[(size_t)n] = m->area[(size_t)n * (size_t)nl + 0];
         corx  [(size_t)n] = m->coriolis_node[n];
+        bcx   [(size_t)n] = m->bc_index_nod2D[n];
         coastx[(size_t)n] = S.gcoast[(size_t)n];
     }
     for (int t = 0; t < next; ++t)
@@ -570,6 +583,7 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
          * Adjacency is staged PER SLOT first — the owner-walk order interleaves slots of
          * different owners, so pushing straight into a prefix-summed CSR would scramble rows. */
         double area0_maxdiff = 0.0;
+        long   bc_mismatch = 0;   /* ring-1 slots where MY local bc_index != the owner's */
         std::vector<std::vector<int>> rowE((size_t)(N + next));
         for (int q = 0; q < npes; ++q) {
             size_t ip = 0;
@@ -581,12 +595,14 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
                  * over interior+halo locally), so it differs from the owner's in last bits.
                  * The replay must use what the OWNER's Step 2 used. (First smoke caught
                  * exactly this: max ulp-level diffs on ring-1 cluster areas.) */
-                if (s < N && ind[(size_t)q][2*j] != area0x[(size_t)s]) {
-                    const double d = fabs(ind[(size_t)q][2*j] - area0x[(size_t)s]);
+                if (s < N && ind[(size_t)q][3*j] != area0x[(size_t)s]) {
+                    const double d = fabs(ind[(size_t)q][3*j] - area0x[(size_t)s]);
                     if (d > area0_maxdiff) area0_maxdiff = d;
                 }
-                area0x[(size_t)s] = ind[(size_t)q][2*j];
-                corx  [(size_t)s] = ind[(size_t)q][2*j + 1];   /* owner bytes (libmvec lesson) */
+                area0x[(size_t)s] = ind[(size_t)q][3*j];
+                corx  [(size_t)s] = ind[(size_t)q][3*j + 1];   /* owner bytes (libmvec lesson) */
+                if (s < N && ind[(size_t)q][3*j + 2] != bcx[(size_t)s]) ++bc_mismatch;
+                bcx   [(size_t)s] = ind[(size_t)q][3*j + 2];   /* owner bytes (local-edge derived) */
                 if (!upd_of_slot(s)) continue;
                 FESOM_CHECK(ip < ini[(size_t)q].size(), "evpwide: adjacency stream underrun (rank %d)", q);
                 const int cnt = ini[(size_t)q][ip++];
@@ -624,9 +640,19 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
         std::sort(upd_slots.begin(), upd_slots.end());
         double a0mx = 0.0;
         MPI_Reduce(&area0_maxdiff, &a0mx, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
-        if (p->mype == 0)
+        long bcsum = 0;
+        MPI_Reduce(&bc_mismatch, &bcsum, 1, MPI_LONG, MPI_SUM, 0, comm);
+        if (p->mype == 0) {
             fprintf(stderr, "[evpwide] ring-1 area0: owner-vs-local max|diff| = %.3e "
                             "(expected ulp-level; owner bytes adopted for the replay)\n", a0mx);
+            /* NOT an error either way. bc_index is derived from LOCAL edges, so a rank that does
+             * not own the boundary edge cannot see the mask — a nonzero count is the positive
+             * evidence that shipping it was necessary; a zero count on a partition whose ring 1
+             * happens to miss every coast is equally fine. Printed so the decision is auditable
+             * rather than assumed. */
+            fprintf(stderr, "[evpwide] ring-1 bc_index: %ld slot(s) where local != owner "
+                            "(owner bytes adopted; ship-once, time-invariant)\n", bcsum);
+        }
     }
 
     /* -------- runtime exchange lists (cgpipe shape): ascending partner ranks; the elem
@@ -691,21 +717,31 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     D.area0x    = push_dev("evpw.area0x", area0x);
     D.corx      = push_dev("evpw.corx", corx);
     D.coastx    = push_dev("evpw.coastx", coastx);
+    /* M9 mEVP: per-step ghost element maps (twins of istr_g) + the shipped boundary mask.
+     * Allocated unconditionally rather than behind a mEVP-mode flag: pfac_g/ice_el_g are [Eg]
+     * and bcx is [N+next], i.e. ghost-zone sized and negligible next to what is already here,
+     * and a mode flag would add a branch whose OFF side is exactly the state a bug would fake. */
+    D.pfac_g    = Kokkos::View<real_t*>("evpw.pfacg", (size_t)Eg);
+    D.ice_el_g  = Kokkos::View<int*>   ("evpw.iceelg", (size_t)Eg);
+    D.bcx       = push_dev("evpw.bcx", bcx);
 
     S.selfcheck = 0;
     if (const char *sc = getenv("FESOM_EVPWIDE_SELFCHECK")) S.selfcheck = atoi(sc);
     D.dbg = (S.selfcheck >= 2) ? 1 : 0;
     S.gs_h = m->gradient_sca; S.ea_h = m->elem_area; S.mf_h = m->metric_factor;
 
-    long loc[5] = { (long)S.partner.size(), (long)S.nrecv, (long)S.nsend, (long)D.nUpd,
-                    (long)(S.roff.empty() ? 0 : *std::max_element(S.roff.begin(), S.roff.end())) };
-    long mx[5];
-    MPI_Reduce(loc, mx, 5, MPI_LONG, MPI_MAX, 0, comm);
+    long loc[6] = { (long)S.partner.size(), (long)S.nrecv, (long)S.nsend, (long)D.nUpd,
+                    (long)(S.roff.empty() ? 0 : *std::max_element(S.roff.begin(), S.roff.end())),
+                    (long)Eg };
+    long mx[6];
+    MPI_Reduce(loc, mx, 6, MPI_LONG, MPI_MAX, 0, comm);
     if (p->mype == 0)
         fprintf(stderr, "[evpwide] built: partners(max)=%ld recv-slots(max)=%ld send-slots(max)=%ld "
-                        "upd-slots(max)=%ld — wide EVP ACTIVE (K=%d, R=%d, msgs/step 120 -> %d+1, "
-                        "widest msg ~%ld KB @2f)\n",
-                mx[0], mx[1], mx[2], mx[3], K, R, 120 / K,
+                        "upd-slots(max)=%ld ghost-elems(max)=%ld — wide %s ACTIVE (K=%d, R=%d, "
+                        "msgs/step %d -> %d+1, widest msg ~%ld KB @2f)\n",
+                mx[0], mx[1], mx[2], mx[3], mx[5],
+                ice->whichEVP == 1 ? "mEVP" : "EVP", K, R,
+                ice->evp_rheol_steps, ice->evp_rheol_steps / K,
                 (long)(mx[4] * 2 * 8 / 1024));
     S.built = true;
 }
@@ -716,11 +752,14 @@ int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_
     const int K = fesom_evpwide_env_K();
     if (K <= 0) return 0;
 
-    if (ice->whichEVP != 0) {
+    /* M9: whichEVP==1 (mEVP) is now SUPPORTED — cells ②/④, the exact wide halo. The refusal
+     * that used to sit here was correct only while the ghost kernel bodies existed for std EVP
+     * alone; fesom_ice_maevp.cpp now carries its own. Anything else still refuses. */
+    if (ice->whichEVP != 0 && ice->whichEVP != 1) {
         if (!g_w.announced && p->mype == 0) {
             fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE requested but whichEVP=%d "
-                            "(mEVP/aEVP has its own subcycle exchange) — the lever is NOT running.\n",
-                    ice->whichEVP);
+                            "(no ghost kernel bodies exist for that rheology) — the lever is "
+                            "NOT running.\n", ice->whichEVP);
             fflush(stderr);
         }
         g_w.announced = true;
@@ -746,9 +785,12 @@ int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_
     if (!g_w.built) evpw_build(ice, p, m);
     if (!g_w.announced) {
         if (p->mype == 0) {
-            fprintf(stderr, "[fesom_speed] FESOM_SPEED_EVPWIDE = %d (R=K=%d rings, exact replay "
-                            "w/ per-window sigma refresh, EVP exchanges/step 120 -> %d+1)\n",
-                    K, g_w.R, 120 / K);
+            const int ns = ice->evp_rheol_steps;
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_EVPWIDE = %d (%s, R=K=%d rings, exact "
+                            "replay w/ per-window refresh, subcycle exchanges/step %d -> %d+1)\n",
+                    K, ice->whichEVP == 1 ? "mEVP: cell ② classic-form / ④ divergence-form"
+                                          : "std EVP",
+                    g_w.R, ns, ns / K);
             fflush(stderr);
         }
         g_w.announced = true;
@@ -1129,6 +1171,64 @@ void fesom_evpwide_subcycle_exchange(struct fesom_ice *ice, struct fesom_partit 
         P.nf = 6; P.nun = 2;
         P.diag = EvpwPlan::WINDOW_DBG;
     }
+    evpw_exchange(ice, p, P);
+}
+
+/* ── M9 mEVP plans (cells ②/④) ─────────────────────────────────────────────────────────────
+ * These are the reason evpw_exchange takes a caller-supplied plan at all (Task 11). Note what
+ * is NOT here: no new transport, no new handshake, no new buffers. The ring zone, the owner
+ * vector, the owner-order gather CSR and the message machinery are all shared with std EVP —
+ * mEVP differs only in WHICH fields ride and WHICH ghost kernels consume them. */
+
+void fesom_evpwide_mevp_prestep_exchange(struct fesom_ice *ice, struct fesom_partit *p)
+{
+    EvpwPlan P;
+    P.F.v[0]  = ice->uice_fld.d();
+    P.F.v[1]  = ice->vice_fld.d();
+    P.F.v[2]  = ice->data[FESOM_ICE_AICE].values_fld.d();
+    P.F.v[3]  = ice->data[FESOM_ICE_MICE].values_fld.d();
+    P.F.v[4]  = ice->data[FESOM_ICE_MSNOW].values_fld.d();
+    P.F.v[5]  = ice->srfoce_u_fld.d();
+    P.F.v[6]  = ice->srfoce_v_fld.d();
+    P.F.v[7]  = ice->stress_atmice_x_fld.d();
+    P.F.v[8]  = ice->stress_atmice_y_fld.d();
+    /* ⚠️ TRAP 7 — these two are shipped AFTER maevp_node_pre has divided them by area, so the
+     * ghost node_pre must NOT scale them again. mEVP scales rhs INSIDE its ice branch, i.e.
+     * only at nodes with a_ice >= 0.01; shipping the owner's post-scaling value is right in
+     * both cases because the ghost solve reads rhs only where it is scaled. */
+    P.F.v[9]  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d();
+    P.F.v[10] = ice->data[FESOM_ICE_MICE].values_rhs_fld.d();
+    P.nf = 11; P.nun = 11;
+    P.sig = false;                    /* sigma travels on the WINDOW ship (cell ②) or not at all */
+    /* The echo is exact here for the same reason it is under std EVP: the last subcycle of the
+     * previous step always refreshes (K divides evp_rheol_steps), and maevp_final_copy then
+     * publishes u_aux into u_ice over the FULL extended range — so the incoming ghost uice/vice
+     * bytes must equal what we already hold, on every backend. A nonzero is plumbing. */
+    P.diag = EvpwPlan::PRESTEP_ECHO;
+    evpw_exchange(ice, p, P);
+}
+
+void fesom_evpwide_mevp_window_exchange(struct fesom_ice *ice, struct fesom_partit *p,
+                                        int div_on)
+{
+    EvpwPlan P;
+    P.F.v[0] = ice->uice_aux_fld.d();   /* mEVP subcycles u_aux/v_aux, not u_ice/v_ice */
+    P.F.v[1] = ice->vice_aux_fld.d();
+    if (div_on) {
+        /* Cell ④ — everything carried is a NODE field, so one segment carries the whole state:
+         * 4*Ng doubles and no element message. This is what the reformulation buys; it is not
+         * faster per element (H1 falsified) but it is half the wide-halo traffic of ②. */
+        P.F.v[2] = ice->work.mevp_Ru_fld.d();
+        P.F.v[3] = ice->work.mevp_Rv_fld.d();
+        P.nf = 4; P.nun = 4;
+        P.sig = false;
+    } else {
+        /* Cell ② — the carried state is element sigma, so it needs the second (element) segment:
+         * 2*Ng node doubles + 3 per ghost element (~2*Ng elements) = 8*Ng doubles. */
+        P.nf = 2; P.nun = 2;
+        P.sig = true;
+    }
+    P.diag = EvpwPlan::WINDOW;
     evpw_exchange(ice, p, P);
 }
 
