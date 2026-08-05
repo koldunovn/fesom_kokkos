@@ -387,6 +387,30 @@ iterate is NOT the A-norm-optimal one CG returns, so a slightly larger solution 
 same `soltol` is expected behaviour, not a defect — but it is a formal FAIL under the strict
 matrix and the remedy (tighter `soltol` for `pcsi`, or margin/K tuning) belongs to T8c.
 
+## A/B perf legs (submitted 2026-08-06 — HARVEST THESE FIRST next session)
+
+Protocol: `jobs/job_m10_ab` — all legs back-to-back in ONE allocation on the SAME nodes with
+the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest reports s/step,
+Δ%, iters/solve and µs/iteration.
+
+| job | rung | legs | purpose |
+|---|---|---|---|
+| 26723631 | NG5 4N | legacy-cg · cg2 · pipecg | the paper's "plain PCG" reference point |
+| 26723632 | NG5 16N | legacy-cg · cg2 · pipecg | ditto |
+| 26723692 | NG5 4N | legacy-cg · pcsi · pcsi K=10 | pcsi + its check-interval sensitivity |
+| 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ditto |
+| **26723783** | **NG5 4N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
+| **26723784** | **NG5 16N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
+
+> ⚠️ **Measurement-design correction, made before any number was quoted.** The first four
+> jobs clear every knob, so their leg 0 is **legacy `cg`** (2 exchanges + 2 allreduces per
+> iteration) — *not* the production configuration. Since the M10 solvers use the CGPIPE ring
+> machinery internally, comparing them against legacy `cg` would credit them with the ring
+> saving that `FESOM_SPEED=1` already ships, and overstate M10's contribution. Jobs 26723783
+> and 26723784 hold `FESOM_SPEED=1` on **every** leg so only the SSH solver differs — those
+> are the numbers of record; the first four stand as the plain-PCG reference the plan asks
+> for. (Interim leg-0 sanity: NG5 16N legacy `cg` = 0.4228/0.4241 s/step at 76.9 iters/solve.)
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
