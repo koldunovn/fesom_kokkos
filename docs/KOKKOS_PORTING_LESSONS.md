@@ -1435,3 +1435,38 @@ minutes and saved the night; **probe an unfamiliar mesh×ranks point before comm
 to it.** Note the corollary for cross-mesh comparison: runs at different ranks-per-node are
 valid *within* a mesh (which is all an A/B needs) but are not directly comparable *across*
 meshes.
+
+- **L106 — A GHOST REPLAY MUST READ THE STATE THE OWNER READ, WHICH MEANS ITS PLACE IN THE
+  KERNEL ORDER IS PART OF ITS CORRECTNESS — and if the replay recomputes rather than reads back,
+  it can also RACE against the very field it is updating.** (M9 cells ②/④, 2026-08-05.) The
+  wide-halo contract says a ghost node replays the owner's per-node sequence. Cell ② does that by
+  reading back the element σ its ghost element pass *stored*, and was bit-identical on the first
+  run. Cell ④ — the divergence form — deliberately stores no element stress, so its ghost gather
+  had to **recompute** each incident element's stress from `u_aux`. Placed inside the ghost node
+  kernel (the obvious home, right next to the value it feeds), that recompute was wrong twice
+  over, and neither fault is visible by reading the kernel:
+    1. **Timing.** The owned node solve runs first and *overwrites* `u_aux` at every owned node.
+       So the gather recomputed the owned elements' stress from POST-solve velocities while the
+       owner had assembled from PRE-solve ones. A read-back (cell ②) is immune because the stored
+       value is already frozen at the right instant; a recompute inherits whatever the array
+       happens to hold when it runs.
+    2. **A read-write race.** The recompute reads `u_aux` at the element's *other* vertices,
+       which can be other ghost slots — inside a kernel that is itself writing `u_aux` at ghost
+       slots. Deterministic-but-wrong on Serial, nondeterministic on CUDA.
+  The fix is the same for both: stage the gather in its own pass, placed where **nothing is
+  writing the field it reads** — between the owned element kernel and any node update.
+  **Rule: when a replay recomputes instead of reading back, its correctness depends on WHERE in
+  the kernel order it sits, and that dependency is invisible in the kernel body. State the
+  instant the recompute is supposed to represent, then check what has already run.**
+  Two further things worth keeping. **The discriminator was the sibling cell**: ② and ④ share the
+  rings, the ship, the per-step maps, the message machinery and the whole solve tail, so ②
+  passing byte-identically while ④ failed at 3.0e-4 pointed straight at the only structural
+  difference. Build the easy twin first and the hard one's bug has nowhere to hide. And a second
+  defect found in the same hunt: the ghost node mask was written as a **scatter over ghost
+  elements** setting the mask at their three vertices — but a ghost element's vertices include
+  OWNED nodes, so a "ghost-only" kernel reached back into owned state. Rewritten as a gather
+  (each ghost slot asks its own gather row), it is ghost-only by construction. **A ghost kernel
+  that writes at entity indices derived from ELEMENTS is not ghost-only; only one that writes at
+  its own loop index is.** (It did not change the failing bytes here — defect 1 dominated — which
+  is its own reminder that fixing a real bug is not evidence you fixed THE bug: re-run and
+  compare the magnitude, which in this case was identical to the digit.)
