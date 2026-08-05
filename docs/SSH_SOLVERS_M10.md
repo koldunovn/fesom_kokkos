@@ -92,6 +92,39 @@ lab α-sequence at `SYMPRE=0`, iteration 1: cg 2.944659607044791 vs cg2 2.944659
 **Lab certification (np1 CORE2 step-20 dump):** baseline `cg` replay — iters 126 = 126 and
 x_final **BITWISE** on all 126858 owned nodes, `CERT PASS`.
 
+**CUDA fidelity (job 26723550, CORE2 4 ranks/4 GPUs, CUDA vs Serial at the same knobs):**
+CUDA and Serial agree on the iteration count to the last solve (123.30 both), 0 fallbacks,
+0 `true>rtol`. Worst fields: `T` 2.334e-03, `Kv` 8.199e-04, `S` 5.737e-04, `uice` 4.393e-04,
+`Av` 2.733e-04, `eta_n` 6.856e-06. **⭐ Better than the baseline control** (job 26723551,
+`cg`): `Kv` 9.835e-02, `Av` 9.898e-02, `u` 6.530e-03 — i.e. under `cg2` the CUDA/Serial pair
+is ~120× closer on the Kv/Av fields. Reading: those fields' ~1e-1 "floor" is a *threshold
+switch* (the near-freezing/mixing branch), not a continuous error — under `cg2` both
+backends happened to stay on the same side of it. Recorded as an observation, **not** as a
+claim that `cg2` improves GPU fidelity; a switch that did not flip is not a smaller error.
+
+### T6 `pipecg` — solution-class gate vs baseline `cg` (serial CORE2 np8, 20 steps, login)
+
+**Every field inside the P-L2 bounds. PASS.** `eta_n` 5.236e-05 · `u`/`v` 5.134e-03/4.922e-03
+· `T` 5.372e-02 · `S` 2.465e-03 · `Kv`/`Av` 9.999e-02/9.990e-02 · `w` 2.050e-06 · `bvfreq`
+2.449e-06 · `pgf_x/y` ~1.05e-08 · `density` 1.931e-03 · `h_ice`/`h_snow` 5.099e-03/2.652e-04
+· `a_ice`/`m_ice`/`m_snow` 2.314e-04/6.219e-04/1.799e-04 · `uice`/`vice` 3.762e-04/6.732e-04.
+
+**Wire observable (the designed signature, and it is unambiguous):** blocking allreduces per
+solve **266.70 → 1.00** (only the initial ‖b‖²), nonblocking **0 → 124.35** — exactly one
+`MPI_Iallreduce` per iteration and no blocking reduction inside the loop at all. Exchanges
+127.35 = 3 + k (ring form) vs 251.70 = 3 + 2k (literal); iteration counts and verify
+residuals identical between the two forms, so the ring composition is again verified as
+numerically equivalent.
+
+**⚠️ Attainable-accuracy watch (the known pipelined failure mode — MEASURED):** max
+\|true − recurrence\| residual over 20 solves is **1.991e-08 for `pipecg`**, against
+**6.964e-11 for `cg2`** and **3.030e-11 for `cg`** — a **~300× loss of attainable accuracy**,
+exactly the price the literature attributes to propagating the residual through extra
+auxiliary recurrences. It is still far inside tolerance here (0 `true>rtol` events in 20
+solves at rtol ≈ 4), but it is the quantity to watch on long runs and at tighter `soltol`,
+and it is why `FESOM_SSH_VERIFY=1` is armed in every gate. Iterations: 124.35 (`cg2`
+123.35, `cg` 132.35).
+
 **T2 instrumentation smoke (login pi np2, dt100, 20 steps, STATS+VERIFY on):** counts EXACT
 vs hand count (3-iter solve: exch=8=2+2k, ar_blk=8=2+2k, body-launches=17=6+4k−1(break));
 verify true≡rec to 7 digits, **max |true−rec| gap over 20 solves = 1.05e-11** — first data

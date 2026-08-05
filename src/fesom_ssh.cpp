@@ -2876,6 +2876,260 @@ static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     return iter;
 }
 
+/* ======================================================================= *
+ * M10 T6 — `pipecg`: Ghysels / Cools–Vanroose pipelined PCG (derivations §2).
+ *
+ *   [post Iallreduce on γ=(r,u), δ=(w,u), ρ=(r,r)]
+ *       exchange w ; m = M⁻¹w ; n = A m            ← the overlap payload
+ *   [Wait]
+ *   β,α as in cg2 (first iteration: β=0, α=γ/δ)
+ *   z = n + βz ; q = m + βq ; s = w + βs ; p = u + βp
+ *   x += αp ; r -= αs ; u -= αq ; w -= αz
+ *
+ * Only `w` is exchanged (m needs w's halo; n needs m's ring1, which the shipped pr rows
+ * supply) — everything else is owned-only, so this is 1 exchange + 1 REDUCTION per
+ * iteration, same counts as cg2 but with the reduction nonblocking.
+ *
+ * ⚠️ R2 — the overlap is structurally unavailable on this stack. T2's probe (26722815 /
+ * 26722816) measured NO async `Iallreduce` progression under MPI_THREAD_SINGLE on either
+ * production MPI, and a SURCHARGE over blocking Allreduce (+8 µs on openmpi/4.1.2,
+ * +1.6–1.8 µs on 4.1.5-nvhpc). Pre-registered attribution: a null-or-negative
+ * pipecg-vs-cg2 delta is STACK, not algorithm. The method is implemented faithfully anyway
+ * (user decision: all four) — the honest negative is the result.
+ * ======================================================================= */
+
+struct SshPipeState {
+    fesom::Field uu, ww, mm, nn, zz, qq, ss, pp2;
+    int ext = 0;
+};
+static SshPipeState g_pipe;
+
+static void ssh_pipe_alloc(const struct fesom_mesh *mesh, int ring_tail)
+{
+    const int N = mesh->myDim_nod2D, E = N + mesh->eDim_nod2D;
+    const int want = E + ring_tail;                /* ww carries the cgpipe ring2 tail */
+    if (g_pipe.ext == want) return;
+    g_pipe.ww .alloc("ssh.pipe.ww", (size_t)want);
+    g_pipe.uu .alloc("ssh.pipe.uu", (size_t)E);
+    g_pipe.mm .alloc("ssh.pipe.mm", (size_t)E);
+    g_pipe.nn .alloc("ssh.pipe.nn", (size_t)E);
+    g_pipe.zz .alloc("ssh.pipe.zz", (size_t)E);
+    g_pipe.qq .alloc("ssh.pipe.qq", (size_t)E);
+    g_pipe.ss .alloc("ssh.pipe.ss", (size_t)E);
+    g_pipe.pp2.alloc("ssh.pipe.pp", (size_t)E);
+    g_pipe.ext = want;
+}
+
+static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                            const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
+{
+    const int     N        = mesh->myDim_nod2D;
+    fesom_partit *partit   = si->partit;
+    const int     parallel = (partit && partit->npes > 1);
+    const int     N_global = parallel ? mesh->nod2D : N;
+    const long    solve_id = g_sshwire.solves + 1;
+
+#ifdef KOKKOS_ENABLE_CUDA
+    const bool transport_ok = fesom_halo_device_active();
+#else
+    const bool transport_ok = true;
+#endif
+    const bool ring = ssh_ring_on() && parallel && transport_ok;
+    if (ssh_sympre_on()) {
+        ssh_sympre_build(S, mesh, partit);
+        FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
+                    "ssh-sympre: CGPIPE ring1 rows shipped with a different preconditioner");
+        cgpipe_ship_pr = g_sympre.pr_h.data();
+    }
+    if (ring && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
+    ssh_pipe_alloc(mesh, ring ? g_cgpipe.nring2 : 0);
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto vals   = S->values_fld.d();
+    auto prvals = ssh_sympre_on() ? Kokkos::View<const double*>(g_sympre.pr_d)
+                                  : Kokkos::View<const double*>(S->pr_values_fld.d());
+    auto X   = dyn->d_eta_fld.d();
+    auto rhs = dyn->ssh_rhs_fld.d();
+    auto rr  = si->rr_fld.d();
+    auto uu  = g_pipe.uu.d();  auto ww = g_pipe.ww.d();
+    auto mm  = g_pipe.mm.d();  auto nn = g_pipe.nn.d();
+    auto zz  = g_pipe.zz.d();  auto qq = g_pipe.qq.d();
+    auto ss  = g_pipe.ss.d();  auto pp = g_pipe.pp2.d();
+
+    auto exch = [&](fesom::Field &f) {
+        if (!parallel) return;
+        ++g_sshwire.s_exch;
+#ifdef KOKKOS_ENABLE_CUDA
+        if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
+#endif
+        f.modify_device(); f.sync_host();
+        fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+        f.modify_host();   f.sync_device();
+    };
+    /* w's exchange + m = M⁻¹w on owned (+ring1 in the ring form) + n = A m on owned */
+    auto payload = [&]() {
+        if (parallel) {
+            if (ring) { ++g_sshwire.s_exch; cgpipe_exchange_rr(g_pipe.ww, partit); }
+            else      exch(g_pipe.ww);
+        }
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pipe_psolve", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += prvals(n2) * ww(colind(n2));
+                mm(row) = s;
+            });
+        if (ring) { SSH_WIRE_LAUNCH(1); cgpipe_zz_ring1(ww, mm); }
+        else      { g_pipe.mm.modify_device(); exch(g_pipe.mm); }
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pipe_spmv", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += vals(n2) * mm(colind(n2));
+                nn(row) = s;
+            });
+    };
+
+    /* ---- initialisation ---- */
+    SSH_WIRE_LAUNCH(1);
+    real_t s0 = cg_dot(rhs, rhs, N);
+    if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &s0, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+    const real_t rtol = si->soltol * sqrt(s0 / (real_t)N_global);
+    if (s0 == 0.0) {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pipe_zeroX", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { X(row) = 0.0; });
+        dyn->d_eta_fld.modify_device();
+        si->last_iters = 0;
+        ssh_wire_close_solve(0, 0.0, (double)rtol, partit);
+        return 0;
+    }
+    exch(dyn->d_eta_fld);
+    SSH_WIRE_LAUNCH(2);
+    cg_spmv(rowptr, colind, vals, X, rr, N);
+    Kokkos::parallel_for("fesom_pipe_r0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
+    si->rr_fld.modify_device();
+    exch(si->rr_fld);                                 /* u₀ = M⁻¹r₀ needs r's halo */
+    SSH_WIRE_LAUNCH(1);
+    Kokkos::parallel_for("fesom_pipe_u0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int a = rowptr(row), e = rowptr(row + 1);
+            for (int n2 = a; n2 < e; ++n2) s += prvals(n2) * rr(colind(n2));
+            uu(row) = s;
+        });
+    g_pipe.uu.modify_device();
+    exch(g_pipe.uu);                                  /* w₀ = A u₀ needs u's halo */
+    SSH_WIRE_LAUNCH(2);
+    Kokkos::parallel_for("fesom_pipe_w0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int a = rowptr(row), e = rowptr(row + 1);
+            for (int n2 = a; n2 < e; ++n2) s += vals(n2) * uu(colind(n2));
+            ww(row) = s;
+        });
+    Kokkos::parallel_for("fesom_pipe_zero", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { zz(row) = 0.0; qq(row) = 0.0; ss(row) = 0.0; pp(row) = 0.0; });
+    g_pipe.ww.modify_device();
+
+    double gamma_prev = 0.0, alpha_prev = 0.0, resid = 0.0;
+    int fb = SSH_FB_NONE, iter = 0;
+    double best = 1e300; int stall = 0;
+    const int STALL_WINDOW = 20;
+
+    for (iter = 1; iter <= si->maxiter; ++iter) {
+        real_t d3[3] = { 0.0, 0.0, 0.0 };
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_reduce("fesom_pipe_dots", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i, real_t &l0, real_t &l1, real_t &l2) {
+                l0 += rr(i) * uu(i); l1 += ww(i) * uu(i); l2 += rr(i) * rr(i);
+            }, d3[0], d3[1], d3[2]);
+
+        MPI_Request req = MPI_REQUEST_NULL;
+        if (parallel) {
+            MPI_Iallreduce(MPI_IN_PLACE, d3, 3, MPI_DOUBLE, MPI_SUM,
+                           partit->MPI_COMM_FESOM, &req);
+            ++g_sshwire.s_ari;
+        }
+        payload();                                    /* the overlap window (R2: no progression) */
+        if (parallel) MPI_Wait(&req, MPI_STATUS_IGNORE);
+
+        const double gamma = (double)d3[0], delta = (double)d3[1];
+        resid = sqrt((double)d3[2] / (double)N_global);
+        if (!(gamma == gamma) || !(delta == delta) || !(resid == resid)) { fb = SSH_FB_NAN; break; }
+        if (resid < rtol) break;
+        if (gamma <= 0.0)                                                { fb = SSH_FB_INDEF; break; }
+        if (resid < best * 0.999) { best = resid; stall = 0; }
+        else if (++stall >= STALL_WINDOW || resid > 1e3 * best)          { fb = SSH_FB_STALL; break; }
+
+        double beta = 0.0, alpha = 0.0;
+        if (iter > 1) {
+            beta = gamma / gamma_prev;
+            const double inv = delta / gamma - beta / alpha_prev;
+            if (!(inv == inv) || inv == 0.0)                             { fb = SSH_FB_NAN; break; }
+            alpha = 1.0 / inv;
+        } else {
+            if (delta == 0.0)                                            { fb = SSH_FB_NAN; break; }
+            alpha = gamma / delta;
+        }
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+            fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=%.17g\n",
+                    iter, alpha, beta, resid);
+
+        const real_t al = (real_t)alpha, be = (real_t)beta;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pipe_update", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i) {
+                const real_t z = nn(i) + be * zz(i);
+                const real_t q = mm(i) + be * qq(i);
+                const real_t s = ww(i) + be * ss(i);
+                const real_t p = uu(i) + be * pp(i);
+                zz(i) = z; qq(i) = q; ss(i) = s; pp(i) = p;
+                X (i) += al * p;
+                rr(i) -= al * s;
+                uu(i) -= al * q;
+                ww(i) -= al * z;
+            });
+        g_pipe.ww.modify_device();
+        gamma_prev = gamma; alpha_prev = alpha;
+    }
+    if (fb == SSH_FB_NONE && iter > si->maxiter) fb = SSH_FB_MAXITER;
+    if (fb != SSH_FB_NONE) { ssh_fb_announce(fb, iter, resid, partit, solve_id); return -1; }
+
+    if (ssh_verify_on()) {
+        exch(dyn->d_eta_fld);
+        --g_sshwire.s_exch;
+        real_t tn = 0.0;
+        Kokkos::parallel_reduce("fesom_pipe_verify", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += vals(n2) * X(colind(n2));
+                const real_t d = rhs(row) - s;
+                l += d * d;
+            }, tn);
+        if (parallel) MPI_Allreduce(MPI_IN_PLACE, &tn, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+        const double tr = sqrt((double)tn / (double)N_global);
+        SshWireState &w = g_sshwire;
+        if (tr > w.v_maxtrue) w.v_maxtrue = tr;
+        const double gap = fabs(tr - resid);
+        if (gap > w.v_maxgap) w.v_maxgap = gap;
+        if (tr > (double)rtol) ++w.v_fail;
+        if (partit == NULL || partit->mype == 0)
+            fprintf(stderr, "[ssh-verify] solve %ld: true=%.6e rec=%.6e rtol=%.6e gap=%.3e%s\n",
+                    solve_id, tr, resid, (double)rtol, gap,
+                    tr > (double)rtol ? "  <-- TRUE RESIDUAL ABOVE rtol" : "");
+    }
+    dyn->d_eta_fld.modify_device();
+    si->last_iters = iter;
+    ssh_wire_close_solve(iter, resid, (double)rtol, partit);
+    return iter;
+}
+
 static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
                              const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
 {
@@ -2891,7 +3145,8 @@ static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinf
 
     int rc = -1;
     switch (kind) {
-        case FESOM_SSHSOLV_CG2: rc = ssh_solve_cg2(S, si, mesh, dyn); break;
+        case FESOM_SSHSOLV_CG2:    rc = ssh_solve_cg2(S, si, mesh, dyn);    break;
+        case FESOM_SSHSOLV_PIPECG: rc = ssh_solve_pipecg(S, si, mesh, dyn); break;
         default:
             FESOM_DIE("FESOM_SSH_SOLVER=%s is not implemented yet (M10 tasks T6-T8b)",
                       ssh_solver_name(kind));
@@ -2915,7 +3170,8 @@ void fesom_ssh_m10_free(void)
     g_sympre.pr_h.clear();
     g_sympre.diag_h.clear();
     g_sympre.built = false;
-    g_cg2 = SshCg2State{};
+    g_cg2  = SshCg2State{};
+    g_pipe = SshPipeState{};
 }
 
 int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
