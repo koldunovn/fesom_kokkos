@@ -61,7 +61,7 @@ def main():
     # A PREFIX is not selective enough: session 1's farc ladder is also tagged f3_* (f3_farc512_phst
     # etc.), and mixing two campaigns' rows into one table is how a stale number gets quoted as new.
     # Session 2's tags carry the backend in them (f3_<mesh>_[cg]<ranks>), so match on that.
-    ap.add_argument("--tags", default=r"^f3_(farc|dars|ng5)_[cg]\d+$",
+    ap.add_argument("--tags", default=r"^f[345]_(farc|dars|ng5)_[cg]\d+$",
                     help="regex the TAG must fully match")
     args = ap.parse_args()
     tag_re = re.compile(args.tags)
@@ -92,25 +92,27 @@ def main():
         print(f"no runs matching tag regex '{args.tags}' under {args.root}")
         return
 
-    order = ["lag8", "wide2_k2", "wide4_k2", "wide2_k4", "wide4_k4", "wide2_k8", "wide4_k8"]
+    order = ["lag2", "lag4", "lag8", "wide2_k2", "wide4_k2", "wide2_k4", "wide4_k4",
+             "wide2_k8", "wide4_k8"]
     print("M9 — the exact wide halo (② classic form / ④ divergence form) vs cell ⑤ (lagged)")
     print("Δ of the MODEL STEP vs the classic leg, same allocation, min-of-reps.\n")
     print("  The ghost-zone table below carries the explanatory variable: ghost updatable slots")
     print("  per owned node per rank. A ratio near 1 means the K-ring zone is as big as the")
     print("  rank's own subdomain, i.e. exactness is being paid for in duplicated compute.\n")
 
-    hdr = (f"{'mesh':<8}{'bk':<4}{'N':>4}{'ranks':>7}{'nod/rank':>10}"
+    hdr = (f"{'tag':<15}{'mesh':<8}{'bk':<4}{'N':>4}{'ranks':>7}{'nod/rank':>10}"
            f"{'classic':>9}" + "".join(f"{c:>11}" for c in order))
     print(hdr)
     print("-" * len(hdr))
     clean = [r for r in runs if not r["instrumented"]]   # s/step comes from CLEAN legs (protocol)
     for r in sorted(clean, key=lambda x: (x["mesh"],
                                           "GPU" if x["ntasks"] <= 4 * x["nodes"] else "CPU",
-                                          x["ntasks"])):
+                                          x["ntasks"], x["tag"])):
         npr = NOD2D.get(r["mesh"], 0) / r["ntasks"] if r["mesh"] in NOD2D else 0
         bk = "GPU" if r["ntasks"] <= 4 * r["nodes"] else "CPU"
         base = r["legs"].get("classic", (float("nan"), 0))[0]
-        row = (f"{r['mesh']:<8}{bk:<4}{r['nodes']:>4}{r['ntasks']:>7}{npr:>10.0f}{base:>9.4f}")
+        row = (f"{r['tag']:<15}{r['mesh']:<8}{bk:<4}{r['nodes']:>4}{r['ntasks']:>7}"
+               f"{npr:>10.0f}{base:>9.4f}")
         for c in order:
             row += f"{r['legs'][c][1]:>+10.2f}%" if c in r["legs"] else f"{'-':>11}"
         print(row)
