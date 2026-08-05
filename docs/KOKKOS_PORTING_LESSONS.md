@@ -1470,3 +1470,28 @@ meshes.
   its own loop index is.** (It did not change the failing bytes here — defect 1 dominated — which
   is its own reminder that fixing a real bug is not evidence you fixed THE bug: re-run and
   compare the magnitude, which in this case was identical to the digit.)
+
+- **L107 — ON A GPU, "REMOVING A MESSAGE" MOSTLY MEANS REMOVING LAUNCHES AND PACKING, WHICH THE
+  PROFILER CHARGES TO *BUSY*, NOT TO *WAIT*. So a communication-avoiding scheme that substitutes
+  local work for an exchange can remove every message it targeted and still be slower — it
+  relocated the cost instead of removing it.** (M9 cells ②/④ vs cell ⑤, 2026-08-05, three meshes,
+  both backends.) The exact wide halo and the lagged halo remove *the same* exchanges at the same
+  K. Measured on farc GPU 16 N, `icedyn` phase: cell ⑤ takes busy 12.1 → **3.5 ms (−71 %)** and
+  wait 10.9 → 1.4 (−87 %) and is worth −15.1 % of the model step; the exact cells cut messages
+  identically (16 vs 15 per step) but leave busy at **12.0 / 13.3 ms** and are worth only
+  −2.2 / −3.9 %. On farc CPU np512 the exact halo removes *more* messages than the approximation
+  (16 vs 30 per step) and is **+19.3 % SLOWER**, because ghost work nearly triples icedyn busy
+  (14.5 → 39.1 ms) and drags wait up with it (8.7 → 25.3 ms) — a ring zone is a different size on
+  every rank, so duplicating it adds a *new* load imbalance on top of the one it removes.
+  **The predictor is the ghost/owned ratio — K-ring updatable slots per owned node per rank,
+  which goes like K·perimeter/area.** At farc CPU np2048 the K=4 ring zone is **1.18× the rank's
+  own subdomain**, and that configuration costs +9.0 %. Get that ratio from the build summary
+  before running a fleet; it predicted every sign in the campaign.
+  Corollaries worth carrying: (1) **an exactness guarantee has a price, and it should be measured
+  the cheap way — at matched K the exact and approximate schemes remove identical messages, so
+  their difference IS the price** (here +6.6…+13.1 pp on GPU, +0.7…+8.1 pp on CPU) rather than
+  something to be argued about. (2) **The two schemes do not share a best K**: the exact cells
+  improve monotonically with K (bigger message saving outruns the bigger ring), while the
+  approximation wants *small* K on accuracy grounds — so "K=8" tuned for one is the wrong answer
+  for the other. (3) A lever that pays at the strong-scaling knee pays *nothing* far from it:
+  at 462 k nodes/rank (NG5, 16 ranks) neither scheme moved the step by more than 3 %.
