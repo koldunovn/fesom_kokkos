@@ -232,15 +232,17 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `.gitignore` (on `m10-ssh-solvers`)
 - Create: worktree `~/port_kokkos_ssh` · `/work/ab0995/a270088/port2/m10/{bin,labdumps,gates,ab,figs}`
 
-- [ ] `git worktree add ~/port_kokkos_ssh -b m10-ssh-solvers 65a1a71` (from the main checkout)
-- [ ] `.gitignore` += `ssh_sergey/`; copy `ssh_sergey/` into the worktree (M9 `ice_sergey/` pattern)
-- [ ] create the `/work/.../m10/` tree; create `SSH_SOLVERS_M10.md` skeleton (header,
-      gate-registry, pre-registration sections); quota check on `/work` before the big dumps land
-- [ ] baseline builds in the worktree: `build-m7serial` + `build-m7cuda` configs compile clean;
-      record both sha256s as `m10-base` in the doc (provenance only — worktree binaries are NOT
-      byte-equal to the main checkout's: `__FILE__`/debug paths differ)
-- [ ] test: knob-free serial 20-step CORE2 gate from the worktree passes the `job_m7_gate_serial`
-      criterion (diff_snap rc=0 vs the certified baseline snapshot)
+- [x] worktree created 2026-08-05 — ➕ base `f42c453`, not `65a1a71` (deviation, documented in
+      `SSH_SOLVERS_M10.md` §Provenance: `f42c453` = `65a1a71` + the plan commit itself, which puts
+      THIS plan + the `ssh_sergey/` gitignore in-tree; `src/` identical to `65a1a71`)
+- [x] `.gitignore` `ssh_sergey/` inherited from `f42c453`; `ssh_sergey/` copied into the worktree
+- [x] `/work/.../m10/{bin,labdumps,gates,ab,figs}` created; `SSH_SOLVERS_M10.md` skeleton;
+      quota checked (group ab0995 no hard cap; global /work ≈14 TB free — re-check before NG5 dumps)
+- [x] baseline builds clean (login, -j16): serial `f228d664…`, cuda `e5245fa3…` → doc §m10-base
+      (➕ kokkos submodule checked out in-worktree @ `15dc143e`)
+- [x] test: knob-free serial 20-step CORE2 gate from the worktree — **PASS** diff_snap rc=0,
+      job 26722627 (via ➕ `jobs/job_m10_gate`, the R9-safe job created early: prints worktree
+      binary md5 `54433326…` ≠ main-checkout `9743f602…` in-log)
 
 ### Task 2: Instrumentation first — `[ssh-wire]`, verify, probes, baseline census
 

@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH --job-name=m10_gate
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:10:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/gate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/gate.%j.err
+#
+# M10 KNOB-OFF / KNOB-ON SERIAL GATE — job_m7_gate_serial clone, R9-hardened.
+#
+# R9 (worktree dead-gate trap): the job_m7_* family hardcodes the MAIN checkout ROOT, so a
+# gate cloned into a worktree silently tests the wrong binary with every gate green (L80 at
+# gate scale). This job:
+#   - resolves ROOT from ${M10_ROOT:-$HOME/port_kokkos_ssh}   (the M10 worktree by default)
+#   - prints the resolved binary path + md5 into the log
+#   - prints the MAIN checkout binary md5 next to it, so the harvest can ASSERT they differ
+#
+# Gate semantics unchanged from job_m7_gate_serial (the certified-baseline invariant):
+# private CORE2 mesh, dist_8, 8 ranks, dt=1800, 20 steps, snap_every=10, PHC, year 1958,
+# vader single-copy off (L18), diff_snap.py (zero tolerance) vs the certified M6 baseline.
+#
+# Usage: sbatch jobs/job_m10_gate                          (tag defaults to job id)
+#        M10_TAG=t2_knoboff sbatch jobs/job_m10_gate
+#        M10_TAG=x KNOBS="FESOM_SSH_SOLVER=cg2;FESOM_SSH_STATS=1" sbatch jobs/job_m10_gate
+#        BASELINE=<dir> to diff against a different snapshot dir (default: certified M6).
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+
+MESH=/work/ab0995/a270088/port2/mesh/core2              # private mesh, NOT /pool (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASELINE=${BASELINE:-/work/ab0995/a270088/port2/m6_baseline_serial}
+MAIN_BIN=/home/a/a270088/port_kokkos/build-m7serial/fesom_port
+
+BIN="$ROOT/build-m7serial/fesom_port"
+echo "=== R9 provenance ==="
+echo "ROOT   = $ROOT   (HEAD $(cd "$ROOT" && git rev-parse --short HEAD))"
+echo "BIN    = $BIN"
+md5sum "$BIN"
+[ -x "$MAIN_BIN" ] && md5sum "$MAIN_BIN" | sed 's/^/main-checkout: /'
+
+# ALL knobs OFF unless passed via KNOBS — M6 physics knobs, M7 speed knobs, M10 ssh knobs.
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
+while read -r v; do unset "$v"; done \
+    < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\)[A-Za-z0-9_]*\)=.*/\1/p')
+
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
+TAG=${M10_TAG:-$SLURM_JOB_ID}
+OUT=/work/ab0995/a270088/port2/m10/gates/gate_$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+( cd "$ROOT" && git rev-parse HEAD ) > "$OUT/SHA.txt"
+md5sum "$BIN" >> "$OUT/SHA.txt"
+
+echo "=== M10 serial gate — tag=$TAG ==="
+srun -l "$BIN" "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+tail -2 "$OUT/run.log"
+
+echo
+echo "=== diff_snap.py vs $BASELINE (zero tolerance, all fields) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASELINE" "$OUT"
+RC=$?
+echo "diff_snap rc=$RC"
+if [ "$RC" -eq 0 ]; then
+    echo "=== M10 GATE PASS ==="
+else
+    echo "=== M10 GATE FAIL — do not commit. ==="
+fi
+exit $RC
