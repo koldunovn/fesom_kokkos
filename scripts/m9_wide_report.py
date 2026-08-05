@@ -39,7 +39,8 @@ def zone_of(root, tag):
     whichever K happened to be found first, which is exactly the kind of number that ends up in
     a table meaning something different from what the reader assumes."""
     out = {}
-    for leg in ("wide2_k2", "wide4_k2", "wide2_k4", "wide4_k4", "wide2_k8", "wide4_k8"):
+    for leg in ("wide2_k2", "wide2f_k2", "wide4_k2", "wide2_k4", "wide2f_k4", "wide4_k4",
+                "wide2_k8", "wide2f_k8", "wide4_k8"):
         K = int(leg.split("_k")[1])
         if K in out:
             continue
@@ -92,8 +93,13 @@ def main():
         print(f"no runs matching tag regex '{args.tags}' under {args.root}")
         return
 
-    order = ["lag2", "lag4", "lag8", "wide2_k2", "wide4_k2", "wide2_k4", "wide4_k4",
-             "wide2_k8", "wide4_k8"]
+    # wide2f_* = cell ② with its two segments FUSED into one per-partner message (D1/P0b).
+    # Kept adjacent to its unfused twin: the pair IS the message term, and reading them apart
+    # is what let the campaign attribute the ②-④ gap to bytes for a whole session.
+    order = ["lag2", "lag4", "lag8",
+             "wide2_k2", "wide2f_k2", "wide4_k2",
+             "wide2_k4", "wide2f_k4", "wide4_k4",
+             "wide2_k8", "wide2f_k8", "wide4_k8"]
     print("M9 — the exact wide halo (② classic form / ④ divergence form) vs cell ⑤ (lagged)")
     print("Δ of the MODEL STEP vs the classic leg, same allocation, min-of-reps.\n")
     print("  The ghost-zone table below carries the explanatory variable: ghost updatable slots")

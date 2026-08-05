@@ -10,6 +10,12 @@ Panels:
   F2  model-step change vs rank count, per cell (the number a user actually feels)
   F3  K sweep: icedyn reduction and the ACCURACY COST on a twin axis — a speed curve for an
       approximation is not publishable without the error curve next to it
+  F4  the exact wide halo across meshes: ② unfused / ② FUSED / ④ / ⑤, Δ model step vs classic
+  F5  the P0b decomposition — the ④−② gap split into its MESSAGE and BYTE terms
+
+F4/F5 exist because the ②-vs-④ story changed: §8.2 read the gap as bytes, and the fused build
+showed it was the extra message. A figure that plots ② without its fused twin next to it
+reproduces exactly the reading that turned out to be wrong.
 """
 import argparse, json, os, re, sys
 import matplotlib
@@ -163,3 +169,106 @@ if acc:
 else:
     print("F3 skipped — no L3 accuracy data yet", file=sys.stderr)
 print(f"figures -> {args.outdir}")
+
+# ------------------------------------------------- F4/F5: the exact wide halo and its two terms
+#
+# One point = one (mesh, ranks, K) triple measured in a SINGLE allocation, which is the only
+# way the message/byte split means anything: all three cells share a classic reference and a
+# node set. Points without a fused leg are skipped rather than plotted with a gap — a missing
+# bar in this figure would read as "fusing did nothing there".
+WIDE_RE = re.compile(r"^wide(2f?|4)_k(\d+)$")
+
+def wide_points():
+    """[(label, mesh, backend, ntasks, K, {cell: pct})] for runs carrying a fused leg."""
+    pts = []
+    for r in D["runs"]:
+        if r.get("mode", "").upper() != "CLEAN":
+            continue
+        legs = r.get("legs") or {}
+        Ks = sorted({int(m.group(2)) for k in legs for m in [WIDE_RE.match(k)] if m})
+        for K in Ks:
+            got = {}
+            # ⑤ is only comparable at ITS OWN K — plotting lag8 beside a K=2 wide leg would
+            # invite a comparison at two different exchange periods, which is not one.
+            want = [("2", f"wide2_k{K}"), ("2f", f"wide2f_k{K}"), ("4", f"wide4_k{K}")]
+            if f"lag{K}" in legs:
+                want.append(("5", f"lag{K}"))
+            for cell, key in want:
+                d = legs.get(key)
+                if d and d.get("pct_vs_ref") is not None:
+                    got[cell] = d["pct_vs_ref"]
+            if "2f" not in got:
+                continue                      # no fused leg: not a P0b point
+            nodes = r["nodes"]
+            pts.append((f"{r['mesh']} {r['backend']}\n{nodes}N np{r['ntasks']}  K={K}",
+                        r["mesh"], r["backend"], r["ntasks"], K, got, r.get("tag")))
+    # stable, readable order: backend, mesh, ranks, K
+    pts.sort(key=lambda t: (t[2], t[1], t[3], t[4]))
+    return pts
+
+PTS = wide_points()
+if not PTS:
+    print("F4/F5 skipped — no run carries a fused (wide2f_*) leg yet", file=sys.stderr)
+else:
+    SERIES = [("2",  "② classic form, unfused (2 msg/partner)", "#d62728"),
+              ("2f", "② classic form, FUSED (1 msg/partner)",   "#2ca02c"),
+              ("4",  "④ divergence form (1 msg, half the bytes)", "#1f77b4"),
+              ("5",  "⑤ lagged halo (approximate)",             "#7f7f7f")]
+    x = list(range(len(PTS)))
+    w = 0.20
+    fig, ax = plt.subplots(figsize=(1.35 * len(PTS) + 2.6, 5.0), constrained_layout=True)
+    for i, (key, lab, col) in enumerate(SERIES):
+        xs = [xx + (i - 1.5) * w for xx in x]
+        ys = [p[5].get(key, float("nan")) for p in PTS]
+        ax.bar(xs, ys, width=w, color=col, label=lab)
+        for xi, yi in zip(xs, ys):
+            if yi == yi:
+                ax.annotate(f"{yi:+.1f}", (xi, yi), ha="center", fontsize=6.0,
+                            va="bottom" if yi >= 0 else "top",
+                            xytext=(0, 2 if yi >= 0 else -2), textcoords="offset points")
+    ax.axhline(0, color="k", lw=.9)
+    ax.set_xticks(x); ax.set_xticklabels([p[0] for p in PTS], fontsize=7.5)
+    ax.set_ylabel("model step vs classic  [%]   (negative = faster)")
+    ax.grid(axis="y", alpha=.25)
+    ax.set_title("M9 — the exact wide halo. Cell ②'s handicap was its SECOND MESSAGE, not its bytes:\n"
+                 "fusing the two segments moves it from a cost to a saving, and past ④ at K=2.",
+                 fontsize=10)
+    # legend BELOW the axes, not inside it — with 9 groups an in-axes legend lands on the
+    # tick labels (the m7 figure convention, for the same reason).
+    fig.legend(fontsize=8, ncol=4, frameon=False, loc="outside lower center")
+    fig.savefig(os.path.join(args.outdir, "f4_wide_fused.png"), dpi=140)
+    print("F4 written")
+
+    # F5 — the decomposition itself. Only points with all three of ②, ②fused, ④.
+    DEC = [p for p in PTS if {"2", "2f", "4"} <= set(p[5])]
+    if DEC:
+        fig, ax = plt.subplots(figsize=(7.6, 0.62 * len(DEC) + 2.8), constrained_layout=True)
+        y = list(range(len(DEC)))
+        msg = [p[5]["2f"] - p[5]["2"] for p in DEC]
+        byt = [p[5]["4"] - p[5]["2f"] for p in DEC]
+        ax.barh([yy + .17 for yy in y], msg, height=.32, color="#2ca02c",
+                label="MESSAGE term  (②fused − ②): bytes held fixed, 2 msgs → 1")
+        ax.barh([yy - .17 for yy in y], byt, height=.32, color="#1f77b4",
+                label="BYTE term  (④ − ②fused): messages held fixed, bytes halved")
+        for yy, m, b in zip(y, msg, byt):
+            ax.annotate(f"{m:+.2f}", (m, yy + .17), fontsize=6.5, va="center",
+                        ha="right" if m < 0 else "left",
+                        xytext=(-3 if m < 0 else 3, 0), textcoords="offset points")
+            ax.annotate(f"{b:+.2f}", (b, yy - .17), fontsize=6.5, va="center",
+                        ha="right" if b < 0 else "left",
+                        xytext=(-3 if b < 0 else 3, 0), textcoords="offset points")
+        ax.axvline(0, color="k", lw=.9)
+        ax.set_yticks(y)
+        ax.set_yticklabels([p[0].replace("\n", " ") for p in DEC], fontsize=7.5)
+        ax.set_xlabel("percentage points of the model step   (negative = that term makes it faster)")
+        ax.grid(axis="x", alpha=.25)
+        lo, hi = min(msg + byt + [0.0]), max(msg + byt + [0.0])
+        ax.set_xlim(lo - 0.16 * (hi - lo) - 0.4, hi + 0.16 * (hi - lo) + 0.4)  # room for the labels
+        ax.set_title("M9 P0b — splitting the ④ − ② gap. The message term carries it;\n"
+                     "the byte term is ±1.5 pp with no consistent sign.", fontsize=10)
+        fig.legend(fontsize=8, ncol=1, frameon=False, loc="outside lower center")
+        fig.savefig(os.path.join(args.outdir, "f5_p0b_decomposition.png"), dpi=140,
+                    bbox_inches="tight")
+        print("F5 written")
+    else:
+        print("F5 skipped — no point has ②, ②fused and ④ in one allocation", file=sys.stderr)
