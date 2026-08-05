@@ -403,6 +403,48 @@ per iteration**, against `cg2`'s 1.
 > extra launches per iteration cost ≈ 30 µs async. The margin is real but thin, and the extra
 > ring bytes eat into it. **An honest negative is paper material.**
 
+### 3.2b ⭐ The right OATI for THIS machine is a SHALLOW one (design finding, T7)
+
+`[T]`'s deep chain `n → g → h → e → f` exists for one reason: to move `m_{i+1}, n_{i+1}` past
+`m_{i+2}, n_{i+2}` so that a *single* `Iallreduce` can overlap **two full iterations'** worth
+of operator work. That is a pure *overlap-depth* optimisation.
+
+**On this stack the overlap is worth nothing** (R2: no async progression on any Levante MPI,
+plus a surcharge). What `oati` still buys here is the halved **sync count**, and that does not
+need the deep chain at all. Compute `m, n` directly instead of recurring them:
+
+```
+pair (i, i+1):                                                    comm per pair
+  β_i, α_i        from γ_i, δ_i (reduced last pair)                    —
+  z,q,s,p  ← recurrences;  x,r,u,w ← updates                  → r_{i+1},u_{i+1},w_{i+1}
+  γ_{i+1}, δ_{i+1} from RECURRENCES (§3.1, no communication)           —
+  β_{i+1}, α_{i+1}                                                     —
+  m_{i+1} = M⁻¹w_{i+1}                                        1 exchange (ring-composed)
+  n_{i+1} = A m_{i+1}                                                  —
+  z,q,s,p ← recurrences;  x,r,u,w ← updates                   → r_{i+2},u_{i+2},w_{i+2}
+  m_{i+2} = M⁻¹w_{i+2}                                        1 exchange (ring-composed)
+  n_{i+2} = A m_{i+2}                                                  —
+  ONE reduction of the 10 λ's                                   1 reduction per 2 iterations
+```
+
+Per iteration this is **1 M⁻¹ + 1 A + 1 exchange + ½ reduction** — the same operator and halo
+cost as `cg2`, with half the syncs, and **no 4-ring machinery, no `g/h/e/f`, no
+non-recurrence repairs**. The deep form's extra cost in our setting (§3.2: 4 chained
+applications ⇒ 4 rings ⇒ ~2× the halo bytes) is spent entirely on an overlap that R2 says
+does not happen.
+
+**Independent confirmation that the derivation is right:** working the recurrences out from
+scratch and applying the symmetric-M foldings (`(s_{i-1},m_i) = (w_i,q_{i-1})` and
+`(z_{i-1},m_i) = (n_i,q_{i-1})`, both valid only under symmetric M — T-3 again) leaves
+exactly seven raw dots plus `γ, δ, ρ` = **10 reduced scalars**, which is precisely `[T]`'s
+`λ0…λ9` count. Two independent routes, same width.
+
+**Status: DERIVED, NOT CODED.** T7 implements this shallow form; the deep form is documented
+as measured-not-worth-it, with R2 as the stated reason. If a future machine has real async
+progression, the deep form becomes interesting again and this section says exactly what it
+would cost here (4-ring shipping of BOTH A and M rows — machinery that does not exist:
+cgpipe is 2-ring and ships M only, cgpoly's R-ring ships A only).
+
 ### 3.3 Cross-source table
 
 | item | own unroll | `[T]` Alg. 4/5 | verdict |
