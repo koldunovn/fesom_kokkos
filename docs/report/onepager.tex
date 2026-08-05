@@ -1,0 +1,115 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1.65cm,top=1.3cm,bottom=1.1cm]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{amsmath}
+\usepackage{caption}
+\captionsetup{font=footnotesize,labelfont=bf}
+\pagestyle{empty}
+\setlength{\parskip}{0.30em}
+\setlength{\parindent}{0pt}
+
+\newcommand{\hd}[1]{\vspace{0.25em}\textbf{\large #1}\par\vspace{0.1em}}
+
+\begin{document}
+\small
+
+{\Large\bfseries Sea-ice sub-cycling in the FESOM2 GPU port: what pays}\\[0.2em]
+{\small N. Koldunov, 6 August 2026 --- summary of the mEVP communication study}
+
+\vspace{0.5em}\hrule\vspace{0.7em}
+
+\hd{The one change that pays}
+
+\textbf{Exchange the ice-velocity halo every 4th mEVP sub-cycle instead of after every one.}
+mEVP runs 120 sub-cycles per model time step and currently exchanges after every one; this
+exchanges 30 times instead of 120 and lets the halo be up to three sub-cycles old. It is one
+conditional, switched on at run time, and it is an \emph{approximation} --- which is why most of
+the work went into measuring what it costs.
+
+\hd{What it buys}
+
+Each mesh at a node count where the model still scales --- not the largest available, which would
+flatter the result. Change of the whole model time step; GPU, same allocation, faster of two
+repetitions.
+
+\begin{center}\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+\textbf{mesh} & \textbf{operating point} & \textbf{standard} & \textbf{every 4th} & \textbf{every 8th} \\
+& & s/step & sub-cycle & sub-cycle \\
+\midrule
+CORE2 (127 k nodes) & 1 node (4 GPUs), knee at 2 & 0.0666 & $-12.6\%$ & $-14.4\%$ \\
+fArc (638 k) & 4 nodes (16 GPUs), flat past 4 & 0.1173 & $-11.4\%$ & $-14.3\%$ \\
+DARS (3.2 M) & 8 nodes (32 GPUs), still scaling & 0.1720 & $-14.2\%$ & $-15.5\%$ \\
+NG5 (7.4 M) & 16 nodes (64 GPUs), still scaling & 0.2424 & $-8.5\%$ & $-9.9\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{So: 11--14\% off a production GPU run at $K=4$ on three of the four meshes (8.5\% on NG5),
+and it is not an artefact of running past the scaling limit} --- each row is that mesh's own
+sensible operating point. (Run past the limit the number is larger --- $-25.5\%$ for CORE2 on
+16 nodes --- but nobody runs CORE2 on 16 nodes, and that number is not the one to quote.)
+
+\textbf{Caveat: this is a GPU result.} On CPU the same change is worth $-1$ to $-3.4\%$, because a
+CPU process holds far less of the mesh and the ice exchange is a much smaller share of the step.
+
+\hd{What it costs}
+
+One-year CORE2 integrations on the CPU backend, which is exactly reproducible, so the whole
+difference is the approximation. Yardstick: two independent and both correct implementations of
+the same mEVP scheme --- our C port and Fortran FESOM2 --- over the same year.
+
+\begin{center}\small
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+pattern correlation, 1 year & SST / SSS / SSH & ice concentration & ice thickness & $u_{\rm ice}$ & $v_{\rm ice}$ \\
+\midrule
+C port versus Fortran (yardstick) & 1.00000 & 0.99999 & 0.99998 & 0.95438 & 0.93908 \\
+\textbf{every 4th sub-cycle} & \textbf{1.000000} & \textbf{0.999995} & \textbf{0.999994} & \textbf{0.963328} & \textbf{0.950003} \\
+every 8th sub-cycle & 1.000000 & 0.999992 & 0.999981 & 0.961359 & 0.944857 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Every field stays inside the yardstick at $K\le8$. Ice velocity is the sensitive field and the
+margin there is only 1.1--1.5$\times$, so smaller $K$ is the defensible choice --- the error is
+monotone in $K$, and $K=4$ keeps about 87\% of the speed of $K=8$. Integrated quantities are
+untouched: Northern Hemisphere ice extent deviates by 0.23\% of its seasonal amplitude at $K=8$,
+and surface temperature, salinity and sea surface height correlate at 1.000000.
+
+\textbf{Not yet measured: accuracy at high resolution.} The accuracy test is CORE2; the speed
+results are on fArc, DARS and NG5. $K=4$ is recommended \emph{scoped to CORE2} until a
+high-resolution year has been run.
+
+\hd{What does not pay --- measured, so we do not have to argue about it}
+
+\textbf{Danilov's divergence-form reformulation} (carry $\nabla\!\cdot\!\sigma$ at nodes instead of
+$\sigma$ at elements). Exact --- it reproduces $\nabla\!\cdot\!\sigma$ to $10^{-15}$ relative ---
+but worth $-0.3$ to $+0.1\%$ on CPU and $0$ to $+1.6\%$ on GPU. The sub-cycle is limited by
+communication and by the number of GPU operations issued, not by arithmetic or memory traffic, so
+removing element arrays removes work that was not costing anything: a control that deleted three
+element arrays outright changed the time by exactly 0.00\%.
+
+\textbf{The exact wide halo} --- Danilov's double-halo proposal (exchange every $K$-th sub-cycle
+but recompute a $K$-deep ghost ring, so the answer is unchanged bit for bit). Certified exact, and
+worth $-1.8$ to $-6.8\%$ at the operating points above, against the approximation's $-8.5$ to
+$-15.5\%$. It needs $K=8$: at $K=2$ it \emph{costs} time, because the duplicated ring is not
+amortised. On CPU it never wins on any mesh --- at 2048 processes on fArc the ring a process must
+advance is larger than its own sub-domain. It remains the right choice for anyone who needs the
+answer unchanged bit for bit.
+
+\hd{Recommendation}
+
+Adopt the delayed exchange at $K=4$ as an opt-in option for GPU production runs, after a
+high-resolution accuracy year. Keep the exact wide halo for anyone who needs the answer unchanged
+bit for bit. The divergence form is correct and elegant, but it is not a speed lever on this
+hardware.
+
+\end{document}
