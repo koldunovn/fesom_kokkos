@@ -387,6 +387,25 @@ iterate is NOT the A-norm-optimal one CG returns, so a slightly larger solution 
 same `soltol` is expected behaviour, not a defect — but it is a formal FAIL under the strict
 matrix and the remedy (tighter `soltol` for `pcsi`, or margin/K tuning) belongs to T8c.
 
+### T8b options ×3 under `pcsi` (job 26723757) — the frozen-eigenbound question, answered
+
+| option | verdict | evidence (step 20) |
+|---|---|---|
+| **zstar** | ✅ **PASS, every field** | `eta_n` 4.009e-05 · `T` 3.777e-03 · `S` 2.583e-03 · `h_ice` 9.140e-04 · `m_ice` 4.782e-04 · `a_ice` 1.819e-04 · `u` 3.725e-03 · `Kv` 9.999e-02 |
+| **mEVP** | ✅ **PASS, every field** | `T` **5.240e-02** (inside the 2e-01 bound) · `u` 1.893e-02 · all ice fields ≤ 5.4e-04 |
+| **TKE** | ⚠️ `h_ice` 1.473e-01 → **EXONERATED** by the revised rule | conserved `m_ice` **2.837e-03** vs a 5e-03 bound ✓; `S` 1.051e-02 ✓; `a_ice` 1.319e-03 ✓ |
+
+**Zero fallback firings across all three options** — and that is the load-bearing sentence
+for R3. `pcsi` estimates `[ν,µ]` ONCE, at the first solve, and then never refreshes them;
+under zstar the matrix values change every step. Twenty zstar steps with the frozen bounds
+produced no divergence, no stall, and every field inside its bound, i.e. **the frozen-bound
+bet holds at this horizon** and `FESOM_PCSI_REEIG` remains correctly unbuilt (YAGNI). The
+long-horizon check (the two CORE2 dumps 180 days apart, job 26723048) is still T8c's job.
+
+Note the `S` excursion that formally failed at DEFAULT options (2.749e-02) is **not
+systematic**: under TKE it is 1.051e-02 and under zstar 2.583e-03, both inside the bound.
+That is consistent with the single-water-column reading rather than a scheme-wide error.
+
 ### T7 `oati` — implemented as the SHALLOW variant, and it beats the deep one here
 
 Derivations §3.2b: `[T]`'s deep `n→g→h→e→f` chain exists only to overlap one `Iallreduce`
