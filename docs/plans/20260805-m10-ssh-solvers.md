@@ -427,15 +427,23 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] implement from OUR unroll (T4), not the paper listing; single fused allreduce per 2
-      iterations (≈12-element buffer); odd-count exit handled; vector-op fusion where row order
-      allows (document any intentional order changes — solver-class anyway)
-- [ ] testbed + lab equivalence (every-2nd-iterate match vs pipecg)
-- [ ] Layer-2 gate set + wire observable (allreduce count ≈ iters/2)
-- [ ] pre-register + A/B NG5 4N/16N vs cg2/pipecg — the flop/launch-overhead-vs-sync tradeoff
-      is the measurement (T2's launch pricing feeds the pre-registration); an honest negative
-      is paper material, not a failure. (Unconditional per user decision — R2's probe outcome
-      changes the EXPECTATION, not the scope.)
+- [x] implemented from OUR unroll — and ➕ as the **SHALLOW** variant (derivations §3.2b):
+      `[T]`'s deep `n→g→h→e→f` chain exists only to deepen the Iallreduce overlap, which R2
+      showed does not happen on this stack, while costing 4-ring shipping of BOTH operators.
+      Shallow = 1 reduction per 2 iterations at cg2's exchange AND iteration count.
+      Reduction width **10** (not the plan's estimated ~12) — our derivation independently
+      reproduces `[T]`'s λ0…λ9 count. Convergence tested once per pair (≤1 extra iteration,
+      avoids 5 further recurrence dots)
+- [x] lab equivalence vs `cg2` on the real CORE2 np1 dump: **it1 bitwise (0.000e+00)**,
+      ~5e-15 at it2–3, ~5e-13 by it6 ⇒ the γ/δ recurrences reproduce the Krylov space to
+      rounding
+- [x] wire observable **ar_blk/solve = 64.00 = iters/2 + 2** ✅ at exch 128.00 (= cg2's).
+      Solution class vs `cg`: **all fields inside P-L2**. Knob-off byte 26723854, options ×3
+      26723855, CUDA fidelity 26723856 submitted
+- [~] A/B submitted (26723857 NG5 16N: SPEED=1 · cg2 · oati · pcsi) — harvest next session.
+      ⚠️ Pre-registration correction recorded: because the shallow form costs NO extra rings
+      and NO extra operator applications, §3.2's "roughly doubles the halo volume" applies to
+      the DEEP form only; the shallow form's expectation is "cg2 minus half the sync latency"
 
 ### Task 8a: Lanczos eigen-estimator
 
