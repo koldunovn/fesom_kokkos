@@ -214,28 +214,34 @@ else:
               ("2f", "② classic form, FUSED (1 msg/partner)",   "#2ca02c"),
               ("4",  "④ divergence form (1 msg, half the bytes)", "#1f77b4"),
               ("5",  "⑤ lagged halo (approximate)",             "#7f7f7f")]
-    x = list(range(len(PTS)))
-    w = 0.20
-    fig, ax = plt.subplots(figsize=(1.35 * len(PTS) + 2.6, 5.0), constrained_layout=True)
+    # HORIZONTAL bars. The campaign has 17 (mesh, ranks, K) points and a vertical grouped bar
+    # chart of that many groups is 3 m wide and unreadable at report size; along y it just gets
+    # taller, and the point labels get the room they need.
+    y = list(range(len(PTS)))[::-1]      # first point at the top
+    h = 0.20
+    fig, ax = plt.subplots(figsize=(8.4, 0.52 * len(PTS) + 2.0), constrained_layout=True)
+    vals = [v for p in PTS for v in p[5].values()]
     for i, (key, lab, col) in enumerate(SERIES):
-        xs = [xx + (i - 1.5) * w for xx in x]
-        ys = [p[5].get(key, float("nan")) for p in PTS]
-        ax.bar(xs, ys, width=w, color=col, label=lab)
-        for xi, yi in zip(xs, ys):
-            if yi == yi:
-                ax.annotate(f"{yi:+.1f}", (xi, yi), ha="center", fontsize=6.0,
-                            va="bottom" if yi >= 0 else "top",
-                            xytext=(0, 2 if yi >= 0 else -2), textcoords="offset points")
-    ax.axhline(0, color="k", lw=.9)
-    ax.set_xticks(x); ax.set_xticklabels([p[0] for p in PTS], fontsize=7.5)
-    ax.set_ylabel("model step vs classic  [%]   (negative = faster)")
-    ax.grid(axis="y", alpha=.25)
+        ys = [yy + (1.5 - i) * h for yy in y]
+        xs = [p[5].get(key, float("nan")) for p in PTS]
+        ax.barh(ys, xs, height=h, color=col, label=lab)
+        for yi, xi in zip(ys, xs):
+            if xi == xi:
+                ax.annotate(f"{xi:+.1f}", (xi, yi), va="center", fontsize=6.0,
+                            ha="right" if xi < 0 else "left",
+                            xytext=(-3 if xi < 0 else 3, 0), textcoords="offset points")
+    ax.axvline(0, color="k", lw=.9)
+    ax.set_yticks(y); ax.set_yticklabels([p[0].replace("\n", "  ") for p in PTS], fontsize=7.5)
+    ax.set_xlabel("model step vs classic  [%]   (negative = faster)")
+    lo, hi = min(vals + [0.0]), max(vals + [0.0])
+    ax.set_xlim(lo - 0.10 * (hi - lo) - 0.6, hi + 0.10 * (hi - lo) + 0.6)
+    ax.grid(axis="x", alpha=.25)
     ax.set_title("M9 — the exact wide halo. Cell ②'s handicap was its SECOND MESSAGE, not its bytes:\n"
-                 "fusing the two segments moves it from a cost to a saving, and past ④ at K=2.",
+                 "fusing the two segments moves it from a cost to a saving, and usually past ④.",
                  fontsize=10)
-    # legend BELOW the axes, not inside it — with 9 groups an in-axes legend lands on the
-    # tick labels (the m7 figure convention, for the same reason).
-    fig.legend(fontsize=8, ncol=4, frameon=False, loc="outside lower center")
+    # legend BELOW the axes, not inside it (the m7 figure convention) — in-axes it lands on the
+    # bars at whichever end happens to be empty for this data set.
+    fig.legend(fontsize=8, ncol=2, frameon=False, loc="outside lower center")
     fig.savefig(os.path.join(args.outdir, "f4_wide_fused.png"), dpi=140)
     print("F4 written")
 
@@ -264,8 +270,9 @@ else:
         ax.grid(axis="x", alpha=.25)
         lo, hi = min(msg + byt + [0.0]), max(msg + byt + [0.0])
         ax.set_xlim(lo - 0.16 * (hi - lo) - 0.4, hi + 0.16 * (hi - lo) + 0.4)  # room for the labels
-        ax.set_title("M9 P0b — splitting the ④ − ② gap. The message term carries it;\n"
-                     "the byte term is ±1.5 pp with no consistent sign.", fontsize=10)
+        ax.set_title("M9 P0b — splitting the ④ − ② gap. The message term carries it, and is\n"
+                     "negative at every point; the byte term is smaller and mostly favours ②.",
+                     fontsize=10)
         fig.legend(fontsize=8, ncol=1, frameon=False, loc="outside lower center")
         fig.savefig(os.path.join(args.outdir, "f5_p0b_decomposition.png"), dpi=140,
                     bbox_inches="tight")
