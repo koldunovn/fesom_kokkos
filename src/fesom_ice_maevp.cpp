@@ -146,11 +146,20 @@ static void maevp_announce_cell(const struct fesom_partit *partit,
     /* Name the study cell explicitly. The 2x3 matrix's two exact wide-halo cells differ ONLY in
      * the carried form, so "EVPWIDE=4" alone does not say which one ran — and the whole point of
      * ②-vs-④ is the comparison between them. */
-    if (wideK)
+    if (wideK) {
         fprintf(stderr, "[m9] mEVP cell: WIDE K=%d  ->  cell %s (%s)\n", wideK,
                 div_on ? "④" : "②",
                 div_on ? "divergence form: (u,v,R_u,R_v) on rings, ONE segment, 4*Ng doubles"
                        : "classic form: (u,v) on rings + sigma on ghost elements, 8*Ng doubles");
+        /* D1: ②'s two segments can ride ONE message. Name it here, on the line every gate and
+         * A/B leg greps — fused and unfused are byte-identical, so this is the only place the
+         * distinction is visible at all. Stated for ④ too, where it is a no-op by construction
+         * (one segment), because "no line" and "no-op" must not look the same. */
+        fprintf(stderr, "[m9] mEVP cell: WIDE transport = %s\n",
+                div_on           ? "single-segment (cell ④ — FUSE is a no-op by construction)"
+                : fesom_evpwide_env_fuse() ? "FUSED (② — 1 msg/partner/window)"
+                                           : "unfused (② — 2 msgs/partner/window)");
+    }
     fflush(stderr);
 }
 

@@ -79,9 +79,23 @@ struct EvpwState {
     Kokkos::View<char*>   selff_d;              /* [nrecv] selfcheck flag: dist(slot) <= K-1 */
     Kokkos::View<real_t*> sbuf_d, rbuf_d;       /* [nsend*11] / [nrecv*11] */
     Kokkos::View<real_t*> esbuf_d, erbuf_d;     /* [nesend*3] / [nerecv*3] */
+    /* ── D1 / P0b: the FUSED form of the two-segment ship (cell ② and std EVP) ────────────
+     * Same bytes, same pack work, ONE message per partner instead of two: the node segment and
+     * the element-sigma segment are laid out back-to-back per partner in a single buffer.
+     * Off by default; FESOM_SPEED_EVPWIDE_FUSE=1 selects it. Buffers and the per-entry partner
+     * maps are only allocated when it is on. */
+    int  fuse_cache = -2;
+    bool fuse = false;
+    Kokkos::View<real_t*> fsbuf_d, frbuf_d;     /* [nsend*11+nesend*3] / [nrecv*11+nerecv*3] */
+    Kokkos::View<int*> spart_d, rpart_d;        /* [nsend]/[nrecv]  partner INDEX of each entry */
+    Kokkos::View<int*> espart_d, erpart_d;      /* [nesend]/[nerecv] ditto, element segment */
+    Kokkos::View<int*> soff_d, roff_d;          /* [P+1] device copies of the offsets */
+    Kokkos::View<int*> esoff_d, eroff_d;
     std::vector<MPI_Request> reqs;
     int selfcheck = -1;                         /* env FESOM_EVPWIDE_SELFCHECK */
     long exch_count = 0;
+    long msg_count = 0;                         /* MPI_Isend+Irecv POSTED (fused halves it) */
+    double dbl_count = 0.0;                     /* doubles received (fusing must not change it) */
     const real_t *gs_h = nullptr, *ea_h = nullptr, *mf_h = nullptr;   /* dump aids (host mesh) */
 };
 EvpwState g_w;
@@ -110,6 +124,18 @@ Kokkos::View<T*> push_dev(const char *lbl, const std::vector<T> &v)
 int fesom_evpwide_env_K(void)
 {
     return fesom_speed_int("EVPWIDE", 0, &g_w.env_cache);
+}
+
+/* D1 / P0b — FESOM_SPEED_EVPWIDE_FUSE=1: ship the node and element-sigma segments as ONE
+ * message per partner. A pure TRANSPORT variant of cell ② (and of std EVP's window ship):
+ * the same values are packed and unpacked in the same order, so it MUST be byte-identical to
+ * the unfused form on every backend — that identity is the gate, and the message counter is
+ * the measurement. It exists to separate the two terms H3 conflates: ②'s deficit against
+ * cell ④ is consistent both with ②'s 2x bytes and with its 2x messages, and only removing
+ * the message term by construction can say which. */
+int fesom_evpwide_env_fuse(void)
+{
+    return fesom_speed_int("EVPWIDE_FUSE", 0, &g_w.fuse_cache);
 }
 
 int fesom_evpwide_next(void) { return g_w.hook_done ? g_w.next : 0; }
@@ -700,6 +726,39 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     S.esbuf_d = Kokkos::View<real_t*>("evpw.esbuf", (size_t)S.nesend * 3);
     S.erbuf_d = Kokkos::View<real_t*>("evpw.erbuf", (size_t)S.nerecv * 3);
 
+    /* -------- D1 / P0b: the fused-transport maps. Built ONLY when the knob is on, so the
+     * default form carries no extra memory and no extra device arrays whose mere existence
+     * could be mistaken for the variant running. Layout per partner q, send side:
+     *     base(q)      = soff[q]*nf + esoff[q]*3
+     *     node entry i = base(q) + (i - soff[q])*nf + f
+     *     elem entry j = base(q) + (soff[q+1]-soff[q])*nf + (j - esoff[q])*3 + c
+     * i.e. exactly the unfused segments, concatenated per partner. nf is a plan property, so
+     * the offsets are recomputed per exchange in the kernel from soff/esoff rather than
+     * baked in — one int multiply per entry, and it keeps the maps valid for every plan. */
+    S.fuse = (fesom_evpwide_env_fuse() != 0);
+    if (S.fuse) {
+        std::vector<int> spart((size_t)S.nsend), rpart((size_t)S.nrecv);
+        std::vector<int> espart((size_t)S.nesend), erpart((size_t)S.nerecv);
+        for (size_t q = 0; q < S.partner.size(); ++q) {
+            for (int i = S.soff[q];  i < S.soff[q + 1];  ++i) spart[(size_t)i]  = (int)q;
+            for (int i = S.roff[q];  i < S.roff[q + 1];  ++i) rpart[(size_t)i]  = (int)q;
+            for (int i = S.esoff[q]; i < S.esoff[q + 1]; ++i) espart[(size_t)i] = (int)q;
+            for (int i = S.eroff[q]; i < S.eroff[q + 1]; ++i) erpart[(size_t)i] = (int)q;
+        }
+        S.spart_d  = push_dev("evpw.spart", spart);
+        S.rpart_d  = push_dev("evpw.rpart", rpart);
+        S.espart_d = push_dev("evpw.espart", espart);
+        S.erpart_d = push_dev("evpw.erpart", erpart);
+        S.soff_d   = push_dev("evpw.soffd", S.soff);
+        S.roff_d   = push_dev("evpw.roffd", S.roff);
+        S.esoff_d  = push_dev("evpw.esoffd", S.esoff);
+        S.eroff_d  = push_dev("evpw.eroffd", S.eroff);
+        S.fsbuf_d  = Kokkos::View<real_t*>("evpw.fsbuf",
+                                           (size_t)S.nsend * 11 + (size_t)S.nesend * 3);
+        S.frbuf_d  = Kokkos::View<real_t*>("evpw.frbuf",
+                                           (size_t)S.nrecv * 11 + (size_t)S.nerecv * 3);
+    }
+
     FesomEvpwideDev &D = S.dev;
     D.K = K; D.R = R; D.next = next; D.Eg = Eg; D.nUpd = (int)upd_slots.size();
     D.upd_slots = push_dev("evpw.upd", upd_slots);
@@ -750,7 +809,19 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
 int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_mesh *m)
 {
     const int K = fesom_evpwide_env_K();
-    if (K <= 0) return 0;
+    if (K <= 0) {
+        /* FUSE is a modifier of EVPWIDE, so on its own it does nothing — and would do nothing
+         * SILENTLY, which is the one failure mode this project keeps paying for (L80). */
+        static bool warned = false;
+        if (!warned && fesom_evpwide_env_fuse() && p->mype == 0) {
+            warned = true;
+            fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE_FUSE was requested but "
+                            "FESOM_SPEED_EVPWIDE is off — FUSE only changes how the wide-halo "
+                            "window ship is transported, so it is NOT running.\n");
+            fflush(stderr);
+        }
+        return 0;
+    }
 
     /* M9: whichEVP==1 (mEVP) is now SUPPORTED — cells ②/④, the exact wide halo. The refusal
      * that used to sit here was correct only while the ghost kernel bodies existed for std EVP
@@ -791,6 +862,15 @@ int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_
                     K, ice->whichEVP == 1 ? "mEVP: cell ② classic-form / ④ divergence-form"
                                           : "std EVP",
                     g_w.R, ns, ns / K);
+            /* D1 / P0b — say WHICH transport ran. Fused and unfused ship identical bytes, so
+             * nothing downstream can tell them apart; this line and the message counter are the
+             * only evidence, and a silent default would make the A/B unauditable (L80). */
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_EVPWIDE_FUSE = %d (two-segment window ship "
+                            "= %s; no-op for any ONE-segment ship, i.e. the prestep 11-field "
+                            "ship and cell ④)\n",
+                    g_w.fuse ? 1 : 0,
+                    g_w.fuse ? "FUSED, 1 msg/partner"
+                             : "unfused, 2 msgs/partner (tags 2200 + 2205)");
             fflush(stderr);
         }
         g_w.announced = true;
@@ -827,6 +907,36 @@ struct EvpwPlan {
     enum Diag { NONE, WINDOW, WINDOW_DBG, PRESTEP_ECHO } diag = NONE;
 };
 
+/*
+ * Buffer index of one exchange ENTRY, in either transport form. This is the whole of the fused
+ * variant on the kernel side: same entries, same order, same values — a different address.
+ *
+ *   unfused: the node segment is its own buffer (stride nf) and the element segment is its own
+ *            (stride 3), so the index is just entry*stride.
+ *   fused:   one buffer holds, per partner q, [that partner's node entries][its elem entries],
+ *            so an entry needs its partner's base offset. `part` gives the partner INDEX of the
+ *            entry; `noff`/`eoff` are the per-partner entry offsets already used to post MPI.
+ *
+ * Making BOTH forms go through this one object is deliberate: every diagnostic in the exchange
+ * (selfcheck drift, prestep echo, the level-3 dump) reads the recv buffer by hand, and a fused
+ * form that quietly left them indexing the unfused buffer would read stale/garbage bytes while
+ * a byte gate — which only compares model output — passed. That is the L80 shape.
+ */
+struct SegIdx {
+    Kokkos::View<const int*> part, noff, eoff;
+    int nf = 0;                /* node fields of the ACTIVE plan (element stride is always 3) */
+    int fused = 0;
+    int elem = 0;              /* 0 = node segment, 1 = element (sigma) segment */
+    KOKKOS_INLINE_FUNCTION int operator()(const int i) const
+    {
+        if (!fused) return elem ? i * 3 : i * nf;
+        const int q = part(i);
+        const int base = noff(q) * nf + eoff(q) * 3;
+        if (!elem) return base + (i - noff(q)) * nf;
+        return base + (noff(q + 1) - noff(q)) * nf + (i - eoff(q)) * 3;
+    }
+};
+
 void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan &P)
 {
     EvpwState &S = g_w;
@@ -846,66 +956,106 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                                    * (design §2 corrected: velocity-only refresh is inexact
                                    * for any finite R); the per-step 11-field ship does not
                                    * (sigma is untouched on both sides between EVP calls). */
+    /* D1 / P0b. Fusing only means anything when there ARE two segments, so a one-segment plan
+     * (the 11-field prestep ship, cell ④'s window) is untouched by the knob BY CONSTRUCTION —
+     * which is also why cell ④ is the right control for this measurement: it already ships one
+     * message and the knob cannot change it. */
+    const bool fused = S.fuse && sig;
+    SegIdx NI, EI;
+    NI.part = S.spart_d; NI.noff = S.soff_d; NI.eoff = S.esoff_d;
+    NI.nf = nf; NI.fused = fused ? 1 : 0; NI.elem = 0;
+    EI = NI; EI.part = S.espart_d; EI.elem = 1;
+    SegIdx RI = NI, ERI = EI;
+    RI.part  = S.rpart_d;  RI.noff  = S.roff_d; RI.eoff  = S.eroff_d;
+    ERI.part = S.erpart_d; ERI.noff = S.roff_d; ERI.eoff = S.eroff_d;
+
     {   /* pack owned values */
-        auto sidx = S.sidx_d; auto sbuf = S.sbuf_d; const PackViews FF = F; const int nfl = nf;
+        auto sidx = S.sidx_d; const PackViews FF = F; const int nfl = nf;
+        auto sbuf = fused ? S.fsbuf_d : S.sbuf_d;
+        const SegIdx IX = NI;
         if (S.nsend > 0)
             Kokkos::parallel_for("fesom_evpwide_pack", Kokkos::RangePolicy<>(0, S.nsend),
                 KOKKOS_LAMBDA(const int i) {
                     const int n = sidx(i);
-                    for (int f = 0; f < nfl; ++f) sbuf(i*nfl + f) = FF.v[f](n);
+                    const int b = IX(i);
+                    for (int f = 0; f < nfl; ++f) sbuf(b + f) = FF.v[f](n);
                 });
     }
     if (sig && S.nesend > 0) {   /* pack my (owner-clean) sigma for the requesters */
-        auto esidx = S.esidx_d; auto esbuf = S.esbuf_d;
+        auto esidx = S.esidx_d;
+        auto esbuf = fused ? S.fsbuf_d : S.esbuf_d;
+        const SegIdx IX = EI;
         auto s11 = ice->work.sigma11_fld.d();
         auto s12 = ice->work.sigma12_fld.d();
         auto s22 = ice->work.sigma22_fld.d();
         Kokkos::parallel_for("fesom_evpwide_packsig", Kokkos::RangePolicy<>(0, S.nesend),
             KOKKOS_LAMBDA(const int i) {
                 const int e = esidx(i);
-                esbuf(i*3 + 0) = s11(e);
-                esbuf(i*3 + 1) = s12(e);
-                esbuf(i*3 + 2) = s22(e);
+                const int b = IX(i);
+                esbuf(b + 0) = s11(e);
+                esbuf(b + 1) = s12(e);
+                esbuf(b + 2) = s22(e);
             });
     }
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf + re-posts rbuf (drains prev unpack) */
 
     int nreq = 0;
-    real_t *sp = S.sbuf_d.data();
-    real_t *rp = S.rbuf_d.data();
+    real_t *sp = fused ? S.fsbuf_d.data() : S.sbuf_d.data();
+    real_t *rp = fused ? S.frbuf_d.data() : S.rbuf_d.data();
     double bytes = 0.0;
-    for (size_t q = 0; q < S.partner.size(); ++q) {
-        const int rc = (S.roff[q + 1] - S.roff[q]) * nf;
-        if (rc > 0) {
-            MPI_Irecv(rp + (size_t)S.roff[q] * nf, rc, MPI_DOUBLE, S.partner[q], 2200,
-                      p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
-            bytes += (double)rc * sizeof(real_t);
-        }
-    }
-    for (size_t q = 0; q < S.partner.size(); ++q) {
-        const int sc = (S.soff[q + 1] - S.soff[q]) * nf;
-        if (sc > 0)
-            MPI_Isend(sp + (size_t)S.soff[q] * nf, sc, MPI_DOUBLE, S.partner[q], 2200,
-                      p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
-    }
-    if (sig) {   /* the sigma segment: second message per partner, tag 2205 */
-        real_t *esp = S.esbuf_d.data();
-        real_t *erp = S.erbuf_d.data();
+    if (fused) {
+        /* ONE message per partner: [node entries][elem entries], contiguous. Same bytes as the
+         * two-segment form, half the messages — which is the whole content of the variant. */
         for (size_t q = 0; q < S.partner.size(); ++q) {
-            const int rc = (S.eroff[q + 1] - S.eroff[q]) * 3;
+            const int rc = (S.roff[q + 1] - S.roff[q]) * nf + (S.eroff[q + 1] - S.eroff[q]) * 3;
             if (rc > 0) {
-                MPI_Irecv(erp + (size_t)S.eroff[q] * 3, rc, MPI_DOUBLE, S.partner[q], 2205,
+                MPI_Irecv(rp + ((size_t)S.roff[q] * nf + (size_t)S.eroff[q] * 3), rc, MPI_DOUBLE,
+                          S.partner[q], 2200, p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+                bytes += (double)rc * sizeof(real_t);
+            }
+        }
+        for (size_t q = 0; q < S.partner.size(); ++q) {
+            const int sc = (S.soff[q + 1] - S.soff[q]) * nf + (S.esoff[q + 1] - S.esoff[q]) * 3;
+            if (sc > 0)
+                MPI_Isend(sp + ((size_t)S.soff[q] * nf + (size_t)S.esoff[q] * 3), sc, MPI_DOUBLE,
+                          S.partner[q], 2200, p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+        }
+    } else {
+        for (size_t q = 0; q < S.partner.size(); ++q) {
+            const int rc = (S.roff[q + 1] - S.roff[q]) * nf;
+            if (rc > 0) {
+                MPI_Irecv(rp + (size_t)S.roff[q] * nf, rc, MPI_DOUBLE, S.partner[q], 2200,
                           p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
                 bytes += (double)rc * sizeof(real_t);
             }
         }
         for (size_t q = 0; q < S.partner.size(); ++q) {
-            const int sc = (S.esoff[q + 1] - S.esoff[q]) * 3;
+            const int sc = (S.soff[q + 1] - S.soff[q]) * nf;
             if (sc > 0)
-                MPI_Isend(esp + (size_t)S.esoff[q] * 3, sc, MPI_DOUBLE, S.partner[q], 2205,
+                MPI_Isend(sp + (size_t)S.soff[q] * nf, sc, MPI_DOUBLE, S.partner[q], 2200,
                           p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
         }
+        if (sig) {   /* the sigma segment: second message per partner, tag 2205 */
+            real_t *esp = S.esbuf_d.data();
+            real_t *erp = S.erbuf_d.data();
+            for (size_t q = 0; q < S.partner.size(); ++q) {
+                const int rc = (S.eroff[q + 1] - S.eroff[q]) * 3;
+                if (rc > 0) {
+                    MPI_Irecv(erp + (size_t)S.eroff[q] * 3, rc, MPI_DOUBLE, S.partner[q], 2205,
+                              p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+                    bytes += (double)rc * sizeof(real_t);
+                }
+            }
+            for (size_t q = 0; q < S.partner.size(); ++q) {
+                const int sc = (S.esoff[q + 1] - S.esoff[q]) * 3;
+                if (sc > 0)
+                    MPI_Isend(esp + (size_t)S.esoff[q] * 3, sc, MPI_DOUBLE, S.partner[q], 2205,
+                              p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
+            }
+        }
     }
+    S.msg_count += nreq;                  /* the ONLY observable that separates the two forms */
+    S.dbl_count += bytes / (double)sizeof(real_t);
     fesom_halo_prof_waitall(nreq, S.reqs.data());
     fesom_halo_prof_bytes(bytes);
 
@@ -915,8 +1065,10 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
      * expected small-but-NONZERO. The exact-zero certification is the FORCE_SERIAL
      * diff_snap gate on owned bytes, plus the pre-step echo check below. */
     if ((P.diag == EvpwPlan::WINDOW || P.diag == EvpwPlan::WINDOW_DBG) && S.selfcheck) {
-        auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; auto flag = S.selff_d;
-        const PackViews FF = F; const int nfl = nf; const int Nlim = S.N;
+        auto ridx = S.ridx_d; auto flag = S.selff_d;
+        auto rbuf = fused ? S.frbuf_d : S.rbuf_d;      /* both forms, one index object */
+        const SegIdx IX = RI;
+        const PackViews FF = F; const int Nlim = S.N;
         double mx[8] = {0, 0, 0, 0, 0, 0, 0, 0};
         for (int f = 0; f < nf; ++f) {
             double m1 = 0.0; const int fl = f;
@@ -925,7 +1077,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                     if (!flag(i)) return;
                     const int s = ridx(i);
                     if (fl >= 2 && s >= Nlim) return;      /* u_rhs is not extended */
-                    const double d = Kokkos::fabs((double)rbuf(i*nfl + fl) - (double)FF.v[fl](s));
+                    const double d = Kokkos::fabs((double)rbuf(IX(i) + fl) - (double)FF.v[fl](s));
                     if (d > acc) acc = d;
                 }, Kokkos::Max<double>(m1));
             mx[f] = m1;
@@ -938,7 +1090,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                         if (flag(i) != want) return;
                         const int s = ridx(i);
                         if (s >= Nlim) return;
-                        const double d = Kokkos::fabs((double)rbuf(i*nfl + 2) - (double)FF.v[2](s));
+                        const double d = Kokkos::fabs((double)rbuf(IX(i) + 2) - (double)FF.v[2](s));
                         if (d > acc) acc = d;
                     }, Kokkos::Max<double>(m1));
                 mx[5 + cls] = m1;
@@ -963,7 +1115,10 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
     static bool s_dumped = false;
     if (P.diag == EvpwPlan::WINDOW_DBG && S.selfcheck >= 3 && !s_dumped) {
         s_dumped = true;
-        auto rbuf = S.rbuf_d; auto ridx = S.ridx_d; auto flag = S.selff_d;
+        auto rbuf  = fused ? S.frbuf_d : S.rbuf_d;
+        auto erbuf = fused ? S.frbuf_d : S.erbuf_d;   /* fused: same buffer, elem offset */
+        auto ridx = S.ridx_d; auto flag = S.selff_d;
+        const SegIdx IX = RI, EIX = ERI;
         int ndust = 0;
         for (int i2 = 0; i2 < S.nrecv && ndust < 4; ++i2) {
             if (!flag(i2)) continue;
@@ -971,7 +1126,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             if (s2 >= S.N) continue;
             double dd = 0.0;
             for (int f2 = 0; f2 < 4; ++f2) {
-                const double d2 = fabs(rbuf(i2*6 + f2) - (double)F.v[f2](s2));
+                const double d2 = fabs(rbuf(IX(i2) + f2) - (double)F.v[f2](s2));
                 if (d2 > dd) dd = d2;
             }
             if (dd <= 0.0) continue;
@@ -983,7 +1138,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             fprintf(stderr, "[evpw-dump] rank %d slot %d dist %d owner-urhs %.17g "
                             "diff %.3e  invam %.17g rhs_a %.17g row [%d..%d):\n",
                     p->mype, s, (int)S.dist[(size_t)s],
-                    rbuf(wi*6 + 2), wd,
+                    rbuf(IX(wi) + 2), wd,
                     (double)ice->work.inv_areamass_fld.d()(s),
                     (double)ice->data[FESOM_ICE_AICE].values_rhs_fld.d()(s),
                     (int)D.gath_ptr(s), (int)D.gath_ptr(s + 1));
@@ -1013,7 +1168,8 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                     const int eg = ue - S.E;
                     for (int z = 0; z < S.nerecv; ++z)
                         if (S.eridx_d(z) == eg) {
-                            o11 = S.erbuf_d(z*3 + 0); o12 = S.erbuf_d(z*3 + 1); o22 = S.erbuf_d(z*3 + 2);
+                            const int eb = EIX(z);
+                            o11 = erbuf(eb + 0); o12 = erbuf(eb + 1); o22 = erbuf(eb + 2);
                             break;
                         }
                 }
@@ -1034,8 +1190,8 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             const double rhsa  = ice->data[FESOM_ICE_AICE].values_rhs_fld.d()(s);
             fprintf(stderr, "[evpw-dump] sum %.17g -> final %.17g vs owner %.17g | my u/v %.17g %.17g "
                             "own u/v %.17g %.17g coastx %d aice %.17g\n",
-                    sum, invam > 0.0 ? sum*invam + rhsa : 0.0, rbuf(wi*6 + 2),
-                    (double)F.v[0](s), (double)F.v[1](s), rbuf(wi*6 + 0), rbuf(wi*6 + 1),
+                    sum, invam > 0.0 ? sum*invam + rhsa : 0.0, rbuf(IX(wi) + 2),
+                    (double)F.v[0](s), (double)F.v[1](s), rbuf(IX(wi) + 0), rbuf(IX(wi) + 1),
                     (int)S.dev.coastx(s), (double)ice->data[FESOM_ICE_AICE].values_fld.d()(s));
             {   /* permutation probe: does ANY summation order of my contributions reproduce
                  * the owner's finalized u_rhs? (order bug vs value bug discriminator) */
@@ -1057,7 +1213,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                     if (istr_v > 0.0)
                         cus.push_back(-(eav*(s11v*gsa + s12v*gsb + s12v*val3d*mfv)));
                 }
-                const double target = rbuf(wi*6 + 2);
+                const double target = rbuf(IX(wi) + 2);
                 int hit = -1;
                 if (cus.size() <= 8) {
                     std::vector<int> pi(cus.size());
@@ -1083,14 +1239,16 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
      * already hold, EXACTLY, on every backend. A nonzero here = plumbing or an unexpected
      * outside writer of uice/vice ghosts. */
     if (P.diag == EvpwPlan::PRESTEP_ECHO && S.selfcheck) {
-        auto ridx = S.ridx_d; auto rbuf = S.rbuf_d;
+        auto ridx = S.ridx_d;
+        auto rbuf = fused ? S.frbuf_d : S.rbuf_d;
+        const SegIdx IX = RI;
         auto u = F.v[0]; auto v = F.v[1];
-        double mx0 = 0.0; const int nfl = nf;
+        double mx0 = 0.0;
         Kokkos::parallel_reduce("fesom_evpwide_echo", Kokkos::RangePolicy<>(0, S.nrecv),
             KOKKOS_LAMBDA(const int i, double &acc) {
                 const int s = ridx(i);
-                double d = Kokkos::fabs((double)rbuf(i*nfl + 0) - (double)u(s));
-                const double d2 = Kokkos::fabs((double)rbuf(i*nfl + 1) - (double)v(s));
+                double d = Kokkos::fabs((double)rbuf(IX(i) + 0) - (double)u(s));
+                const double d2 = Kokkos::fabs((double)rbuf(IX(i) + 1) - (double)v(s));
                 if (d2 > d) d = d2;
                 if (d > acc) acc = d;
             }, Kokkos::Max<double>(mx0));
@@ -1104,24 +1262,30 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
     ++g_w.exch_count;
 
     {   /* unpack into ghost slots (fields >= 2 of the dbg nf==4 mode are compare-only) */
-        auto ridx = S.ridx_d; auto rbuf = S.rbuf_d; const PackViews FF = F; const int nfl = nf;
+        auto ridx = S.ridx_d; const PackViews FF = F;
+        auto rbuf = fused ? S.frbuf_d : S.rbuf_d;
+        const SegIdx IX = RI;
         const int nun = P.nun;                   /* compare-only fields are not unpacked */
         if (S.nrecv > 0)
             Kokkos::parallel_for("fesom_evpwide_unpack", Kokkos::RangePolicy<>(0, S.nrecv),
                 KOKKOS_LAMBDA(const int i) {
                     const int s = ridx(i);
-                    for (int f = 0; f < nun; ++f) FF.v[f](s) = rbuf(i*nfl + f);
+                    const int b = IX(i);
+                    for (int f = 0; f < nun; ++f) FF.v[f](s) = rbuf(b + f);
                 });
     }
     if (sig && S.nerecv > 0) {   /* re-baseline ghost sigma to owner bytes */
-        auto eridx = S.eridx_d; auto erbuf = S.erbuf_d;
+        auto eridx = S.eridx_d;
+        auto erbuf = fused ? S.frbuf_d : S.erbuf_d;
+        const SegIdx IX = ERI;
         auto s11g = S.dev.s11_g; auto s12g = S.dev.s12_g; auto s22g = S.dev.s22_g;
         Kokkos::parallel_for("fesom_evpwide_unpacksig", Kokkos::RangePolicy<>(0, S.nerecv),
             KOKKOS_LAMBDA(const int i) {
                 const int eg = eridx(i);
-                s11g(eg) = erbuf(i*3 + 0);
-                s12g(eg) = erbuf(i*3 + 1);
-                s22g(eg) = erbuf(i*3 + 2);
+                const int b = IX(i);
+                s11g(eg) = erbuf(b + 0);
+                s12g(eg) = erbuf(b + 1);
+                s22g(eg) = erbuf(b + 2);
             });
     }
     /* no post-unpack fence: consumers are same-stream kernels; the pre-MPI fence of the NEXT
@@ -1232,6 +1396,26 @@ void fesom_evpwide_mevp_window_exchange(struct fesom_ice *ice, struct fesom_part
     evpw_exchange(ice, p, P);
 }
 
+void fesom_evpwide_msg_report(int timed_steps, struct fesom_partit *p)
+{
+    if (!p || timed_steps <= 0) return;
+    int on = g_w.built ? 1 : 0, any = 0;
+    MPI_Allreduce(&on, &any, 1, MPI_INT, MPI_MAX, p->MPI_COMM_FESOM);
+    if (!any) return;                     /* lever off everywhere: say nothing */
+    /* msg_count spans the WHOLE run, timed_steps only the timed window; the ratio is what is
+     * comparable across legs, and it is exact because the exchange cadence is per-step. */
+    double loc[2] = { (double)g_w.msg_count, g_w.dbl_count }, mx[2], sum[2];
+    MPI_Reduce(loc, mx,  2, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+    MPI_Reduce(loc, sum, 2, MPI_DOUBLE, MPI_SUM, 0, p->MPI_COMM_FESOM);
+    if (p->mype != 0) return;
+    const double st = (double)timed_steps;
+    printf("[evpwide-wire] transport=%s  msgs/step: max-rank %.1f, all-ranks %.1f | "
+           "doubles recv/step: max-rank %.0f, all-ranks %.0f  (bytes MUST match between the "
+           "fused and unfused forms; only the message count may differ)\n",
+           g_w.fuse ? "FUSED" : "unfused", mx[0]/st, sum[0]/st, mx[1]/st, sum[1]/st);
+    fflush(stdout);
+}
+
 void fesom_evpwide_free(void)
 {
     EvpwState &S = g_w;
@@ -1241,5 +1425,10 @@ void fesom_evpwide_free(void)
     S.selff_d = Kokkos::View<char*>();
     S.sbuf_d = Kokkos::View<real_t*>(); S.rbuf_d = Kokkos::View<real_t*>();
     S.esbuf_d = Kokkos::View<real_t*>(); S.erbuf_d = Kokkos::View<real_t*>();
+    S.fsbuf_d = Kokkos::View<real_t*>(); S.frbuf_d = Kokkos::View<real_t*>();
+    S.spart_d = Kokkos::View<int*>();  S.rpart_d = Kokkos::View<int*>();
+    S.espart_d = Kokkos::View<int*>(); S.erpart_d = Kokkos::View<int*>();
+    S.soff_d = Kokkos::View<int*>();   S.roff_d = Kokkos::View<int*>();
+    S.esoff_d = Kokkos::View<int*>();  S.eroff_d = Kokkos::View<int*>();
     S.built = false;
 }

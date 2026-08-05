@@ -35,6 +35,21 @@ set -u
 ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
 K_BIN=${BIN:?BIN required}
 KNOBS=${KNOBS:?KNOBS required — the M9 knobs whose inertness is being gated}
+# The mEVP leg's expectation is a property of the KNOB, not of this gate.
+#   differ  (default) — a SOLVER-class lever: MEVPDIV, MEVPLAG>1. Bit-identical under mEVP would
+#                       mean it never fired, so "differs" doubles as the fired-proof.
+#   byte              — a BYTE-class lever: EVPWIDE (cells ②/④) and EVPWIDE_FUSE are EXACT, so
+#                       bit-identical under mEVP is the correct result and "differs" would be the
+#                       failure. For these the diff cannot be the fired-proof, so EXPECT is
+#                       required. (P0b, 2026-08-05: run with the default, the fused build was
+#                       reported FAIL for passing its own gate.)
+MEVP_EXPECT=${MEVP_EXPECT:-differ}
+EXPECT=${EXPECT:-}
+if [ "$MEVP_EXPECT" = "byte" ] && [ -z "$EXPECT" ]; then
+    echo "ERROR: MEVP_EXPECT=byte needs EXPECT=<regex>. Without the diff to prove the knob"
+    echo "       fired, a vacuous pass is indistinguishable from a real one (L80)."
+    exit 2
+fi
 
 MESH=/work/ab0995/a270088/port2/mesh/core2      # PRIVATE mesh (L73)
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
@@ -70,10 +85,24 @@ run_leg () {                     # $1 label  $2 option-env  $3 expect: byte|diff
     grep -hE '^\[fesom_speed\] FESOM_SPEED_MEVP|^\[m9\]' "$on/run.err" "$on/run.log" 2>/dev/null \
         | sed 's/^/      /' | sort -u
 
+    if [ -n "$EXPECT" ] && [ "$lab" = "all3" ]; then
+        if grep -qE "$EXPECT" "$on/run.log" "$on/run.err"; then
+            echo "  KNOB-FIRED PASS — matched: $(grep -hoE "$EXPECT" "$on/run.log" "$on/run.err" | head -1)"
+        else
+            echo "  KNOB-FIRED FAIL — EXPECT '$EXPECT' absent; the verdict below is VACUOUS"
+            RC=1
+        fi
+    fi
+
     if [ "$expect" = "byte" ]; then
         "$PY" "$ROOT/scripts/diff_snap.py" "$off" "$on" >/dev/null 2>&1
         if [ $? -eq 0 ]; then
-            echo "  PASS — bit-identical: the M9 knobs are INERT under $lab, as they must be"
+            if [ "$lab" = "all3" ]; then
+                echo "  PASS — bit-identical under mEVP: the knob FIRED (above) and is EXACT,"
+                echo "         which for a byte-class lever is the result, not an absence of one"
+            else
+                echo "  PASS — bit-identical: the M9 knobs are INERT under $lab, as they must be"
+            fi
         else
             echo "  FAIL — the M9 knobs changed a NON-mEVP option. Something reaches outside"
             echo "         the whichEVP==1 branch. This is the leak this gate exists to find."
@@ -90,7 +119,7 @@ run_leg () {                     # $1 label  $2 option-env  $3 expect: byte|diff
 
 run_leg tke   "FESOM_MIX_SCHEME=TKE"                              byte
 run_leg zstar "FESOM_ALE=zstar"                                   byte
-run_leg all3  "FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar" differ
+run_leg all3  "FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar" "$MEVP_EXPECT"
 
 echo
 [ "$RC" -eq 0 ] && echo "=== M9 OPTIONS x3 PASS ===" || echo "=== M9 OPTIONS x3 FAIL ==="

@@ -1514,6 +1514,7 @@ skip_rest_state:
                 fflush(stdout);
             }
             fesom_halo_mpi_report(timed, &mpi);   /* M5.17: per-rank halo MPI split — COLLECTIVE, all ranks */
+            fesom_evpwide_msg_report(timed, &mpi); /* D1/P0b: wide-halo MESSAGES/step — COLLECTIVE */
             fesom_halo_syncstats_report(timed, &mpi); /* M7 0.3: sync/fence counters — COLLECTIVE, all ranks */
             fesom_phasestats_report(timed, &mpi);     /* M7 E.IMB.0: phase busy/wait table — COLLECTIVE */
         }

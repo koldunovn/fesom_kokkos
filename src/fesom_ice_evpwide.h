@@ -88,6 +88,15 @@ struct FesomEvpwideDev {
 /* Raw knob (fesom_speed_int semantics: opt-in, Serial needs FORCE_SERIAL). No announce. */
 int fesom_evpwide_env_K(void);
 
+/* FESOM_SPEED_EVPWIDE_FUSE=1 (decision D1): ship cell ②'s node and element-sigma segments as ONE
+ * message per partner instead of two. A pure TRANSPORT variant — identical bytes packed in an
+ * identical order, so it MUST be byte-identical to the unfused form; only the message COUNT
+ * changes. It exists because ②'s measured deficit against cell ④ (RESULTS §9.7) is consistent
+ * with BOTH of ②'s handicaps — 2x the bytes and 2x the messages — and removing the message term
+ * by construction is the only way to say which one it is. Reported by the [m9] cell line;
+ * no-op for any one-segment ship (the prestep ship, and cell ④). */
+int fesom_evpwide_env_fuse(void);
+
 /* Extended-slot count for allocation tails (0 when off / no stash / npes==1).
  * Valid after fesom_evpwide_mesh_hook. */
 int fesom_evpwide_next(void);
@@ -121,6 +130,18 @@ void fesom_evpwide_subcycle_exchange(struct fesom_ice *ice, struct fesom_partit 
 void fesom_evpwide_mevp_prestep_exchange(struct fesom_ice *ice, struct fesom_partit *p);
 void fesom_evpwide_mevp_window_exchange(struct fesom_ice *ice, struct fesom_partit *p,
                                         int div_on);
+
+/* D1/P0b — end-of-loop report of what the wide halo actually put on the wire: MPI messages
+ * posted per step and doubles shipped per step. COLLECTIVE (every rank must call it); prints
+ * nothing when the lever is off.
+ *
+ * It exists because NOTHING ELSE CAN SEE THE FUSED VARIANT. The halo profiler's `mpi/step`
+ * counts WAITALL calls, i.e. exchanges, and fusing changes neither; the bytes are identical by
+ * construction; and the model output is bit-identical, which is the point. Without this line a
+ * fused/unfused A/B is two runs that differ in no observable except a wall clock — exactly the
+ * situation where a dead knob and a lever that does not pay look the same (L80). The bytes are
+ * printed alongside as the control: they MUST match between the two forms. */
+void fesom_evpwide_msg_report(int timed_steps, struct fesom_partit *p);
 
 /* Release device Views before Kokkos::finalize (fesom_main teardown; cgpipe rule). */
 void fesom_evpwide_free(void);

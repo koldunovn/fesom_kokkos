@@ -87,5 +87,47 @@ if grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | grep
 fi
 
 echo
+echo "############ FUSED TRANSPORT (D1/P0b): EVPWIDE=2 + EVPWIDE_FUSE=1 ############"
+# The fused form packs the SAME values in the SAME order into ONE per-partner message instead
+# of two, so it must be byte-identical to the unfused leg above — that is check (1) again, at
+# matched K, and it is the whole correctness content of the variant.
+#
+# 🔴 Check (2) matters MORE here than it did for the refactor. Fusing moves every entry to a
+#    different address in a different buffer; a diagnostic left indexing the old buffer reads
+#    stale or unwritten memory and prints a plausible number, while the byte check passes at
+#    full marks because model output never touches it. Same L80 shape, new costume.
+OUT=$BASE/k2_fused; mkdir -p "$OUT"
+( export FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_EVPWIDE=2 FESOM_SPEED_EVPWIDE_FUSE=1 \
+         FESOM_EVPWIDE_SELFCHECK=1
+  srun -l "$K_BIN" "$MESH" "$OUT" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT/run.log" 2> "$OUT/run.err" )
+echo "exit=$?"
+grep -hE "FESOM_SPEED_EVPWIDE_FUSE = " "$OUT/run.err" "$OUT/run.log" | head -1 | sed 's/^/    /'
+if ! grep -qE "FESOM_SPEED_EVPWIDE_FUSE = 1" "$OUT/run.err" "$OUT/run.log"; then
+    echo "    FAIL — the FUSE knob did not fire; everything below is VACUOUS"; RC=1
+fi
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/k2" "$OUT" >/dev/null 2>&1
+if [ $? -eq 0 ]; then echo "    BYTE PASS — fused == unfused at K=2, bit for bit"
+else echo "    BYTE FAIL — fusing changed the trajectory (it must not: same values, same order)"; RC=1; fi
+FDRIFT=$(grep -hc "ghost drift" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+FECHO=$(grep -hc "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+echo "    window drift lines : ${FDRIFT:-0}   prestep echo lines : ${FECHO:-0}"
+grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | tail -2 | sed 's/^/      /'
+[ "${FDRIFT:-0}" -gt 0 ] || { echo "    FAIL — the WINDOW diagnostic is DEAD under fusing"; RC=1; }
+[ "${FECHO:-0}"  -gt 0 ] || { echo "    FAIL — the PRESTEP_ECHO diagnostic is DEAD under fusing"; RC=1; }
+if grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | grep -qv "0.000e+00"; then
+    echo "    FAIL — the prestep echo is NONZERO under fusing"; RC=1
+fi
+# The drift print must also AGREE with the unfused run's, value for value: it is computed from
+# the recv buffer, so it is the one number that would move if the fused indexing were wrong in
+# a way the ghost values happen to survive.
+if diff <(grep -hE "ghost drift" "$BASE/k2_self/run.log" "$BASE/k2_self/run.err" 2>/dev/null) \
+        <(grep -hE "ghost drift" "$OUT/run.log" "$OUT/run.err" 2>/dev/null) >/dev/null; then
+    echo "    DIAG PASS — the drift series is identical to the unfused run's"
+else
+    echo "    FAIL — the drift series differs from the unfused run: the fused recv indexing is wrong"
+    RC=1
+fi
+
+echo
 [ "$RC" -eq 0 ] && echo "=== M9 EVPWIDE REGRESSION PASS ===" || echo "=== M9 EVPWIDE REGRESSION FAIL ==="
 exit $RC
