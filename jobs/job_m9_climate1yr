@@ -80,11 +80,15 @@ echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
 echo "    mesh   = $MESH   nodes=$SLURM_NNODES ntasks=$NPES"
 echo "    dt=$DT steps=$NSTEPS (= $(awk "BEGIN{printf \"%.2f\", $DT*$NSTEPS/86400/365}") model yr) year=$YEAR"
 echo "    KNOBS  = '${KNOBS:-<none — classic>}'"
-echo "    io     = COMPILED-IN DEFAULT (monthly means, all default vars) — FESOM_IO_CONFIG unset"
+echo "    io     = ${IOCFG:-COMPILED-IN DEFAULT (monthly means, all default vars)}"
 echo
 
 # Clean slate: no stray physics or speed knobs inherited through --export=ALL.
 unset FESOM_MIX_SCHEME FESOM_ALE FESOM_ALE_DUMP_DIR FESOM_IO_CONFIG
+# IOCFG= overrides the compiled-in default. Used by the partition-imprint test, which needs
+# DAILY ice fields (jobs/io.config.m9_daily_ice); a monthly mean averages away 30 days of the
+# very thing that test is looking for. Unset => the default monthly-means behaviour above.
+[ -n "${IOCFG:-}" ] && export FESOM_IO_CONFIG="$IOCFG"
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
 
 export FESOM_WHICH_EVP=1             # <-- mEVP. Cell 5 is a no-op under std EVP.
