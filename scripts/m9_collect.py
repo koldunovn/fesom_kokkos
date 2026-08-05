@@ -30,6 +30,12 @@ MODE_RE  = re.compile(r"^\s+mode\s+= (\S+)")
 PHASE_RE = re.compile(r"\[phasestats\]\s+(\w+)\s+\|\s+([0-9.]+)\s+/\s+([0-9.]+)\s+/\s+([0-9.]+)\s+@\d+\s+\|"
                       r"\s+([0-9.]+)\s+/\s+([0-9.]+)\s+/\s+([0-9.]+)\s+@\d+\s+\|\s+([0-9.]+)")
 CELL_RE  = re.compile(r"\[m9\] mEVP cell: (.*)")
+# D1/P0b: what the wide halo actually put on the wire. The fused and unfused forms of cell (2)
+# differ in NO other recorded quantity -- same bytes, bit-identical output -- so without this
+# the JSON cannot tell the two legs apart at all.
+WIRE_RE  = re.compile(r"\[evpwide-wire\] transport=(\S+)\s+msgs/step: max-rank ([0-9.]+), "
+                      r"all-ranks ([0-9.]+) \| doubles recv/step: max-rank ([0-9.]+), "
+                      r"all-ranks ([0-9.]+)")
 
 def phases_from(logpath):
     """phase -> dict(busy_min/mean/max, wait_min/mean/max, mpi). Last occurrence wins."""
@@ -46,6 +52,23 @@ def phases_from(logpath):
     except OSError:
         pass
     return out
+
+def wire_of(legdir):
+    """transport + messages/step + doubles/step, from the end-of-loop [evpwide-wire] line."""
+    for cand in ("run.1.log", "run.2.log"):
+        try:
+            with open(os.path.join(legdir, cand), "rb") as f:
+                for raw in f:
+                    m = WIRE_RE.search(raw.decode("utf-8", "replace"))
+                    if m:
+                        return dict(transport=m.group(1),
+                                    msgs_per_step_max=float(m.group(2)),
+                                    msgs_per_step_all=float(m.group(3)),
+                                    doubles_per_step_max=float(m.group(4)),
+                                    doubles_per_step_all=float(m.group(5)))
+        except OSError:
+            continue
+    return None
 
 def cell_of(legdir):
     for cand in ("run.1.log", "run.2.log"):
@@ -94,6 +117,9 @@ for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
     for leg, d in legs.items():
         legdir = os.path.join(tagdir, leg)
         d["cell"] = cell_of(legdir)
+        w = wire_of(legdir)
+        if w:
+            d["wire"] = w
         ph = phases_from(os.path.join(legdir, "run.1.log"))
         if ph:
             d["phases"] = ph
@@ -137,3 +163,7 @@ for r in runs:
         print(f"   {name:<14} {d.get('s_per_step','?'):>9} s/step  {d.get('pct_vs_ref',0):+7.2f}%"
               f"   icedyn {d.get('icedyn_busy_ms','-'):>7} ms {d.get('icedyn_pct_vs_ref',0):+7.2f}%"
               f"   spread {d.get('rep_spread_pct',0):.2f}%   [{d.get('cell')}]", file=sys.stderr)
+        w = d.get("wire")
+        if w:
+            print(f"   {'':<14} wire: {w['transport']:<8} {w['msgs_per_step_max']:.0f} msgs/step "
+                  f"(max-rank), {w['doubles_per_step_max']:.0f} doubles/step", file=sys.stderr)

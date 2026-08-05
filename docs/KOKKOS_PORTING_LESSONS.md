@@ -1495,3 +1495,33 @@ meshes.
   approximation wants *small* K on accuracy grounds — so "K=8" tuned for one is the wrong answer
   for the other. (3) A lever that pays at the strong-scaling knee pays *nothing* far from it:
   at 462 k nodes/rank (NG5, 16 ranks) neither scheme moved the step by more than 3 %.
+
+- **L108 — WHEN ONE VARIANT CARRIES TWO HANDICAPS, YOU HAVE NOT MEASURED EITHER OF THEM. BUILD
+  THE VERSION THAT REMOVES ONE AND HOLDS THE OTHER FIXED — IT IS USUALLY A TRANSPORT CHANGE, NOT
+  A REDESIGN, AND IT IS BIT-IDENTICAL SO THE GATE IS FREE.** (M9 P0b, 2026-08-06.) Cell ② lost to
+  cell ④ on GPU everywhere, by 1.9–7.1 pp, and ② shipped both **2× the bytes and 2× the
+  messages**. The campaign attributed the gap to bytes — that was the term the pre-registration
+  had named — and wrote it up as the one place Danilov's reformulation paid. Packing ②'s two
+  segments into one per-partner message (`FESOM_SPEED_EVPWIDE_FUSE`, one index object, same
+  values in the same order) recovered **106–142 % of the gap at K=2**: the message was the whole
+  effect, the byte term is ±1.5 pp with no consistent sign, and the reformulation's last apparent
+  win evaporated. **The discriminator was already in the published table and nobody read it:**
+  the gap decayed with K like 1/K, which is what an extra message per *window* does (120/K
+  windows per step), while a byte ratio is K-independent. **Before believing a mechanism, check
+  that the effect scales the way that mechanism must scale.**
+  Three corollaries: (1) **A pure transport variant is the cheapest experiment in the book** —
+  bit-identical output means the whole correctness ladder is "did the bytes change? no", so the
+  only cost is the build. (2) **It needs an observable, and it will not have one.** Fused and
+  unfused differ in no recorded quantity: the halo profiler's `mpi/step` counts WAITALL calls
+  (i.e. exchanges), the bytes are identical by design, the output is bit-identical on purpose.
+  A new counter — messages posted and doubles shipped, printed at end of loop — had to be added
+  *for the A/B to be readable at all*, and it is what proved ②fused and ④ post exactly the same
+  message count while ④ ships 19 % fewer doubles and is still slower. **If a variant's only
+  visible difference is a wall clock, you are one silent regression away from measuring nothing.**
+  (3) **Sanity-check the ratio you are theorising about against the wire.** The "8·Ng vs 4·Ng"
+  2× byte ratio described only the *window* ship; on the wire the real ratio was **1.23×**,
+  because the per-step 11-field prestep ship that both cells share dominates the volume. That was
+  computable before any run and would have made a 7 pp byte explanation implausible on its face.
+  Also: a byte-class lever's gate cannot use "output differs" as its knob-fired proof — run that
+  way, `job_m9_options3` reported this build FAIL *for passing its own gate* (the L80 family,
+  inverted).
