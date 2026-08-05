@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=m10_probe
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --time=00:08:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/probe.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/probe.%j.err
+#
+# M10 T2 (R2) — Iallreduce progression probe, COMPUTE nodes, BOTH MPI stacks.
+# 2 nodes x 4 ranks so the reduction crosses the real IB fabric.
+# ⚠️ L77: env.sh and env_cuda.sh are sourced in SEPARATE subshells.
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+W=/work/ab0995/a270088/port2/m10/gates/probe_$SLURM_JOB_ID
+mkdir -p "$W"
+
+echo "=== M10 R2 probe — nodes: $SLURM_JOB_NODELIST ==="
+
+echo "--- stack A: openmpi/4.1.2-gcc-11.2.0 (env.sh — the CPU-production stack) ---"
+(
+  source "$ROOT/env.sh"
+  mpicc -O2 -o "$W/probe_412" "$ROOT/tools/iallreduce_probe.c" -lm || exit 3
+  srun -n "$SLURM_NTASKS" "$W/probe_412" 3
+)
+echo "stack A rc=$?"
+
+echo "--- stack B: openmpi/4.1.5-nvhpc-24.7 (env_cuda.sh — the GPU-production stack) ---"
+(
+  source "$ROOT/env_cuda.sh"
+  export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+  export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+  mpicc -O2 -o "$W/probe_415" "$ROOT/tools/iallreduce_probe.c" -lm || exit 3
+  srun -n "$SLURM_NTASKS" "$W/probe_415" 3
+)
+echo "stack B rc=$?"
+echo "=== probe done ==="

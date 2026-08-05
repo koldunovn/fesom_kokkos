@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=m10_probeg
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:08:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/probeg.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/probeg.%j.err
+#
+# M10 T2 (R2) — Iallreduce progression probe on GPU NODES (the allocation shape and
+# MPI stack pipecg actually runs under: openmpi/4.1.5-nvhpc, UCX, -C a100_80 per L94).
+# Host-side MPI only — the GPUs are allocated to reproduce the production environment.
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+W=/work/ab0995/a270088/port2/m10/gates/probeg_$SLURM_JOB_ID
+mkdir -p "$W"
+
+echo "=== M10 R2 probe (GPU nodes) — nodes: $SLURM_JOB_NODELIST ==="
+(
+  source "$ROOT/env_cuda.sh"
+  export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+  export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+  mpicc -O2 -o "$W/probe_415" "$ROOT/tools/iallreduce_probe.c" -lm || exit 3
+  srun -n "$SLURM_NTASKS" "$W/probe_415" 3
+)
+echo "rc=$?"
+echo "=== probe done ==="

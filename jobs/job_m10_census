@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=m10_census
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/census.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/census.%j.err
+#
+# M10 T2 — baseline census run (GPU): [ssh-wire] counters + PHASESTATS on the
+# UNMODIFIED cg path. Sizing numbers only (counts, iters/solve, CG-phase ms/step);
+# perf numbers of record still come from 300-step pinned A/B pairs (house rule).
+#
+# R9-hardened: ROOT from M10_ROOT, binary md5 into the log (m7_provenance).
+#
+# Submit: sbatch -N 4 --ntasks=16 --export=ALL,MESH=<mesh>,DT=180,TAG=census_ng5_4n \
+#             [NSTEPS=100] [KNOBS="FESOM_SPEED=1"] jobs/job_m10_census
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m10/gates/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+clear_knobs() { while read -r v; do unset "$v"; done \
+                  < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\)[A-Za-z0-9_]*\)=.*/\1/p'); }
+
+run_leg() {  # run_leg <name> <extra-knobs ';'-joined or ->
+    local leg=$1 knobs=$2
+    clear_knobs
+    if [ "$knobs" != "-" ]; then
+        IFS=';' read -ra KV <<< "$knobs"; for kv in "${KV[@]}"; do export "$kv"; done
+    fi
+    export FESOM_SSH_STATS=1 FESOM_SPEED_PHASESTATS=1
+    echo "--- leg $leg (knobs: $knobs) ---"
+    srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-100}" -1 "$PHC" 1958 \
+        > "$OUT/run_$leg.log" 2> "$OUT/run_$leg.err"
+    echo "run rc=$?"
+    grep -E "ssh-wire|cgpipe\] built|fesom_speed" "$OUT/run_$leg.err" | tail -8
+    grep -B2 -A14 "phase " "$OUT/run_$leg.log" | tail -20
+    grep "loop timing" "$OUT/run_$leg.log" | tail -1
+}
+
+echo "=== M10 census  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?DT required} nsteps=${NSTEPS:-100} ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+# leg A: legacy cg (all knobs off — 2 exch/iter, the pre-CGPIPE anatomy)
+run_leg legacy "-"
+# leg B: production FESOM_SPEED=1 (CGPIPE adopted — 1 fused exch/iter)
+run_leg speed1 "FESOM_SPEED=1"
+echo "=== census done ==="

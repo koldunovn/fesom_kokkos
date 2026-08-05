@@ -250,17 +250,18 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h`
 - Create: `jobs/job_m10_gate` (cheap-walltime gate template) · `tools/iallreduce_probe.c` (tiny, standalone)
 
-- [ ] `[ssh-wire]` counters in `fesom_ssh_solve_cg_kk`: per-solve iters, halo-exchange count,
-      blocking-allreduce count, iallreduce count, fallback count, final recurrence residual;
-      per-solve line under `FESOM_SSH_STATS=1`, aggregate at finalize under the same knob
-- [ ] `FESOM_SSH_VERIFY=1`: post-solve true residual ‖b−Ax‖ (one extra SpMV + allreduce),
-      printed vs recurrence residual; gate threshold DEFERRED until the baseline distribution is
-      recorded, then pre-registered
-- [ ] knobs parse via the house pattern: unrecognized value ⇒ `FESOM_DIE` listing valid values
-- [ ] `job_m10_gate`: `ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}`; prints resolved binary path +
-      md5 into the log (R9)
-- [ ] serial knob-off byte gate: instrumentation code with both knobs unset is byte-identical
-      (job id → doc); log's binary md5 differs from the main checkout's binary (R9 armed proof)
+- [x] `[ssh-wire]` counters in `fesom_ssh_solve_cg_kk` (iters, exch events, blocking/i-allreduce,
+      solver-body kernel launches ➕, fallback, final recurrence residual); per-solve line +
+      finalize aggregate under `FESOM_SSH_STATS=1`; ➕ (CUDA) launch-overhead micro-probe in
+      `fesom_ssh_wire_report` (async + fenced µs/launch — the T2 launch pricing)
+- [x] `FESOM_SSH_VERIFY=1`: post-solve true residual (fused SpMV-diff-reduce, byte-transparent,
+      comm/launches not wire-counted); threshold DEFERRED — first data: pi np2 max gap 1.05e-11
+- [x] knobs parse via the house pattern (`fesom_ssh_env01`: unrecognized ⇒ abort listing 0/1;
+      rank-0 announce when ON)
+- [x] `job_m10_gate` (created in T1): `ROOT=${M10_ROOT:-...}`, binary md5 + main-checkout md5
+      printed (R9)
+- [x] serial knob-off byte gate on the instrumentation commit: **PASS** job 26722771, diff_snap
+      rc=0, log md5 `8f2be32b…` ≠ main `9743f602…` (R9 armed proof)
 - [ ] **Iallreduce progression probe** (R2): post `Iallreduce`, busy-work T, `Wait`; overlap
       fraction on openmpi/4.1.2 AND 4.1.5-nvhpc, CPU and CUDA nodes; result → doc; pipecg
       attribution rule pre-registered from it

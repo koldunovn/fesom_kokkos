@@ -44,6 +44,12 @@ Every gate/A-B row: date · gate · job id · binary md5 (from the log — R9) �
 | date | gate | job | binary md5 | result |
 |---|---|---|---|---|
 | 2026-08-06 | T1 base: knob-free serial 20-step CORE2 byte gate (worktree ROOT, HEAD f42c453) | 26722627 | `54433326…` (log also shows main-checkout `9743f602…` ≠ — R9 armed) | **PASS** diff_snap rc=0 |
+| 2026-08-06 | T2 knob-off byte gate on the [ssh-wire]+VERIFY instrumentation commit | 26722771 | `8f2be32b…` ≠ main `9743f602…` (R9) | **PASS** diff_snap rc=0 |
+
+**T2 instrumentation smoke (login pi np2, dt100, 20 steps, STATS+VERIFY on):** counts EXACT
+vs hand count (3-iter solve: exch=8=2+2k, ar_blk=8=2+2k, body-launches=17=6+4k−1(break));
+verify true≡rec to 7 digits, **max |true−rec| gap over 20 solves = 1.05e-11** — first data
+point for the (deferred) verify gate threshold.
 
 ## Pre-registrations
 
