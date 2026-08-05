@@ -38,6 +38,9 @@
 #include "fesom_partit.h"
 #include "fesom_speed.hpp"         // M7 E.CG1: FESOM_SPEED_CGPIPE (opt-in _exp lever)
 #include <unordered_map>           // M7 E.CG1: one-time gid->local maps (setup only)
+#include "fesom_ssh_dump.h"        // M10 T3: solver-lab dump format
+#include <sys/stat.h>              // M10 T3: mkdir for FESOM_SSH_DUMP
+#include <errno.h>
 
 /*===========================================================================
  * Stiffness matrix: build CSR + fill values
@@ -2155,6 +2158,120 @@ static void ssh_wire_close_solve(int iters, double res, double rtol, fesom_parti
     }
 }
 
+/* ---- M10 T3: FESOM_SSH_TRACE — per-iteration α/β/residual on rank 0 ------
+ * The Layer-0 comparator's instrument: cg2/pipecg/oati must reproduce the
+ * reference PCG's α/β sequences to rounding on real dumps. %.17g = exact
+ * double round-trip. Diagnostic prints only — byte-transparent. */
+static bool ssh_trace_on()
+{
+    static int c = -1;
+    if (c < 0) c = fesom_ssh_env01("FESOM_SSH_TRACE");
+    return c != 0;
+}
+
+/* ---- M10 T3: FESOM_SSH_DUMP=<csv 1-based solves> + FESOM_SSH_DUMP_DIR ----
+ * Per-rank raw dumps of a solve (CSR + pr + b + x0 + x_final + iters) for
+ * the offline lab (tools/fesom_ssh_lab.cpp). Format: src/fesom_ssh_dump.h.
+ * The solve index is the [ssh-wire] solve counter (== model step for the
+ * 1-solve/step main loop; init-context solves use the C solver, not this). */
+static const char *ssh_dump_dir()
+{
+    static int init = 0;
+    static const char *dir = NULL;
+    if (!init) {
+        init = 1;
+        const char *steps = getenv("FESOM_SSH_DUMP");
+        if (steps && steps[0]) {
+            dir = getenv("FESOM_SSH_DUMP_DIR");
+            if (!dir || !dir[0])
+                FESOM_DIE("FESOM_SSH_DUMP is set but FESOM_SSH_DUMP_DIR is missing");
+        }
+    }
+    return dir;
+}
+
+static bool ssh_dump_wanted(long solve)
+{
+    static int init = 0;
+    static std::vector<long> steps;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("FESOM_SSH_DUMP");
+        if (e && e[0]) {
+            char *dup = strdup(e), *save = NULL;
+            for (char *tok = strtok_r(dup, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+                char *end = NULL;
+                long v = strtol(tok, &end, 10);
+                if (!end || *end != '\0' || v <= 0)
+                    FESOM_DIE("FESOM_SSH_DUMP: bad step '%s' (want a csv of positive ints)", tok);
+                steps.push_back(v);
+            }
+            free(dup);
+        }
+    }
+    for (long s : steps) if (s == solve) return true;
+    return false;
+}
+
+static void ssh_dump_write(const fesom_ssh_stiff *S, const fesom_solverinfo *si,
+                           const struct fesom_mesh *mesh, fesom_partit *partit,
+                           long solve,
+                           const std::vector<real_t> &av, const std::vector<real_t> &pr,
+                           const std::vector<real_t> &b,  const std::vector<real_t> &x0,
+                           const real_t *xf, int iters, double final_res, double rtol)
+{
+    static_assert(sizeof(real_t) == 8, "ssh-dump format is f64; SP builds are out of scope");
+    const char *dir = ssh_dump_dir();
+    const int mype = partit ? partit->mype : 0;
+    const int npes = partit ? partit->npes : 1;
+    const int N    = mesh->myDim_nod2D;
+    char stepdir[1024], path[1200];
+    snprintf(stepdir, sizeof stepdir, "%s/step%04ld", dir, solve);
+    if (mype == 0) {
+        mkdir(dir, 0755);                                   /* EEXIST is fine */
+        if (mkdir(stepdir, 0755) != 0 && errno != EEXIST)
+            FESOM_DIE("ssh-dump: mkdir %s failed (errno %d)", stepdir, errno);
+    }
+    if (partit && npes > 1) MPI_Barrier(partit->MPI_COMM_FESOM);
+    snprintf(path, sizeof path, "%s/rank%05d.bin", stepdir, mype);
+    FILE *f = fopen(path, "wb");
+    FESOM_CHECK(f, "ssh-dump: cannot open %s", path);
+    uint64_t u64; int32_t i32; double f64;
+    #define WSCAL(x) FESOM_CHECK(fesom_sshdump_wr(f, &(x), sizeof(x)) == 0, "ssh-dump: write failed %s", path)
+    #define WARR(p, n) FESOM_CHECK(fesom_sshdump_wr_arr(f, (p), (n)) == 0, "ssh-dump: array write failed %s", path)
+    u64 = FESOM_SSHDUMP_MAGIC; WSCAL(u64);
+    i32 = FESOM_SSHDUMP_VERSION; WSCAL(i32);
+    i32 = (int32_t)solve; WSCAL(i32);
+    i32 = npes; WSCAL(i32);   i32 = mype; WSCAL(i32);
+    i32 = N; WSCAL(i32);      i32 = mesh->eDim_nod2D; WSCAL(i32);
+    i32 = S->nnz; WSCAL(i32); i32 = mesh->nod2D; WSCAL(i32);
+    f64 = (double)FESOM_PHASE1_DT; WSCAL(f64);
+    f64 = (double)si->soltol; WSCAL(f64);
+    i32 = si->maxiter; WSCAL(i32);
+    u64 = partit ? fesom_sshdump_fnv1a(partit->myList_nod2D,
+                       (size_t)(N + mesh->eDim_nod2D) * sizeof(int)) : 0;
+    WSCAL(u64);
+    WARR(S->rowptr, (size_t)(N + 1) * sizeof(int));
+    WARR(S->colind, (size_t)S->nnz * sizeof(int));
+    WARR(av.data(), av.size() * sizeof(real_t));
+    WARR(pr.data(), pr.size() * sizeof(real_t));
+    WARR(b.data(),  b.size()  * sizeof(real_t));
+    WARR(x0.data(), x0.size() * sizeof(real_t));
+    WARR(xf,        (size_t)N * sizeof(real_t));
+    i32 = iters; WSCAL(i32);
+    f64 = final_res; WSCAL(f64);
+    f64 = rtol; WSCAL(f64);
+    u64 = FESOM_SSHDUMP_MAGIC; WSCAL(u64);
+    #undef WSCAL
+    #undef WARR
+    fclose(f);
+    if (mype == 0) {
+        fprintf(stderr, "[ssh-dump] solve %ld -> %s (np%d, nnz=%d, iters=%d)\n",
+                solve, stepdir, npes, S->nnz, iters);
+        fflush(stderr);
+    }
+}
+
 /* Finalize aggregate (fesom_main, before Kokkos::finalize). No-op unless
  * FESOM_SSH_STATS=1. The CUDA micro-probe prices a kernel launch two ways:
  * back-to-back enqueue (async, one fence at the end) and fully-fenced (the
@@ -2328,6 +2445,27 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         return 0;
     }
 
+    /* M10 T3 — FESOM_SSH_DUMP: snapshot the solve inputs for the offline lab.
+     * sync_host on read-only mirrors is value-neutral; the file is written at
+     * solve exit (x_final + iters land in the footer). The dump decision is
+     * uniform across ranks (env + solve counter), so the barrier inside
+     * ssh_dump_write is collective by construction. */
+    const long dump_solve = g_sshwire.solves + 1;
+    const bool dumping = ssh_dump_dir() != NULL && ssh_dump_wanted(dump_solve);
+    std::vector<real_t> dmp_av, dmp_pr, dmp_b, dmp_x0;
+    if (dumping) {
+        dyn->d_eta_fld.sync_host();
+        dyn->ssh_rhs_fld.sync_host();
+        /* const_cast: sync_host mutates only the DualView bookkeeping/mirror,
+         * never the model values — the matrix stays what the device computed. */
+        const_cast<fesom_ssh_stiff *>(S)->values_fld.sync_host();
+        const_cast<fesom_ssh_stiff *>(S)->pr_values_fld.sync_host();
+        dmp_x0.assign(dyn->d_eta,   dyn->d_eta   + N);
+        dmp_b .assign(dyn->ssh_rhs, dyn->ssh_rhs + N);
+        dmp_av.assign(S->values,    S->values    + S->nnz);
+        dmp_pr.assign(S->pr_values, S->pr_values + S->nnz);
+    }
+
     /* r0 = rhs - A·X. X must be halo-current before the SpMV gathers it at colind. */
     exch(dyn->d_eta_fld);                            /* solver.F90:421 EXCH(X) */
     SSH_WIRE_LAUNCH(2);                              /* r0 spmv + map */
@@ -2455,6 +2593,10 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
 
         real_t residual = sqrt(sp1 / (real_t)N_global);
         last_res = residual;                         /* M10: exported to wire/verify */
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0)) {
+            fprintf(stderr, "[ssh-trace] it=%d al=%.17g res=%.17g\n",
+                    iter, (double)al, (double)residual);
+        }
         if ((partit == NULL || partit->mype == 0)
             && (verbose ? (iter <= 5 || iter % 50 == 0)
                         : (iter % heartbeat_every == 0))) {
@@ -2473,6 +2615,8 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
 
         const real_t be = sp0 / s_old;
         s_old = sp0;
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+            fprintf(stderr, "[ssh-trace] it=%d be=%.17g\n", iter, (double)be);
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, Next),
             KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
@@ -2534,6 +2678,11 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             fprintf(stderr, "[cgpoly] solve %ld: iters=%d\n", g_cgpoly.solves, iter);
             fflush(stderr);
         }
+    }
+    if (dumping) {                                   /* M10 T3: x_final + footer */
+        dyn->d_eta_fld.sync_host();
+        ssh_dump_write(S, si, mesh, partit, dump_solve, dmp_av, dmp_pr, dmp_b, dmp_x0,
+                       dyn->d_eta, iter, (double)last_res, (double)rtol);
     }
     si->last_iters = iter;
     ssh_wire_close_solve(iter, (double)last_res, (double)rtol, partit);

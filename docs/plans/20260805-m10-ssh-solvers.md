@@ -262,18 +262,22 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
       printed (R9)
 - [x] serial knob-off byte gate on the instrumentation commit: **PASS** job 26722771, diff_snap
       rc=0, log md5 `8f2be32b…` ≠ main `9743f602…` (R9 armed proof)
-- [ ] **Iallreduce progression probe** (R2): post `Iallreduce`, busy-work T, `Wait`; overlap
-      fraction on openmpi/4.1.2 AND 4.1.5-nvhpc, CPU and CUDA nodes; result → doc; pipecg
-      attribution rule pre-registered from it
-- [ ] baseline census (the sizing-of-record table in `SSH_SOLVERS_M10.md`): instrumented runs
-      on CORE2 np8 (login) + dars g4n + NG5 g4n/g16n short runs — iters/solve, counts,
-      PHASESTATS `FESOM_PH_CG` ms/step, **CG-phase kernel-launch count + per-launch overhead**
-      (prices the extra AXPY launches pipecg/oati pay against saved allreduces)
-- [ ] **pre-register the Layer-2 per-field solver-class bounds** in the doc (citing
-      `docs/REFERENCE_RUNS.md` per-scheme floors, the L79 zstar Kv ~1e-1 control, the
-      CGPOLY/M5.23 bar) — before any variant gate is submitted
-- [ ] test: `[ssh-wire]` counts reconcile with the E-ledger's known exchange counts on the same
-      config (146/74 events/step class — L100 cross-check)
+- [x] **Iallreduce progression probe** (R2): jobs 26722815 (compute, both stacks) + 26722816
+      (GPU nodes) — **NO progression on any stack** (wait = full AR latency at every busy
+      factor; Iallreduce path carries +8 µs (4.1.2) / +1.6-1.8 µs (4.1.5) surcharge over
+      blocking); attribution rule pre-registered in doc §census (null pipecg ⇒ STACK)
+- [x] baseline census harvested (doc §census): CORE2 np8 login (132.35 it, legacy+FORCE_SERIAL
+      cgpipe legs) · dars 4N 26722817 (40.2 it, cg 11.0+8.3 → 6.1+4.4 ms/step) · NG5 4N
+      26722818 (83.7 it) · NG5 16N 26722819 (83.7 it, cg 10.4 busy + **13.0 wait** ms/step —
+      majority-comm at scale); launch pricing ➕ IN-BINARY probe: async 3.0 / fenced 8.9
+      µs/launch (A100, stable across 4 runs)
+- [x] **Layer-2 per-field solver-class bounds pre-registered** (doc §P-L2) — ➕ calibrated by
+      MEASUREMENT: off-vs-CGPOLY-d3 FORCE_SERIAL 20-step pair on the exact gate config (the
+      certified solver-class precedent) instead of invented numbers; mEVP
+      formal-FAIL-with-exoneration shape + strict-matrix rule carried over
+- [x] test: counts reconcile EXACTLY — legacy 2+2k / cgpipe 2+k at CORE2 (266.7/134.35 @
+      k=132.35) and dars (82.34/42.18 @ k=40.17); iteration counts IDENTICAL legacy-vs-speed1
+      (CGPIPE byte-claim at count level, CUDA included)
 
 ### Task 3: Solver lab — matrix dump + replay driver
 

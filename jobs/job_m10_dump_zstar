@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=m10_dumpz
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/dumpz.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/dumpz.%j.err
+#
+# M10 T3 (R3) — zstar drift-material dumps: CORE2 g1 CUDA, FESOM_ALE=zstar, two dumps
+# ~6 months apart (steps 100 and 8740 at dt1800 = 180 d). The matrix VALUES drift per step
+# under zstar while pr_values and the (future) pcsi eigenbounds stay frozen — these two
+# matrices are the drift-check material (T8c decides FESOM_PCSI_REEIG on them).
+# np1 ⇒ single-file dumps, directly lab/python-readable on login.
+# NOTE: CUDA-trajectory dumps are for MATRIX analysis, not lab bitwise certification
+# (cert dumps are the serial CORE2 ones).
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export FESOM_PRINT_EVERY=999
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DD=/work/ab0995/a270088/port2/m10/labdumps/core2_np1_zstar
+OUT=/work/ab0995/a270088/port2/m10/gates/dumprun_zstar
+rm -rf "$OUT"; mkdir -p "$OUT" "$DD"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+cat "$OUT/SHA.txt"
+
+export FESOM_ALE=zstar
+export FESOM_SSH_DUMP="100,8740"
+export FESOM_SSH_DUMP_DIR=$DD
+export FESOM_SSH_STATS=1
+
+echo "=== M10 zstar dump — CORE2 g1 CUDA dt1800, 8740 steps, dumps @100/@8740 ==="
+srun "$FESOM" "$MESH" "$OUT" 1800 8740 -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+grep "ssh-dump" "$OUT/run.err" | tail -3
+grep "ssh-wire.*AGGREGATE" "$OUT/run.err" | tail -1
+du -sh "$DD"
