@@ -170,6 +170,18 @@ symmetric ⇒ `D^{1/2} M D^{-1/2}` is symmetric — the cgpoly `isq` machinery i
 tool); (b) the quantified candidate cause for Sergey's CG² instability (report to user).
 Identical at step 1 and step 20 (linfs: matrix static, as designed).
 
+**F1b ⭐⭐ (R1, CONFIRMED 2026-08-06) — the non-symmetry BREAKS the recurrence that every
+CG-CG-family solver depends on.** Derived in `docs/plans/20260805-m10-ssh-derivations.md`
+§0.4 and measured with `fesom_ssh_lab --sigma-drift` on the CORE2 np1 step-20 dump: the
+`σ_i = δ_i − β_i²σ_{i-1}` recurrence — which `cg2`, `pipecg` AND `oati` all use in place of
+an explicit `(p,Ap)` — is valid only for symmetric `M⁻¹`. As built it drifts to **21.8 %**
+by iteration 60 (the orthogonality term that must vanish reaches **24.1 %** of γ); with the
+symmetrised `M̃⁻¹ = D^{−1/2}CD^{−1/2}` it is exact to **1.2e-13**. **α is therefore wrong by
+up to 22 % on the production matrix** — a confirmed candidate explanation for Sergey's CG²
+instability, and a scope change: the preconditioner-symmetry decision the plan scoped to
+P-CSI now governs all four solvers (knob `FESOM_SSH_SYMPRE`, default 1 for non-`cg`).
+Baseline `cg` is unaffected — it computes `(p,Ap)` explicitly and recurs nothing.
+
 **F2 (R2) — no async Iallreduce progression** (see §Baseline census: probe verdict +
 binding pipecg attribution rule).
 

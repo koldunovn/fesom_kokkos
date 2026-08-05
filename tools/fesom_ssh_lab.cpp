@@ -18,6 +18,10 @@
  *   --reps <r>       solve repetitions (default 1; each rep restarts from the dumped x0)
  *   --trace          FESOM_SSH_TRACE=1 (per-iteration α/β/res lines, rank 0)
  *   --sym-check      R1 symmetry-defect measurement on pr_values (+ A as control), then exit
+ *   --sigma-drift    Layer-0 falsification experiment (derivations §0.4): run reference PCG
+ *                    and compare the TRUE (p,Ap) against the CG-CG recurrence
+ *                    σ_i = δ_i − β_i²σ_{i-1} that cg2/pipecg/oati rely on. Repeat with the
+ *                    symmetrised preconditioner D^{-1/2}CD^{-1/2}. Then exit.
  *   --knob K=V       arbitrary env knob, repeatable (e.g. --knob FESOM_SPEED_CGPOLY=3)
  * N must equal the dump's npes. Exit 0 = certification criteria met (np1: bitwise x_final
  * + same iters; np>1: same iters), 1 = mismatch, 2 = usage/load error.
@@ -62,7 +66,7 @@ int main(int argc, char **argv)
     const char *step_dir = argv[2];
 
     /* options */
-    double opt_tol = -1.0; int opt_maxiter = -1, reps = 1, sym_check = 0;
+    double opt_tol = -1.0; int opt_maxiter = -1, reps = 1, sym_check = 0, sigma_drift = 0;
     for (int a = 3; a < argc; ++a) {
         if      (!strcmp(argv[a], "--solver")  && a + 1 < argc) setenv("FESOM_SSH_SOLVER", argv[++a], 1);
         else if (!strcmp(argv[a], "--tol")     && a + 1 < argc) opt_tol = atof(argv[++a]);
@@ -70,6 +74,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[a], "--reps")    && a + 1 < argc) reps = atoi(argv[++a]);
         else if (!strcmp(argv[a], "--trace"))                    setenv("FESOM_SSH_TRACE", "1", 1);
         else if (!strcmp(argv[a], "--sym-check"))                sym_check = 1;
+        else if (!strcmp(argv[a], "--sigma-drift"))              sigma_drift = 1;
         else if (!strcmp(argv[a], "--knob")    && a + 1 < argc) {
             char *kv = strdup(argv[++a]); char *eq = strchr(kv, '=');
             if (!eq) die_usage(mpi.mype);
@@ -186,7 +191,106 @@ int main(int argc, char **argv)
                d_step, mpi.npes, stiff.nnz, ref_iters, ref_res, ref_rtol, d_soltol, d_maxiter);
 
     /* ---- R1: symmetry-defect measurement ---------------------------------- */
-    if (sym_check) {
+    /* ---- Layer-0 falsification experiment: σ-recurrence drift (derivations §0.4) ----
+     * Reference PCG on the dumped system, host-side (a diagnostic, NOT the production
+     * solver), tracking per iteration:
+     *    σ_true = (p_i, A p_i)          — what baseline PCG computes explicitly
+     *    σ_rec  = δ_i − β_i² σ_rec,i-1  — what cg2/pipecg/oati recur instead
+     * The identity σ_true == σ_rec holds iff M⁻¹ is symmetric. Run twice: with the
+     * built preconditioner and with M̃⁻¹ = D^{-1/2} C D^{-1/2} (same spectrum, symmetric).
+     * Also reports the orthogonality residual (u_i, r_{i-1}) — the term that must vanish. */
+    if (sigma_drift) {
+        const int Nx = N + mesh.eDim_nod2D;
+        std::vector<real_t> pr_sym((size_t)stiff.nnz);
+        {   /* p̃r[i,j] = pr[i,j]·sqrt(d_i/d_j); needs d over owned+halo → exchange the diag */
+            std::vector<real_t> dg((size_t)Nx, 0.0);
+            for (int i = 0; i < N; ++i) dg[(size_t)i] = stiff.values[stiff.rowptr[i]];
+            if (mpi.npes > 1) fesom_halo_exchange(dg.data(), FESOM_HALO_NOD2D, 1, 1, &mpi);
+            for (int i = 0; i < N; ++i)
+                for (int n = stiff.rowptr[i]; n < stiff.rowptr[i + 1]; ++n) {
+                    const int j = stiff.colind[n];
+                    pr_sym[(size_t)n] = (j == i) ? stiff.pr_values[n]
+                        : stiff.pr_values[n] * sqrt(dg[(size_t)i] / dg[(size_t)j]);
+                }
+        }
+        std::vector<real_t> pr_orig(stiff.pr_values, stiff.pr_values + stiff.nnz);
+
+        auto dot = [&](const std::vector<real_t> &a, const std::vector<real_t> &b) {
+            double s = 0.0;
+            for (int i = 0; i < N; ++i) s += (double)a[(size_t)i] * (double)b[(size_t)i];
+            if (mpi.npes > 1) MPI_Allreduce(MPI_IN_PLACE, &s, 1, MPI_DOUBLE, MPI_SUM, mpi.MPI_COMM_FESOM);
+            return s;
+        };
+        auto spmv = [&](const real_t *vals, std::vector<real_t> &v, std::vector<real_t> &y) {
+            if (mpi.npes > 1) fesom_halo_exchange(v.data(), FESOM_HALO_NOD2D, 1, 1, &mpi);
+            for (int i = 0; i < N; ++i) {
+                real_t s = 0.0;
+                for (int n = stiff.rowptr[i]; n < stiff.rowptr[i + 1]; ++n)
+                    s += vals[n] * v[(size_t)stiff.colind[n]];
+                y[(size_t)i] = s;
+            }
+        };
+
+        for (int leg = 0; leg < 2; ++leg) {
+            const real_t *PR = leg == 0 ? pr_orig.data() : pr_sym.data();
+            const char *name = leg == 0 ? "pr_values (as built, NON-symmetric)"
+                                        : "D^-1/2 C D^-1/2 (symmetrised)";
+            std::vector<real_t> x(Nx,0.0), r(Nx,0.0), u(Nx,0.0), p(Nx,0.0), ap(Nx,0.0),
+                                r_prev(Nx,0.0), tmp(Nx,0.0);
+            for (int i = 0; i < N; ++i) x[(size_t)i] = d_x0[(size_t)i];
+            spmv(stiff.values, x, tmp);
+            for (int i = 0; i < N; ++i) r[(size_t)i] = d_b[(size_t)i] - tmp[(size_t)i];
+            spmv(PR, r, u);
+            for (int i = 0; i < N; ++i) p[(size_t)i] = u[(size_t)i];
+            double gamma = dot(r, u), gamma_prev = 0.0, sigma_rec = 0.0, beta = 0.0;
+            const double rtol_ = (opt_tol > 0.0 ? opt_tol : d_soltol)
+                               * sqrt(dot(d_b, d_b) / (double)mesh.nod2D);
+            double worst_rel = 0.0, worst_orth = 0.0;
+            int it = 0;
+            if (mpi.mype == 0)
+                printf("[lab-sigma] === leg %d: %s ===\n"
+                       "[lab-sigma] %5s %16s %16s %12s %14s\n", leg, name,
+                       "iter", "sigma_true", "sigma_recurred", "rel.drift", "(u_i,r_i-1)/gamma");
+            for (it = 1; it <= 60; ++it) {
+                spmv(stiff.values, p, ap);
+                const double sig_true = dot(p, ap);
+                if (it == 1) sigma_rec = sig_true;   /* seed: p₀=u₀ ⇒ σ₀ = δ₀ exactly */
+                const double alpha = gamma / sig_true;
+                const double rel = fabs(sig_true - sigma_rec) / fabs(sig_true);
+                if (it > 1 && rel > worst_rel) worst_rel = rel;
+                if (mpi.mype == 0 && (it <= 8 || it % 10 == 0))
+                    printf("[lab-sigma] %5d %16.9e %16.9e %12.3e %14.3e\n",
+                           it, sig_true, sigma_rec, rel,
+                           it > 1 ? dot(u, r_prev) / gamma : 0.0);
+                for (int i = 0; i < N; ++i) r_prev[(size_t)i] = r[(size_t)i];
+                for (int i = 0; i < N; ++i) {
+                    x[(size_t)i] += alpha * p[(size_t)i];
+                    r[(size_t)i] -= alpha * ap[(size_t)i];
+                }
+                spmv(PR, r, u);
+                const double gamma_new = dot(r, u);
+                const double rr = dot(r, r);
+                /* the orthogonality term that (★) needs to vanish */
+                const double orth = fabs(dot(u, r_prev)) / fabs(gamma_new);
+                if (it > 1 && orth > worst_orth) worst_orth = orth;
+                gamma_prev = gamma; gamma = gamma_new;
+                beta = gamma / gamma_prev;
+                /* CG-CG recurrence for the NEXT iteration's σ: needs δ = (w,u), w = A u */
+                spmv(stiff.values, u, tmp);
+                const double delta = dot(tmp, u);
+                sigma_rec = delta - beta * beta * sigma_rec;
+                for (int i = 0; i < N; ++i) p[(size_t)i] = u[(size_t)i] + beta * p[(size_t)i];
+                if (sqrt(rr / (double)mesh.nod2D) < rtol_) break;
+            }
+            if (mpi.mype == 0)
+                printf("[lab-sigma] leg %d SUMMARY: iters=%d  WORST |sigma_true-sigma_rec|/|sigma_true| = %.3e"
+                       "   WORST |(u_i,r_i-1)|/gamma = %.3e\n", leg, it, worst_rel, worst_orth);
+        }
+        if (mpi.mype == 0)
+            printf("[lab-sigma] VERDICT: the CG-CG family recurs sigma; leg 0 drift is the error"
+                   " cg2/pipecg/oati inherit from a non-symmetric M (derivations sec 0.4).\n");
+    }
+    else if (sym_check) {
         /* Owned-pair scan (both endpoints owned rows). Halo-column pairs need the
          * neighbour's row — reported as uncovered fraction; run at np1 for 100 %
          * coverage (the CORE2 case). A-matrix defect is the control (~0 expected). */

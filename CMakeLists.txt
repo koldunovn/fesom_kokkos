@@ -159,3 +159,12 @@ add_executable(test_field tests/test_field.cpp)
 target_include_directories(test_field PRIVATE src)
 target_link_libraries(test_field PRIVATE Kokkos::kokkos)
 add_test(NAME field COMMAND test_field)
+
+# M10 T4: solver testbed — SPD Laplacian fixture with analytic spectrum, reference PCG, the
+# alpha/beta comparator, the Chebyshev-rate checker and the derivations-§0.4/§0.5 symmetry
+# assertions. Pure host arithmetic (no Kokkos, no MPI) so it runs on the login node in <1 s;
+# per-solver assertions are added here as T5b-T8b land.
+add_executable(test_ssh_solvers tests/test_ssh_solvers.cpp)
+target_include_directories(test_ssh_solvers PRIVATE src ${NC_INCDIR})
+target_link_libraries(test_ssh_solvers PRIVATE m MPI::MPI_CXX Kokkos::kokkos)
+add_test(NAME ssh_solvers COMMAND test_ssh_solvers)
