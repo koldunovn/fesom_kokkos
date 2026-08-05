@@ -3130,6 +3130,384 @@ static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     return iter;
 }
 
+/* ======================================================================= *
+ * M10 T8a — Lanczos eigen-estimator for pcsi (derivations §4.4; [P] App. C with the
+ * T-5 correction). Tridiagonalises M̃⁻¹A in the M̃⁻¹ inner product; the extreme Ritz
+ * values come from Sturm bisection on T_m.
+ *
+ * ⚠️ T-5 (measured, testbed §7): [P] prints `q₁ = r₀/(r₀ᵀs₀)`. The missing SQUARE ROOT
+ * corrupts α₁ and plants a spurious tiny eigenvalue in T — θmin came out **2270× too
+ * small** on the fixture, at every m. We use `q₁ = r₀/sqrt(r₀ᵀs₀)`.
+ *
+ * Ritz values converge OUTWARD-short (θmax ≤ λmax, θmin ≥ λmin — verified in the testbed
+ * by monotonicity in m), which is exactly why the safe margins are deflate-ν / inflate-µ.
+ * That guarantee holds only for a self-adjoint operator ⇒ pcsi requires SYMPRE=1 (enforced
+ * in the interaction matrix).
+ *
+ * No reorthogonalisation: at m ≈ 30 the loss of orthogonality mainly duplicates interior
+ * Ritz values, and duplicates do not move the extremes (Ritz values always lie inside
+ * [λmin, λmax] by Rayleigh–Ritz). Runs ONCE, at the first pcsi solve.
+ * ======================================================================= */
+
+/* eigenvalues of T strictly below x (Sturm sequence) */
+static int ssh_sturm_count(const std::vector<double> &a, const std::vector<double> &b, double x)
+{
+    const int m = (int)a.size();
+    int cnt = 0;
+    double d = a[0] - x;
+    if (d < 0.0) ++cnt;
+    for (int i = 1; i < m; ++i) {
+        if (fabs(d) < 1e-300) d = 1e-300;
+        d = (a[(size_t)i] - x) - b[(size_t)i - 1] * b[(size_t)i - 1] / d;
+        if (d < 0.0) ++cnt;
+    }
+    return cnt;
+}
+
+static void ssh_tridiag_extremes(const std::vector<double> &a, const std::vector<double> &b,
+                                 double *lo, double *hi)
+{
+    const int m = (int)a.size();
+    double g0 = a[0], g1 = a[0];
+    for (int i = 0; i < m; ++i) {
+        const double bl = (i > 0)     ? b[(size_t)i - 1] : 0.0;
+        const double br = (i < m - 1) ? b[(size_t)i]     : 0.0;
+        g0 = fmin(g0, a[(size_t)i] - bl - br);
+        g1 = fmax(g1, a[(size_t)i] + bl + br);
+    }
+    auto bisect = [&](int want) {
+        double x0 = g0, x1 = g1;
+        for (int it = 0; it < 200; ++it) {
+            const double xm = 0.5 * (x0 + x1);
+            if (ssh_sturm_count(a, b, xm) >= want) x1 = xm; else x0 = xm;
+        }
+        return 0.5 * (x0 + x1);
+    };
+    *lo = bisect(1);
+    *hi = bisect(m);
+}
+
+struct SshPcsiState {
+    bool  built = false;
+    double nu = 0.0, mu = 0.0;
+    fesom::Field rp, dx, tmp;
+    int ext = 0;
+};
+static SshPcsiState g_pcsi;
+
+static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                         const struct fesom_mesh *mesh, fesom_partit *partit)
+{
+    SshPcsiState &s = g_pcsi;
+    if (s.built) return;
+    const int N        = mesh->myDim_nod2D;
+    const int Next     = N + mesh->eDim_nod2D;
+    const int parallel = (partit && partit->npes > 1);
+
+    /* explicit override wins (FESOM_PCSI_EIG="nu,mu") */
+    if (const char *e = getenv("FESOM_PCSI_EIG")) {
+        double a = 0.0, b = 0.0;
+        FESOM_CHECK(sscanf(e, "%lf,%lf", &a, &b) == 2 && a > 0.0 && b > a,
+                    "FESOM_PCSI_EIG='%s' — expected \"nu,mu\" with 0 < nu < mu", e);
+        s.nu = a; s.mu = b; s.built = true;
+        if (!partit || partit->mype == 0)
+            fprintf(stderr, "[pcsi] eigenbounds from FESOM_PCSI_EIG: [%.6e, %.6e]\n", a, b);
+        return;
+    }
+
+    int m = 30;
+    if (const char *e = getenv("FESOM_PCSI_LANCZOS")) {
+        m = atoi(e);
+        FESOM_CHECK(m >= 4 && m <= 500, "FESOM_PCSI_LANCZOS=%d out of range [4,500]", m);
+    }
+    double mg[2] = { 0.10, 0.05 };
+    if (const char *e = getenv("FESOM_PCSI_EIGMARGIN"))
+        FESOM_CHECK(sscanf(e, "%lf,%lf", &mg[0], &mg[1]) == 2 && mg[0] >= 0.0 && mg[1] >= 0.0,
+                    "FESOM_PCSI_EIGMARGIN='%s' — expected \"deflate_nu,inflate_mu\"", e);
+
+    /* host-side Lanczos on the ORIGINAL (host) arrays — runs once, off the hot path. */
+    std::vector<real_t> vals_h((size_t)S->nnz);
+    {
+        auto mv = Kokkos::create_mirror_view(S->values_fld.d());
+        Kokkos::deep_copy(mv, S->values_fld.d());
+        for (int i = 0; i < S->nnz; ++i) vals_h[(size_t)i] = mv(i);
+    }
+    const real_t *PR = g_sympre.pr_h.data();          /* SYMPRE is mandatory for pcsi */
+    auto spmv = [&](const real_t *A_, std::vector<real_t> &v, std::vector<real_t> &y) {
+        if (parallel) fesom_halo_exchange(v.data(), FESOM_HALO_NOD2D, 1, 1, partit);
+        for (int r = 0; r < N; ++r) {
+            real_t acc = 0.0;
+            for (int n = S->rowptr[r]; n < S->rowptr[r + 1]; ++n)
+                acc += A_[n] * v[(size_t)S->colind[n]];
+            y[(size_t)r] = acc;
+        }
+    };
+    auto dot = [&](const std::vector<real_t> &x, const std::vector<real_t> &y) {
+        double d = 0.0;
+        for (int i = 0; i < N; ++i) d += (double)x[(size_t)i] * (double)y[(size_t)i];
+        if (parallel) MPI_Allreduce(MPI_IN_PLACE, &d, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+        return d;
+    };
+
+    std::vector<real_t> q((size_t)Next, 0.0), qp((size_t)Next, 0.0), r((size_t)Next, 0.0),
+                        p((size_t)Next, 0.0), t((size_t)Next, 0.0);
+    /* deterministic, rank-independent start vector: a function of the GLOBAL node id, so
+     * every partitioning produces the SAME Krylov space (bit-reproducible bounds). */
+    for (int i = 0; i < N; ++i) {
+        const int gid = partit ? partit->myList_nod2D[i] : i + 1;
+        r[(size_t)i] = 1.0 + 0.37 * sin(0.7 * (double)gid);
+    }
+    spmv(PR, r, p);
+    const double n0 = dot(r, p);
+    FESOM_CHECK(n0 > 0.0, "pcsi Lanczos: r0'M^-1 r0 = %g <= 0 — preconditioner not SPD", n0);
+    const double scale = sqrt(n0);                     /* ⭐ T-5: the SQUARE ROOT */
+    for (int i = 0; i < N; ++i) q[(size_t)i] = r[(size_t)i] / scale;
+
+    std::vector<double> al, be;
+    double beta_prev = 0.0;
+    for (int j = 0; j < m; ++j) {
+        spmv(PR, q, p);                                /* p = M⁻¹ q   */
+        spmv(vals_h.data(), p, r);                     /* r = A M⁻¹ q */
+        for (int i = 0; i < N; ++i) r[(size_t)i] -= (real_t)beta_prev * qp[(size_t)i];
+        const double a = dot(p, r);
+        al.push_back(a);
+        for (int i = 0; i < N; ++i) r[(size_t)i] -= (real_t)a * q[(size_t)i];
+        spmv(PR, r, t);
+        const double bb = dot(r, t);
+        if (!(bb > 0.0)) break;
+        const double b = sqrt(bb);
+        be.push_back(b);
+        qp = q;
+        for (int i = 0; i < N; ++i) q[(size_t)i] = r[(size_t)i] / (real_t)b;
+        beta_prev = b;
+    }
+    FESOM_CHECK(al.size() >= 2, "pcsi Lanczos broke down after %zu steps", al.size());
+    if (be.size() >= al.size()) be.resize(al.size() - 1);
+
+    double th_lo = 0.0, th_hi = 0.0;
+    ssh_tridiag_extremes(al, be, &th_lo, &th_hi);
+    FESOM_CHECK(th_lo > 0.0 && th_hi > th_lo,
+                "pcsi Lanczos: nonsensical Ritz interval [%g, %g]", th_lo, th_hi);
+    /* SAFE directions (Ritz converge outward-short): deflate ν, inflate µ */
+    s.nu = th_lo * (1.0 - mg[0]);
+    s.mu = th_hi * (1.0 + mg[1]);
+
+    /* R6-class rank-agreement assertion: the bounds come from allreduced dots, so they must
+     * already be bitwise identical on every rank. Prove it (MIN vs MAX) rather than assume —
+     * a silent per-rank ω divergence would corrupt the solve invisibly. */
+    if (parallel) {
+        double lo2[2] = { s.nu, s.mu }, hi2[2] = { s.nu, s.mu };
+        MPI_Allreduce(MPI_IN_PLACE, lo2, 2, MPI_DOUBLE, MPI_MIN, partit->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, hi2, 2, MPI_DOUBLE, MPI_MAX, partit->MPI_COMM_FESOM);
+        FESOM_CHECK(lo2[0] == hi2[0] && lo2[1] == hi2[1],
+                    "pcsi: eigenbounds DIFFER across ranks (nu %.17g..%.17g, mu %.17g..%.17g) "
+                    "— every rank must compute the same omega sequence", lo2[0], hi2[0], lo2[1], hi2[1]);
+    }
+    s.built = true;
+    if (!partit || partit->mype == 0) {
+        fprintf(stderr, "[pcsi] Lanczos m=%zu on M~^-1 A: theta = [%.6e, %.6e] -> "
+                        "[nu,mu] = [%.6e, %.6e] (margins %.2f/%.2f), kappa = %.1f\n",
+                al.size(), th_lo, th_hi, s.nu, s.mu, mg[0], mg[1], s.mu / s.nu);
+        fflush(stderr);
+    }
+}
+
+/* ======================================================================= *
+ * M10 T8b — `pcsi`: preconditioned Chebyshev (classical Stiefel) iteration.
+ *
+ *   γ = (µ+ν)/2 ; α = 2/(µ−ν) ; ω₀ = 2/γ
+ *   Δx₀ = (1/γ)M⁻¹r₀ ; x₁ = x₀ + Δx₀ ; r₁ = b − Ax₁
+ *   ω_k = 1/(γ − ω_{k-1}/(4α²))            ← T-6 RESOLVED coefficient
+ *   Δx_k = ω_k M⁻¹r_k + (γω_k − 1)Δx_{k-1}
+ *   x_{k+1} = x_k + Δx_k ; r_{k+1} = b − Ax_{k+1}   ← TRUE residual, self-correcting
+ *
+ * 1 exchange, ZERO reductions per iteration; one reduction every FESOM_PCSI_CHECK
+ * iterations for the convergence test — and because the residual is the true one by
+ * construction, that test reads a residual that needs no verification (the pipelined
+ * attainable-accuracy failure mode does not exist here).
+ *
+ * Ring composition: exchange r on 2 rings ⇒ M⁻¹r on owned+ring1 ⇒ Δx and x carry ring1 by
+ * recurrence ⇒ Ax at owned rows sees a current ring1 x with no second message.
+ * ======================================================================= */
+
+static void ssh_pcsi_alloc(const struct fesom_mesh *mesh)
+{
+    const int E = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    if (g_pcsi.ext == E) return;
+    g_pcsi.rp .alloc("ssh.pcsi.rp",  (size_t)E);
+    g_pcsi.dx .alloc("ssh.pcsi.dx",  (size_t)E);
+    g_pcsi.tmp.alloc("ssh.pcsi.tmp", (size_t)E);
+    g_pcsi.ext = E;
+}
+
+static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                          const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
+{
+    const int     N        = mesh->myDim_nod2D;
+    fesom_partit *partit   = si->partit;
+    const int     parallel = (partit && partit->npes > 1);
+    const int     N_global = parallel ? mesh->nod2D : N;
+    const long    solve_id = g_sshwire.solves + 1;
+
+#ifdef KOKKOS_ENABLE_CUDA
+    const bool transport_ok = fesom_halo_device_active();
+#else
+    const bool transport_ok = true;
+#endif
+    const bool ring = ssh_ring_on() && parallel && transport_ok;
+    ssh_sympre_build(S, mesh, partit);                 /* mandatory for pcsi (checked in T5a) */
+    FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
+                "ssh-sympre: CGPIPE ring1 rows shipped with a different preconditioner");
+    cgpipe_ship_pr = g_sympre.pr_h.data();
+    if (ring && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
+    ssh_pcsi_alloc(mesh);
+    ssh_pcsi_eig(S, si, mesh, partit);
+
+    int K = 5;
+    if (const char *e = getenv("FESOM_PCSI_CHECK")) {
+        K = atoi(e);
+        FESOM_CHECK(K >= 1 && K <= 1000, "FESOM_PCSI_CHECK=%d out of range [1,1000]", K);
+    }
+    int maxit = si->maxiter;
+    if (const char *e = getenv("FESOM_PCSI_MAXITER")) {
+        maxit = atoi(e);
+        FESOM_CHECK(maxit >= 1, "FESOM_PCSI_MAXITER=%d must be positive", maxit);
+    }
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto vals   = S->values_fld.d();
+    auto prvals = Kokkos::View<const double*>(g_sympre.pr_d);
+    auto X   = dyn->d_eta_fld.d();
+    auto rhs = dyn->ssh_rhs_fld.d();
+    auto rr  = si->rr_fld.d();
+    auto rp  = g_pcsi.rp.d();
+    auto dx  = g_pcsi.dx.d();
+
+    auto exch = [&](fesom::Field &f) {
+        if (!parallel) return;
+        ++g_sshwire.s_exch;
+#ifdef KOKKOS_ENABLE_CUDA
+        if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
+#endif
+        f.modify_device(); f.sync_host();
+        fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+        f.modify_host();   f.sync_device();
+    };
+    auto exch_r = [&]() {
+        if (!parallel) return;
+        if (ring) { ++g_sshwire.s_exch; cgpipe_exchange_rr(si->rr_fld, partit); }
+        else      exch(si->rr_fld);
+    };
+    /* rp = M̃⁻¹ r on owned (+ring1 in the ring form) */
+    auto apply_M = [&]() {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pcsi_psolve", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n = a; n < e; ++n) s += prvals(n) * rr(colind(n));
+                rp(row) = s;
+            });
+        if (ring) { SSH_WIRE_LAUNCH(1); cgpipe_zz_ring1(rr, rp); }
+        else      { g_pcsi.rp.modify_device(); exch(g_pcsi.rp); }
+    };
+    /* r = b − A x over owned rows; x must be halo-current */
+    auto true_resid = [&]() {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pcsi_resid", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n = a; n < e; ++n) s += vals(n) * X(colind(n));
+                rr(row) = rhs(row) - s;
+            });
+        si->rr_fld.modify_device();
+    };
+    auto resid_norm = [&]() {
+        real_t t = 0.0;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_reduce("fesom_pcsi_rnorm", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i, real_t &l) { l += rr(i) * rr(i); }, t);
+        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &t, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+        return sqrt((double)t / (double)N_global);
+    };
+
+    SSH_WIRE_LAUNCH(1);
+    real_t s0 = cg_dot(rhs, rhs, N);
+    if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &s0, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+    const real_t rtol = si->soltol * sqrt(s0 / (real_t)N_global);
+    if (s0 == 0.0) {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pcsi_zeroX", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { X(row) = 0.0; });
+        dyn->d_eta_fld.modify_device();
+        si->last_iters = 0;
+        ssh_wire_close_solve(0, 0.0, (double)rtol, partit);
+        return 0;
+    }
+
+    const double gmm = 0.5 * (g_pcsi.mu + g_pcsi.nu);
+    const double alp = 2.0 / (g_pcsi.mu - g_pcsi.nu);
+    const double c4  = 1.0 / (4.0 * alp * alp);        /* ⭐ T-6: 1/(4α²), NOT (1/4)α² */
+    double omega = 2.0 / gmm;
+
+    exch(dyn->d_eta_fld);
+    true_resid();
+    exch_r();
+    apply_M();
+    {   /* Δx₀ = (1/γ)M⁻¹r₀ ; x₁ = x₀ + Δx₀ — over owned+ring1 so x keeps its halo */
+        const real_t ig = (real_t)(1.0 / gmm);
+        const int E = ring ? N + mesh->eDim_nod2D : N;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_pcsi_dx0", Kokkos::RangePolicy<>(0, E),
+            KOKKOS_LAMBDA(const int i) { const real_t d = ig * rp(i); dx(i) = d; X(i) += d; });
+        if (!ring) { dyn->d_eta_fld.modify_device(); exch(dyn->d_eta_fld); }
+    }
+    true_resid();
+    double resid = resid_norm();
+
+    int fb = SSH_FB_NONE, iter = 0;
+    double best = resid; int stall = 0;
+    const int STALL_WINDOW = 10;                       /* in CHECK events, not iterations */
+    if (resid >= rtol)
+    for (iter = 1; iter <= maxit; ++iter) {
+        omega = 1.0 / (gmm - c4 * omega);
+        exch_r();
+        apply_M();
+        {
+            const real_t w = (real_t)omega, g = (real_t)(gmm * omega - 1.0);
+            const int E = ring ? N + mesh->eDim_nod2D : N;
+            SSH_WIRE_LAUNCH(1);
+            Kokkos::parallel_for("fesom_pcsi_step", Kokkos::RangePolicy<>(0, E),
+                KOKKOS_LAMBDA(const int i) { const real_t d = w * rp(i) + g * dx(i);
+                                             dx(i) = d; X(i) += d; });
+            if (!ring) { dyn->d_eta_fld.modify_device(); exch(dyn->d_eta_fld); }
+        }
+        true_resid();
+        if (iter % K == 0 || iter == maxit) {
+            resid = resid_norm();
+            if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+                fprintf(stderr, "[ssh-trace] it=%d omega=%.17g res=%.17g\n", iter, omega, resid);
+            if (!(resid == resid))                        { fb = SSH_FB_NAN;   break; }
+            if (resid < rtol) break;
+            if (resid < best * 0.999) { best = resid; stall = 0; }
+            else if (++stall >= STALL_WINDOW || resid > 1e3 * best) { fb = SSH_FB_STALL; break; }
+        }
+    }
+    if (fb == SSH_FB_NONE && iter > maxit) fb = SSH_FB_MAXITER;
+    if (fb != SSH_FB_NONE) { ssh_fb_announce(fb, iter, resid, partit, solve_id); return -1; }
+
+    if (ssh_verify_on() && (partit == NULL || partit->mype == 0))
+        fprintf(stderr, "[ssh-verify] solve %ld: true=%.6e rec=%.6e rtol=%.6e gap=%.3e "
+                        "(pcsi recurs the TRUE residual — gap is 0 by construction)\n",
+                solve_id, resid, resid, (double)rtol, 0.0);
+    dyn->d_eta_fld.modify_device();
+    si->last_iters = iter;
+    ssh_wire_close_solve(iter, resid, (double)rtol, partit);
+    return iter;
+}
+
 static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
                              const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
 {
@@ -3147,6 +3525,7 @@ static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinf
     switch (kind) {
         case FESOM_SSHSOLV_CG2:    rc = ssh_solve_cg2(S, si, mesh, dyn);    break;
         case FESOM_SSHSOLV_PIPECG: rc = ssh_solve_pipecg(S, si, mesh, dyn); break;
+        case FESOM_SSHSOLV_PCSI:   rc = ssh_solve_pcsi(S, si, mesh, dyn);   break;
         default:
             FESOM_DIE("FESOM_SSH_SOLVER=%s is not implemented yet (M10 tasks T6-T8b)",
                       ssh_solver_name(kind));
@@ -3172,6 +3551,7 @@ void fesom_ssh_m10_free(void)
     g_sympre.built = false;
     g_cg2  = SshCg2State{};
     g_pipe = SshPipeState{};
+    g_pcsi = SshPcsiState{};
 }
 
 int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,

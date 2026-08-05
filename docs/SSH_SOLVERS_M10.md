@@ -293,6 +293,63 @@ at np8 (login, serial build `aaa9762`+T3). Roundtrip FNV-64 checksums verified o
 array at every load (loader hard-fails on mismatch). np1 bitwise-cert + at-scale dumps:
 below.
 
+### T5b options ×3 under `cg2` (job 26723560, serial CORE2 np8, variant vs baseline `cg`)
+
+Two **formal FAILs**, both carrying the threshold-switch signature the P-L2 pre-registration
+anticipated, and both requiring the pre-registered exoneration probe before any verdict.
+The options matrix stays STRICT (user 2026-07-17) — these rows stand as
+formal-FAIL-with-mechanism for user adjudication, exactly as the CGPOLY mEVP row does.
+
+| option | field | step 10 | step 20 | bound | verdict |
+|---|---|--:|--:|--:|---|
+| **TKE** | `h_ice` | 4.473e-01 | 5.069e-02 | 2e-02 | ❌ formal FAIL |
+| **TKE** | `a_ice` | 7.707e-03 | 5.246e-03 | 5e-03 | ❌ formal FAIL (marginal) |
+| TKE | `eta_n` · `T` · `Kv` · `uice` | 9.52e-05 · 1.23e-02 · 9.99e-02 · 2.71e-03 | 5.36e-05 · 5.11e-02 · 9.99e-02 · 2.09e-03 | 1.5e-4 · 2e-1 · 2e-1 · 5e-3 | ✅ |
+| **mEVP** | `T` | 4.182e-01 | 6.603e-02 | 2e-01 | ❌ formal FAIL |
+| mEVP | `a_ice` · `h_ice` · `eta_n` · `uice` | 6.66e-05 · 2.30e-04 · 8.55e-05 · 4.39e-04 | 6.38e-04 · 5.39e-04 · 5.34e-05 · — | — | ✅ |
+
+**⭐ The mEVP fingerprint is numerically identical to the documented CGPOLY one.** The M7
+ledger records for CGPOLY-vs-baseline mEVP: "`T` 6.602e-02 … NON-accumulating (max shrinks
+**0.42 → 0.066** step 10 → 20)". `cg2` gives **0.4182 → 0.06603**. Same field, same
+non-accumulating decay, same magnitudes to two figures — i.e. this is the mEVP scheme's own
+per-scheme floor (L79 family) being excited by *any* solver-class change, not something
+`cg2` does. Everything here is pure Serial, so the "no CUDA anywhere" half of the CGPOLY
+exoneration (probe 26313804) is satisfied by construction; what remains for a full
+exoneration is the cell-count/geography characterisation.
+
+**TKE is a NEW pattern, not previously seen**, and it is the one to chase: `h_ice` and
+`a_ice` peak at the **same node (46061)** at step 10, which is the isolated-ice-edge-cell
+shape rather than a field-wide error — but that is a hypothesis, not a finding, until the
+cells are counted and located. **Open item (T11):** run the CGPOLY-shaped exoneration probe
+on the TKE leg (cell count, latitude distribution, degree/knob dependence) before the
+recommendation is written.
+
+### T8a/T8b `pcsi` — first results (serial CORE2 np8, 20 steps, login)
+
+**It works, and the trade is much better than the plan assumed.** Lanczos m=30 on `M̃⁻¹A`
+returned θ = [3.4455e-03, 1.4440] → with the safe margins (deflate ν 10 %, inflate µ 5 %)
+[ν,µ] = [3.1010e-03, 1.5162], **κ = 489**; rank-agreement assertion passed; sympre defect
+0.700 → 2.45e-13.
+
+| metric | `cg` | `pcsi` (K=5) | change |
+|---|--:|--:|---|
+| iters/solve | 132.35 | **138.00** | **+4.3 % only** |
+| blocking allreduces/solve | 266.70 | **29.60** | **−88.9 % (9.0×)** |
+| exchanges/solve | 266.70 | 140.00 | −47.5 % |
+| fallbacks | 0 | 0 | — |
+
+`ar_blk` = 29.60 = `iters/K + 1` exactly, i.e. the ONLY reductions are the every-5th-iteration
+convergence checks plus the initial ‖b‖². The plan's expectation was "`pcsi` higher by
+design (Chebyshev is CG without the optimality)" — **wrong-high on the iteration penalty**:
++4.3 % is far cheaper than the 9× reduction saving, before any tuning of K or the margins.
+
+**Solution class: 18 of 19 fields inside the P-L2 bounds; `S` 2.749e-02 vs a 2e-02 bound
+(1.4×) = formal FAIL.** `S`, `T`, `Kv` and `density` all peak at the **same node
+(1564237)** — a single water column. Mechanism note: at equal residual tolerance a Chebyshev
+iterate is NOT the A-norm-optimal one CG returns, so a slightly larger solution error at the
+same `soltol` is expected behaviour, not a defect — but it is a formal FAIL under the strict
+matrix and the remedy (tighter `soltol` for `pcsi`, or margin/K tuning) belongs to T8c.
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
