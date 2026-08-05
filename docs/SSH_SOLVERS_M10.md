@@ -343,6 +343,24 @@ default-options gate.
 > quoted. This also retro-explains why `h_snow` (60× margin) never tripped: snow is not
 > concentrated at those marginal cells.
 
+### T6 options ×3 under `pipecg` (job 26723616) — and the first use of the revised rule
+
+| option | verdict | evidence (step 20) |
+|---|---|---|
+| **zstar** | ✅ **PASS, every field** | `eta_n` 8.199e-05 · `T` 3.777e-03 · `S` 9.953e-04 · `h_ice` 2.199e-03 · `m_ice` 1.018e-03 · `a_ice` 4.272e-04 · `u` 3.725e-03 · `Kv`/`Av` 9.999e-02/9.990e-02 |
+| **mEVP** | ✅ within bound at step 20 | `T` **6.603e-02** — again the exact CGPOLY figure; all other fields pass |
+| **TKE** | ⚠️ `h_ice` 1.445e-01 > 2e-02 → **EXONERATED by the revised rule** | the conserved `m_ice` at the same option is **2.834e-03**, comfortably inside its 5e-03 bound; `S` 1.051e-02 ✓, `a_ice` 1.318e-03 ✓ |
+
+**zstar passing on every field is the load-bearing result here**: zstar is the time-varying
+matrix case, so it is what stresses the frozen `pr_values` (and, once `pcsi` is tuned, the
+frozen eigenbounds). The standing zstar controls behave exactly as pre-registered for a
+solver-class change — `Kv` 9.999e-02 / `Av` 9.990e-02, i.e. moved off the byte-exact
+9.537e-02/9.869e-02 in value while holding the ~1e-1 magnitude.
+
+The TKE row is the revised P-L2 rule's first live application, and it worked as intended: the
+derived thickness trips, the conserved mass does not, and the row is exonerated on the spot
+instead of needing a separate probe.
+
 ### T8a/T8b `pcsi` — first results (serial CORE2 np8, 20 steps, login)
 
 **It works, and the trade is much better than the plan assumed.** Lanczos m=30 on `M̃⁻¹A`
