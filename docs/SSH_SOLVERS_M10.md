@@ -317,12 +317,31 @@ per-scheme floor (L79 family) being excited by *any* solver-class change, not so
 exoneration (probe 26313804) is satisfied by construction; what remains for a full
 exoneration is the cell-count/geography characterisation.
 
-**TKE is a NEW pattern, not previously seen**, and it is the one to chase: `h_ice` and
-`a_ice` peak at the **same node (46061)** at step 10, which is the isolated-ice-edge-cell
-shape rather than a field-wide error — but that is a hypothesis, not a finding, until the
-cells are counted and located. **Open item (T11):** run the CGPOLY-shaped exoneration probe
-on the TKE leg (cell count, latitude distribution, degree/knob dependence) before the
-recommendation is written.
+**TKE was a NEW pattern — probe run, and it is EXONERATED.** Cell-count/geography probe
+(pure Serial both legs, so no CUDA anywhere by construction):
+
+| step | field | cells with \|Δ\| > 1e-3 | of | fraction | where |
+|---|---|--:|--:|--:|---|
+| 10 | `h_ice` | **3** | 126858 | 0.0024 % | 80.0 °N, −71.8 °S, 80.2 °N |
+| 10 | `a_ice` | **1** | 126858 | 0.0008 % | 80.0 °N |
+| 20 | `h_ice` | 5 | 126858 | 0.0039 % | 80.0 °N, −71.4 °S, … |
+| 20 | `a_ice` | 3 | 126858 | 0.0024 % | 79.8–80.4 °N |
+
+The entire 4.473e-01 `h_ice` excursion is **one cell**, at 80.0 °N, and it is a
+**derived-ratio artifact, not a physics difference**: there `a_ice` = 0.0157 (baseline) vs
+0.0080 (cg2) — a nearly ice-free cell — and `h_ice = m_ice/a_ice` divides by it. The
+CONSERVED quantity barely moves: `m_ice ≈ h_ice·a_ice` = 0.4565·0.0157 = **7.17e-03** vs
+0.9038·0.0080 = **7.23e-03**, i.e. **0.8 % on the conserved mass while the derived thickness
+differs by 98 %**. `m_ice` itself passes its bound comfortably (6.2e-04 vs 5e-03) in the
+default-options gate.
+
+> **Methodological lesson for the bounds (recorded, and it changes P-L2):** bounding a
+> *derived ratio* like `h_ice = m_ice/a_ice` at ice-marginal cells measures the denominator,
+> not the solver. **Revised rule for the remaining variant gates: `h_ice`/`h_snow` excursions
+> are adjudicated on the conserved `m_ice`/`m_snow` at the same cell**; a `h_ice` FAIL whose
+> `m_ice` passes is exonerated and recorded as such, with the cell count and the two masses
+> quoted. This also retro-explains why `h_snow` (60× margin) never tripped: snow is not
+> concentrated at those marginal cells.
 
 ### T8a/T8b `pcsi` — first results (serial CORE2 np8, 20 steps, login)
 

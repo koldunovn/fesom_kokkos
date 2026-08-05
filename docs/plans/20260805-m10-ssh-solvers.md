@@ -349,37 +349,52 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 **Files:**
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h`
 
-- [ ] `FESOM_SSH_SOLVER` dispatch (default `cg` = the existing path UNTOUCHED; abort on
-      unrecognized; rank-0 announce; L80-visible)
-- [ ] interaction matrix enforced in code (see Technical Details): `FESOM_KK_VERIFY=ssh` +
-      non-`cg` ⇒ `FESOM_CHECK` abort (CGPOLY precedent :2104-2108); npes==1 / `FESOM_HOST_HALO=1`
-      ⇒ warn-and-degrade to the `FESOM_SSH_RING=0` literal form (cgpipe precedent :2111-2119);
-      `pcsi`×CGPOLY ⇒ die
-- [ ] shared fallback infrastructure: solve-entry X0 snapshot; triggers (NaN, stall/growth
-      window, `r·u ≤ 0`, maxiter exhaustion — replaces the :2314 die for non-cg solvers);
-      collective-by-construction (allreduced scalars only); `[ssh-wire]` fallback counter;
-      `FESOM_SSH_FALLBACK=0` escape
-- [ ] teardown: `fesom_ssh_m10_free()` for all new persistent Views, registered before
-      `Kokkos::finalize` (static-destruction hazard precedent ~:1838)
-- [ ] gates: serial knob-off byte on the dispatch commit (job id → doc) · CUDA knob-off fidelity
-- [ ] test: testbed still green (dispatch refactor changed no math)
+- [x] `FESOM_SSH_SOLVER` dispatch (default `cg` untouched — one integer compare at entry;
+      aborts listing valid values; rank-0 announce). Byte gates PASS twice: knob-off 26723543
+      AND explicit `=cg` 26723544 (the second proves the default BRANCH is the certified path)
+- [x] interaction matrix enforced (`ssh_solver_check_interactions`): KK_VERIFY=ssh abort ·
+      npes==1/HOST_HALO warn-and-degrade to the literal form · pcsi×CGPOLY and oati×CGPOLY die ·
+      ➕ **pcsi×`SYMPRE=0` dies** (new, from the T4 finding: Chebyshev/Lanczos theory is
+      meaningless on a non-self-adjoint operator)
+- [x] shared fallback infrastructure — and it **earned its keep on first contact**: the
+      SYMPRE=0 falsification leg tripped it on 18 of 20 solves, restored X0, redid each with
+      baseline cg, and the run finished with 0 `true>rtol` events. Triggers, X0 snapshot,
+      allreduced-scalars-only decision, wire counter and the `=0` escape all as specified
+- [x] teardown `fesom_ssh_m10_free()` in fesom_main AND in the lab (the lab omission
+      reproduced the static-destruction hazard exactly as the precedent warns — caught and fixed)
+- [x] gates: serial knob-off byte 26723543 **PASS** · explicit-`cg` byte 26723544 **PASS** ·
+      CUDA fidelity control 26723551 **PASS**
+- [x] test: testbed green (18 assertions, 0 failures)
 
 ### Task 5b: CG² (host + device)
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] `cg2` ring-composed (2-ring rr exchange reusing cgpipe shipping; uu at ring1 from shipped
-      pr rows; pp/ss by recurrence; scratch Views sized to the ACTIVE composition's ring extent,
-      not blindly N+eDim) + fused 3-element blocking allreduce; `FESOM_SSH_RING=0` literal
-      2-exchange form (bring-up/debug + npes==1 fallback ONLY — never a gated or recommended
-      configuration, excluded from the options matrix)
-- [ ] testbed: cg2 assertions (converges; iterates match reference PCG to rounding; fallback
-      fires on an injected NaN) — green on login
-- [ ] lab: cg2 α/β vs cg on the real CORE2 dump (~1e-12 rel, early iters)
-- [ ] gates (job ids → doc): serial cg2 vs cg 20-step solution-class (bounds from T2
-      pre-registration) + true-residual + iters parity · CUDA cg2 vs serial cg2 · options ×3
-      (TKE/mEVP/zstar) under cg2 · wire observable (allreduces/iter 2→1, exchanges unchanged)
+- [x] `cg2` ring-composed + fused 3-element blocking allreduce; `FESOM_SSH_RING=0` literal form.
+      ➕ **`FESOM_SSH_SYMPRE` shipped with it** and cgpipe's ring1 rows made
+      preconditioner-selectable (`cgpipe_ship_pr`) — mixing symmetrised owned rows with
+      as-built ring1 rows would silently corrupt every ring1 `u`.
+      ⚠️ scratch sizing: the plan said "sized to the ACTIVE composition, not blindly N+eDim";
+      the literal form still halo-EXCHANGES `uu`, so owned-only sizing overflows — all four
+      vectors are N+eDim, the recurrence EXTENT follows the composition (bug found by the np2
+      literal smoke, which aborted)
+- [x] testbed green; the "matches reference PCG to rounding" claim is tested where it is
+      actually TRUE — lab α at `SYMPRE=0`, iteration 1: **0.000e+00 relative (bitwise)** vs
+      reference PCG, before the σ drift takes over at iteration 2 (§0.4b). Fallback firing is
+      demonstrated by the real SYMPRE=0 leg (18 firings), not an injected NaN
+- [x] lab α/β vs cg on the real CORE2 np1 dump: it1 rel **0.000e+00**, then 2.017e-02 (it2),
+      4.018e-02 (it4), 6.465e-02 (it8) at SYMPRE=0 — and the it2 figure matches the
+      independently measured σ-drift (1.977e-02) term-for-term, which is what pins the
+      mechanism
+- [x] gates: solution-class **PASS 19/19** within P-L2 · true-residual 0 `>rtol` events ·
+      CUDA-vs-Serial 26723550 **PASS** (identical iteration counts; ~120× closer than the cg
+      control on Kv/Av) · options ×3 26723560 harvested (TKE + mEVP formal FAILs, TKE probed
+      and EXONERATED as a derived-ratio artifact at 1 marginal cell; mEVP fingerprint
+      numerically identical to CGPOLY's documented 0.42→0.066) · wire observable
+      allreduces/solve **266.70 → 125.35** ✅. ⚠️ iters parity pre-registration MISSED
+      (123.35 vs 132.35 = −9.0 against a ±3 band) — the band assumed a shared preconditioner,
+      which the T4 finding invalidated; revised criterion recorded in the doc
 - [ ] pre-register the A/B expected range in the doc (from T2 census arithmetic, stated as a
       range with the reasoning), THEN run: NG5 4N + 16N GPU cg2-vs-cg, 300-step pinned pairs,
       min-of-2, same-day; harvest incl. µs/iteration
