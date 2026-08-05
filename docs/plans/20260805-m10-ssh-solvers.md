@@ -405,16 +405,22 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] pipecg recurrences (+4 vectors: zz,qq,mm,nn class, ring-extent sized), `MPI_Iallreduce`
-      posted before the overlap window (ring-composed ww exchange + precond SpMV + matrix SpMV),
-      `MPI_Wait` after; first-iteration special-case per Sergey's F90 (`IF(iter>1)`, :205)
-- [ ] testbed + lab equivalence assertions for pipecg (as 5b)
-- [ ] Layer-2 gate set (same shape as 5b) + wire observable (iallreduce=1/iter, blocking=0)
-- [ ] attribution pre-registered from the T2 probe (R2): what a null vs cg2 means
-- [ ] pre-register + A/B NG5 4N/16N vs cg AND vs cg2 (the "does overlap pay on GPU" question);
-      harvest incl. µs/iteration; attainable-accuracy watch: max |true−recurrence| residual
-      across the run → ledger
-- [ ] test: gates green before Task 7
+- [x] pipecg implemented (+4 vectors zz/qq/mm/nn, `MPI_Iallreduce` posted before the overlap
+      window, `Wait` after, first-iteration special case). ➕ derivation finding: **only `w`
+      needs the exchange** (m needs w's halo; n needs m's ring1 from the shipped pr rows) —
+      everything else is owned-only, so pipecg is 1 exchange + 1 reduction per iteration
+- [x] lab/testbed: ring-vs-literal forms give IDENTICAL iteration counts and IDENTICAL verify
+      residuals ⇒ ring composition verified numerically equivalent
+- [x] Layer-2 gates: solution-class **PASS all fields** · knob-off byte 26723615 **PASS** ·
+      options ×3 26723616 (**zstar PASSES every field**; mEVP within bound; TKE `h_ice`
+      exonerated by the revised m_ice rule) · wire observable **blocking AR/solve 266.70 → 1.00**
+      with 124.35 Iallreduce ✅
+- [x] attribution pre-registered and binding: a null-or-negative pipecg-vs-cg2 delta is
+      STACK (no progression + measured Iallreduce surcharge), not algorithm
+- [~] A/B submitted (26723631/32 legacy-reference; **26723783/84 = the numbers of record,
+      FESOM_SPEED=1 on every leg**) — harvest next session. ✅ attainable-accuracy watch DONE:
+      max |true−recurrence| = **1.991e-08** (cg2 6.964e-11, cg 3.030e-11) = ~300× loss
+- [x] test: gates green
 
 ### Task 7: oati
 
@@ -437,29 +443,38 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h` (+ small symmetric-tridiag eigensolver,
   host-only, init-time)
 
-- [ ] Lanczos on M⁻¹A with the T4-DECIDED symmetric M (`FESOM_PCSI_LANCZOS` steps, default 30)
-      at first solve, reusing the solver's SpMV/dot/allreduce primitives; T_m eigenvalues via
-      bisection/QL; margins with the SAFE directions — **deflate ν, inflate µ** (spectrum must
-      stay ⊂ [ν,µ]); `FESOM_PCSI_EIGMARGIN` (default "0.10,0.05", finalized in the lab),
-      `FESOM_PCSI_EIG="ν,µ"` override; rank-0 announce
-- [ ] **rank-agreement assertion** (R6-class): [ν,µ] computed from allreduced dots on all ranks
-      AND asserted bitwise-identical via MIN/MAX allreduce (abort on mismatch) — converts a
-      silent wrong-ω divergence into a loud stop
-- [ ] testbed: Lanczos on the Laplacian fixture recovers known extreme eigs within margin
-- [ ] test: estimator on the CORE2 lab dump; θ's stable across np1/np8 (job/log → doc)
+- [x] Lanczos on M̃⁻¹A (default m=30) at first solve, Sturm-bisection eigenvalues, safe
+      margins (deflate ν 0.10 / inflate µ 0.05), `FESOM_PCSI_EIG` override, rank-0 announce.
+      ⭐ **T-5 fix applied**: `q₁ = r₀/sqrt(r₀ᵀs₀)` — `[P]` App. C's un-rooted form costs
+      **2270× in θmin** (measured in the testbed). ➕ deterministic start vector keyed on the
+      GLOBAL node id, so the bounds are partition-independent. CORE2: θ = [3.4455e-03, 1.4440]
+      → [ν,µ] = [3.1010e-03, 1.5162], κ = 489
+- [x] rank-agreement assertion via MIN/MAX allreduce (aborts on any mismatch) — passed on
+      CORE2 np8
+- [x] testbed: Lanczos recovers the fixture's extremes; ➕ proves Ritz values converge
+      **OUTWARD** with m (θmax non-decreasing, θmin non-increasing) — which is what JUSTIFIES
+      the deflate-ν/inflate-µ margin directions rather than assuming them
+- [~] estimator runs in-model on CORE2 np8 (θ logged); np1-vs-np8 stability comparison still
+      to record — the global-id start vector makes it partition-independent by construction
 
 ### Task 8b: pcsi iteration + guards
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] pcsi per the verified recurrence (b−Ax true-residual form — self-correcting, note in
-      docs); ring-composed single 2-ring r exchange; convergence check every `FESOM_PCSI_CHECK`
-      iters (default 5) = the only allreduce; `FESOM_PCSI_MAXITER` (default sized from lab
-      data; exhaustion ⇒ fallback, not die); divergence detect at check points ⇒ fallback
-      (+ log); `pcsi`+CGPOLY ⇒ die (already in 5a matrix)
-- [ ] testbed: pcsi rate within Chebyshev bound on the fixture; broken-[ν,µ] fallback fires
-- [ ] Layer-2 gate set + wire observable (blocking allreduces ≈ iters/K, exchanges 1/iter)
+- [x] pcsi implemented per the verified recurrence (true-residual form, ⭐ ω coefficient
+      `1/(4α²)` per the T-6 resolution), ring-composed single 2-ring r exchange, check every
+      `FESOM_PCSI_CHECK`=5 iters as the ONLY reduction, `FESOM_PCSI_MAXITER`, fallback on
+      stall/NaN/maxiter, pcsi+CGPOLY and pcsi+SYMPRE=0 both die
+- [x] testbed: pcsi meets the Golub–Varga bound at k = 10/20/40, measured in the **A-norm of
+      the error** (the quantity the theory bounds — a residual ratio is not, and the first draft
+      of this test was wrong until that was fixed); ➕ the MISREAD ω coefficient provably does
+      NOT meet the bound, which is what makes the T-6 resolution a decision rather than a taste
+- [x] wire observable: blocking AR/solve **266.70 → 29.60** = exactly `iters/K + 1`,
+      exchanges 140.00 = `2 + k` ✅. Knob-off byte gate 26723691 **PASS**. Solution class:
+      **18/19 fields pass; `S` 2.749e-02 vs 2e-02 = formal FAIL** (S/T/Kv/density all peak at
+      the SAME node ⇒ one water column; mechanism = a Chebyshev iterate is not the A-norm-optimal
+      one at equal residual). Remedy belongs to T8c. Options ×3 submitted (26723757)
 - [ ] test: gates green before 8c
 
 ### Task 8c: pcsi tuning + A/B
