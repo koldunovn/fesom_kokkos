@@ -3508,6 +3508,278 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     return iter;
 }
 
+/* ======================================================================= *
+ * M10 T7 — `oati`: one allreduce per TWO iterations (derivations §3, incl. §3.2b).
+ *
+ * We implement the SHALLOW form, not [T]'s deep `n→g→h→e→f` chain. [T]'s chain exists to
+ * overlap one Iallreduce with two full iterations of operator work; R2 measured that this
+ * stack has NO async progression, so that overlap buys nothing here while costing 4 chained
+ * operator applications = 4 rings (our M⁻¹ is sparse; [T] used Jacobi, which needs no halo).
+ * The shallow form keeps OATI's actual prize — half the syncs — at cg2's operator and halo
+ * cost, and needs no new ring machinery.
+ *
+ * Per PAIR (j, j+1): 2 exchanges, 2 M⁻¹, 2 A, ONE 10-element reduction.
+ *   γ_{j+1}, δ_{j+1} come from recurrences in scalars already reduced, so the odd iteration
+ *   needs no communication at all:
+ *     γ_{j+1} = γ_j − 2α_j[δ_j + β_jΛsu] + α_j²[Λwm + 2β_jΛwq + β_j²Λsq]
+ *     δ_{j+1} = δ_j − 2α_j[Λwm + β_jΛwq]  + α_j²[Λnm + 2β_jΛnq + β_j²Λzq]
+ *   ⚠️ Both fold pairs of DIFFERENT inner products that are equal only for a symmetric M⁻¹
+ *   ((r,q)=(s,u) and (z,u)=(w,q)) — T-1/T-3. FESOM_SSH_SYMPRE=1 is therefore not optional
+ *   for oati either.
+ *
+ * The 7 Λ's + γ,δ,ρ = 10 reduced scalars — independently the same width as [T]'s λ0…λ9.
+ * Convergence is tested once per pair (on the reduced ρ), which costs at most one extra
+ * iteration and avoids five further recurrence dots.
+ * ======================================================================= */
+
+static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
+                          const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
+{
+    const int     N        = mesh->myDim_nod2D;
+    fesom_partit *partit   = si->partit;
+    const int     parallel = (partit && partit->npes > 1);
+    const int     N_global = parallel ? mesh->nod2D : N;
+    const long    solve_id = g_sshwire.solves + 1;
+
+#ifdef KOKKOS_ENABLE_CUDA
+    const bool transport_ok = fesom_halo_device_active();
+#else
+    const bool transport_ok = true;
+#endif
+    const bool ring = ssh_ring_on() && parallel && transport_ok;
+    if (ssh_sympre_on()) {
+        ssh_sympre_build(S, mesh, partit);
+        FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
+                    "ssh-sympre: CGPIPE ring1 rows shipped with a different preconditioner");
+        cgpipe_ship_pr = g_sympre.pr_h.data();
+    }
+    if (ring && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
+    ssh_pipe_alloc(mesh, ring ? g_cgpipe.nring2 : 0);   /* same vector set as pipecg */
+
+    auto rowptr = S->rowptr_fld.d();
+    auto colind = S->colind_fld.d();
+    auto vals   = S->values_fld.d();
+    auto prvals = ssh_sympre_on() ? Kokkos::View<const double*>(g_sympre.pr_d)
+                                  : Kokkos::View<const double*>(S->pr_values_fld.d());
+    auto X   = dyn->d_eta_fld.d();
+    auto rhs = dyn->ssh_rhs_fld.d();
+    auto rr  = si->rr_fld.d();
+    auto uu  = g_pipe.uu.d();  auto ww = g_pipe.ww.d();
+    auto mm  = g_pipe.mm.d();  auto nn = g_pipe.nn.d();
+    auto zz  = g_pipe.zz.d();  auto qq = g_pipe.qq.d();
+    auto ss  = g_pipe.ss.d();  auto pp = g_pipe.pp2.d();
+
+    auto exch = [&](fesom::Field &f) {
+        if (!parallel) return;
+        ++g_sshwire.s_exch;
+#ifdef KOKKOS_ENABLE_CUDA
+        if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
+#endif
+        f.modify_device(); f.sync_host();
+        fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
+        f.modify_host();   f.sync_device();
+    };
+    auto payload = [&]() {                 /* exchange w; m = M⁻¹w; n = A m */
+        if (parallel) {
+            if (ring) { ++g_sshwire.s_exch; cgpipe_exchange_rr(g_pipe.ww, partit); }
+            else      exch(g_pipe.ww);
+        }
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_oati_psolve", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += prvals(n2) * ww(colind(n2));
+                mm(row) = s;
+            });
+        if (ring) { SSH_WIRE_LAUNCH(1); cgpipe_zz_ring1(ww, mm); }
+        else      { g_pipe.mm.modify_device(); exch(g_pipe.mm); }
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_oati_spmv", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += vals(n2) * mm(colind(n2));
+                nn(row) = s;
+            });
+    };
+    /* the ONE reduction: γ, δ, ρ and the seven Λ's, all from the CURRENT vector state */
+    double L[10];
+    auto reduce10 = [&]() {
+        real_t a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0,a8=0,a9=0;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_reduce("fesom_oati_dots", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i, real_t &g_, real_t &d_, real_t &r_,
+                          real_t &su, real_t &wm, real_t &wq, real_t &sq,
+                          real_t &nm, real_t &nq, real_t &zq) {
+                const real_t r_i = rr(i), u_i = uu(i), w_i = ww(i);
+                const real_t m_i = mm(i), n_i = nn(i);
+                const real_t s_p = ss(i), q_p = qq(i), z_p = zz(i);   /* previous index */
+                g_ += r_i * u_i;  d_ += w_i * u_i;  r_ += r_i * r_i;
+                su += s_p * u_i;  wm += w_i * m_i;  wq += w_i * q_p;  sq += s_p * q_p;
+                nm += n_i * m_i;  nq += n_i * q_p;  zq += z_p * q_p;
+            }, a0,a1,a2,a3,a4,a5,a6,a7,a8,a9);
+        L[0]=a0; L[1]=a1; L[2]=a2; L[3]=a3; L[4]=a4;
+        L[5]=a5; L[6]=a6; L[7]=a7; L[8]=a8; L[9]=a9;
+        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, L, 10, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+    };
+    /* one half-iteration: recurrences with (α,β) then the four state updates */
+    auto half_step = [&](double alpha, double beta) {
+        const real_t al = (real_t)alpha, be = (real_t)beta;
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_oati_step", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int i) {
+                const real_t z = nn(i) + be * zz(i);
+                const real_t q = mm(i) + be * qq(i);
+                const real_t s = ww(i) + be * ss(i);
+                const real_t p = uu(i) + be * pp(i);
+                zz(i)=z; qq(i)=q; ss(i)=s; pp(i)=p;
+                X (i) += al * p;
+                rr(i) -= al * s;
+                uu(i) -= al * q;
+                ww(i) -= al * z;
+            });
+        g_pipe.ww.modify_device();
+    };
+
+    SSH_WIRE_LAUNCH(1);
+    real_t s0 = cg_dot(rhs, rhs, N);
+    if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &s0, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+    const real_t rtol = si->soltol * sqrt(s0 / (real_t)N_global);
+    if (s0 == 0.0) {
+        SSH_WIRE_LAUNCH(1);
+        Kokkos::parallel_for("fesom_oati_zeroX", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row) { X(row) = 0.0; });
+        dyn->d_eta_fld.modify_device();
+        si->last_iters = 0;
+        ssh_wire_close_solve(0, 0.0, (double)rtol, partit);
+        return 0;
+    }
+
+    /* r₀ = b − Ax₀ ; u₀ = M⁻¹r₀ ; w₀ = Au₀ ; z,q,s,p = 0 (so the index-0 Λ's vanish) */
+    exch(dyn->d_eta_fld);
+    SSH_WIRE_LAUNCH(2);
+    cg_spmv(rowptr, colind, vals, X, rr, N);
+    Kokkos::parallel_for("fesom_oati_r0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) { rr(row) = rhs(row) - rr(row); });
+    si->rr_fld.modify_device();
+    exch(si->rr_fld);
+    SSH_WIRE_LAUNCH(1);
+    Kokkos::parallel_for("fesom_oati_u0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int a = rowptr(row), e = rowptr(row + 1);
+            for (int n2 = a; n2 < e; ++n2) s += prvals(n2) * rr(colind(n2));
+            uu(row) = s;
+        });
+    g_pipe.uu.modify_device();
+    exch(g_pipe.uu);
+    SSH_WIRE_LAUNCH(2);
+    Kokkos::parallel_for("fesom_oati_w0", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int row) {
+            real_t s = 0.0;
+            const int a = rowptr(row), e = rowptr(row + 1);
+            for (int n2 = a; n2 < e; ++n2) s += vals(n2) * uu(colind(n2));
+            ww(row) = s;
+        });
+    Kokkos::parallel_for("fesom_oati_zero", Kokkos::RangePolicy<>(0, N),
+        KOKKOS_LAMBDA(const int i) { zz(i)=0.0; qq(i)=0.0; ss(i)=0.0; pp(i)=0.0; });
+    g_pipe.ww.modify_device();
+    payload();                                  /* m₀, n₀ */
+    reduce10();
+
+    double gamma = L[0], delta = L[1], resid = sqrt(L[2] / (double)N_global);
+    double gamma_prev = 0.0, alpha_prev = 0.0;
+    int fb = SSH_FB_NONE, iter = 0;
+    double best = resid; int stall = 0;
+    const int STALL_WINDOW = 10;                /* in PAIRS */
+
+    if (resid >= rtol)
+    while (iter < si->maxiter) {
+        /* ---- even half: (α_j, β_j) from the reduced γ_j, δ_j ---- */
+        double beta = 0.0, alpha = 0.0;
+        if (iter > 0) {
+            beta = gamma / gamma_prev;
+            const double inv = delta / gamma - beta / alpha_prev;
+            if (!(inv == inv) || inv == 0.0) { fb = SSH_FB_NAN; break; }
+            alpha = 1.0 / inv;
+        } else {
+            if (delta == 0.0) { fb = SSH_FB_NAN; break; }
+            alpha = gamma / delta;
+        }
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+            fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=%.17g\n",
+                    iter + 1, alpha, beta, resid);
+        /* γ_{j+1}, δ_{j+1} by recurrence — NO communication (the point of the method) */
+        const double su = L[3], wm = L[4], wq = L[5], sq = L[6],
+                     nm = L[7], nq = L[8], zq = L[9];
+        const double s_u = delta + beta * su;                       /* (s_j, u_j) */
+        const double w_q = wm + beta * wq;                          /* (w_j, q_j) */
+        const double s_q = wm + 2.0 * beta * wq + beta * beta * sq; /* (s_j, q_j) */
+        const double z_q = nm + 2.0 * beta * nq + beta * beta * zq; /* (z_j, q_j) */
+        const double gamma1 = gamma - 2.0 * alpha * s_u + alpha * alpha * s_q;
+        const double delta1 = delta - 2.0 * alpha * w_q + alpha * alpha * z_q;
+
+        half_step(alpha, beta);                 /* → index j+1 */
+        ++iter;
+        if (!(gamma1 == gamma1) || !(delta1 == delta1) || gamma1 <= 0.0) { fb = SSH_FB_INDEF; break; }
+
+        /* ---- odd half: (α_{j+1}, β_{j+1}) from the RECURRED scalars ---- */
+        const double beta1 = gamma1 / gamma;
+        const double inv1  = delta1 / gamma1 - beta1 / alpha;
+        if (!(inv1 == inv1) || inv1 == 0.0) { fb = SSH_FB_NAN; break; }
+        const double alpha1 = 1.0 / inv1;
+        payload();                              /* m_{j+1}, n_{j+1} — 1 exchange */
+        if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
+            fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=(recurred)\n",
+                    iter + 1, alpha1, beta1);
+        half_step(alpha1, beta1);               /* → index j+2 */
+        ++iter;
+        payload();                              /* m_{j+2}, n_{j+2} — 1 exchange */
+        reduce10();                             /* the pair's ONLY reduction */
+
+        gamma_prev = gamma1; alpha_prev = alpha1;
+        gamma = L[0]; delta = L[1];
+        resid = sqrt(L[2] / (double)N_global);
+        if (!(resid == resid))                                 { fb = SSH_FB_NAN;   break; }
+        if (resid < rtol) break;
+        if (gamma <= 0.0)                                      { fb = SSH_FB_INDEF; break; }
+        if (resid < best * 0.999) { best = resid; stall = 0; }
+        else if (++stall >= STALL_WINDOW || resid > 1e3 * best) { fb = SSH_FB_STALL; break; }
+    }
+    if (fb == SSH_FB_NONE && iter >= si->maxiter && resid >= rtol) fb = SSH_FB_MAXITER;
+    if (fb != SSH_FB_NONE) { ssh_fb_announce(fb, iter, resid, partit, solve_id); return -1; }
+
+    if (ssh_verify_on()) {
+        exch(dyn->d_eta_fld);
+        --g_sshwire.s_exch;
+        real_t tn = 0.0;
+        Kokkos::parallel_reduce("fesom_oati_verify", Kokkos::RangePolicy<>(0, N),
+            KOKKOS_LAMBDA(const int row, real_t &l) {
+                real_t s = 0.0;
+                const int a = rowptr(row), e = rowptr(row + 1);
+                for (int n2 = a; n2 < e; ++n2) s += vals(n2) * X(colind(n2));
+                const real_t d = rhs(row) - s;
+                l += d * d;
+            }, tn);
+        if (parallel) MPI_Allreduce(MPI_IN_PLACE, &tn, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+        const double tr = sqrt((double)tn / (double)N_global);
+        SshWireState &w = g_sshwire;
+        if (tr > w.v_maxtrue) w.v_maxtrue = tr;
+        const double gap = fabs(tr - resid);
+        if (gap > w.v_maxgap) w.v_maxgap = gap;
+        if (tr > (double)rtol) ++w.v_fail;
+        if (partit == NULL || partit->mype == 0)
+            fprintf(stderr, "[ssh-verify] solve %ld: true=%.6e rec=%.6e rtol=%.6e gap=%.3e%s\n",
+                    solve_id, tr, resid, (double)rtol, gap,
+                    tr > (double)rtol ? "  <-- TRUE RESIDUAL ABOVE rtol" : "");
+    }
+    dyn->d_eta_fld.modify_device();
+    si->last_iters = iter;
+    ssh_wire_close_solve(iter, resid, (double)rtol, partit);
+    return iter;
+}
+
 static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
                              const struct fesom_mesh *mesh, struct fesom_dyn *dyn)
 {
@@ -3526,6 +3798,7 @@ static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinf
         case FESOM_SSHSOLV_CG2:    rc = ssh_solve_cg2(S, si, mesh, dyn);    break;
         case FESOM_SSHSOLV_PIPECG: rc = ssh_solve_pipecg(S, si, mesh, dyn); break;
         case FESOM_SSHSOLV_PCSI:   rc = ssh_solve_pcsi(S, si, mesh, dyn);   break;
+        case FESOM_SSHSOLV_OATI:   rc = ssh_solve_oati(S, si, mesh, dyn);   break;
         default:
             FESOM_DIE("FESOM_SSH_SOLVER=%s is not implemented yet (M10 tasks T6-T8b)",
                       ssh_solver_name(kind));

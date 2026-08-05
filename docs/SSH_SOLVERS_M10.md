@@ -387,6 +387,33 @@ iterate is NOT the A-norm-optimal one CG returns, so a slightly larger solution 
 same `soltol` is expected behaviour, not a defect — but it is a formal FAIL under the strict
 matrix and the remedy (tighter `soltol` for `pcsi`, or margin/K tuning) belongs to T8c.
 
+### T7 `oati` — implemented as the SHALLOW variant, and it beats the deep one here
+
+Derivations §3.2b: `[T]`'s deep `n→g→h→e→f` chain exists only to overlap one `Iallreduce`
+with two iterations of operator work. **R2 measured that this stack has no async
+progression**, so that overlap buys nothing — while the chain would cost 4 chained operator
+applications ⇒ 4-ring shipping of BOTH A and M (machinery that does not exist: cgpipe is
+2-ring and ships M only; cgpoly's R-ring ships A only) ⇒ roughly double the halo bytes on the
+axis the census says dominates. The shallow form keeps OATI's actual prize — half the syncs —
+at `cg2`'s operator and halo cost. Measured, CORE2 np8, 20 steps:
+
+| | `cg` | `cg2` | `pipecg` | **`oati`** | `pcsi` |
+|---|--:|--:|--:|--:|--:|
+| iters/solve | 132.35 | 123.35 | 124.35 | **124.00** | 138.00 |
+| **blocking allreduces/solve** | 266.70 | 125.35 | 1.00 | **64.00** | **29.60** |
+| (nonblocking) | 0 | 0 | 124.35 | 0 | 0 |
+| exchanges/solve | 266.70 | 125.35 | 127.35 | **128.00** | 140.00 |
+| verify gap (max \|true−rec\|) | 3.03e-11 | 6.96e-11 | 1.99e-08 | 6.93e-09 | 0 by construction |
+| fallbacks | 0 | 0 | 0 | 0 | 0 |
+
+`ar_blk` = 64.00 = `iters/2 + 2` — exactly one reduction per two iterations, at the SAME
+exchange count as `cg2`. **Correctness:** the α sequence matches `cg2`'s on the same real
+CORE2 dump — **it1 bitwise (0.000e+00)**, ~5e-15 at it2–3, ~5e-13 by it6 — i.e. the γ/δ
+recurrences reproduce the Krylov space to rounding, which is the Layer-0 acceptance criterion.
+Solution class vs `cg`: **all fields inside P-L2** (`eta_n` 5.143e-05 · `u`/`v`
+8.932e-03/7.809e-03 · `T` 5.374e-02 · `S` 2.350e-03 · `Kv`/`Av` 9.999e-02/9.990e-02 ·
+`h_ice` 6.784e-03 · `m_ice` 4.847e-04 · `uice`/`vice` 5.175e-04/8.671e-04).
+
 ## A/B perf legs (submitted 2026-08-06 — HARVEST THESE FIRST next session)
 
 Protocol: `jobs/job_m10_ab` — all legs back-to-back in ONE allocation on the SAME nodes with
