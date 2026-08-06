@@ -20,10 +20,16 @@
 # "different iteration count", which is the distinction the crossover claim rests on.
 # The [ssh-wire] aggregate supplies iters/solve; the loop timer supplies s/step.
 #
-# env: MESH, DT, TAG, LEGS (';'-separated, each a ','-joined knob list or "cg"),
-#      NSTEPS (default 300 — the pinned-pair standard), BIN (default build-m7cuda).
+# env: MESH, DT, TAG, LEGS, NSTEPS (default 300 — the pinned-pair standard),
+#      BIN (default build-m7cuda).
+#
+# ⚠️ LEGS SYNTAX: legs are ';'-separated; knobs WITHIN a leg are '+'-separated. NOT commas.
+#    `sbatch --export` treats COMMAS as its own separator, so a comma inside LEGS is eaten by
+#    sbatch and the leg list is silently TRUNCATED — job 26723783 ran two identical
+#    `FESOM_SPEED=1` legs for exactly this reason and produced a +0.11 % "result" that was
+#    really the same configuration twice. The per-leg knob echo below is the guard.
 # Submit: sbatch -N 4 --ntasks=16 --export=ALL,MESH=$NG5,DT=180,TAG=ab_ng5_4n,\
-#           LEGS="cg;FESOM_SSH_SOLVER=cg2;FESOM_SSH_SOLVER=pipecg" jobs/job_m10_ab
+#           LEGS="cg;FESOM_SSH_SOLVER=cg2;FESOM_SPEED=1+FESOM_SSH_SOLVER=pcsi" jobs/job_m10_ab
 
 set -u
 ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
@@ -57,10 +63,14 @@ for leg in "${LEGARR[@]}"; do
     clear_knobs
     name="$leg"
     if [ "$leg" != "cg" ]; then
-        IFS=',' read -ra KV <<< "$leg"; for kv in "${KV[@]}"; do export "$kv"; done
+        IFS='+' read -ra KV <<< "$leg"; for kv in "${KV[@]}"; do export "$kv"; done
     fi
     export FESOM_SSH_STATS=1          # counts + iters/solve; no VERIFY (it costs an SpMV)
     echo "--- leg $li: $name ---"
+    # L80 guard: show the knobs this leg ACTUALLY has. Two legs printing the same set means
+    # the leg list was truncated (see the LEGS syntax warning above) — the numbers are then
+    # the same configuration measured twice, not an A/B.
+    echo -n "    knobs: "; env | grep -E '^FESOM_(SPEED|SSH|PCSI)' | sort | tr '\n' ' '; echo
     best=""; iters=""
     for rep in a b; do
         srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
