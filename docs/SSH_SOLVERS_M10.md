@@ -1829,3 +1829,30 @@ imbalance gain. `Repartitioning OUT` stands as a user decision — now for a sta
 The trade is a continuum between edgecut and vertical balance, and only its two endpoints have
 been measured. A softened 3D weight (or edge-weighted METIS) might find an interior optimum.
 That is a partitioner study, not a model change, and it is unexplored.
+
+### ⭐⭐⭐ CORRECTION — the imbalance IS recoverable, below ~250 vertices/core (26744554-57)
+
+The 864-rank result above is real but **not general**. The halo penalty of dual weighting is a
+constant **+40 % at every rank count**, but its weight in the step is not — halo rises from
+**9 % of owned nodes at 128 ranks to 29 % at 864** — while the imbalance removed stays roughly
+constant (3D max/mean 1.48→1.53 across the ladder). So the trade must change sign, and it does:
+
+| ranks | vertices/core | `wgt0` (2D-only) | `wgt2` (dual) | dual vs 2D-only |
+|--:|--:|--:|--:|--:|
+| 128 | 991 | ⚠️ diverged | 0.1981 | — |
+| **256** | **495** | 0.1060 | **0.1011** | **−4.62 %** ✅ |
+| 512 | 248 | 0.0593 | 0.0593 | **0.00 %** ← crossover |
+| 864 | 146 | 0.0448 | 0.0487 | **+8.71 %** ❌ |
+
+Min-of-2, one allocation per rung; rep-to-rep spread ≤0.3 %, and the 256-rank dual leg
+reproduced 0.1011/0.1011 exactly, so −4.62 % is far outside noise.
+
+**⇒ "repartitioning is OUT" is true only past the crossover.** At **495 vertices/core — inside
+FESOM's own 300–500 operating guidance — dual weighting is worth −4.6 %**, for no model change
+at all. CORE2's production 512-rank point sits essentially ON the crossover (0.00 %). Past it
+the halo penalty dominates and the lever inverts.
+
+⚠️ **A regenerated 2D-only `dist_128` made baseline CG diverge at iteration 1**
+(`CG_kk abort at iter 1: residual=5.49698e+45`) where the shipped and dual-weighted partitions
+at the same rank count both ran clean — L99 (instability is partition-marginal) in the wild.
+**Any newly generated decomposition needs a stability check before it is used.**
