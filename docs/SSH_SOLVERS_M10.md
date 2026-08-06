@@ -457,6 +457,45 @@ with the conserved `m_ice` comfortably inside its bound. **Zero fallback firings
 the options matrix** — 12 option-runs across four solvers. `oati`'s `a_ice` at 1.05× the bound
 is the one genuinely marginal number in the set and is flagged rather than waved through.
 
+### ⭐ R3 ANSWERED — the zstar eigenbound drift check (lab, login, free)
+
+The plan made `FESOM_PCSI_REEIG` conditional: "built ONLY if this check shows the bounds
+move". Run on the two CORE2 zstar dumps **180 simulated days apart** (job 26723048, steps 100
+and 8740 at dt1800), replaying the real matrices through the production Lanczos estimator:
+
+| dump | θ (Ritz) | [ν,µ] after margins | κ |
+|---|---|---|--:|
+| step 100 | [3.436277e-03, 1.434050] | [3.092650e-03, 1.505753] | 486.9 |
+| step 8740 | [3.433973e-03, 1.433030] | [3.090576e-03, 1.504681] | 486.9 |
+| **drift** | **θmin 0.067 % · θmax 0.071 %** | | **identical to 4 s.f.** |
+
+**The preconditioned spectrum moves by less than 0.1 % across 180 simulated days**, against
+safety margins of 10 % (deflate ν) and 5 % (inflate µ) — **the margins are ~100× larger than
+the drift**. Sergey's premise ("matrix changes are tiny; the eigenvalues are set by domain and
+resolution") is confirmed quantitatively on the production matrix.
+
+**⇒ `FESOM_PCSI_REEIG` stays unbuilt, now on evidence rather than YAGNI**, and the frozen-bound
+design is vindicated. Combined with the zstar options gate (0 fallbacks, all fields inside
+bounds), R3 is closed.
+
+**➕ Discovered while doing it — the symmetrisation is APPROXIMATE under zstar.** The
+`[ssh-sympre]` observable reports a post-symmetrisation defect ratio of **6.7e-03 (step 100)
+and 7.4e-03 (step 8740)** under zstar, versus **2.5e-13 under linfs**. Cause: `M̃⁻¹` scales the
+FROZEN `pr_values` by `sqrt(d_i/d_j)` taken from the CURRENT `diag(A)`, and under zstar `A`
+drifts away from the matrix `pr_values` was built from — so the two are mutually stale by the
+accumulated drift. Three observations that matter:
+- it is still **~100× better than the 0.70 as-built defect**, and 7e-3 ≪ 1, so the σ-recurrence
+  argument (§0.4) holds comfortably — consistent with every zstar options gate passing with 0
+  fallbacks across all four solvers;
+- it **does not grow** between step 100 and step 8740 (6.7e-3 → 7.4e-3), i.e. almost all of it
+  is accumulated before step 100, matching the <0.1 % spectral drift above;
+- it is nonetheless the one quantity that would degrade on a multi-decade zstar run, so it
+  belongs on the T12 climate-leg watch list.
+
+*(Also noted: `pcsi` takes ~16–20 % more iterations than `cg` on these zstar dumps — 130 vs
+112 and 105 vs 87 — against +4.3 % on linfs CORE2. Chebyshev's iteration penalty is
+mesh/state dependent; T8c should quote it per configuration rather than as one number.)*
+
 ## A/B perf legs (submitted 2026-08-06 — HARVEST THESE FIRST next session)
 
 Protocol: `jobs/job_m10_ab` — all legs back-to-back in ONE allocation on the SAME nodes with
