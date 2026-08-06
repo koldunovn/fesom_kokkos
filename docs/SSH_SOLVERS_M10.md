@@ -900,6 +900,25 @@ short of the knee. Reaching it would need new partitions (the `core2_bigpart` re
 and a 64–192 node allocation. Until then, the CPU verdict for those two meshes is **provisional
 at best**, and the honest statement is "not yet measured where it matters".
 
+#### ✅ RESOLVED for dars — the partitions now exist (job 26738726, 2026-08-06)
+
+`/work/ab0995/a270088/port2/mesh/dars_bigpart` carries `dist_6144`, `dist_8192`, `dist_10240`
+= **514 / 385 / 308 vertices per core**, i.e. the 300–500 range is now spanned. The md5
+integrity gate on `nod2d/elem2d/nlvls/elvls` passed before any partition was written, and the
+copy is a full rsync (not a symlink — `/pool` is writable for this account, so a symlink could
+carry a stray write back into `/pool`). A/B runs submitted: **26741040** (6144 = 48 nodes) and
+**26741041** (8192 = 64 nodes), four legs each (`cg`/`cg2`/`oati`/`pcsi`), binary pinned to
+`stallknob_serial`.
+
+🔴 **These rungs form their OWN curve.** The `core2_bigpart` control measured flat METIS
+partitions as **7.4 % slower** than the certified mesh's at the same rank count, so
+`dars_bigpart` rows must never be merged into a scaling curve with the `/pool` dars rows.
+*The variant-vs-baseline A/B is unaffected* — both legs run on the same partition inside one
+allocation, so the partition-source bias cancels in the ratio. Only cross-rung and absolute
+comparisons are contaminated.
+
+NG5's generator (26738744) is still running: 16384 took >1 h, with 20480 and 24576 to go.
+
 ### The rule that falls out (GPU side is solid; CPU side is CORE2-only so far)
 
 **The split is by BACKEND, not by mesh size** (sorting the table by nodes/rank does *not*
