@@ -61,11 +61,10 @@ field, the difference between the owner's arriving value and the value the recei
 already holds. Nine of the eleven arrive \emph{exactly} equal --- ice velocity, concentration,
 thickness, snow, ocean velocity, wind stress --- because FESOM's own halo exchange has already put
 them there, as you said. The two right-hand sides do not: they are assembled and area-scaled over
-owned nodes only, so a halo node has no correct value at all. But the redundancy stops at the
-first ring, and rings $2\ldots K$ have no other source, so what could be removed is 37\% of that
-exchange at $K$=2 and 17\% at $K$=4. Since the exchange is 5.4\% of the data the scheme moves and
-one message per neighbour per step, removing it would gain under one percent of the traffic and no
-messages. We have not implemented the trimmed version, and that is why.
+owned nodes only. But the redundancy stops at the first ring, and rings $2\ldots K$ have no other
+source, so what could be removed is 37\% of that exchange at $K$=2 and 17\% at $K$=4 --- under one
+percent of the scheme's traffic, and no messages. We did not build the trimmed version, and that
+measurement is why.
 
 \textbf{Point 1, the kernel structure.} This is the part we could not bound before, and it was
 much the larger. Our wide halo adds 362 kernel launches per model step, each on a slower launch
