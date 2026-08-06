@@ -1525,3 +1525,47 @@ meshes.
   Also: a byte-class lever's gate cannot use "output differs" as its knob-fired proof — run that
   way, `job_m9_options3` reported this build FAIL *for passing its own gate* (the L80 family,
   inverted).
+
+## L109 — A Kokkos kernel whose closure crosses 512 bytes changes LAUNCH PATH, and that is a 3× launch-latency cliff you will read as "the algorithm is slow"
+
+M9 P5, 2026-08-06, nsys on fArc np16 (jobs 26738629/30).
+
+The exact wide halo's ghost kernels (`maevp_stress_w`, `maevp_node_solve_w`, `maevp_edge_bc_w`)
+are character-for-character their owned twins with the views swapped. They should cost what the
+owned kernels cost, scaled by the ring's size. They did not. The trace says why:
+
+| | launch path | median inter-kernel gap |
+|---|---|---|
+| owned mEVP kernel | `cuda_parallel_launch_local_memory` | 4.38–5.47 µs |
+| **ghost mEVP kernel** | `cuda_parallel_launch_**constant**_memory` | **14.34 µs** |
+
+Kokkos chooses between the two at `CudaTraits::ConstantMemoryUseThreshold` = **512 bytes of
+closure**. Over that line the closure is staged through `__constant__` behind an event instead of
+riding the launch as a kernel argument. The ghost bodies captured the whole `FesomEvpwideDev` —
+about 25 `Kokkos::View`s, each ~24 B in a closure (data pointer + extent + allocation tracker) —
+so they were ~600 B and crossed it. The owned twins captured ~14 and did not.
+
+At 3 stages × 120 sub-cycles that is 360 launches per model step on the wrong side of the cliff:
+**+5.9 ms/step of inter-kernel gap against +2.5 ms/step of GPU busy — the launch term was 2.3× the
+arithmetic it was supposedly measuring.** Every conclusion drawn about "the price of exactness"
+had this baked in.
+
+Three things follow.
+
+1. **A `Kokkos::View` in a device closure is expensive as a CAPTURE, not just as an access.**
+   Where the kernel needs many arrays, capture `v.data()` and index the raw pointer. For 1-D
+   contiguous Views `p[i]` is exactly `v(i)`, and a pointer is 8 B instead of ~24. The M9 lean
+   kernels come to ~300 B this way and stay on the fast path; capturing the struct would have put
+   the *owned* body on the slow path too and made the fused kernel slower than the two it
+   replaced.
+2. **Fusing two kernels can lose if it merges their closures.** "One launch instead of two" is
+   only a win while the survivor stays under the threshold. Check the launch path, do not assume.
+3. **The observable exists and costs one query.** In the nsys sqlite, group
+   `CUPTI_ACTIVITY_KIND_KERNEL` by demangled name and look for `constant_memory` in it; the gap
+   before each launch is `start[i] - end[i-1]`. Neither number appears in `nsys stats` output, and
+   nothing in the Kokkos API reports which path a kernel took — so a build can sit on the slow
+   path for a whole campaign without a single symptom other than a wall clock.
+
+Related: L103 (a diagnostic branch inside a timed kernel costs the registers its body needs, even
+untaken), L107 (a removed message on GPU is mostly removed launches and packing, charged to
+`busy`) — this lesson is the mechanism *underneath* L107's second clause.
