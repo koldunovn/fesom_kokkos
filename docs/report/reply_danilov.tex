@@ -29,9 +29,8 @@ costs most of the saving, was measuring our implementation.
 \begin{tabular}{@{}lrrr@{}}
 \toprule
 change of the sea-ice cost, $K$=8, & CORE2 & fArc & DARS \\
-six legs per mesh in one allocation & 1 node / 4 GPUs & 4 / 16 & 8 / 32 \\
+all legs per mesh in one allocation & 1 node / 4 GPUs & 4 / 16 & 8 / 32 \\
 \midrule
-\emph{delayed exchange (stale halo)}            & \emph{$-58.2\%$} & \emph{$-62.8\%$} & \emph{$-62.4\%$} \\
 wide halo, standard form, our kernels           & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ \\
 wide halo, divergence form, our kernels         & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ \\
 \textbf{wide halo, standard form, your loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ \\
@@ -42,19 +41,20 @@ same, as a share of the whole model step        & $-14.4\%$ & $-9.6\%$ & $-12.7\
 \end{tabular}
 \end{center}
 
-The delayed exchange is in the table because it is the scheme we rejected for putting the domain
-decomposition into the ice field, and because we reported it as saving about three times what the
-wide halo saves. That factor was our kernel structure. On CORE2 it disappears entirely --- the
-divergence form is identical to the delayed exchange in both currencies. On fArc and DARS it does
-not: the rewriting closes two thirds of the gap and the delayed exchange still leads. We would no
-longer describe the wide halo as a fraction of it, but neither can we claim parity in general.
+\textbf{And the saving grows with the number of GPUs.} We swept node counts, 1 to 16 on both
+backends. On GPU the sea-ice cost of the standard scheme does not scale at all --- it is flat or
+rising with node count on every mesh (CORE2 15.6, 15.0, 22.9, 24.4\,ms at 1, 2, 4, 8 nodes) --- so
+adding GPUs buys nothing on the ice. Written as widened loops the wide halo lowers that cost and
+partly restores its scaling: in your divergence form the ice cost \emph{falls} where the standard
+scheme's rises, 16.9, 15.0, 13.5\,ms on fArc at 2, 4 and 8 nodes. The saving is therefore $-40$ to
+$-52\%$ of the ice on fArc from 1 to 8 nodes and $-31$ to $-51\%$ on DARS from 2 to 8, and the
+table above, taken at one node count per mesh, understates it.
 
 Giving up the owner's summation order costs what you predicted: after a time step of 120
 sub-cycles the ice velocity differs from the exact wide halo by 8 to 15 units in the last place.
 The 60-day test of the domain decomposition, which replaces the bit-identity we gave up, passes:
-the ratio of boundary to interior differences is 0.84 for ice thickness against 0.85 for two
-identical runs, and on ice velocity 1.20 against a control of 1.33, while the delayed exchange
-gives 2.5 and 1.76.
+the boundary-to-interior ratio is 0.836 for ice thickness against 0.854 for two identical runs, and
+1.196 for ice velocity against a control of 1.325 --- at or below its own control on every field.
 
 \textbf{Point 1, the auxiliary fields.} We instrumented the per-step exchange to report, field by
 field, the difference between the owner's arriving value and the value the receiving process
@@ -74,12 +74,14 @@ a threshold in Kokkos above which arguments are staged through constant memory. 
 consecutive launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels. Per step
 the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic.
 
-\textbf{Your reformulation now wins everywhere, and we had been measuring past it.} With ring
+\textbf{Your reformulation now wins almost everywhere, and we had been measuring past it.} With ring
 kernels the standard form beat the divergence form by 13 points of ice cost on CORE2 and 4 on
 fArc, and our previous note decomposed that gap into a message term and a byte term. With the ring
 folded into the existing loops \emph{the divergence form leads at all three meshes} --- by 1.3,
 6.5 and 6.7 points, ordered by how much mesh each GPU holds, which is the behaviour a halved nodal
-message should produce. It is ahead at every $K$ we tried as well. The launch structure was not
+message should produce. It is ahead at every $K$ we tried as well, and at every node count in the
+sweep but one --- fArc on two GPU nodes, where the standard form is 0.7 points ahead, outside the
+repetition spread there. So it is a strong tendency rather than a law. The launch structure was not
 creating the difference between the two forms; it was hiding it, and it fell hardest on yours
 because its ring gather was the most expensive of the ring kernels. On CPU the same rewriting also
 favours your form, where there are no launches at all: folding the loops removes a recomputation

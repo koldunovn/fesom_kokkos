@@ -103,23 +103,12 @@ The ring-kernel writing is exact: it reproduces the every-sub-cycle trajectory b
 widened-loop writing gives that up, because a ring node is summed in the receiving process's
 element order rather than the owner's; after one step of 120 sub-cycles the ice velocity differs by
 8 to 15 units in the last place. In place of the bit check we hold it to a 60-day test of whether
-the domain decomposition becomes visible in the ice --- mean $|\Delta|$ on the one-cell sub-domain
-boundary against the interior, fArc on 16 GPUs:
-
-\begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-boundary / interior ratio & two identical runs & ring kernels & \textbf{widened loops} \\
-\midrule
-ice thickness & 0.854 & 0.866 & \textbf{0.836} \\
-ice concentration & 0.831 & 0.817 & \textbf{0.796} \\
-ice velocity & 1.325 & 1.211 & \textbf{1.196} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-At or below its own control on every field. Each row carries its own control because the absolute
-ratio is a property of the field: two identical runs already score 1.33 on ice velocity.
+the domain decomposition becomes visible in the ice: the mean $|\Delta|$ on the one-cell sub-domain
+boundary divided by the mean in the interior, fArc on 16 GPUs. The widened-loop writing gives 0.836
+for ice thickness, 0.796 for concentration and 1.196 for ice velocity, against 0.854, 0.831 and
+1.325 for two identical runs --- at or below its own control on every field. Each field needs its
+own control because the absolute ratio is a property of the field, not of the scheme: two identical
+runs already score 1.33 on ice velocity.
 
 \hd{Recommendation}
 
