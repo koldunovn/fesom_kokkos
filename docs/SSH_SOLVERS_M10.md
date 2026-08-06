@@ -469,8 +469,26 @@ the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest repo
 | 26723632 | NG5 16N | legacy-cg · cg2 · pipecg | ✅ HARVESTED (below) |
 | 26723692 | NG5 4N | legacy-cg · pcsi · pcsi K=10 | ✅ HARVESTED (below) |
 | 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ✅ HARVESTED (below) |
-| **26723783** | **NG5 4N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
-| **26723784** | **NG5 16N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
+| ~~26723783~~ | NG5 4N | *(intended)* SPEED=1 · +cg2 · +pipecg · +pcsi | ❌ **VOID — see the L80 note below** |
+| ~~26723784/26723867~~ | NG5 16N | *(intended)* same | ❌ cancelled, same defect |
+| **26724474** | **NG5 16N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ⭐ **the number of record** (resubmitted) |
+| **26724475** | **NG5 4N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ⭐ **the number of record** (resubmitted) |
+
+> ### ⚠️ L80 in the wild: a silent A/B truncation, caught by its own output
+>
+> Job 26723783 reported a clean-looking result — two legs, `+0.11 %` apart. **Both legs were
+> the same configuration.** `sbatch --export` uses COMMAS as its own separator, so passing
+> `LEGS="FESOM_SPEED=1;FESOM_SPEED=1,FESOM_SSH_SOLVER=cg2;…"` let sbatch eat everything from
+> the first comma onward: the job received `LEGS="FESOM_SPEED=1;FESOM_SPEED=1"` and dutifully
+> measured the baseline against itself. The earlier jobs (26723631/32/92/93) were unaffected
+> only because their legs happened to contain no commas.
+>
+> This is the dead-knob trap wearing a different hat — a measurement that *looks* like a
+> null result but never ran the thing being measured. It was caught because the harvest
+> prints the leg name, and two legs printed the same one. **Fixes:** the intra-leg separator
+> is now `+`, and every leg now echoes its resolved `FESOM_*` knob set into the log, so two
+> legs sharing a knob set is visible at a glance rather than inferable from suspiciously
+> equal numbers.
 
 > ⚠️ **Measurement-design correction, made before any number was quoted.** The first four
 > jobs clear every knob, so their leg 0 is **legacy `cg`** (2 exchanges + 2 allreduces per
