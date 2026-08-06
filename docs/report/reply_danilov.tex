@@ -1,13 +1,13 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[10pt,a4paper]{article}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
-\usepackage[margin=2.0cm,top=1.5cm]{geometry}
+\usepackage[margin=1.7cm,top=1.3cm,bottom=1.2cm]{geometry}
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{microtype}
 \pagestyle{empty}
-\setlength{\parskip}{0.30em}
+\setlength{\parskip}{0.24em}
 \setlength{\parindent}{0pt}
 
 \begin{document}
@@ -15,75 +15,76 @@
 {\large\bfseries Reply to S. Danilov's comments on the mEVP communication study}\\[0.2em]
 {\small N. Koldunov, 6 August 2026}
 
-\vspace{0.6em}\hrule\vspace{0.8em}
+\vspace{0.45em}\hrule\vspace{0.6em}
 
-\textbf{On the intent of the divergence form.} Understood, and it works as intended. Our two
-wide-halo variants differ only in what rides the window message, and on DARS at 32 GPUs the
-divergence form removes \textbf{28.8\%} of the ice cost against \textbf{23.8\%} for the classic
-form. Its advantage is ordered by how much mesh each GPU holds: it loses by 17 percentage points
-on CORE2 at 32\,000 surface nodes per GPU, loses by 4 on fArc at 40\,000, and gains 5 on DARS at
-99\,000. The halved, nodal message pays where messages are large, which is the regime it was aimed
-at.
-
-\textbf{Why our implementation exchanges more than yours.} Not for bit-identity in the first
-instance, but because our ring is $K$ cells deep and rings $2\ldots K$ do not exist in FESOM's data
-structures: on those nodes \texttt{a\_ice}, \texttt{u\_w}, \texttt{stress\_atmice} and the right-hand
-sides are not last-bit different, they are absent. Your scheme never meets this because it stays
-inside the halo FESOM already maintains, which is also what restricts it to $K=2$. At $K=2$ the two
-approaches need the same data.
-
-\textbf{Point 2 --- extending the computation over the $K-1$ ring.} You are right that this removes
-the error and makes the sub-domain boundaries invisible, and we have measured it. Averaging
-$|\Delta$ ice thickness$|$ on the sub-domain boundaries and in the interior over 60 days on fArc,
-the ratio is 0.87 for the configuration that recomputes the ring, against 0.85 for two identical
-runs; there is no imprint to detect. The configuration that does this is the one we call the wide
-halo.
-
-The difficulty is that the same change removes most of the saving:
+We built the variant you describe, and it changes the study's conclusion. Written as you write it
+--- the ring computation folded into the loops that already exist rather than into kernels of its
+own --- the wide halo removes \textbf{58\% of the sea-ice cost} on CORE2 at its operating point,
+against 11\% for our version of the same scheme. The two runs compute the same ring and put
+identical message and byte counts on the wire; they differ by 360 kernel launches per time step.
+Our earlier conclusion, that exactness costs most of the saving, was measuring our implementation.
 
 \begin{center}\small
-\begin{tabular}{@{}lrr@{}}
+\begin{tabular}{@{}lrrr@{}}
 \toprule
-GPU, four meshes at their operating points & ice cost & boundary/interior ratio \\
+CORE2, one node, four GPUs & model step & \multicolumn{2}{c}{sea-ice cost} \\
 \midrule
-delayed exchange, stale halo, no ring computation & $-37$ to $-58\%$ & 1.70 ($K$=2), 2.52 ($K$=4) \\
-ring recomputed (our wide halo) & $-11$ to $-29\%$ & 0.87 \\
-two identical runs & --- & 0.85 \\
+every sub-cycle (reference)                     & 0.0660\,s          & 15.8\,ms          & --- \\
+wide halo, standard form, our kernels           & $-2.4\%$           & 14.1\,ms          & $-10.8\%$ \\
+wide halo, divergence form, our kernels         & $+1.1\%$           & 16.3\,ms          & $+3.2\%$ \\
+\textbf{wide halo, standard form, your loops}   & $\mathbf{-13.6\%}$ & \textbf{6.7\,ms}  & $\mathbf{-57.6\%}$ \\
+\textbf{wide halo, divergence form, your loops} & $\mathbf{-13.6\%}$ & \textbf{6.6\,ms}  & $\mathbf{-58.2\%}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The delayed exchange is about three times faster than the wide halo \emph{because} it does not
-compute in the ring, and computing in the ring is what makes the boundaries invisible. The imprint
-and the saving have the same origin, so a scheme that extends the computation over the ring
-converges onto the wide halo and inherits its numbers. We have not found an intermediate that is
-both cheap and clean, and we would be glad to be shown one.
+58\% is the upper end of the range we measured for the delayed exchange, the scheme we rejected
+because it puts the domain decomposition into the ice field. If this holds on the other three
+meshes, the trade we reported between speed and a clean ice field does not exist; it was a
+property of how we had written the ring. Giving up the owner's summation order costs what you
+predicted: after a time step of 120 sub-cycles the ice velocity differs from the exact wide halo
+by 8 to 15 units in the last place.
 
-\textbf{Point 1 --- what sacrificing exactness would buy.} Part of this we can bound and part we
-cannot.
+\textbf{Point 1, the auxiliary fields.} We instrumented the per-step exchange to report, field by
+field, the difference between the owner's arriving value and the value the receiving process
+already holds. Nine of the eleven arrive \emph{exactly} equal --- ice velocity, concentration,
+thickness, snow, ocean velocity, wind stress --- because FESOM's own halo exchange has already put
+them there, as you said. The two right-hand sides do not: they are assembled and area-scaled over
+owned nodes only, so a halo node has no correct value at all. But the redundancy stops at the
+first ring, and rings $2\ldots K$ have no other source, so what could be removed is 37\% of that
+exchange at $K$=2 and 17\% at $K$=4. Since the exchange is 5.4\% of the data the scheme moves and
+one message per neighbour per step, removing it would gain under one percent of the traffic and no
+messages. We have not implemented the trimmed version, and that is why.
 
-The auxiliary fields we ship once per model step, which is the cost you object to, amount to
-1.6--6.2\% of the wide halo's messages and 3.6--9.2\% of the data it moves, because they are sent
-once per step against $120/K$ window exchanges. Removing them altogether therefore gains at most
-about 0.4 percentage points of the model step. On this evidence the field shipping is not what
-holds the scheme back.
+\textbf{Point 1, the kernel structure.} This is the part we could not bound before, and it was
+much the larger. Our wide halo adds 362 kernel launches per model step, each on a slower launch
+path than the owned kernel it duplicates: the ring kernels carry enough array descriptors to cross
+a threshold in Kokkos above which arguments are staged through constant memory. The gap between
+consecutive launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels. Per step
+the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic.
 
-What we have not measured is the second half. Our implementation performs the ring computation in
-kernels of its own --- two extra per sub-cycle in the classic form and three in the divergence
-form, so 240 to 360 more per model step --- whereas yours simply extends the bounds of the loops
-that already exist and adds none. Of the 8.2\,ms ice-dynamics phase we profiled, only 1.25\,ms is
-arithmetic, spread over some 480 launches per step, so that is where a substantial gain could still
-be hiding. We cannot bound it from the runs we have.
+\textbf{The two forms become indistinguishable.} In our implementation the standard and divergence
+forms differed by 3.5 percentage points, and the previous note decomposed that difference into a
+message term and a byte term. With the ring folded into the existing loops the difference is zero
+to four decimals, while the divergence form still ships 40\% fewer numbers. The gap we decomposed
+was our kernel structure. On CPU at 512 cores the picture differs and favours your form: there the
+ring assembly is arithmetic-bound, and folding the loops removes a recomputation the divergence
+form was doing about six times over, worth 3 percentage points, while in the standard form the
+same change costs 5.
 
-\textbf{What we propose.} We will build the variant you describe --- the ring computation folded
-into the loops that already exist, in the natural order, exchanging velocities and stress
-divergence every $K$ sub-cycles and recomputing the rest --- and measure it against our wide halo
-at the same operating points. The ring computation is common to both, so the difference between
-them should be the launches and the ordering machinery, which your formulation avoids. We will
-report the result whichever way it comes out.
+\textbf{Point 2, extending the computation over the ring.} You were right, and the correction runs
+deeper than we allowed. Recomputing the ring does remove the imprint --- averaging $|\Delta$ ice
+thickness$|$ on the sub-domain boundaries against the interior over 60 days on fArc gives 0.87,
+against 0.85 for two identical runs and 2.52 for the delayed exchange. What we wrote was that the
+same change removes most of the saving and that we had found no intermediate that was both cheap
+and clean. That was a statement about our kernels, not about the scheme.
 
-\vspace{0.5em}
-{\footnotesize All numbers above are from the runs described in
-\texttt{danilov\_mevp\_report.pdf}; the underlying output and job scripts can be shared.}
+\textbf{Open.} The table is CORE2 at its operating point; fArc, DARS and NG5 are queued. The
+60-day boundary test is being repeated for this variant and is the gate we hold it to, since it is
+no longer bit-identical and cannot be checked the way the exact version was.
+
+\vspace{0.35em}
+{\footnotesize All numbers are from the runs described in \texttt{danilov\_mevp\_report.pdf}; the
+output and job scripts can be shared.}
 
 \end{document}
