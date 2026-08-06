@@ -101,10 +101,25 @@ def node_axis(ax, counts):
     ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
 
 
-def decimal_log_yaxis(ax):
+def decimal_log_yaxis(ax, lo, hi):
+    """Log y with PLAIN decimal tick labels (house style, m7_scaling_figs.py).
+
+    🔴 The house helper picks from a fixed list of round values. That list is decade-spaced
+    enough that a panel spanning e.g. 0.055-0.074 s gets NO major tick inside it and renders
+    with a bare, unlabelled axis — which is what the first draft of this figure did on three of
+    the eight panels. So: build the candidate list densely (1/1.5/2/3/5/7 per decade) and widen
+    to the next candidates outward if fewer than three land in range."""
     ax.set_yscale("log")
+    cand = sorted(m * 10.0 ** k for k in range(-4, 3) for m in (1, 1.5, 2, 3, 5, 7))
+    inside = [t for t in cand if lo * 0.98 <= t <= hi * 1.02]
+    if len(inside) < 3:                      # pad outward so the axis is never bare
+        i0 = max(0, min(range(len(cand)), key=lambda i: abs(cand[i] - lo)) - 1)
+        i1 = min(len(cand), min(range(len(cand)), key=lambda i: abs(cand[i] - hi)) + 2)
+        inside = cand[i0:i1]
+    ax.set_yticks(inside)
     ax.yaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%g"))
-    ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
+    ax.yaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+    ax.set_ylim(lo * 0.88, hi * 1.14)
 
 
 def render(which, fname, title, ylabel):
@@ -114,8 +129,11 @@ def render(which, fname, title, ylabel):
     for col, (mesh, mlab) in enumerate(MESHES):
         for row, backend in enumerate(("gpu", "cpu")):
             ax = axes[row][col]
-            counts = sorted(n for (b, m, n) in data if b == backend and m == mesh)
-            drew = False
+            # only node counts that actually carry a value for THIS quantity — otherwise the
+            # axis advertises points the panel does not show
+            counts = sorted(n for (b, m, n) in data
+                            if b == backend and m == mesh and data[(b, m, n)][which])
+            drew, seen_y = False, []
             for key, lab, col_, mk, ls in SER:
                 xs, ys = [], []
                 for n in counts:
@@ -125,10 +143,10 @@ def render(which, fname, title, ylabel):
                 if xs:
                     ax.plot(xs, ys, ls, color=col_, marker=mk, ms=4.2, lw=1.4,
                             label=lab if (row == 0 and col == 0) else None, zorder=3)
-                    drew = True; any_point = True
+                    drew = True; any_point = True; seen_y += ys
             if drew:
                 node_axis(ax, counts)
-                decimal_log_yaxis(ax)
+                decimal_log_yaxis(ax, min(seen_y), max(seen_y))
             else:
                 ax.set_xticks([]); ax.set_yticks([])
                 ax.text(0.5, 0.5, "no data", ha="center", va="center", fontsize=8,
