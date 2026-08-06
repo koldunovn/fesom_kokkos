@@ -43,7 +43,11 @@ export FESOM_PRINT_EVERY=999
 MESH=${MESH:?MESH required}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 TAG=${TAG:?TAG required}
-OUT=/work/ab0995/a270088/port2/m10/ab/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+# ⚠️ The job id is part of the path ON PURPOSE. Two jobs sharing a TAG previously shared
+# this directory, and since each starts with `rm -rf`, concurrent runs wiped and
+# interleaved each other's logs — silently producing two different "results" for the
+# same configuration (jobs 26734774/80 at 1536 and 26734776/81 at 2048).
+OUT=/work/ab0995/a270088/port2/m10/ab/${TAG}_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
 NPES=$SLURM_NTASKS
 FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
 m7_provenance "$OUT" "$FESOM"

@@ -829,12 +829,39 @@ straight onto the certified curve and the 7.4 % offset would have been read as p
 |--:|--:|--:|--:|--:|--:|--:|--:|
 | 864 | 146 | 21.3 | 0.0467 | 100.0 | −7.49 | −9.85 | **−11.78** |
 | 1024 | 123 | 21.8 | 0.0410 | 96.1 | −6.34 | −10.73 | **−12.68** |
-| 1536 | 82 | 26.4 | 0.0408 | **64.4** | −9.07 | −12.25 | **−13.97** |
-| **2048** | **61** | **29.6** | 0.0355 | **55.5** | −10.42 | −14.08 | **−14.65** |
+| ~~1536~~ | 82 | — | — | — | — | — | ❌ **VOID — re-running** |
+| ~~2048~~ | 61 | — | — | — | — | — | ❌ **VOID — re-running** |
+
+> ### ❌ DATA-INTEGRITY RETRACTION (found 2026-08-06, before the numbers were used)
+>
+> **The 1536 and 2048 rows are withdrawn.** A `sed` formatting error in the submission line
+> printed an error but did **not** stop the `sbatch` calls, so each of those two rungs was
+> submitted **twice** — jobs 26734774 *and* 26734780 at 1536, 26734776 *and* 26734781 at 2048.
+> Both members of each pair carried the same `TAG`, hence the same output directory, and the
+> job begins with `rm -rf "$OUT"` — so the concurrent runs wiped and interleaved each other's
+> logs while both were writing.
+>
+> The symptom that exposed it: the consolidated harvest produced **two different results for
+> the same 2048 configuration** (baseline 0.0369 s/step with `pcsi` −17.89 %, and 0.0355 with
+> `pcsi` missing entirely). One configuration cannot have two answers.
+>
+> **Unaffected:** 864 control (job 26734773) and 1024 (job 26734671) were each single runs with
+> unique tags — those rows stand. The certified-mesh ladder (128–864) is untouched.
+>
+> **Fix:** `$OUT` now includes `$SLURM_JOB_ID`, so a tag collision cannot share a directory.
+> Re-runs submitted as jobs **26735610** (1536) and **26735611** (2048) with unique tags.
+>
+> ⚠️ **Everything derived from the 2048 row is suspended pending the re-run** — including the
+> "`pcsi` at 1024 ranks matches the baseline at 2048" claim and the -14.6 % best-step-time
+> figure below. They are left in place, struck, so the correction is visible rather than
+> quietly edited away.
 
 ### The wall, and what the solvers do to it
 
-**The baseline stops scaling between 1024 and 1536: 1.5× the cores buys 1.005× the speed.**
+⚠️ *The paragraphs below rest on the VOIDED 1536/2048 rows and are suspended pending jobs
+26735610/26735611. Retained struck-through rather than deleted, so the correction is visible.*
+
+~~**The baseline stops scaling between 1024 and 1536: 1.5× the cores buys 1.005× the speed.**~~
 Parallel efficiency collapses from 96 % to 64 % across that step and reaches 55.5 % at 2048.
 The SSH share climbs to **29.6 %** — nearly a third of the step is the solve — which is
 exactly why this is where the solvers pay most: their whole-step gain grows monotonically
