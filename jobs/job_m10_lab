@@ -41,14 +41,26 @@ cat "$OUT/SHA.txt"
 
 echo "=== M10 lab  $TAG  mesh=$(basename "$MESH") np=$NPES dump=$DUMP ==="
 
+# SECTIONS: which of 1..4 to run (default all). The sigma-drift and the tolerance ladder are
+# slow at large np (host-side reference PCG + up to 2000 iterations per run), and section 4 —
+# the DECISIVE widened-guard test — used to sit behind them, so a walltime kill lost exactly
+# the result the job was for. Select it directly: SECTIONS=4.
+SECTIONS=${SECTIONS:-1234}
+want () { case "$SECTIONS" in *"$1"*) return 0;; *) return 1;; esac; }
+
+want 1 && {
 echo "--- 1. sym-check"
 srun "$LAB" "$MESH" "$DUMP" --sym-check > "$OUT/symcheck.out" 2> "$OUT/symcheck.err"
 echo "    rc=$?"; grep -a "lab" "$OUT/symcheck.out" | sed 's/^/      /'
+}
 
+want 2 && {
 echo "--- 2. sigma-drift"
 srun "$LAB" "$MESH" "$DUMP" --sigma-drift > "$OUT/sigma.out" 2> "$OUT/sigma.err"
 echo "    rc=$?"; grep -a "lab-sigma" "$OUT/sigma.out" | tail -40 | sed 's/^/      /'
+}
 
+want 3 && {
 echo "--- 3. stall-guard plateau ladder"
 for tol in 1e-5 1e-7 1e-9; do
     for slv in cg cg2 oati; do
@@ -63,7 +75,9 @@ for tol in 1e-5 1e-7 1e-9; do
                "$tol" "$slv" "${it:-?}" "${pl:-?}" "$fb"
     done
 done
+}
 
+want 4 && {
 echo "--- 4. guard WIDENED: does the variant recover if the stall guard never fires?"
 # The decisive test for open item 3. STALL_WINDOW=100000 effectively disables the plateau
 # trigger (the `resid > 1e3*best` divergence trigger stays armed), maxiter 2000 gives room.
@@ -92,5 +106,6 @@ if h:
 PYEOF
     grep -a "FALLBACK on solve" "$OUT/wide_${slv}.err" | sed 's/^/      /'
 done
+}
 
 echo "=== done ==="
