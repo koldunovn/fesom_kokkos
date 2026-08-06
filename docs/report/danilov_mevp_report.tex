@@ -254,7 +254,11 @@ scheme acts, while the step is dominated by the ocean.
 \includegraphics[width=\textwidth]{fig3_scaling_ice.pdf}
 \caption{Strong scaling of the sea-ice cost alone --- ice, ice dynamics and ice advection,
 computation together with time spent waiting for communication. This is the measure appropriate to
-a sea-ice scheme; the model step divides an ice-only change by roughly ten.}
+a sea-ice scheme; the model step divides an ice-only change by roughly ten. NG5 is run here from
+the shared-archive copy of the mesh rather than the locally repartitioned one used for the
+operating-point table, because only the former carries the range of process counts a scaling curve
+needs; the two have identical geometry but different partitions, so NG5 curves should not be
+compared point-by-point with the NG5 column of Sect.~5.3.}
 \label{fig:scice}
 \end{figure}
 
