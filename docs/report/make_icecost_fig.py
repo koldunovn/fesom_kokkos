@@ -20,13 +20,19 @@ import matplotlib.pyplot as plt
 D = json.load(open("/work/ab0995/a270088/port2/m9/m9_results.json"))
 OUT = os.path.dirname(os.path.abspath(__file__))
 
-POINTS = [("ic_core2", "CORE2, 127 k nodes\n1 node / 4 GPUs"),
-          ("ic_farc",  "fArc, 638 k\n4 nodes / 16 GPUs"),
-          ("ic_dars",  "DARS, 3.2 M\n8 nodes / 32 GPUs"),
-          ("ic_ng5",   "NG5, 7.4 M\n16 nodes / 64 GPUs")]
-SER = [("divergence",   "divergence form alone",                    "#8c8c8c"),
-       ("wide_std_k8",  "wide halo, standard form ($K$=8)",         "#1f6fb4"),
-       ("wide_div_k8",  "wide halo, divergence form ($K$=8)",       "#7fb3dd")]
+POINTS = [("p6_core2_phst", "CORE2, 127 k nodes\n1 node / 4 GPUs"),
+          ("p6_farc_phst",  "fArc, 638 k\n4 nodes / 16 GPUs"),
+          ("p6_dars_phst",  "DARS, 3.2 M\n8 nodes / 32 GPUs"),
+          ("p6_ng5_phst",   "NG5, 7.4 M\n16 nodes / 64 GPUs")]
+# Session 5: the same four schemes, but each wide-halo scheme now appears in BOTH writings --
+# ring kernels of their own (as measured through session 4) and the ring folded into the loops
+# that already exist (Danilov's structure). The pairs are the figure's whole point: the two bars
+# of a pair compute the same ring, remove the same messages and put identical byte counts on the
+# wire, so the distance between them is the port's kernel structure and nothing else.
+SER = [("wide_k8",          "standard form, ring kernels",   "#1f6fb4"),
+       ("wide_k8_lean",     "standard form, widened loops",  "#8fc4e8"),
+       ("widediv_k8",       "divergence form, ring kernels", "#8a5a1f"),
+       ("widediv_k8_lean",  "divergence form, widened loops", "#e0b072")]
 
 
 def ice_cost(ph):
@@ -56,11 +62,11 @@ for tag, lab in POINTS:
 if not rows:
     sys.exit("no instrumented operating-point runs found")
 
-fig, ax = plt.subplots(figsize=(7.2, 3.9), constrained_layout=True)
+fig, ax = plt.subplots(figsize=(7.6, 4.1), constrained_layout=True)
 x = range(len(rows))
-w = 0.26
+w = 0.20
 for i, (key, lab, col) in enumerate(SER):
-    xs = [xx + (i - 1) * w for xx in x]
+    xs = [xx + (i - 1.5) * w for xx in x]
     ys = [v.get(key, float("nan")) for _, v in rows]
     ax.bar(xs, ys, width=w, color=col, label=lab, zorder=3)
     for xi, yi in zip(xs, ys):
@@ -72,8 +78,9 @@ ax.axhline(0, color="k", lw=1.0, zorder=3)
 ax.set_xticks(list(x))
 ax.set_xticklabels([lab for lab, _ in rows], fontsize=8)
 ax.set_ylabel("change of the sea-ice cost  [%]")
-ax.set_title("Cost of the sea ice relative to the standard scheme,\n"
-             "each mesh at a node count where the model still scales", fontsize=9.5)
+ax.set_title("Cost of the sea ice relative to the standard scheme, each mesh at a node count\n"
+             "where the model still scales. Within a pair only the kernel structure differs.",
+             fontsize=9.5)
 ax.grid(axis="y", alpha=.3, zorder=0)
 ax.legend(fontsize=8, loc="lower left")
 fig.savefig(os.path.join(OUT, "fig1_icecost.pdf"))
