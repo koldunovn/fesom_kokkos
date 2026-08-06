@@ -846,6 +846,24 @@ int fesom_evpwide_K(struct fesom_ice *ice, struct fesom_partit *p, struct fesom_
         g_w.announced = true;
         return 0;
     }
+    /* P5. The LEAN kernels (FESOM_SPEED_EVPWIDE_LEAN) exist in fesom_ice_maevp.cpp only, so under
+     * std EVP the knob would be accepted, resolve, and do NOTHING — and the guard that catches
+     * this for mEVP lives inside the mEVP routine, which std EVP never calls. That is the exact
+     * shape of L80, opened by the very commit that added the guard. Caught here instead, where
+     * every other "requested but not running" shout lives. A raw getenv is the right test: the
+     * message is "this does not apply to this rheology", which is true on either backend. */
+    if (ice->whichEVP == 0) {
+        static bool warned_lean = false;
+        const char *lv = getenv("FESOM_SPEED_EVPWIDE_LEAN");
+        if (!warned_lean && lv && atoi(lv) != 0 && p->mype == 0) {
+            warned_lean = true;
+            fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE_LEAN=%s was requested but "
+                            "whichEVP=0 (standard EVP) — the lean ghost kernels exist for mEVP "
+                            "only, so the wide halo is running in its EXACT form and the lean "
+                            "lever is NOT running.\n", lv);
+            fflush(stderr);
+        }
+    }
     if (!g_w.hook_done) {
         if (!g_w.announced && p->mype == 0) {
             fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE requested but no extended zone "
