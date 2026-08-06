@@ -239,8 +239,31 @@ differs.}
 
 Figures~\ref{fig:scstep} and~\ref{fig:scice} give the strong scaling of the standard scheme and of
 the two widened-loop wide halos, on both backends, for the model step and for the sea ice
-separately. The two are shown apart because they have different shapes: the sea ice is where the
-scheme acts, while the step is dominated by the ocean.
+separately. The two are shown apart because they behave differently, and the ice figure carries the
+result. As a check on the whole fleet, the three points it shares with the operating-point table of
+Sect.~5.3 reproduce it to between 0.2 and 0.8\%, on different days and in different allocations.
+
+\textbf{On GPU the sea ice does not scale at all.} For the standard scheme its cost per step is
+flat or rising with node count on every mesh: on CORE2 15.6, 15.0, 22.9, 24.4\,ms at 1, 2, 4 and 8
+nodes; on fArc 24.7, 27.9, 26.3, 28.0; on DARS 38.8, 34.1, 43.4 at 2, 4 and 8. The ocean around it
+scales normally, which is why the model step still falls. Adding GPUs buys nothing on the ice and
+eventually costs.
+
+\textbf{The widened-loop wide halo lowers that cost and restores some of its scaling.} In the
+divergence form the ice cost \emph{falls} with node count where the standard scheme's rises: on
+fArc 16.9, 15.0, 13.5\,ms at 2, 4 and 8 nodes, and on DARS 26.9, 21.6, 21.5. On CORE2 it still
+rises, but from 6.5\,ms instead of 15.6 and far more slowly.
+
+\textbf{The saving therefore grows with the number of GPUs}, which is the opposite of how an
+optimisation usually ages and the reason the single-operating-point table understates it. In the
+divergence form it is $-40$, $-39$, $-43$, $-52\%$ of the ice cost on fArc at 1, 2, 4 and 8 nodes,
+and $-31$, $-37$, $-51\%$ on DARS at 2, 4 and 8. CORE2 is the exception in shape only: it is past
+its scaling limit from 2 nodes on, and there the saving is already $-55$ to $-62\%$.
+
+\textbf{On CPU the sea ice scales cleanly} --- on fArc 91.9\,ms at 1 node down to 10.4 at 16 ---
+and the wide halo is a uniform penalty, between $+46$ and $+173\%$ of the ice cost across all
+fourteen points measured. Because the ice is a small share of a CPU step, that shows up as $+4$ to
+$+22\%$ of the step. There is no node count at which it becomes profitable.
 
 \begin{figure}[tb]
 \centering

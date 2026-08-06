@@ -62,7 +62,7 @@ for tag, lab in POINTS:
 if not rows:
     sys.exit("no instrumented operating-point runs found")
 
-fig, ax = plt.subplots(figsize=(7.6, 4.1), constrained_layout=True)
+fig, ax = plt.subplots(figsize=(7.8, 4.4), constrained_layout=True)
 x = range(len(rows))
 w = 0.20
 for i, (key, lab, col) in enumerate(SER):
@@ -82,6 +82,11 @@ ax.set_title("Cost of the sea ice relative to the standard scheme, each mesh at 
              "where the model still scales. Within a pair only the kernel structure differs.",
              fontsize=9.5)
 ax.grid(axis="y", alpha=.3, zorder=0)
-ax.legend(fontsize=8, loc="lower left")
-fig.savefig(os.path.join(OUT, "fig1_icecost.pdf"))
+# the deepest bar reaches about -58 %, and its value label sits below it, so leave room
+# rather than letting the label collide with the legend (which is what the first draft did)
+lo = min([v for _, vv in rows for v in vv.values()] + [0.0])
+ax.set_ylim(lo * 1.18 - 4, max([v for _, vv in rows for v in vv.values()] + [0.0]) + 6)
+fig.legend(fontsize=8, ncol=4, loc="lower center", frameon=False,
+           bbox_to_anchor=(0.5, -0.045))
+fig.savefig(os.path.join(OUT, "fig1_icecost.pdf"), bbox_inches="tight")
 print("fig1_icecost written")

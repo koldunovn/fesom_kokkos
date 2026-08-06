@@ -85,6 +85,18 @@ launch structure was not creating the difference between the two forms; it was h
 fell hardest on the divergence form because its ring gather was the most expensive of the ring
 kernels.
 
+\hd{How it scales}
+
+On GPU the sea-ice cost of the standard scheme does not fall with node count --- it is flat or
+rising on every mesh (CORE2 15.6, 15.0, 22.9, 24.4\,ms at 1, 2, 4, 8 nodes; fArc 24.7 to 28.0
+across 1 to 8). The ocean around it scales, so the model step still improves, but adding GPUs buys
+nothing on the ice. The widened-loop wide halo lowers that cost and partly restores its scaling: in
+the divergence form the ice cost \emph{falls} where the standard scheme's rises (fArc 16.9, 15.0,
+13.5\,ms at 2, 4, 8 nodes). \textbf{The saving therefore grows with the number of GPUs} --- $-40$
+to $-52\%$ of the ice on fArc from 1 to 8 nodes, $-31$ to $-51\%$ on DARS from 2 to 8 --- so the
+single-operating-point table above understates it. On CPU the ice scales cleanly and the wide halo
+is a uniform penalty at every node count tried.
+
 \hd{The accuracy price, and the test that replaces bit-identity}
 
 The ring-kernel writing is exact: it reproduces the every-sub-cycle trajectory bit for bit. The
