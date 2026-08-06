@@ -251,7 +251,10 @@ int main(int argc, char **argv)
                 printf("[lab-sigma] === leg %d: %s ===\n"
                        "[lab-sigma] %5s %16s %16s %12s %14s\n", leg, name,
                        "iter", "sigma_true", "sigma_recurred", "rel.drift", "(u_i,r_i-1)/gamma");
-            for (it = 1; it <= 60; ++it) {
+            const int SD_MAX = 500;   /* run to CONVERGENCE, not a fixed window: the
+                                       * iteration count each preconditioner needs is the
+                                       * answer to "does symmetrising help plain PCG too?" */
+            for (it = 1; it <= SD_MAX; ++it) {
                 spmv(stiff.values, p, ap);
                 const double sig_true = dot(p, ap);
                 if (it == 1) sigma_rec = sig_true;   /* seed: p₀=u₀ ⇒ σ₀ = δ₀ exactly */
@@ -283,8 +286,9 @@ int main(int argc, char **argv)
                 if (sqrt(rr / (double)mesh.nod2D) < rtol_) break;
             }
             if (mpi.mype == 0)
-                printf("[lab-sigma] leg %d SUMMARY: iters=%d  WORST |sigma_true-sigma_rec|/|sigma_true| = %.3e"
-                       "   WORST |(u_i,r_i-1)|/gamma = %.3e\n", leg, it, worst_rel, worst_orth);
+                printf("[lab-sigma] leg %d SUMMARY: PLAIN-PCG iters to converge = %d%s   "
+                       "WORST |sigma_true-sigma_rec|/|sigma_true| = %.3e   WORST |(u_i,r_i-1)|/gamma = %.3e\n",
+                       leg, it, it > SD_MAX ? " (NOT CONVERGED)" : "", worst_rel, worst_orth);
         }
         if (mpi.mype == 0)
             printf("[lab-sigma] VERDICT: the CG-CG family recurs sigma; leg 0 drift is the error"

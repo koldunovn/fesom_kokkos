@@ -94,6 +94,66 @@ drifts away from the true `(p_i, A p_i)` — cumulatively, since σ is a recurre
 gives a wrong α, which is no longer the line-search minimiser; the method stops being CG.
 This applies to `cg2`, `pipecg` and `oati` alike (they share this α recurrence).
 
+### 0.4a REVIEWER OBJECTION (S. Danilov, 2026-08-06) — "this should kill plain CG too"
+
+> *"the MITgcm preconditioner is symmetric by construction, maybe I have an error somewhere,
+> since this ought to destroy the convergence of plain CG in FESOM as well."*
+
+Both halves answered, with evidence.
+
+**(a) Is the port faithful, or did the Kokkos port introduce the asymmetry?** Faithful. FESOM's
+`src/solver.F90:79-80` reads
+
+```fortran
+pr_values(n+offset) = -0.5_WP*(ssh_stiff%values(n+offset)/ssh_stiff%values(1+offset))/  &
+                      (ssh_stiff%values(1+offset)+ diag_values(node))
+```
+
+i.e. exactly `-0.5·(a_ij/d_i)/(d_i+d_j)` — the same formula the C++ port implements, term for
+term. **The extra leading `1/d_i` is what breaks symmetry**, and it is in the Fortran. If the
+intended MITgcm operator is symmetric by construction, then this line is where the discrepancy
+entered, not the port.
+
+**(b) Why does plain PCG NOT break?** Because plain PCG never uses the identity that fails.
+It computes `α_i = γ_i/(p_i,Ap_i)` with an **explicit** dot product, and the orthogonality it
+actually relies on — `(r_i, p_{i-1}) = 0` — holds *regardless of M's symmetry*. By induction:
+assume `(r_{i-1},p_{i-2}) = 0`; then
+
+```
+(r_{i-1},p_{i-1}) = (r_{i-1}, u_{i-1} + β_{i-1}p_{i-2}) = γ_{i-1}
+(r_i,  p_{i-1})   = (r_{i-1},p_{i-1}) − α_{i-1}(p_{i-1},Ap_{i-1}) = γ_{i-1} − γ_{i-1} = 0  ✓
+```
+
+with the base case `p_0 = u_0`. So `α_i` is always the **exact line-search minimiser** along
+`p_i`, and PCG stays a monotone descent method that cannot diverge. What M-symmetry buys is
+*full* conjugacy (`r_i` orthogonal to **all** previous directions, not just the last), i.e.
+optimality of the short recurrence. Lose it and convergence is **slower, not absent**.
+
+**Measured on the real CORE2 matrix** (`fesom_ssh_lab --sigma-drift`, np1 step-20 dump, plain
+reference PCG run to convergence with each preconditioner):
+
+| preconditioner | plain-PCG iterations | σ-recurrence drift |
+|---|--:|--:|
+| as built (non-symmetric) | **126** | 2.4e-01 |
+| symmetrised `D^{−1/2}CD^{−1/2}` | **117** | 1.2e-13 |
+
+**Plain CG is not killed — it pays about 7 % in iterations** (126 → 117), precisely the
+"slower but sound" prediction. The CG-CG family has no such safety net: it *replaces* the
+explicit `(p,Ap)` with the recurrence, so the error accumulates unchecked (21.8 % by iteration
+60, §0.4b) and there is no line search to absorb it — hence divergence rather than slowdown.
+
+**Practical consequence for FESOM:** repairing `solver.F90` would not only unblock the
+communication-avoiding variants, it would give the **existing** solver ~7 % fewer iterations
+for free. The minimal repair preserving the spectrum is to scale each stored off-diagonal by
+`sqrt(d_i/d_j)`:
+
+```
+pr[i,j] = −0.5·a_ij / ( sqrt(d_i·d_j) · (d_i + d_j) )      ← symmetric, same spectrum
+```
+
+⚠️ It is a solver-class change to the production path (different iterates within tolerance),
+so on the FESOM side it needs the usual convergence/climate check rather than a silent swap.
+
 ### 0.4b MEASURED — on the real CORE2 matrix, and it is not small
 
 `tools/fesom_ssh_lab --sigma-drift` runs reference PCG on a dumped ocean system while
