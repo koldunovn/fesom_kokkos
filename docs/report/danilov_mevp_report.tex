@@ -322,24 +322,28 @@ the owner's summation order --- gives, on CORE2 at its operating point:
 \begin{center}\small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
-CORE2, one node, four GPUs & model step & \multicolumn{2}{c}{sea-ice cost} \\
+CORE2, one node, four GPUs, all six in one allocation & model step & \multicolumn{2}{c}{sea-ice cost} \\
 \midrule
-every sub-cycle (reference)                  & 0.0660\,s          & 15.8\,ms         & --- \\
-wide halo, standard form, separate kernels   & $-2.4\%$           & 14.1\,ms         & $-10.8\%$ \\
-wide halo, divergence form, separate kernels & $+1.1\%$           & 16.3\,ms         & $+3.2\%$ \\
-\textbf{wide halo, standard form, widened loops}   & $\mathbf{-13.6\%}$ & \textbf{6.7\,ms} & $\mathbf{-57.6\%}$ \\
-\textbf{wide halo, divergence form, widened loops} & $\mathbf{-13.6\%}$ & \textbf{6.6\,ms} & $\mathbf{-58.2\%}$ \\
+every sub-cycle (reference)                  & 0.0667\,s          & 15.7\,ms         & --- \\
+\emph{delayed exchange (stale halo), $K$=8}  & \emph{$-14.4\%$}   & \emph{6.6\,ms}   & \emph{$-58.0\%$} \\
+wide halo, standard form, separate kernels   & $-3.0\%$           & 13.9\,ms         & $-11.5\%$ \\
+wide halo, divergence form, separate kernels & $+1.1\%$           & 16.1\,ms         & $+2.6\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-14.1\%}$ & \textbf{6.8\,ms} & $\mathbf{-56.7\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-14.4\%}$ & \textbf{6.5\,ms} & $\mathbf{-58.6\%}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 Three points, in order of how much they change the study.
 
-\textbf{The saving was ours to give away, not the scheme's to withhold.} 58\% of the ice cost is
-the upper end of the range we measure for the delayed exchange (Sect.~6.4), the scheme we reject
-for putting the decomposition into the ice field. The statement in Sect.~6.3 that the wide halo is
-worth substantially less than the delayed exchange on every mesh holds for the implementation
-measured there, not for the scheme.
+\textbf{The trade between speed and a clean ice field does not exist.} The delayed exchange is in
+the table because Sect.~6.4 rejects it for putting the decomposition into the ice field while
+recording that it saves about three times what the wide halo saves. It no longer does: in the
+divergence form the widened-loop wide halo matches it exactly on the model step and is 1.5\% ahead
+of it on the ice cost, and in the standard form it is within a third of a percent. The wide halo
+still computes the ring and still refreshes it exactly every window, so it still leaves no
+imprint. The factor of three was our kernel structure, and with it goes the only argument this
+study had for a stale halo.
 
 \textbf{The two forms become indistinguishable.} They differ by 3.5 percentage points with
 separate ring kernels and by nothing to four decimals with widened loops, although the divergence
@@ -367,13 +371,16 @@ node, about six times over, it saves 3.
 \subsection*{6.4 The delayed exchange, and why it is not usable}
 
 Accepting a halo up to $K-1$ sub-cycles old removes 105 of the 120 exchanges per step at $K=8$ and
-costs one conditional. It is much the fastest of the three: at the four operating points it takes
-$-14.4$, $-14.3$, $-15.5$ and $-9.9\%$ off the model step at $K=8$ (CORE2, fArc, DARS, NG5) and
-$-12.6$, $-11.4$, $-14.2$ and $-8.5\%$ at $K=4$, which against the ice cost is $-37$ to $-58\%$ on
-GPU and $-5$ to $-25\%$ on CPU --- about three times what the wide halo gives. On CPU the same
-change is worth $-1$ to $-3.4\%$ of the step, because a CPU process holds far less of the mesh.
+costs one conditional. At the four operating points it takes $-14.4$, $-14.3$, $-15.5$ and
+$-9.9\%$ off the model step at $K=8$ (CORE2, fArc, DARS, NG5) and $-12.6$, $-11.4$, $-14.2$ and
+$-8.5\%$ at $K=4$, which against the ice cost is $-37$ to $-58\%$ on GPU and $-5$ to $-25\%$ on
+CPU. On CPU the same change is worth $-1$ to $-3.4\%$ of the step, because a CPU process holds far
+less of the mesh. \emph{We described this as about three times what the wide halo gives; Sect.~6.3b
+withdraws that comparison. Measured against the wide halo written as a widening of the existing
+loops, in the same allocation, the delayed exchange is level on CORE2 and marginally behind on the
+ice cost.}
 
-We nevertheless do not regard it as usable. The stale values lie on the one-cell boundary of each
+We do not regard it as usable. The stale values lie on the one-cell boundary of each
 sub-domain, and the decomposition is fixed for the run, so the same nodes are perturbed at every
 step. Figure~\ref{fig:artefact} shows the consequence after 60 days on fArc: the difference follows
 the sub-domain boundaries, while the exact wide halo on the same colour scale does not. Averaged on

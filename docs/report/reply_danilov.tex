@@ -20,30 +20,37 @@
 We built the variant you describe, and it changes the study's conclusion. Written as you write it
 --- the ring computation folded into the loops that already exist rather than into kernels of its
 own --- the wide halo removes \textbf{58\% of the sea-ice cost} on CORE2 at its operating point,
-against 11\% for our version of the same scheme. The two runs compute the same ring and put
-identical message and byte counts on the wire; they differ by 360 kernel launches per time step.
-Our earlier conclusion, that exactness costs most of the saving, was measuring our implementation.
+against 11\% for our version of the same scheme, and matches the delayed exchange we had rejected.
+The two runs compute the same ring and put identical message and byte counts on the wire; they
+differ by 360 kernel launches per time step. Our earlier conclusion, that exactness costs most of
+the saving, was measuring our implementation.
 
 \begin{center}\small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
-CORE2, one node, four GPUs & model step & \multicolumn{2}{c}{sea-ice cost} \\
+CORE2, one node, four GPUs, all six in one allocation & model step & \multicolumn{2}{c}{sea-ice cost} \\
 \midrule
-every sub-cycle (reference)                     & 0.0660\,s          & 15.8\,ms          & --- \\
-wide halo, standard form, our kernels           & $-2.4\%$           & 14.1\,ms          & $-10.8\%$ \\
-wide halo, divergence form, our kernels         & $+1.1\%$           & 16.3\,ms          & $+3.2\%$ \\
-\textbf{wide halo, standard form, your loops}   & $\mathbf{-13.6\%}$ & \textbf{6.7\,ms}  & $\mathbf{-57.6\%}$ \\
-\textbf{wide halo, divergence form, your loops} & $\mathbf{-13.6\%}$ & \textbf{6.6\,ms}  & $\mathbf{-58.2\%}$ \\
+every sub-cycle (reference)                     & 0.0667\,s          & 15.7\,ms          & --- \\
+\emph{delayed exchange (stale halo), $K$=8}     & \emph{$-14.4\%$}   & \emph{6.6\,ms}    & \emph{$-58.0\%$} \\
+wide halo, standard form, our kernels           & $-3.0\%$           & 13.9\,ms          & $-11.5\%$ \\
+wide halo, divergence form, our kernels         & $+1.1\%$           & 16.1\,ms          & $+2.6\%$ \\
+\textbf{wide halo, standard form, your loops}   & $\mathbf{-14.1\%}$ & \textbf{6.8\,ms}  & $\mathbf{-56.7\%}$ \\
+\textbf{wide halo, divergence form, your loops} & $\mathbf{-14.4\%}$ & \textbf{6.5\,ms}  & $\mathbf{-58.6\%}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-58\% is the upper end of the range we measured for the delayed exchange, the scheme we rejected
-because it puts the domain decomposition into the ice field. If this holds on the other three
-meshes, the trade we reported between speed and a clean ice field does not exist; it was a
-property of how we had written the ring. Giving up the owner's summation order costs what you
-predicted: after a time step of 120 sub-cycles the ice velocity differs from the exact wide halo
-by 8 to 15 units in the last place.
+The delayed exchange is in the table because it is the scheme we rejected for putting the domain
+decomposition into the ice field, and because we reported it as saving about three times what the
+wide halo saves. \textbf{It no longer does.} In the divergence form the widened-loop wide halo
+matches it exactly on the model step and is 1.5\% ahead of it on the ice; in the standard form it
+is within a third of a percent. The wide halo still computes the ring and still refreshes it
+exactly every window, so it still leaves no imprint. The trade we reported between speed and a
+clean ice field was a property of how we had written the ring, and there is now no speed argument
+for accepting a stale halo at all.
+
+Giving up the owner's summation order costs what you predicted: after a time step of 120
+sub-cycles the ice velocity differs from the exact wide halo by 8 to 15 units in the last place.
 
 \textbf{Point 1, the auxiliary fields.} We instrumented the per-step exchange to report, field by
 field, the difference between the owner's arriving value and the value the receiving process
