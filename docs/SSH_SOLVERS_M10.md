@@ -794,7 +794,78 @@ point would need a partition beyond 864, which does not exist for this mesh.
 NG5 CPU **re-submitted at 1024 ranks** (the 256-rank attempt was cancelled during init —
 7.4 M nodes is too tight there, job 26733444 void, replacement 26733926).
 
-## ⭐⭐⭐ Past the wall: CORE2 to 2048 ranks on purpose-built partitions
+## ⭐⭐⭐ THE PRACTICAL RESULT — CORE2 at 512 CPU ranks (the production configuration)
+
+**This is the number that matters.** CORE2 on 512 CPU ranks is the production setup; everything
+below 300 nodes/rank was previously reported here in terms of large percentages at rank counts
+nobody runs at, which was a mis-weighting. Measured on the certified mesh, single clean runs,
+`FESOM_SPEED=1` on every leg (job 26733441):
+
+| leg | s/step | **whole-step** | SSH ms/step | **solve itself** | SSH% of step |
+|---|--:|--:|--:|--:|--:|
+| production baseline | 0.0587 | — | 5.81 | — | 9.9 |
+| `+ cg2` | 0.0563 | **−4.09 %** | 3.83 | −34.1 % | 6.8 |
+| `+ oati` | 0.0556 | **−5.28 %** | 3.06 | −47.4 % | 5.5 |
+| **`+ pcsi`** | **0.0550** | **−6.30 %** | 2.31 | **−60.2 %** | 4.2 |
+
+**A 5–6 % whole-step saving on the production configuration, from a solver swap** — no new
+hardware, no repartitioning, no change to the science. The solve itself gets 47–60 % faster;
+it is 9.9 % of the step, which is what converts that into ~5–6 % overall.
+
+### And it moves the knee
+
+Parallel efficiency on the certified CPU ladder (each leg vs its own 128-rank point):
+
+| ranks | nodes/rank | baseline | `oati` | `pcsi` |
+|--:|--:|--:|--:|--:|
+| 128 | 991 | 100.0 | 100.0 | 100.0 |
+| 256 | 495 | 93.1 | 93.6 | 94.0 |
+| 432 | 293 | 87.5 | 91.8 | 92.2 |
+| **512** | **247** | **83.3** | **87.5** | **88.2** |
+| 864 | 146 | 66.6 | 74.9 | 76.1 |
+
+Production at 512 ranks already sits just past the knee at 83.3 % efficiency; the solvers put
+it back to ~88 %. Taking the largest rank count that still holds a given efficiency:
+
+| efficiency floor | baseline | `pcsi` | knee moves | throughput at that point |
+|---|--:|--:|--:|--:|
+| ≥ 85 % | 479 ranks, 0.0618 s/step | 605 ranks, 0.0504 | **×1.26** | **−18.4 %** |
+| ≥ 80 % | 581 ranks, 0.0557 | 750 ranks, 0.0434 | **×1.29** | **−22.2 %** |
+| ≥ 75 % | 686 ranks, 0.0512 | 864 ranks, 0.0378 | ×1.26 | −26.1 % |
+
+So the knee moves out by about **1.25–1.3×** in cores, and if you choose to spend those cores
+you get **18–26 % more throughput at the same efficiency** you accept today.
+
+### Gain at fixed rank counts — where it is and is not worth doing
+
+| ranks | nodes/rank | `oati` | `pcsi` | verdict |
+|--:|--:|--:|--:|---|
+| 128 | 991 | −0.46 % | −0.72 % | not worth it — SSH is 2.5 % of the step |
+| 256 | 495 | −1.05 % | −1.71 % | marginal |
+| 432 | 293 | −5.14 % | −5.74 % | **worthwhile** (FESOM's own ~300 n/rank scaling guidance) |
+| **512** | **247** | **−5.28 %** | **−6.30 %** | **production — worthwhile** |
+| 864 | 146 | −11.49 % | −13.10 % | past the practical knee; large %, low value |
+
+**Reading:** the benefit switches on around 300 nodes/rank and is already worth having at the
+production point. Below that the SSH solve is too small a share for anything to matter.
+
+### On GPU the practical case is stronger, at ordinary node counts
+
+The GPU rungs are not extreme configurations — 4 and 8 nodes — and the SSH share there is
+already 27–38 %, because a GPU makes the local compute fast while the solve stays
+latency-bound:
+
+| config | nodes | SSH% | best solver | whole-step |
+|---|--:|--:|---|--:|
+| CORE2 g4n | 4 | 27.4 | `oati` | **−5.18 %** |
+| CORE2 g16n | 16 | 30.5 | `oati` | −6.73 % |
+| farc g4n | 4 | 36.5 | `oati` | **−5.12 %** |
+| farc g8n | 8 | 37.6 | `oati` | **−6.81 %** |
+
+⚠️ The GPU ladder is only two points per mesh, so no knee analysis is possible there yet —
+a proper GPU efficiency curve needs 1/2/4/8/16-node rungs per mesh, which is not yet run.
+
+## Past the wall (methodological, not a production recommendation): CORE2 to 2048 ranks
 
 CORE2's shipped maximum is 864 ranks, which was not enough to show a turnover. Larger
 partitions were generated with the user's partitioner (METIS 5.1.0, flat single-level,
