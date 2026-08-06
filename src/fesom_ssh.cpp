@@ -2554,12 +2554,23 @@ static void ssh_solver_check_interactions(int kind, int npes)
                 "(the C twin runs the legacy solver; the iterates differ within tolerance)",
                 ssh_solver_name(kind));
 
+    /* ⚠️ L80/dead-knob: `FESOM_SPEED_CGPOLY` selects a DIFFERENT preconditioner (a Chebyshev
+     * polynomial in A) that the M10 variants do not yet consult — they apply `pr_values` or
+     * its symmetrised twin. Letting the combination run would measure the poly knob as doing
+     * nothing, which is indistinguishable from a lever that does not pay. So it DIES until
+     * T9 wires `cgpoly_apply` in as the M-slot. `pcsi` and `oati` die permanently
+     * (nested Chebyshev / no poly composition for the unrolled recurrences). */
     static int s_cgpoly = -2;
     const int cgpoly_d = fesom_speed_int("CGPOLY", 0, &s_cgpoly);
     FESOM_CHECK(!(cgpoly_d >= 1 && (kind == FESOM_SSHSOLV_PCSI || kind == FESOM_SSHSOLV_OATI)),
                 "FESOM_SSH_SOLVER=%s is incompatible with FESOM_SPEED_CGPOLY "
-                "(pcsi: nested Chebyshev; oati: the deep aux chain has no poly composition)",
+                "(pcsi: nested Chebyshev; oati: the unrolled recurrences have no poly composition)",
                 ssh_solver_name(kind));
+    FESOM_CHECK(!(cgpoly_d >= 1 && (kind == FESOM_SSHSOLV_CG2 || kind == FESOM_SSHSOLV_PIPECG)),
+                "FESOM_SSH_SOLVER=%s + FESOM_SPEED_CGPOLY=%d is NOT YET IMPLEMENTED (M10 Task 9 "
+                "slots cgpoly_apply in as the preconditioner). Refusing to run rather than "
+                "silently ignoring the poly knob — a dead knob is indistinguishable from a "
+                "lever that does not pay (L80).", ssh_solver_name(kind), cgpoly_d);
 
     FESOM_CHECK(!(kind == FESOM_SSHSOLV_PCSI && !ssh_sympre_on()),
                 "FESOM_SSH_SOLVER=pcsi requires FESOM_SSH_SYMPRE=1 — the Chebyshev/Lanczos "
