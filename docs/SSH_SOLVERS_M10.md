@@ -1232,10 +1232,61 @@ apparent result produced by an asymmetry in the harness rather than by the physi
 timing is not an A/B point. What does not stand is the inference "the variants fail to
 converge where `cg` succeeds" — that was never measured.)*
 
-### ⭐⭐ MEASURED on a real failing farc solve — the breakdown is REAL (job 26740651)
+### ⭐⭐⭐ RESOLVED — the farc "breakdown" is a FALSE POSITIVE of our own guard (26740651 + 26741060)
 
-**This refutes the "the guard is too aggressive" reading, including my own.** farc np32,
-`cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
+🔴 **This section supersedes both earlier readings, including the one I committed in
+`cfafe73` ("the breakdown is REAL"). It was wrong.** The trace below is genuine, but it is
+only the first 107 iterations of a solve that converges at 205.
+
+**The decisive run (26741060): the same dumped system, the same binary, the only difference
+being `FESOM_SSH_STALL_WINDOW=100000`.**
+
+| solver | iterations | final residual | vs baseline `cg` (211) |
+|---|--:|--:|--:|
+| `cg2` | **205** | 4.3045e-01 < rtol | **6 FEWER** |
+| `oati` | 205 | 4.4407e-01 | 6 fewer |
+| `pipecg` | 204 | 4.4580e-01 | 7 fewer |
+
+The lab's residuals reproduce the in-model trace to 5 significant figures (it 87 = 1.5816e+01,
+it 95 = 1.8186e+01, it 107 = 1.6213e+01), so it is provably the identical solve. Continuing
+past where the model gave up:
+
+```
+it 107   1.6213e+01     <- the guard fired HERE
+it 110   1.4375e+01     <- the stagnation ENDS, three iterations later
+it 130   5.6246e+00
+it 205   4.3045e-01  <  rtol 4.3743e-01     CONVERGED, 0 fallbacks
+```
+
+**The stagnation ran ~21 iterations (87 → 108) against a `STALL_WINDOW` of 20. The guard
+aborted a healthy solve three iterations before it resumed converging.** Residual
+non-monotonicity is normal CG behaviour — only the A-norm of the error decreases
+monotonically — and on a mesh with κ = 843 a 20-iteration plateau is ordinary, not pathological.
+
+**Consequences, and they are large:**
+
+1. `cg2`/`oati`/`pipecg` **do not break down on farc.** They converge in *fewer* iterations
+   than baseline `cg` on the very solve that was reported as a divergence.
+2. The robustness defect is in **our fallback heuristic**, not in the solvers or in the
+   literature's methods.
+3. The retraction's *conclusion* — "on an ill-conditioned mesh they fail to converge on a
+   noticeable fraction of solves" — **does not survive**. (Its *timings* stay retracted: a
+   fallback still makes a leg a variant/baseline mixture, so those numbers are unusable
+   regardless of why the guard fired.)
+4. Baseline `cg` "never fails" on farc for the same reason it reports `fallbacks=0`: **it is
+   not watched.** It rides through the identical 21-iteration stagnation because nothing is
+   checking. The two facts are the same fact.
+5. **Every farc A/B row should be re-measured with a corrected window** before farc is called
+   a loss for these solvers.
+
+**Why this was so hard to see:** the in-model evidence (a residual that visibly grows and
+oscillates for 20 iterations) looks exactly like a genuine breakdown, and it is what talked me
+out of the correct hypothesis. Only running past the abort point distinguishes "stalled" from
+"stalling *right now*". That is what the `FESOM_SSH_STALL_WINDOW` knob was built for.
+
+### The in-model trace that misled (job 26740651) — the first 107 iterations only
+
+farc np32, `cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
 
 | iteration | residual | comment |
 |--:|--:|---|
@@ -1247,16 +1298,13 @@ converge where `cg` succeeds" — that was never measured.)*
 | 97–106 | oscillates 1.59–1.66e+01 | never beats it-87 again |
 | 107 | 1.621e+01 | guard fires: 20 consecutive non-improving steps |
 
-The residual does not plateau near convergence — it **turns around at iteration 87 and
-stagnates at ~37× rtol**. On the same trajectory baseline `cg` goes 1.7533e+01 at iteration
-100 → **5.1488e-01 at iteration 200**, converging at ~212. So `cg2` genuinely breaks down
-where `cg` does not, and the guard is doing its job rather than aborting a live solve.
+Read on its own this looks decisive: the residual turns around at iteration 87 and sits at
+~37× rtol while baseline `cg` reaches 5.1488e-01 by iteration 200. **It is not decisive, and
+I drew the wrong conclusion from it.** The window shown is simply too short — three iterations
+past the last row the residual resumes falling, and the solve converges at 205. See the
+resolution above.
 
-**Net effect on the retraction:** its *conclusion* survives and is now backed by direct trace
-evidence instead of by the vacuous counter comparison; its *stated basis* was still wrong.
-Both corrections belong in the record.
-
-### ⭐⭐ …but the failure is RARE, and `cg2` holds iteration parity with `cg` on farc
+### ⭐⭐ The aggregates — `cg2` holds iteration parity with `cg` on farc, and the false positive is rare
 
 The same job's aggregates, 60 solves per leg, farc np32 dt900 (`fallbacks=` harvested per the
 process fix):
@@ -1267,20 +1315,21 @@ process fix):
 | `cg` (baseline) | 60 | **220.83** | 443.67 | 443.67 | 0 *(structurally — see above)* |
 
 **`cg2` matches baseline `cg`'s iteration count on farc to 0.9 %** (218.85 vs 220.83) and
-halves both the exchanges and the blocking allreduces (224 vs 444), exactly as designed. It
-breaks down on **1 solve in 60 = 1.7 %**; the other 98.3 % converge normally.
+halves both the exchanges and the blocking allreduces (224 vs 444), exactly as designed —
+and the 218.85 is itself inflated by the one mixed solve, so the true parity is slightly
+better still.
+
+The guard fired on **1 solve in 60 = 1.7 %**. Since that firing is now known to be a false
+positive (above), the correct reading of this table is: **`cg2` converged on all 60 solves**,
+and on 1 of them our harness threw the answer away and redid it with `cg`.
 
 So the ledger's earlier framing — *"on an ill-conditioned mesh they fail to converge on a
-noticeable fraction of solves"* — **overstates it**. The accurate statement is: `cg2` is
-fully functional on farc and delivers its designed wire saving, but suffers a **rare hard
-breakdown** (~2 % of solves here) that the armed fallback catches. That is a robustness
-defect worth taking seriously — a solver that needs a safety net is not a default — but it is
-categorically different from "does not converge on farc".
+noticeable fraction of solves"* — is **wrong, not merely overstated**.
 
 ⚠️ **Rate discrepancy, unexplained:** this run gives 1/60 = 1.7 %, while the 300-step A/B
 runs gave ~20/300 = 6.7 % at the same np32. The A/B runs cover later model time (300 steps vs
-60), so the rate may not be stationary. Not yet measured; do not quote a single "farc fallback
-rate" until it is.
+60), so the false-positive rate may not be stationary. Not yet measured; do not quote a single
+"farc fallback rate" until it is.
 
 *(The pre-registered criterion is 0 firings, so the retracted A/B timings stay retracted
 regardless — 1 fallback still makes a leg a mixture.)*
@@ -1296,8 +1345,9 @@ else if (++stall >= STALL_WINDOW || resid > 1e3 * best)  ->  SSH_FB_STALL
 steps without a 0.1 % residual drop** — not divergence, not a residual increase. That is a
 *heuristic*, and on farc it fires at ~112 iterations of a solve baseline `cg` completes in
 212, which is why "the guard is aborting a converging solve" was the natural first
-hypothesis. **The trace above shows it is not what happens** — but the heuristic's looseness
-is still worth stating, because the same reasoning applies wherever it has NOT been traced.
+hypothesis — **and it is exactly what happens** (26741060). Note what the trigger does NOT
+require: no residual increase, no NaN, no loss of positivity. Twenty quiet iterations are
+enough, and CG on a κ = 843 system produces twenty quiet iterations as a matter of course.
 
 ### ⭐ MEASURED — iteration count alone does NOT produce stalls (login, `core2_np1/step0020`)
 

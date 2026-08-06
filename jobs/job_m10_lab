@@ -108,4 +108,31 @@ PYEOF
 done
 }
 
+want 5 && {
+echo "--- 5. DEFAULT-guard control (same system, same binary, knob UNSET)"
+# The airtight A/B for section 4: the ONLY difference is FESOM_SSH_STALL_WINDOW. If this leg
+# falls back where section 4 converged, the guard — not the solver — is what failed.
+for slv in cg2 oati; do
+    FESOM_SSH_TRACE=1 srun "$LAB" "$MESH" "$DUMP" --solver "$slv" --maxiter 2000 \
+        > "$OUT/dflt_${slv}.out" 2> "$OUT/dflt_${slv}.err"
+    echo "    rc=$? solver=$slv  fallbacks=$(grep -ac 'FALLBACK on solve' "$OUT/dflt_${slv}.err")"
+    grep -a "FALLBACK on solve" "$OUT/dflt_${slv}.err" | sed 's/^/      /'
+    grep -a "rep 1" "$OUT/dflt_${slv}.out" | sed 's/^/      /'
+done
+}
+
+want 6 && {
+echo "--- 6. longest LEGITIMATE stagnation (guard widened) — sizes the safe window"
+# How many consecutive non-improving iterations does a solve that DOES converge go through?
+# That is the number STALL_WINDOW must clear. Reported per solver on this system.
+for slv in cg cg2 oati; do
+    FESOM_SSH_TRACE=1 FESOM_SSH_STALL_WINDOW=100000 \
+        srun "$LAB" "$MESH" "$DUMP" --solver "$slv" --maxiter 2000 \
+        > "$OUT/stag_${slv}.out" 2> "$OUT/stag_${slv}.err"
+    printf "    solver=%-5s " "$slv"
+    "$PY" "$ROOT/scripts/m10_stall_analysis.py" "$OUT/stag_${slv}.err" 2>/dev/null \
+        | grep -E "longest plateau" | sed 's/^/  /'
+done
+}
+
 echo "=== done ==="
