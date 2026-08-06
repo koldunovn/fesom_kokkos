@@ -2616,6 +2616,41 @@ static void ssh_fb_announce(int reason, int iters, double res, fesom_partit *par
     }
 }
 
+/* FESOM_SSH_STALL_WINDOW — the guard's plateau tolerance, in the units each solver counts
+ * (iterations for cg2/pipecg, CHECK events for pcsi, PAIRS for oati). Unset keeps the
+ * per-solver value that has always been compiled in, so knob-off is byte-identical.
+ *
+ * It exists because the stall test is a HEURISTIC, not a convergence proof: it fires after
+ * N consecutive steps without a 0.1 % residual drop, and an ill-conditioned system plateaus
+ * by nature. Baseline `cg` carries NO such guard (its body only dies on NaN or maxiter), so
+ * `fallbacks=0` on the cg path is structurally guaranteed rather than earned — the variants
+ * are the only monitored path. Widening this window is how "would the variant have converged
+ * if the guard had not aborted it?" gets measured (M10 open item 3). */
+static int ssh_stall_window(int dflt)
+{
+    static int cached = -1;                          /* 0 = unset, >0 = the override */
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SSH_STALL_WINDOW");
+        if (e && e[0]) {
+            cached = atoi(e);
+            FESOM_CHECK(cached >= 1, "FESOM_SSH_STALL_WINDOW='%s' must be a positive integer", e);
+            int rank = 0, ini = 0;
+            MPI_Initialized(&ini);
+            if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+            if (rank == 0) {                         /* L80: a knob must announce that it fired */
+                fprintf(stderr, "[ssh-solver] FESOM_SSH_STALL_WINDOW=%d (compiled defaults: "
+                                "20 cg2/pipecg, 10 pcsi/oati) — the fallback stall heuristic "
+                                "is WIDENED; this is a diagnostic, not a production setting\n",
+                        cached);
+                fflush(stderr);
+            }
+        } else {
+            cached = 0;
+        }
+    }
+    return cached > 0 ? cached : dflt;
+}
+
 /* The variant entry point. Returns the iteration count, or -1 to mean "guard tripped, X0
  * restored, redo this solve with baseline cg". Implemented per solver in T5b–T8b. */
 static int ssh_solve_variant(int kind, const fesom_ssh_stiff *S, fesom_solverinfo *si,
@@ -2795,7 +2830,7 @@ static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     int iter = 0;
     double best = resid;
     int stall = 0;
-    const int STALL_WINDOW = 20;
+    const int STALL_WINDOW = ssh_stall_window(20);
     if (fb == SSH_FB_NONE && resid >= rtol)
     for (iter = 1; iter <= si->maxiter; ++iter) {
         const real_t al = (real_t)alpha, be = (real_t)beta;
@@ -3050,7 +3085,7 @@ static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     double gamma_prev = 0.0, alpha_prev = 0.0, resid = 0.0;
     int fb = SSH_FB_NONE, iter = 0;
     double best = 1e300; int stall = 0;
-    const int STALL_WINDOW = 20;
+    const int STALL_WINDOW = ssh_stall_window(20);
 
     for (iter = 1; iter <= si->maxiter; ++iter) {
         real_t d3[3] = { 0.0, 0.0, 0.0 };
@@ -3501,7 +3536,7 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
 
     int fb = SSH_FB_NONE, iter = 0;
     double best = resid; int stall = 0;
-    const int STALL_WINDOW = 10;                       /* in CHECK events, not iterations */
+    const int STALL_WINDOW = ssh_stall_window(10);      /* in CHECK events, not iterations */
     if (resid >= rtol)
     for (iter = 1; iter <= maxit; ++iter) {
         omega = 1.0 / (gmm - c4 * omega);
@@ -3724,7 +3759,7 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     double gamma_prev = 0.0, alpha_prev = 0.0;
     int fb = SSH_FB_NONE, iter = 0;
     double best = resid; int stall = 0;
-    const int STALL_WINDOW = 10;                /* in PAIRS */
+    const int STALL_WINDOW = ssh_stall_window(10);  /* in PAIRS */
 
     if (resid >= rtol)
     while (iter < si->maxiter) {

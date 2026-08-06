@@ -60,6 +60,8 @@ Every gate/A-B row: date · gate · job id · binary md5 (from the log — R9) �
 | 2026-08-06 | T7 options ×3 under `oati` | 26723855 | (in log) | harvested — zstar+mEVP all-pass |
 | 2026-08-06 | T7 CUDA fidelity, `oati` | 26723856 | (in log) | CUDA ≡ Serial wire counts, 0 fallbacks |
 | 2026-08-06 | Dead-knob guard commit (CGPOLY×cg2/pipecg dies) — knob-off byte | 26724330 | (in log) | **PASS** |
+| 2026-08-06 | `FESOM_SSH_STALL_WINDOW` commit — knob-off byte gate | 26740665 | `0712ee57…` (main `9743f602…` ≠ — R9 armed) | **PASS** diff_snap rc=0 |
+| 2026-08-06 | `FESOM_SSH_STALL_WINDOW` commit — explicit `FESOM_SSH_SOLVER=cg` byte gate | 26740666 | `0712ee57…` | **PASS** diff_snap rc=0 |
 
 ### T5b `cg2` — solution-class gate vs baseline `cg` (serial CORE2 np8, dt1800, 20 steps, login)
 
@@ -1186,6 +1188,98 @@ residual still passes. `oati` has no such dependency. This is the substantive ar
 `oati` as the default and `pcsi` as a per-mesh specialist, independent of which mesh happens to
 win a given A/B.
 
+## 🔴 Why `cg2`/`oati` fall back on farc — open item 3, and the framing was wrong
+
+**Status: IN PROGRESS.** Two facts are already established and they move the question.
+
+### ❌ Contamination class 4: `fallbacks=0` on baseline `cg` is VACUOUS
+
+The retraction above reads *"Baseline `cg` fired **zero** fallbacks on every farc run"* as
+evidence that the communication-avoiding variants are less robust than `cg`. **It is not
+evidence. The baseline `cg` body carries no fallback guard at all** — brace-matching
+`fesom_ssh_solve_cg_kk` (`src/fesom_ssh.cpp:3897-4298`, 402 lines) gives **0** references to
+`SSH_FB`/`STALL`/`ssh_fb_*` anywhere inside it. The guard (`ssh_fb_announce`,
+`SSH_FB_STALL`/`NAN`/`INDEF`/`MAXITER`) exists only inside `ssh_solve_cg2` /
+`ssh_solve_pipecg` / `ssh_solve_pcsi` / `ssh_solve_oati`. `cg` is the fallback *target*, so
+its counter is structurally incapable of incrementing.
+
+What baseline `cg` on farc *does* establish is weaker but real: it neither hit `maxiter=500`
+nor produced a NaN (both are `FESOM_DIE`, and no farc run died), so it converged on every
+solve. The comparison as stated in the retraction is a **monitored path against an unmonitored
+one**, which is a fourth contamination class of the same family as the other three — an
+apparent result produced by an asymmetry in the harness rather than by the physics.
+
+*(The retraction itself STANDS: a leg with fallbacks is a variant/baseline mixture and its
+timing is not an A/B point. What does not stand is the inference "the variants fail to
+converge where `cg` succeeds" — that was never measured.)*
+
+### The guard is a heuristic, and it fires mid-solve
+
+```c
+if (resid < best * 0.999) { best = resid; stall = 0; }
+else if (++stall >= STALL_WINDOW || resid > 1e3 * best)  ->  SSH_FB_STALL
+```
+
+`STALL_WINDOW` = 20 (`cg2`/`pipecg`) or 10 (`pcsi`/`oati`). So the trigger is **N consecutive
+steps without a 0.1 % residual drop** — not divergence, not a residual increase. On farc it
+fires at **~112 iterations of a solve that baseline `cg` completes in 212**: squarely
+mid-solve, in exactly the region where an ill-conditioned CG plateaus by nature.
+
+### ⭐ MEASURED — iteration count alone does NOT produce stalls (login, `core2_np1/step0020`)
+
+The handoff's hypothesis was "the σ recurrence accumulates rounding with iteration count, and
+farc needs 212 iterations against CORE2's 106". The lab tests that directly: `--tol` forces
+the *same* CORE2 matrix to run to any iteration count.
+
+| `--tol` | `cg2` iterations | longest plateau (guard threshold 20) |
+|---|--:|--:|
+| 1e-5 (production) | 117 | **2** |
+| 1e-7 | 174 | **2** |
+| 1e-9 | 226 | **2** |
+| 1e-11 | **277** | **2** |
+
+**At 277 iterations — more than farc's 212 — `cg2` on CORE2 still plateaus for only 2
+iterations, a 10× margin against the guard.** Baseline `cg` on the same system: longest
+plateau 3. Iteration count is therefore *not* the driver, and the σ-drift-accumulates story
+does not survive its first test. This is consistent with the §0.4b table, where the
+*symmetrised* drift is flat at ~1e-13…1e-14 from iteration 2 to 60 rather than growing.
+
+*(⚠️ `--tol` is plumbed to the variant paths only, not to baseline `cg`, whose rtol comes from
+the dump's `soltol` — the four `cg` rows of that sweep are the same run and only the `cg2`
+column carries information.)*
+
+Tool: `scripts/m10_stall_analysis.py` replays the guard against any `[ssh-trace]` residual
+history and reports the longest plateau plus whether the guard would fire.
+
+### What is still open, and how it gets settled
+
+Whatever kills `cg2`/`oati` on farc is a property of **that matrix**, not of the iteration
+count. Two runs are in flight:
+
+- **`jobs/job_m10_farcdump`** — farc np32 (a confirmed-failing configuration: 20 `cg2` / 21
+  `oati` fallbacks). ⭐ **The dump exploits a dispatch accident**: `fesom_ssh_solve_cg_kk`
+  dispatches to the variant at **:3928** and *returns* on success, while the
+  `FESOM_SSH_DUMP` block sits at **:4061** — so under a variant the dump fires **only on
+  solves that fell back** (rc<0 falls through to the baseline body). Leg 1 therefore captures
+  exactly the failing systems and nothing else. Solve numbering stays correct because
+  `ssh_solve_cg2` returns −1 *without* calling `ssh_wire_close_solve`, so the retry's
+  `solves+1` is still this solve's index. Leg 2 dumps ordinary systems as the control. Both
+  legs trace per-iteration residuals.
+- **`jobs/job_m10_lab`** — the offline battery (`--sym-check`, `--sigma-drift`, and a
+  solver × tolerance plateau ladder) at the dump's own np.
+
+- **New knob `FESOM_SSH_STALL_WINDOW`** (default = the compiled-in per-solver value, so unset
+  is byte-identical) makes the heuristic tunable. It is the only way to answer *"would the
+  variant have converged if the guard had not aborted it?"* — the question the whole farc
+  verdict rests on. Diagnostic setting, not a production one; it announces itself on rank 0
+  (L80).
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
+
+| name | md5 | contents |
+|---|---|---|
+| `stallknob_serial` | `0712ee57fe7f2f5dbb8738f4463653b2` | Serial `fesom_port`, `FESOM_SSH_STALL_WINDOW` commit |
+| `stallknob_lab` | `f425461f0b6e7c7ab49f3b38f38afe63` | Serial `fesom_ssh_lab`, same commit |
+| `stallknob_cuda` | `09d26e91139048512529dce16467afc1` | CUDA `fesom_port`, same commit |

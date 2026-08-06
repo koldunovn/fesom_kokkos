@@ -1,0 +1,85 @@
+#!/bin/bash
+#SBATCH --job-name=m10_farcdump
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH -N 1
+#SBATCH --ntasks=32
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/farcdump.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/farcdump.%j.err
+#
+# M10 open-item-3 — capture farc systems for the sigma-drift falsification.
+#
+# THE TRICK: fesom_ssh_solve_cg_kk dispatches to the variant FIRST (src/fesom_ssh.cpp:3893)
+# and RETURNS before reaching the FESOM_SSH_DUMP block (~:4020). So under a variant the dump
+# fires ONLY when the guard tripped and the solve fell through to the baseline body — i.e.
+# LEG 1 dumps EXACTLY the solves that failed, and nothing else. Leg 2 (baseline cg) dumps a
+# spread of ordinary solves as the control.
+#
+# farc np32 is a CONFIRMED-failing configuration (ledger: CPU 32 r = 20 cg2 / 21 oati
+# fallbacks). 1 node keeps it cheap to the scheduler.
+#
+# Submit: sbatch jobs/job_m10_farcdump
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=${DT:-900}
+NSTEPS=${NSTEPS:-60}
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+OUT=/work/ab0995/a270088/port2/m10/gates/farcdump_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+m7_provenance "$OUT" "$FESOM"
+cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+# every solve in the window (leg 1 filters itself down to the failures)
+ALL=$(seq -s, 1 "$NSTEPS")
+# ordinary-solve control spread
+CTRL=$(seq -s, 10 10 "$NSTEPS")
+
+export FESOM_SSH_STATS=1
+export FESOM_PRINT_EVERY=999
+
+echo "=== M10 farc dump  mesh=$(basename "$MESH") np=$NPES dt=$DT nsteps=$NSTEPS ==="
+
+run_leg () {   # $1=name $2=solver $3=dumpsteps $4=dumpdir
+    local name=$1 solver=$2 steps=$3 dd=$4
+    mkdir -p "$dd"
+    echo "--- leg $name: FESOM_SSH_SOLVER=$solver  dump=$(echo "$steps" | cut -c1-40)...  -> $dd"
+    # TRACE=1: per-iteration residual. This is the evidence for the COMPETING hypothesis —
+    # the guard is `20 consecutive iters without a 0.1 % residual drop` (STALL_WINDOW=20),
+    # and it fires at ~112 of farc's 212 iterations. An ill-conditioned CG plateaus by
+    # nature, so the trace decides "genuinely diverging" vs "guard too aggressive".
+    env FESOM_SSH_SOLVER="$solver" \
+        FESOM_SSH_DUMP="$steps" \
+        FESOM_SSH_DUMP_DIR="$dd" \
+        FESOM_SSH_TRACE=1 \
+        srun "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 \
+        > "$OUT/log_$name.txt" 2> "$OUT/err_$name.txt"
+    echo "    rc=$?"
+    # -a: run logs carry NUL bytes (ledger process fix)
+    echo "    solver announce: $(grep -a 'ssh-solver.*=' "$OUT/err_$name.txt" | head -2 | tr '\n' ' ')"
+    echo "    FALLBACKS:"
+    grep -a 'FALLBACK on solve' "$OUT/err_$name.txt" | sed 's/^/      /'
+    echo "    aggregate: $(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_$name.txt" | tail -1)"
+    echo "    dumps written:"
+    ls -1 "$dd" | sed 's/^/      /'
+    du -sh "$dd"
+}
+
+# LEG 1 — cg2 with the guard armed: the dump fires only on fallback solves.
+run_leg fb   cg2 "$ALL"  /work/ab0995/a270088/port2/m10/labdumps/farc_np32_fb
+
+# LEG 2 — baseline control systems from the same mesh/dt.
+run_leg ctrl cg  "$CTRL" /work/ab0995/a270088/port2/m10/labdumps/farc_np32_ctrl
+
+echo "=== done ==="
+rm -f "$OUT"/*.nc 2>/dev/null || true

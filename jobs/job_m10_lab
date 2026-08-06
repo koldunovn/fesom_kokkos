@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --job-name=m10_lab
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/lab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/lab.%j.err
+#
+# M10 open-item-3 — offline lab battery on a dumped system, at the dump's own np.
+#
+# Runs, on ONE dumped step:
+#   1. --sym-check     symmetry defect of pr_values (R1)
+#   2. --sigma-drift   the Layer-0 falsification: sigma_true vs the CG-CG recurrence,
+#                      both as-built and symmetrised
+#   3. cg2 + cg traces at a tolerance ladder -> STALL-guard plateau analysis
+#      (scripts/m10_stall_analysis.py replays the guard against the real residuals)
+#
+# ⚠️ Lab numbers are NEVER performance numbers of record (R4/T3 rule).
+#
+# Submit: sbatch -N 1 --ntasks=64 --export=ALL,MESH=$DARS,DUMP=/work/.../labdumps/dars_np64/step0001,TAG=dars jobs/job_m10_lab
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=${MESH:?MESH required}
+DUMP=${DUMP:?DUMP required (a stepNNNN dir)}
+TAG=${TAG:?TAG required}
+NPES=$SLURM_NTASKS
+LAB=${BIN:-$ROOT/build-m7serial/fesom_ssh_lab}
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+OUT=/work/ab0995/a270088/port2/m10/gates/lab_${TAG}_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+m7_provenance "$OUT" "$LAB"
+cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+[ -d "$DUMP" ]            || { echo "ERROR: dump $DUMP missing"; exit 2; }
+
+echo "=== M10 lab  $TAG  mesh=$(basename "$MESH") np=$NPES dump=$DUMP ==="
+
+echo "--- 1. sym-check"
+srun "$LAB" "$MESH" "$DUMP" --sym-check > "$OUT/symcheck.out" 2> "$OUT/symcheck.err"
+echo "    rc=$?"; grep -a "lab" "$OUT/symcheck.out" | sed 's/^/      /'
+
+echo "--- 2. sigma-drift"
+srun "$LAB" "$MESH" "$DUMP" --sigma-drift > "$OUT/sigma.out" 2> "$OUT/sigma.err"
+echo "    rc=$?"; grep -a "lab-sigma" "$OUT/sigma.out" | tail -40 | sed 's/^/      /'
+
+echo "--- 3. stall-guard plateau ladder"
+for tol in 1e-5 1e-7 1e-9; do
+    for slv in cg cg2 oati; do
+        FESOM_SSH_TRACE=1 srun "$LAB" "$MESH" "$DUMP" --solver "$slv" \
+            --tol "$tol" --maxiter 2000 \
+            > "$OUT/tr_${slv}_${tol}.out" 2> "$OUT/tr_${slv}_${tol}.err"
+        it=$(grep -a "rep 1" "$OUT/tr_${slv}_${tol}.out" | sed -E 's/.*iters=([0-9]+).*/\1/')
+        pl=$("$PY" "$ROOT/scripts/m10_stall_analysis.py" "$OUT/tr_${slv}_${tol}.err" 2>/dev/null \
+             | grep "longest plateau" | sed -E 's/.*: ([0-9]+) iter.*/\1/')
+        fb=$(grep -ac "FALLBACK on solve" "$OUT/tr_${slv}_${tol}.err")
+        printf "    tol=%-6s solver=%-5s iters=%-6s max_plateau=%-4s fallbacks=%s\n" \
+               "$tol" "$slv" "${it:-?}" "${pl:-?}" "$fb"
+    done
+done
+
+echo "=== done ==="
