@@ -87,7 +87,13 @@ for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
         r["clean"].update(legs)
 
 PAIRS = [("wide_k8", "wide_k8_lean", "classic form, K=8"),
-         ("widediv_k8", "widediv_k8_lean", "divergence form, K=8")]
+         ("widediv_k8", "widediv_k8_lean", "divergence form, K=8"),
+         # The delayed exchange is the speed bar the wide halo was reported to fall short of by
+         # about 3x. Quoting that comparison across days would be exactly the drift the campaign
+         # banned, so the `p6_` fleet carries a lag8 leg in the SAME allocation and this pair is
+         # what may be quoted. Sign convention: negative = the lean wide halo is FASTER.
+         ("lag8", "wide_k8_lean", "vs the DELAYED exchange (same allocation), classic lean"),
+         ("lag8", "widediv_k8_lean", "vs the DELAYED exchange (same allocation), div lean")]
 REF = "standard"
 
 for base in sorted(runs):
