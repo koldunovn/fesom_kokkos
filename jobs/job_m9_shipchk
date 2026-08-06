@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=m9_shipchk
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:08:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/shipchk.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/shipchk.%j.err
+#
+# M9 P5 — THE SHIP AUDIT. Is the 11-field per-step ship NECESSARY?
+#
+# S. Danilov's second objection is that the wide halo's per-step ship carries far more than the
+# sub-cycle needs and exists only to buy bit-identity. Session 4 measured what it COSTS
+# (1.6-6.2 % of messages, 3.6-9.2 % of bytes => <= 0.4 pp of runtime). That is not the same
+# question. This job measures whether each field could be dropped at all.
+#
+# FESOM_EVPWIDE_SHIPCHK=1 makes the prestep exchange report, per field, the max absolute
+# difference between the ARRIVING owner byte and what this rank already holds, over the slots
+# that lie inside FESOM's own dist-file halo. A field that reports exactly 0.000e+00 is already
+# maintained there by the model's ordinary halo exchange and is redundant for those slots. The
+# extended slots (BFS rings 2..R) are counted separately and are never trimmable at any K:
+# nothing else in FESOM writes them.
+#
+# 🔴 Serial needs FESOM_SPEED_FORCE_SERIAL=1 or EVPWIDE resolves OFF and the audit prints nothing
+#    at all — which reads exactly like "no differences found".
+#
+# env: BIN (required), K (default 2 — the case the P5 plan singles out), NSTEPS (default 3).
+# Usage:
+#   sbatch --export=ALL,BIN=/work/.../m9/bin/b_94617f1d/fesom_port_serial,K=2 jobs/job_m9_shipchk
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+BIN=${BIN:?BIN required — pin the frozen binary}
+K=${K:-2}
+NSTEPS=${NSTEPS:-3}
+MESH=${MESH:-/work/ab0995/a270088/port2/mesh/core2}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/m9/shipchk_K$K; rm -rf "$OUT"; mkdir -p "$OUT"
+
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+
+export FESOM_WHICH_EVP=1
+export FESOM_SPEED_FORCE_SERIAL=1
+export FESOM_SPEED_EVPWIDE=$K
+export FESOM_EVPWIDE_SHIPCHK=1
+export FESOM_IO_CONFIG=$ROOT/jobs/io.config.m9_timing
+
+echo "=== M9 P5 ship audit  K=$K  mesh=$(basename "$MESH") ntasks=$SLURM_NTASKS steps=$NSTEPS ==="
+echo "    BIN    = $BIN"
+echo "    sha256 = $(sha256sum "$BIN" | cut -c1-16)"
+echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
+echo
+
+srun -l "$BIN" "$MESH" "$OUT" 1800 $NSTEPS -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+
+echo
+echo "=========== the audit ==========="
+grep -h 'evpwide-shipchk' "$OUT/run.log" "$OUT/run.err" | sed 's/^[0-9]*: //' | sort -u
+echo
+echo "=========== provenance (the knob must have fired) ==========="
+grep -hE '\[m9\]|\[evpwide\] hook|EVPWIDE' "$OUT/run.err" "$OUT/run.log" | sed 's/^[0-9]*: //' | sort -u | head -20
