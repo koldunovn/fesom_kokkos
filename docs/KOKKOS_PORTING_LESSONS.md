@@ -1569,3 +1569,14 @@ Three things follow.
 Related: L103 (a diagnostic branch inside a timed kernel costs the registers its body needs, even
 untaken), L107 (a removed message on GPU is mostly removed launches and packing, charged to
 `busy`) — this lesson is the mechanism *underneath* L107's second clause.
+
+**Check it at build time, not in a profile.** Which path a kernel took is a static property of its
+closure and is in the symbol table:
+
+```
+cuobjdump -symbols <binary> | c++filt \
+  | grep cuda_parallel_launch_constant_memory | grep -c 'ParallelFor<my_function('
+```
+
+M9 P5 used exactly this to confirm the five fused kernels stayed on the fast path before the first
+GPU job ran (constant-memory count unchanged at 9, local-memory 24 → 29).
