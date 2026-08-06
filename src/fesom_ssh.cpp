@@ -3226,7 +3226,16 @@ static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         return;
     }
 
-    int m = 30;
+    /* ⚠️ DEFAULT RAISED 30 -> 120 (2026-08-06, measured). m=30 UNDER-ESTIMATES the spectrum:
+     * sweeping m on real matrices gave theta_min 2.027e-03 -> 3.482e-04 on farc (kappa
+     * 843 -> 4911, a 5.8x error) and 3.446e-03 -> 2.513e-03 on CORE2 (489 -> 670).
+     * The farc under-estimate produced a mis-tuned Chebyshev polynomial that STALLED and
+     * fired the fallback guard on ~2 % of solves; at m=120 the same configuration runs with
+     * ZERO fallbacks. m=120 costs a few extra setup SpMVs, once per run.
+     * Note the trade: an under-estimated kappa yields a MORE aggressive polynomial that is
+     * slightly faster when it happens to converge (CORE2 -7.2 % at m=30 vs -5.4 % at m=120),
+     * so the old default was not merely wrong — it was faster-but-unsafe. Correctness wins. */
+    int m = 120;
     if (const char *e = getenv("FESOM_PCSI_LANCZOS")) {
         m = atoi(e);
         FESOM_CHECK(m >= 4 && m <= 500, "FESOM_PCSI_LANCZOS=%d out of range [4,500]", m);
@@ -3315,10 +3324,22 @@ static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
                     "— every rank must compute the same omega sequence", lo2[0], hi2[0], lo2[1], hi2[1]);
     }
     s.built = true;
+    /* Suitability check. Chebyshev needs ~0.5*sqrt(kappa)*ln(2/tol) iterations; when that
+     * exceeds what the baseline CG would take, pcsi is the wrong tool for this system and
+     * the user should know BEFORE spending a run on it. Measured: farc kappa 4911 => ~428
+     * predicted vs CG's 212 (pcsi indeed lost); CORE2 kappa 670 => ~158 vs CG's 106 (pcsi
+     * won on wall-clock because its iterations are far cheaper). So this is a WARNING, not
+     * an abort — cheap iterations can still win at a moderate iteration penalty. */
+    const double pred = 0.5 * sqrt(s.mu / s.nu) * log(2.0 / (double)si->soltol);
     if (!partit || partit->mype == 0) {
         fprintf(stderr, "[pcsi] Lanczos m=%zu on M~^-1 A: theta = [%.6e, %.6e] -> "
                         "[nu,mu] = [%.6e, %.6e] (margins %.2f/%.2f), kappa = %.1f\n",
                 al.size(), th_lo, th_hi, s.nu, s.mu, mg[0], mg[1], s.mu / s.nu);
+        fprintf(stderr, "[pcsi] predicted Chebyshev iterations ~%.0f (maxiter %d)%s\n",
+                pred, si->maxiter,
+                pred > 0.6 * (double)si->maxiter
+                    ? "  <-- ILL-CONDITIONED: pcsi is likely a poor choice here; expect many "
+                      "iterations and check for fallback firings" : "");
         fflush(stderr);
     }
 }

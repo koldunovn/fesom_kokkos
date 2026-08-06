@@ -1133,6 +1133,43 @@ fixed, but simply **too few Lanczos steps for farc's spectrum**. It is also cons
 `cg2`/`oati` being unaffected: they are Krylov methods whose iteration count adapts to the
 actual spectrum, with no interval to get wrong.
 
+### ✅ RESOLVED — the Lanczos sweep (jobs 26734516 farc, 26734517 CORE2 control)
+
+**Prediction 1 confirmed, prediction 2 wrong.** `θmin` versus Lanczos steps:
+
+| mesh | m=30 | m=120 | m=250 | κ: 30 → 120 | fallbacks at m=30 → m=120 |
+|---|--:|--:|--:|--:|---|
+| **farc** | 2.027e-03 | **3.482e-04** | 3.249e-04 | **843 → 4911 (5.8×)** | **6 → 0** ✅ |
+| CORE2 (control) | 3.446e-03 | 2.513e-03 | 2.459e-03 | 489 → 670 (1.4×) | 0 → 0 |
+
+`m=30` **under-estimates the spectrum on both meshes** — badly on farc (5.8×). I predicted
+CORE2 would be "essentially flat"; it moved 37 %, so that half of the prediction was wrong.
+
+**The correction fixes CONVERGENCE but not COMPETITIVENESS**, and the theory now matches
+measurement exactly:
+
+| farc, `pcsi` | κ used | predicted iters (`½√κ·ln(2/tol)`) | measured iters | fallbacks | vs baseline |
+|---|--:|--:|--:|--:|--:|
+| m=30 | 843 | 177 | 350 ❌ (2× predicted) | **6** | +11.61 % |
+| **m=120** | **4911** | **428** | **376** ✅ | **0** | +9.08 % |
+| m=250 | 5263 | 442 | 389 ✅ | 0 | +11.27 % |
+
+At m=30 the measured count was **2× the prediction** — the signature of a spectrum outside
+`[ν,µ]`. At m=120 measurement and theory agree and **the fallbacks vanish**. But farc's true
+κ ≈ 4900 needs ~400 Chebyshev iterations against CG's 212, so **`pcsi` is simply the wrong
+method for a system this ill-conditioned** — correctly converged, and still 9 % slower.
+
+**⚠️ The uncomfortable part: the old default was faster BECAUSE it was wrong.** On CORE2,
+m=30 gives −7.20 % and m=120 −5.40 %: under-estimating κ yields a more aggressive polynomial
+that wins *when it happens to converge*. On farc that same aggression caused convergence
+failures. **Correctness wins — the default is now `FESOM_PCSI_LANCZOS=120`**, accepting ~1.8 pp
+of CORE2 speed for a bound that is actually converged.
+
+**Also added:** a setup-time suitability warning. `pcsi` now prints its predicted Chebyshev
+iteration count and flags `ILL-CONDITIONED: pcsi is likely a poor choice here` when that
+exceeds 60 % of `maxiter` — so the farc case announces itself before a run is spent on it.
+
+*(Historical: the original pre-registration below.)*
 **Test in flight** (jobs 26734516 farc, 26734517 CORE2 control): sweep
 `FESOM_PCSI_LANCZOS` ∈ {30, 120, 250}. Pre-registered predictions —
 1. On **farc**, θmin should keep falling as m grows (the m=30 value is not converged), and the
