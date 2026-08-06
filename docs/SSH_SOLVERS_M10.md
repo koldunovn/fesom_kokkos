@@ -821,7 +821,41 @@ speed-up, `d_tot` = whole-step. WIN = `d_tot` better than −2 %.
 | NG5 | CPU | 1024 | 7229 | 1.1 | +26.8 | −0.38 | ❌ LOSE |
 | farc | CPU | 64 | 9974 | 3.3 | +12.7 | +0.47 | ❌ LOSE |
 
-### The rule that falls out
+### ⚠️ The CPU rows for farc/dars/NG5 are measured OUTSIDE their scaling range — do not conclude from them yet
+
+FESOM's rule of thumb (user, and the `namelist.config` guidance): a mesh scales until roughly
+**300–500 vertices per core**. Against that, the CPU rungs above are nowhere near where these
+meshes are actually run:
+
+| mesh | vertices | scaling range (ranks) | = CPU nodes | what I tested | vertices/core tested |
+|---|--:|--:|--:|---|--:|
+| CORE2 | 126 858 | 253 – 422 | 2 – 3 | 128…864 | 991 … **146** ✅ spans it |
+| farc | 638 387 | 1 276 – 2 127 | 9 – 16 | 64, 128 | **9 974, 4 987** ❌ 10–30× too coarse |
+| dars | 3 160 340 | 6 320 – 10 534 | 49 – 82 | 512, 1024 | **6 172, 3 086** ❌ |
+| NG5 | 7 402 886 | 14 805 – 24 676 | 115 – 192 | 1024, 2048 | **7 229, 3 614** ❌ |
+
+**Only CORE2 was tested inside its operating range** — which is exactly why it is the only mesh
+where the CPU numbers looked good. The farc/dars/NG5 "LOSE" rows say the solvers do not help at
+3 000–10 000 vertices/core, which is true but uninteresting: nobody runs there, and it is the
+regime where the SSH solve is a negligible 0.8–4 % of the step by construction.
+
+**Corrected rungs submitted** (jobs 26738526-31), each inside or as close to the range as the
+available partitions allow:
+
+| mesh | ranks | nodes | vertices/core | note |
+|---|--:|--:|--:|---|
+| farc | 1024 / **2048** | 8 / **16** | 623 / **312** | ✅ reaches the 300–500 range |
+| dars | 2048 / **4096** | 16 / **32** | 1543 / **771** | 4096 is the LARGEST partition that exists |
+| NG5 | 4096 / **8192** | 32 / **64** | 1807 / **903** | 8192 is the LARGEST partition that exists |
+
+⚠️ **dars and NG5 cannot reach 300–500 vertices/core with the partitions that exist** — dars
+would need ~6 300–10 500 ranks (49–82 nodes) and NG5 ~14 800–24 700 (115–192 nodes), against
+maxima of 4 096 and 8 192. So even the corrected rungs sit at 771 and 903 vertices/core, still
+short of the knee. Reaching it would need new partitions (the `core2_bigpart` recipe applies)
+and a 64–192 node allocation. Until then, the CPU verdict for those two meshes is **provisional
+at best**, and the honest statement is "not yet measured where it matters".
+
+### The rule that falls out (GPU side is solid; CPU side is CORE2-only so far)
 
 **The split is by BACKEND, not by mesh size** (sorting the table by nodes/rank does *not*
 separate the wins from the losses; sorting by backend does):
