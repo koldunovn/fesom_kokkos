@@ -300,6 +300,70 @@ A second effect pushes the same way. The ring is a different size on every proce
 it introduces a new load imbalance on top of the one it removes: on fArc CPU the ice-dynamics
 waiting time rose from 8.7 to 25.3\,ms per step when the ring was made deep.
 
+\subsection*{6.3b The same scheme, written as a widening of the existing loops}
+
+\emph{Everything above measures a wide halo whose ring computation runs in kernels of its own.
+That turns out to be most of what it costs.}
+
+The reference implementation we were sent extends the bounds of the loops that already exist and
+adds no kernels; ours launches a separate ring kernel per stage per sub-cycle. We profiled the
+difference before changing anything. Our wide halo adds \textbf{362 kernel launches per model
+step}, and each is on a slower launch path than the owned kernel it duplicates: the ring kernels
+capture enough array descriptors to cross the threshold in Kokkos above which arguments are staged
+through constant memory rather than passed with the launch. The measured gap between consecutive
+launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels, and over a step the
+ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic. The launch structure
+was more than twice the computation it carried.
+
+Folding each ring kernel into the owned loop it duplicates --- and, the two being one loop
+thereafter, assembling the ring nodes by the same scatter the owned nodes use instead of replaying
+the owner's summation order --- gives, on CORE2 at its operating point:
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+CORE2, one node, four GPUs & model step & \multicolumn{2}{c}{sea-ice cost} \\
+\midrule
+every sub-cycle (reference)                  & 0.0660\,s          & 15.8\,ms         & --- \\
+wide halo, standard form, separate kernels   & $-2.4\%$           & 14.1\,ms         & $-10.8\%$ \\
+wide halo, divergence form, separate kernels & $+1.1\%$           & 16.3\,ms         & $+3.2\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-13.6\%}$ & \textbf{6.7\,ms} & $\mathbf{-57.6\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-13.6\%}$ & \textbf{6.6\,ms} & $\mathbf{-58.2\%}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Three points, in order of how much they change the study.
+
+\textbf{The saving was ours to give away, not the scheme's to withhold.} 58\% of the ice cost is
+the upper end of the range we measure for the delayed exchange (Sect.~6.4), the scheme we reject
+for putting the decomposition into the ice field. The statement in Sect.~6.3 that the wide halo is
+worth substantially less than the delayed exchange on every mesh holds for the implementation
+measured there, not for the scheme.
+
+\textbf{The two forms become indistinguishable.} They differ by 3.5 percentage points with
+separate ring kernels and by nothing to four decimals with widened loops, although the divergence
+form still ships 40\% fewer numbers. Sect.~6.5's decomposition of that gap into a message term and
+a byte term is not withdrawn --- both terms were isolated at bit-identical output --- but what it
+decomposed was smaller than the implementation term sitting on top of it.
+
+\textbf{It is a compute result, not a communication one.} The two rows of each pair post identical
+message and byte counts: 390.5 messages and 1\,542\,053 doubles per step for the standard form in
+both cases. Nothing moved on the wire.
+
+The price is bit-identity, deliberately: a ring node is now summed in the receiving process's
+element order rather than the owner's. After a step of 120 sub-cycles the ice velocity differs
+from the exact wide halo by 8 to 15 units in the last place, and after twenty steps by about as
+much as this port's own GPU and CPU arms differ at identical arithmetic. Since that removes the
+bit-identity gate, the 60-day boundary/interior test of Sect.~6.4 becomes the acceptance criterion
+for this variant rather than a diagnostic.
+
+On CPU the same change is not a gain, and the reason is instructive: with no launches to remove it
+only trades a gather of plain reads for an atomic scatter. In the standard form, where the gather
+merely re-read stored stresses, that costs 5 percentage points at 512 cores on fArc. In the
+divergence form, where the gather had to recompute each element's stress once per incident ring
+node, about six times over, it saves 3.
+
 \subsection*{6.4 The delayed exchange, and why it is not usable}
 
 Accepting a halo up to $K-1$ sub-cycles old removes 105 of the 120 exchanges per step at $K=8$ and
@@ -409,12 +473,19 @@ is. Reported here as a negative result. \\
 \item \textbf{The accuracy of the delayed exchange at high resolution.} This was to have been the
 largest remaining gap; Sect.~6.4 rules the scheme out on other grounds, so the one-year CORE2
 result stands as a record of what the approximation costs rather than as support for using it.
-\item \textbf{A leaner wide halo.} Our implementation sends eleven auxiliary fields once per step
-so that rings 2\dots$K$, which do not exist in FESOM's data structures, have values at all. That
-transfer amounts to 1.6--6.2\% of the wide halo's messages and 3.6--9.2\% of the data it moves, so
-removing it altogether could gain at most a few tenths of a percent of the model step. Your scheme
-avoids it by staying within the halo FESOM already maintains, which is also what limits it to
-$K$=2. We have not implemented that variant.
+\item \textbf{Trimming the eleven auxiliary fields.} Measured but not built. Instrumenting the
+per-step exchange to compare each arriving owner value against the value the receiving process
+already holds shows that \emph{nine of the eleven arrive exactly equal} --- ice velocity,
+concentration, thickness, snow, ocean velocity, wind stress --- because FESOM's own halo exchange
+has already put them there. The two right-hand sides do not, being assembled and area-scaled over
+owned nodes only. But the redundancy stops at the first ring, and rings 2\dots$K$ have no other
+source at any $K$, so what could be removed is 37\% of that exchange at $K$=2 and 17\% at $K$=4;
+since the exchange is 5.4\% of the data the scheme moves and one message per neighbour per step,
+removing it would gain under one percent of the traffic and no messages at all. We did not
+implement it, and this is the measurement that says why.
+\item \textbf{The widened-loop variant on the three larger meshes.} Sect.~6.3b is CORE2 at its
+operating point; fArc, DARS and NG5 are queued at the time of writing. The claim that the
+implementation rather than the scheme carried the cost rests on one mesh until they land.
 \item \textbf{The divergence form over a long integration.} Since it showed no speed benefit we did
 not carry it through a one-year test, so the $2.1\times10^{-11}$ per-step non-equivalence of
 section~6.1 has not been followed to its long-term consequences.
