@@ -157,6 +157,36 @@ equality is not available; what it does to the ice is Sect.~6.4.
 
 \section*{6. Results}
 
+The table below is the summary; the subsections give the measurements behind it. Each timing is
+quoted twice, against the model time step and against the ice cost (ice, ice dynamics and ice
+advection, computation together with time spent waiting for communication), for the reason set out
+in Sect.~6.2: sea ice is 5 to 13\% of a CPU step, so an ice-only change is divided by about ten
+before it reaches the step.
+
+\begin{center}\small
+\begin{tabular}{@{}llrrrr@{}}
+\toprule
+& & \multicolumn{2}{c}{\textbf{GPU}} & \multicolumn{2}{c}{\textbf{CPU}} \\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}
+& & ice cost & model step & ice cost & model step \\
+\midrule
+delayed exchange & $K$=2 & $-32$ to $-39\%$ & $-8.3$ to $-9.3\%$ & $-2$ to $-18\%$ & $-0.1$ to $-2.9\%$ \\
+delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%$ & $-0.3$ to $-3.6\%$ \\
+wide halo, standard form & $K$=8 & $-11$ to $-24\%$ & $-2.2$ to $-5.7\%$ & \multicolumn{2}{c}{never profitable} \\
+wide halo, divergence form & $K$=8 & $+5$ to $-29\%$ & $+0.2$ to $-6.8\%$ & \multicolumn{2}{c}{never profitable} \\
+wide halo, either form & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
+divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+GPU ranges span the meshes at the node count where each still gains from more GPUs: CORE2 on 1 node
+(4 GPUs), fArc on 4, DARS on 8, NG5 on 16 --- the wide-halo rows cover the first three, NG5 being
+still in the queue. CPU ranges span 128 to 2048 cores on CORE2 and fArc. $^\dagger$ one point only
+(DARS, 8 nodes); at $K$=2 the wide halo is a cost on fArc at 4 nodes and a saving at 16, so it needs
+the larger $K$. The delayed exchange, which the table shows to be much the fastest, is ruled out on
+other grounds in Sect.~6.4.
+
 \subsection*{6.1 Exactness of the reformulation}
 
 Carrying $R$ and $\sigma$ simultaneously and comparing them sub-cycle by sub-cycle, $R$ agrees
@@ -174,13 +204,6 @@ form is not bitwise reproducible against the standard form over a long integrati
 introduced as a scheme change rather than as an optimisation.
 
 \subsection*{6.2 Effect of the reformulation on run time}
-
-\textbf{First, the denominator, because it decides how this reads.} Percent of the \emph{model
-step} is what a production run feels, but the ice is only a small part of a step --- 5 to 13\% on
-CPU --- so an ice-only change is divided by 10 before it reaches that number. Percent of the
-\emph{ice cost} (ice + ice dynamics + ice advection, computation \emph{and} MPI wait, which is the
-definition Koldunov et al.\ 2019 used) is what judges a sea-ice scheme. We report both from here
-on; quoting only the first is what made our first reading of this result wrong.
 
 Measured against the ice cost, the reformulation \textbf{does} pay on CPU, and the more so the more
 processes are used: $-2.2\%$ at 512 processes on fArc, $-3.2\%$ at 1024, $-5.6\%$ at 1536,
@@ -238,10 +261,13 @@ own adds 2 to 8\% there, for the reason given in Sect.~6.2.
 Reading the figure:
 
 \begin{itemize}\itemsep0.12em
-\item The wide halo is a real gain, and it is exact, so no accuracy argument is needed: worth $-1.8$ to $-6.8\%$ of the model step at realistic operating points, which is
-\textbf{$-12$ to $-19\%$ of the ice cost} (fArc, 16 GPU nodes, $K$=8: $-11.9\%$ in the classic
-form, $-19.1\%$ in the divergence form). That $-19.1\%$ is the same configuration and very nearly
-the same number as your $\sim$20\%; the apparent disagreement was a matter of denominator.
+\item The wide halo is a real gain, and it is exact, so no accuracy argument is needed: at the
+operating points it is worth $-2.2$ to $-6.8\%$ of the model step, which is \textbf{$-11$ to
+$-29\%$ of the ice cost} depending on the mesh and on which form carries it. For the comparison
+with your own figure: on fArc at 16 GPU nodes with $K$=8 the divergence form removes $19.1\%$ of
+the ice cost and the classic form $11.9\%$ --- the same configuration and very nearly the same
+number as your $\sim$20\%, the apparent disagreement having been a matter of denominator. On DARS
+at 8 nodes, an operating point rather than a flat one, it reaches $28.8\%$.
 \item It is worth substantially less than the delayed exchange on every mesh.
 \item On CPU it never wins, on any mesh, at any $K$.
 \item It needs large $K$. At $K=2$ it is a net \emph{cost} on most configurations, because the
