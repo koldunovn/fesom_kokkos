@@ -45,9 +45,9 @@ is said.
 \textbf{Two things are worth knowing before the detail.} First, we report every speed number in two
 currencies --- percent of the whole model step and percent of the ice cost --- because the first
 divides an ice-only change by ten and made us report your reformulation as a null result when it is
-not (section~6.2). Second, the cheap option, the one that gives up exactness, turns out to
-\textbf{imprint the domain decomposition on the ice} (section~6.6), and that, rather than its
-speed, is what decides the recommendation.
+not (section~6.2). Second, the cheap option, the one that gives up exactness, turns out to \textbf{draw the domain
+decomposition into the ice field} (section~6.6). It is the fastest thing we measured and it is not
+usable; we report it as a measured negative.
 
 \section*{2. Terms, configurations, meshes, machine}
 
@@ -374,7 +374,7 @@ tested, by a factor of 1.1 to 1.5.}
 \label{fig:accuracy}
 \end{figure}
 
-\subsection*{6.6 The delayed exchange imprints the domain decomposition}
+\subsection*{6.6 The delayed exchange draws the decomposition into the ice --- and that rules it out}
 
 This was raised as an objection --- would the stale halo show up as partition artefacts in the ice?
 --- and it turned out to be the finding that decides the recommendation.
@@ -414,13 +414,15 @@ $10^{-4}$\,m), persists for two months, scales with $K$, and appears in ice conc
 and ice velocity (1.76) as well as thickness. Figure~\ref{fig:artefact} shows both the ring
 profiles and the map: the difference field traces the sub-domain boundaries.
 
-\textbf{Why this is a different kind of defect from an accuracy cost.} Section~6.5 says the
-delayed exchange stays inside mEVP's own implementation spread, and that remains true. But the
-error is not distributed like an implementation difference --- it is organised along artificial
-lines, and \emph{it depends on how the mesh was partitioned}. The same experiment run on a
-different number of cores has a different error pattern. That is a property a climate model
-should not acquire lightly, and it is not visible in any of the integral diagnostics of
-section~6.5.
+\textbf{Why this rules the option out, and it is not the accuracy cost.} Section~6.5 remains
+true: the delayed exchange stays inside mEVP's own implementation spread, and every integral
+diagnostic is untouched. The objection is different in kind. The error is not distributed like an
+implementation difference --- it is a \emph{polygonal structure in a physical field, in the shape
+of the processor grid}. A sea-ice field with the decomposition visible in it is not something one
+can put in front of a sea-ice modeller, whatever the correlation coefficient says, and no amount
+of speed buys that back. (That the pattern also changes with the core count is true but secondary;
+these models are not bit-reproducible across decompositions anyway, and nobody objects to that.)
+Reducing the delay to $K$=2 halves the ratio, to 1.70, but does not remove it.
 
 \textbf{It also draws the line your own message drew, and confirms it.} Giving up bit-identity by
 \emph{recomputing} a shared quantity independently --- each core changing the last bit on a
@@ -489,16 +491,16 @@ wide halo (either form) &
 exact, bit for bit; $-12$ to $-19\%$ of the ice cost on GPU at $K$=8 ($-2$ to $-7\%$ of the model
 step); never profitable on CPU; \textbf{no partition imprint} &
 \textbf{the option we would put into production.} It is the only one that is both worth having and
-free of an accuracy or reproducibility argument. Its $-19.1\%$ of the ice cost on fArc is the same
+free of an accuracy argument and of an artefact. Its $-19.1\%$ of the ice cost on fArc is the same
 measurement as your $\sim$20\%. \\[0.3em]
 delayed exchange &
 approximate; $-37$ to $-58\%$ of the ice cost on GPU --- three times the wide halo --- but
-\textbf{it imprints the domain decomposition} (edge/interior 2.52 at $K$=4 against a control of
-0.85) &
-\textbf{not recommended as it stands}, despite being much the fastest. Its error is inside mEVP's
-own implementation spread but is organised along sub-domain boundaries and depends on the core
-count. Worth revisiting only with evidence about a decade-scale integration, or with a hybrid that
-refreshes exactly now and then. \\
+\textbf{it draws the sub-domain boundaries into the ice} (edge/interior 2.52 at $K$=4 against a
+control of 0.85, and still 1.70 at $K$=2) &
+\textbf{a no-go, and reported as a measured negative.} It is the fastest thing in this study and
+it cannot be used: a polygonal artefact in the shape of the processor grid disqualifies a sea-ice
+scheme regardless of how small the integral error is. Worth knowing about, and worth the
+measurement, but not an option. \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -506,13 +508,10 @@ refreshes exactly now and then. \\
 \section*{8. What has not been measured}
 
 \begin{itemize}\itemsep0.12em
-\item \textbf{Whether the partition imprint matters on climate time scales.} Two months on fArc
-establish that it exists, is immediate and is visible; they say nothing about whether it biases
-ice thickness or drift over decades, which is the question that would decide whether the delayed
-exchange is usable at all. This is now the largest gap.
-\item \textbf{The accuracy of the delayed exchange at high resolution.} Established at CORE2
-resolution over one year; the speed results that motivate it are on fArc, DARS and NG5, where the
-ice is better resolved and the velocity field is rougher.
+\item \textbf{The accuracy of the delayed exchange at high resolution} was going to be the
+largest remaining gap. It is now moot: section~6.6 rules the option out on other grounds, so the
+one-year CORE2 accuracy result stands as a record of what the approximation costs, not as support
+for using it.
 \item \textbf{A leaner wide halo.} Our implementation ships eleven auxiliary fields once per step
 so that rings 2\dots$K$ --- which do not exist in FESOM's data structures --- have any values at
 all. Measured, that ship is 1.6--6.2\% of the wide halo's messages and 3.6--9.2\% of its bytes, so

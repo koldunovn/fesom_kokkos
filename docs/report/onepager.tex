@@ -27,7 +27,7 @@ mEVP runs 120 sub-cycles per model time step and currently exchanges the ice-vel
 every one. Three ways to do it less often were implemented and measured:
 
 \textbf{delayed exchange} --- exchange every $K$-th sub-cycle and let the halo go stale. Fastest by
-far, \emph{but it imprints the domain decomposition on the ice} (below).
+far, \emph{but it writes the sub-domain boundaries into the ice field}: \textbf{not usable} (below).
 \textbf{Wide halo} (Danilov) --- exchange every $K$-th sub-cycle but recompute a $K$-deep ghost
 ring in between, so nothing is stale: \emph{exact}, bit for bit, and no imprint; smaller gain.
 \textbf{Divergence form} (Danilov) --- carry $\nabla\!\cdot\!\sigma$ at nodes instead of $\sigma$
@@ -62,7 +62,7 @@ removing element arrays removes work that was not being paid for. Danilov's own 
 divergence form with its double halo matches our \textbf{$-19.1\%$ of the ice cost} for that
 combination (fArc, 16 GPU nodes).
 
-\hd{\textcolor{red}{The finding that decides the recommendation: the fast option imprints the partition}}
+\hd{\textcolor{red}{Why the fast option is out: it draws the decomposition into the ice}}
 
 The delayed exchange reads halo values up to $K-1$ sub-cycles old, and those nodes are exactly the
 one-cell rim of each sub-domain. The partition is static, so the same nodes are perturbed every
@@ -82,10 +82,12 @@ delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
 \end{tabular}
 \end{center}
 
-It is there on \textbf{day one} (ratio 3.1), persists for two months, scales with $K$, and traces
-the sub-domain boundaries visibly. The exact wide halo scores like the control, as it must, which
-also validates the diagnostic. \textbf{The delayed exchange therefore makes the answer depend on
-how the mesh was partitioned.} The ring profiles and the map are Figure~4 of the full note.
+It is there on \textbf{day one} (ratio 3.1), persists for two months, and is visible as a web of
+differences following the sub-domain boundaries. Reducing the delay to $K$=2 halves it but does not
+remove it. The exact wide halo scores like the control, as it must, which also validates the
+diagnostic. \textbf{An artificial polygonal structure in the ice, in the shape of the processor
+grid, is not something a sea-ice model can carry} --- and it is a different objection from the
+accuracy cost below, which is small. The ring profiles and the map are Figure~4 of the full note.
 
 \hd{What the delayed exchange costs in simulated climate (1 year, CORE2, exactly reproducible)}
 
@@ -102,10 +104,9 @@ amplitude and the ocean surface is unchanged to six digits. \emph{CORE2 resoluti
 accuracy argument and no partition imprint, and worth 12--19\% of the ice cost on GPU at $K$=8. It
 does not pay on CPU on any mesh.
 
-\textbf{The delayed exchange is not recommended as it stands}, despite being worth three times as
-much: results stop being reproducible across core counts and the error is organised along
-artificial lines. If the speed is wanted, establish whether the imprint matters over a decade, or
-whether a hybrid (short delay, occasional exact refresh) removes it.
+\textbf{The delayed exchange is a no-go}, despite being worth three times as much, and we report it
+as a measured negative: it is the fastest thing we found and it cannot be used, because it puts the
+processor decomposition into the ice field. No amount of speed buys that back.
 
 \textbf{The divergence form} is worth having on CPU at scale and is a cost on GPU --- and it is
 what makes the wide halo cheapest to carry.
