@@ -1726,3 +1726,106 @@ rather than a blocker.)*
 | `stallknob_serial` | `0712ee57fe7f2f5dbb8738f4463653b2` | Serial `fesom_port`, `FESOM_SSH_STALL_WINDOW` commit |
 | `stallknob_lab` | `f425461f0b6e7c7ab49f3b38f38afe63` | Serial `fesom_ssh_lab`, same commit |
 | `stallknob_cuda` | `09d26e91139048512529dce16467afc1` | CUDA `fesom_port`, same commit |
+
+## 🔴 LOAD IMBALANCE — what it is, and why fixing it makes the step SLOWER
+
+**User question (2026-08-06):** *"what is in this load imbalance, do we know? why we have an
+imbalance in compute?"* Plus two prior negative results from the user: the ice hypothesis was
+tested and failed, and 3D balancing was tried and failed.
+
+### It is bathymetry, not ice — measured (26742298 + partition analysis)
+
+Per-rank `ocean` busy against per-rank mesh content, farc 2048 (2048 ranks, all correlations
+over all ranks):
+
+| correlation with `ocean` busy | r |
+|---|--:|
+| **3D nodes owned** (Σ `nlvls` over owned columns) | **0.967** |
+| 2D nodes owned | 0.003 |
+| `cg` **wait** vs 3D nodes | **−0.771** |
+
+Fit: `ocean_busy = 2.241 ms per 1000 3D nodes + 10.22 ms`, which reproduces the measured
+8.8→42.5 ms range. **The partition balances SURFACE nodes (310–313 per rank, 1.01×) while the
+work is per WATER COLUMN, and 3D nodes span 9.40×** (1550 → 14571). On fArc that is shallow
+Siberian shelf against deep Arctic basin.
+
+**This explains the user's negative ice result.** `cg` wait correlates **−0.771** with 3D
+nodes: deep-column ranks wait *least* because they are the stragglers. The ranks everyone
+waits for are the DEEP ones, not the icy ones.
+
+*(Parse verified before use — the M7 `rpart.out` misreading is the precedent. `my_list` owned
+sets form a perfect disjoint cover: 638387 nodes each owned exactly once, 3D sum equal to the
+mesh total exactly. The r = 0.967 against measured busy is independent confirmation.)*
+
+### Why the earlier 3D-balancing test could not have worked
+
+| partition | 2D bal | 3D bal |
+|---|--:|--:|
+| **NG5 `dist_2048`** (/pool) — what M7 verified | 1.02× | **1.04×** already dual-weighted |
+| `dars_bigpart`, `ng5_bigpart` (ours) | 1.03× | 1.05× |
+| **fArc `dist_2048`** (/pool) | 1.01× | **9.40×** |
+| **CORE2 `dist_864`** | 1.06× | **9.60×** |
+
+The M7 record is correct *for NG5* — and that is the problem. Its regenerated `ng5_w3d` dists
+came out **byte-identical to /pool** because NG5 was already dual-weighted, so that A/B
+compared a partition against itself: an L80 dead-knob null, structurally incapable of showing
+an effect. On CORE2 and fArc, where the partition IS imbalanced, the lever was untested.
+
+### The systematic CORE2 test (26743709 / 26743820 / 26743981 / 26744115)
+
+The weighting is a COMPILE-TIME `#ifdef PART_WEIGHTED` (`fort_part.c`), so 2D-only and dual
+could only be compared across two binaries. A copy of the partitioner at
+`/work/.../partw/fesom2` was patched to read **`FESOM_PART_WGT`** at runtime (0 = 2D only,
+1 = 3D only, 2 = dual) — one binary, no build confound. *(The user's tree is untouched:
+verified by md5 + `find -newermt`.)* `wgt_type=1` is legacy dead code and aborts inside METIS
+(rc=134); the question is answered by 0 vs 2.
+
+🔴 **The first attempt (26743391) was itself a dead-knob null** — `rsync` preserved the
+prebuilt binary's mtime and the copied CMake cache held absolute paths to the original tree,
+so `cmake --build` reported "Built target" without recompiling. All three legs produced
+IDENTICAL edgecuts under three different knob values. The script now ABORTS unless the
+override announces itself.
+
+**A/B, same allocation, same binary, 864 ranks, min-of-2, 300 steps (26743981).** All three
+arms verified byte-identical on the 8 mesh-definition files, so only `dist_*` differs:
+
+| arm | 3D balance | s/step | vs shipped |
+|---|--:|--:|--:|
+| `core2` (shipped) | 9.60× | 0.0440 | — |
+| `core2_wgt0` (2D only) | 9.32× | 0.0443 | **+0.68 %** ← partitioner-source control: clean |
+| `core2_wgt2` (dual) | **1.05×** | 0.0482 | **+9.55 % SLOWER** |
+
+`wgt0` reproduces the shipped partition's imbalance, confirming the shipped CORE2 partitions
+are 2D-only, and the source control is clean (+0.68 %), so the +9.55 % is the pure weighting
+effect.
+
+### ⭐ WHY it loses — the balancing works and still costs more than it saves (26744115)
+
+Phase-resolved, 864 ranks (`FESOM_SPEED_PHASESTATS=1`; ⚠️ needs `FESOM_SPEED_FORCE_SERIAL=1`
+on a Serial build — `fesom_speed.hpp:111-113`, "Serial stays legacy" — without it the lever
+silently resolves OFF, which cost two runs):
+
+| | `wgt0` (9.32×) | `wgt2` (1.05×) | Δ |
+|---|--:|--:|--:|
+| `ocean` busy min/mean/max | 3.8 / 13.0 / 19.4 | 10.1 / 14.7 / 17.5 | spread 5.1× → **1.73×** |
+| `ocean` imbalance tax (max−mean) | 6.4 ms | 2.8 ms | **−3.6** ✅ |
+| `ocean` wait | 6.7 | 4.9 | **−1.8** ✅ |
+| **total busy** | 22.9 | 25.6 | **+2.7** ❌ |
+| `cg` wait | 9.0 | 10.2 | +1.2 ❌ |
+| `icedyn` wait | 4.0 | 5.1 | +1.1 ❌ |
+| **total** | 45.2 | 48.1 | **+2.9 ms** |
+
+**The balancing did exactly what it was supposed to** — idle ranks took on real work (`ocean`
+busy min 3.8 → 10.1), the spread collapsed, and `ocean` wait fell 1.8 ms. **But the
+dual-weighted partition needs a 40 % bigger halo** (42 → 59 nodes/rank), and that costs
+**+2.7 ms of COMPUTE** plus +1.2/+1.1 ms of wait in the comm-heavy `cg` and `icedyn` phases.
+
+**Conclusion: the user's "3D balancing did not work out" is CONFIRMED, and now has a measured
+mechanism rather than a null result.** The imbalance is real and worth 6.4 ms, but METIS
+cannot balance the vertical without cutting more edges, and the halo penalty exceeds the
+imbalance gain. `Repartitioning OUT` stands as a user decision — now for a stated reason.
+
+**What is NOT ruled out:** `wgt_type=2` already softens the 3D criterion by `+100` per node.
+The trade is a continuum between edgecut and vertical balance, and only its two endpoints have
+been measured. A softened 3D weight (or edge-weighted METIS) might find an interior optimum.
+That is a partitioner study, not a model change, and it is unexplored.
