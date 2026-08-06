@@ -1358,3 +1358,70 @@ this fix — the constant was hardwired precisely because the reference config n
 **Corollary for the inert case:** the bit-identical result is not worthless — it is the *null
 rung* of the ladder, proving the path is inert below threshold, which is a real requirement.
 Record it as that, and never as evidence the machinery works.
+
+### L103 — THE OCEAN-PHASE LOAD IMBALANCE IS BATHYMETRIC, AND VERTEX WEIGHTING CANNOT BUY IT BACK: balancing the vertical costs a ~90× worse edgecut, which GPUs punish 30 %. Partition track CLOSED. (M10, 2026-08-06)
+
+**The imbalance is real and large.** Per-rank `ocean` busy spans 4.8× (farc 2048 ranks:
+8.8 / 26.6 / 42.5 ms; CORE2 864: 3.8 / 13.0 / 18.2). A bulk-synchronous phase costs its
+maximum, so the tax is **11 % of the CORE2 step and 19 % of the fArc step** — comparable to
+the entire barotropic solve.
+
+**1. It is BATHYMETRY, not ice, and not the horizontal partition.** Correlating per-rank ocean
+compute against per-rank mesh content over all 2048 fArc ranks:
+
+| correlation with per-rank ocean compute | r |
+|---|--:|
+| **3D nodes owned** (Σ `nlvls` over owned columns) | **0.967** |
+| 2D nodes owned | 0.003 |
+| solver **wait** vs 3D nodes owned | **−0.771** |
+
+The partition balances *surface* nodes to 1.01× while the work is per water column, and 3D
+nodes span **9.4×**. Fit: `ocean_busy = 2.24 ms per 1000 3D nodes + 10.2 ms`. The negative
+correlation for solver wait is the causal closure: **deep-column ranks wait LEAST because they
+are the stragglers** — the ranks everyone waits for are the deep ones, not the icy ones, which
+is why an ice-based hypothesis tests negative.
+
+**2. A null result on this lever is worthless unless the partition actually CHANGED.** The
+M7-era conclusion rested on regenerating NG5 with 3D weighting — but /pool NG5 was *already*
+dual-weighted (3D spread 1.04×), so the regenerated dists came out **byte-identical** and the
+A/B compared a partition against itself. That is L80 at partition scale. **Check the 3D
+balance of the partition you are "fixing" before believing any repartitioning null.**
+
+**3. Measured properly on a mesh that IS imbalanced, it still loses — and the reason is not
+the halo node count.** CORE2, one binary with runtime-selectable weighting (the knob matters:
+it is a compile-time `#ifdef PART_WEIGHTED` in `fort_part.c`, so 2D-only and dual otherwise
+require two binaries), all arms byte-identical on the mesh definition:
+
+| backend / rung | vertices/core | dual vs 2D-only |
+|---|--:|--:|
+| CPU 256 r | 495 | **−4.62 %** ✅ |
+| CPU 512 r | 248 | 0.00 % (crossover) |
+| CPU 864 r | 146 | +8.71 % |
+| **GPU 8 r (2 nodes)** | 15857 | **+29.74 %** ❌ |
+
+**4. Halo NODES understate the damage by two orders of magnitude — use EDGECUT.** Dual
+weighting grows halo nodes ~40 %, which predicts a ~1 % compute penalty. Measured penalty:
+**+13 % CPU, +20 % GPU** on ocean compute *mean*. The reason is in the cut, not the surface:
+
+| CORE2 ranks | edgecut 2D-only | edgecut dual | ratio |
+|--:|--:|--:|--:|
+| 8 | 1 335 | 120 883 | **91×** |
+| 16 | 2 549 | 217 791 | 85× |
+| 32 | 4 307 | 375 211 | 87× |
+
+Balancing the vertical forces METIS to fragment subdomains. That is a locality collapse, and
+**the GPU punishes it far harder than the CPU** (memory-access sensitivity): even the
+regenerated *2D-only* partition is +4.18 % against the shipped one on GPU, versus +0.68 % on
+CPU. **Any regenerated decomposition must be measured on GPU before use, not merely checked
+for balance.**
+
+**5. Partition-marginal instability is real (L99 again).** A regenerated 2D-only `dist_128`
+made baseline CG diverge at iteration 1 (`residual=5.49698e+45`) where the shipped and
+dual-weighted partitions at the same rank count both ran clean.
+
+**VERDICT — the partition track is CLOSED.** The imbalance is genuine and worth ~6 ms of a
+45 ms step, but vertex weighting trades a 1.2–1.5× compute spread for a ~90× worse cut and
+loses everywhere that matters: it wins only on CPU below ~250 vertices/core, has no GPU
+counterpart, and the production point sits on the crossover. Do not re-derive this. If the
+imbalance is ever attacked again it must be by a method that does **not** cost edgecut —
+which vertex weighting inherently does.
