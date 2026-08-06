@@ -93,7 +93,7 @@ On DARS, where the solve is a small share of the step, it is 27\,\% faster on CP
 
 Figure~\ref{fig:payoff}(a) collects every valid configuration. The whole-step gain follows the
 share of the step the solve occupies, which varies from 0.8\,\% (DARS at 512 CPU ranks) to
-37.7\,\% (fArc on 8 GPU nodes). Below roughly 5\,\% the effect is within measurement noise;
+42.2\,\% (fArc on 16 GPU nodes). Below roughly 5\,\% the effect is within measurement noise;
 above it the gain grows steadily.
 
 That share is not a property of the mesh but of how thinly it is spread. On CORE2 it rises
@@ -117,7 +117,7 @@ parallel-efficiency knee out by a factor of 1.26--1.29.
 \multirow{4}{*}{GPU}
 & CORE2, 2 nodes & 15857 & 25.8 & \texttt{oati} & $-5.32$\,\% \\
 & CORE2, 16 nodes & 1982 & 30.5 & \texttt{oati} & $-6.73$\,\% \\
-& fArc, 8 nodes & 19949 & 37.7 & \texttt{oati} & $-7.32$\,\% \\
+& fArc, 16 nodes & 9975 & 42.2 & \texttt{oati} & $-10.36$\,\% \\
 & DARS, 16 nodes & 49380 & 7.4 & \texttt{oati} & $-1.00$\,\% \\
 \bottomrule
 \end{tabular}
