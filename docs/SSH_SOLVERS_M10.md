@@ -50,7 +50,15 @@ Every gate/A-B row: date · gate · job id · binary md5 (from the log — R9) �
 | 2026-08-06 | T5a explicit `FESOM_SSH_SOLVER=cg` byte gate (proves the default branch is the certified path) | 26723544 | (in log) | *(pending)* |
 | 2026-08-06 | T5b CUDA fidelity, `cg2` (CUDA vs Serial, same knobs) | 26723550 | (in log) | *(pending)* |
 | 2026-08-06 | T5b CUDA fidelity control, `cg` | 26723551 | (in log) | *(pending)* |
-| 2026-08-06 | T5b options ×3 (TKE/mEVP/zstar) under `cg2` | 26723560 | (in log) | *(pending)* |
+| 2026-08-06 | T5b options ×3 (TKE/mEVP/zstar) under `cg2` | 26723560 | (in log) | harvested (see below) |
+| 2026-08-06 | T6 knob-off byte gate (pipecg commit) | 26723615 | (in log) | **PASS** |
+| 2026-08-06 | T6 options ×3 under `pipecg` | 26723616 | (in log) | harvested — zstar all-pass |
+| 2026-08-06 | T8 knob-off byte gate (pcsi commit) | 26723691 | (in log) | **PASS** |
+| 2026-08-06 | T8b options ×3 under `pcsi` | 26723757 | (in log) | harvested — zstar all-pass, 0 fallbacks |
+| 2026-08-06 | T7 knob-off byte gate (oati commit) | 26723854 | (in log) | **PASS** |
+| 2026-08-06 | T7 options ×3 under `oati` | 26723855 | (in log) | harvested — zstar+mEVP all-pass |
+| 2026-08-06 | T7 CUDA fidelity, `oati` | 26723856 | (in log) | CUDA ≡ Serial wire counts, 0 fallbacks |
+| 2026-08-06 | Dead-knob guard commit (CGPOLY×cg2/pipecg dies) — knob-off byte | 26724330 | (in log) | **PASS** |
 
 ### T5b `cg2` — solution-class gate vs baseline `cg` (serial CORE2 np8, dt1800, 20 steps, login)
 
