@@ -1,0 +1,79 @@
+% M10 interim report: communication-avoiding SSH solvers, CPU and GPU speed-up.
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=18mm,top=15mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{microtype}
+\usepackage{parskip}
+\pagestyle{empty}
+
+\begin{document}
+
+{\large\bfseries Communication-avoiding solvers for the FESOM2 sea-surface-height system}\\[1pt]
+{\small Interim report, 6 August 2026 --- FESOM2 C++/Kokkos port, Levante (A100 GPUs, 128-core CPU nodes)}
+
+\textbf{What was done.}
+The barotropic sea-surface-height (SSH) solve is the model's synchronisation bottleneck:
+preconditioned CG performs two global reductions and two halo exchanges per iteration. We
+implemented four alternatives behind a runtime switch --- Chronopoulos--Gear CG
+(\texttt{cg2}), pipelined CG (\texttt{pipecg}), PIPECG-OATI (\texttt{oati}) and Chebyshev
+P-CSI (\texttt{pcsi}) --- leaving the certified baseline bit-identical when the switch is
+unset. Two defects had to be fixed first. The preconditioner inherited from FESOM's
+\texttt{solver.F90} is not symmetric (defect ratio 0.62--0.74 over three meshes), which
+invalidates the recurrence the CG--CG variants use in place of an explicit inner product: the
+step length came out wrong by 21.8\,\% and most solves diverged. Symmetrising it also reduces
+the \emph{existing} solver's iteration count by about 7\,\%. Our own stall guard was
+separately aborting converging solves, its threshold of 20 non-improving iterations sitting
+below the 21-iteration plateau baseline CG itself exhibits on fArc, so every previously
+reported fArc failure was a false positive.
+
+\textbf{Preliminary results.}
+Each row is a same-allocation A/B against baseline CG, minimum of two repetitions, 300 steps,
+zero fallback firings. $d_{\mathrm{SSH}}$ is the solver's own speed-up, $d_{\mathrm{tot}}$ the
+whole-step speed-up; the latter reproduces to 0.4\,pp under a reversed leg order.
+
+\begin{center}\footnotesize\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llrrlr}
+\toprule
+& configuration & vert./core & SSH\,\% & best $d_{\mathrm{SSH}}$ & $d_{\mathrm{tot}}$ \\
+\midrule
+\multirow{4}{*}{CPU}
+& CORE2, 512 ranks & 248 & 9.9 & $-60.3$ (\texttt{pcsi}) & $-6.3$ \\
+& CORE2, 864 ranks & 146 & 18.9 & $-58.6$ (\texttt{pcsi}) & $-13.1$ \\
+& fArc, 2048 ranks & 312 & 22.8 & $-45.6$ (\texttt{oati}) & $-13.3$ \\
+& DARS, 8192 ranks & 385 & 6.4 & $-20.5$ (\texttt{pcsi}) & $-4.0$ \\
+\midrule
+\multirow{3}{*}{GPU}
+& CORE2, 4 nodes & --- & 27.4 & $-18.3$ (\texttt{oati}) & $-5.2$ \\
+& CORE2, 16 nodes & --- & 30.5 & $-20.5$ (\texttt{oati}) & $-6.7$ \\
+& DARS, 8 nodes & --- & 5.7 & \multicolumn{2}{l}{none --- all variants lose} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The SSH share of the step, not the mesh size or the per-core workload, predicts the payoff. It
+rises as a mesh is spread thinner --- on CORE2 from 2.5\,\% at 128 ranks to 18.9\,\% at 864
+--- so the solvers pay most where the model stops scaling, moving CORE2's parallel-efficiency
+knee out by a factor of 1.26--1.29. On GPU the share is 27--31\,\% at ordinary node counts,
+because the device makes local work fast while the solve stays latency-bound. Where the share
+is small the variants lose, trading reductions for extra vector passes: a poor bargain when
+the solve is 6\,\% of the step, as on DARS. \texttt{oati} is the better general choice and
+\texttt{pcsi} a per-mesh specialist, since \texttt{oati} tracks baseline CG's iteration count
+everywhere while \texttt{pcsi} converges faster only where its Chebyshev interval is accurate
+--- an eigenvalue estimate that was silently wrong on fArc.
+
+\textbf{Status and caveats.}
+The fArc rows need the stall guard widened past its shipped default, and the value to ship has
+not been chosen. The GPU rows predate that fix; fArc GPU is withdrawn pending re-measurement,
+and NG5 has no valid CPU row, its tested rungs lying outside the operating range and its
+baseline leg failing at 4096 ranks and above. DARS is measured at 300--500 vertices per core on newly
+generated partitions, which form their own scaling curve. All numbers come from one machine
+and a 300-step window, and the baseline solver remains the shipped default.
+
+\end{document}
