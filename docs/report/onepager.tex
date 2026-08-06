@@ -86,17 +86,16 @@ It is there on \textbf{day one} (ratio 3.1), persists for two months, and is vis
 differences following the sub-domain boundaries. Reducing the delay to $K$=2 halves it but does not
 remove it. The exact wide halo scores like the control, as it must, which also validates the
 diagnostic. \textbf{An artificial polygonal structure in the ice, in the shape of the processor
-grid, is not something a sea-ice model can carry} --- and it is a different objection from the
-accuracy cost below, which is small. The ring profiles and the map are Figure~4 of the full note.
+grid, is not something a sea-ice model can carry.} The ring profiles and the map that show
+it are Figure~4 of the full note.
 
-\hd{What the delayed exchange costs in simulated climate (1 year, CORE2, exactly reproducible)}
-
-Pattern correlation against the same run exchanging every sub-cycle, judged against the difference
-between two independent correct implementations of mEVP (our C port versus Fortran FESOM2). At
-$K$=4: ice concentration 0.999995 and thickness 0.999994 against a yardstick of 0.99999/0.99998;
-ice velocity 0.963/0.950 against 0.954/0.939. Every field stays inside the yardstick at $K\le8$,
-but only by 1.1--1.5$\times$ on ice velocity. Hemispheric ice extent moves 0.23\% of its seasonal
-amplitude and the ocean surface is unchanged to six digits. \emph{CORE2 resolution only.}
+\textbf{Note what this says about global metrics.} The same runs pass every integral check we
+made: over a year on CORE2 the ice-concentration and thickness correlations against the reference
+are 0.999995 and 0.999994, inside the spread between two independent correct implementations of
+mEVP, and hemispheric ice extent moves 0.23\% of its seasonal amplitude. A one-cell-wide feature
+along sub-domain edges is a small fraction of the mesh, so it leaves a domain-wide correlation at
+0.99999 while being obvious on a map. \textbf{The accuracy test we designed could not have found
+this; only looking for it could.}
 
 \hd{Recommendation}
 
@@ -108,7 +107,7 @@ does not pay on CPU on any mesh.
 as a measured negative: it is the fastest thing we found and it cannot be used, because it puts the
 processor decomposition into the ice field. No amount of speed buys that back.
 
-\textbf{The divergence form} is worth having on CPU at scale and is a cost on GPU --- and it is
-what makes the wide halo cheapest to carry.
+\textbf{The divergence form} is worth having on CPU at scale, is a cost on GPU, and is what makes
+the wide halo cheapest to carry.
 
 \end{document}
