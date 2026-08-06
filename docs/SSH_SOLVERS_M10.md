@@ -677,13 +677,52 @@ delta and the SSH share alongside the whole-step delta. `FESOM_SPEED=1` on every
 | **dars g8n** (32 r) | 98761 | **5.7** | ⚠️ +4.59 | ⚠️ +11.96 | ⚠️ +21.47 | ⚠️ none — all lose |
 | NG5 g16n (64 r) | 115670 | ~10 | −1.25 (total) | −1.16 (total) | −2.24 (total) | −2.24 (pcsi) |
 
-### CPU (128 ranks/node) — CORE2 driven deep into its non-scaling regime
+### CPU (128 ranks/node) — CORE2 driven to its MAXIMUM decomposition
+
+CORE2 has no 1024-rank partition; **864 is the largest that exists**, so this ladder is the
+full available range for this mesh.
 
 | rung | nodes/rank | SSH% | `cg2` d_SSH | `oati` d_SSH | `pcsi` d_SSH | d_total (pcsi) |
 |---|--:|--:|--:|--:|--:|--:|
-| CORE2 c1n (128 r) | 991 | 2.5 | −8.28 | −8.42 | **−16.60** | −0.72 |
-| CORE2 c2n (256 r) | 496 | 4.4 | −23.61 | −25.79 | **−41.92** | −1.71 |
-| **CORE2 c4n (512 r)** | **248** | **9.9** | −34.12 | −47.38 | **−60.25** | **−6.30** |
+| CORE2 128 r | 991 | 2.5 | −8.28 | −8.42 | **−16.60** | −0.72 |
+| CORE2 256 r | 496 | 4.4 | −23.61 | −25.79 | **−41.92** | −1.71 |
+| CORE2 432 r | 293 | 9.4 | −29.15 | −43.49 | **−53.87** | −5.74 |
+| CORE2 512 r | 248 | 9.9 | −34.12 | −47.38 | **−60.25** | −6.30 |
+| **CORE2 864 r** | **146** | **18.9** | −33.01 | −49.89 | **−58.62** | **−13.10** |
+
+### ⭐⭐⭐ The scaling result: ~1.7 rungs of parallel efficiency recovered
+
+The SSH share climbs monotonically as the mesh thins — 2.5 → 4.4 → 9.4 → 9.9 → **18.9 %** —
+i.e. by 864 ranks nearly a fifth of the step is the SSH solve. That is the scaling wall
+forming, and it is exactly the wall these solvers attack. Speed-up and parallel efficiency
+are relative to the 128-rank rung of each leg:
+
+| ranks | nodes/rank | SSH% | baseline s/step | ×  | eff % | `pcsi` s/step | ×  | eff % | **eff gain** |
+|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 128 | 991 | 2.5 | 0.1955 | 1.00 | 100.0 | 0.1941 | 1.00 | 100.0 | — |
+| 256 | 495 | 4.4 | 0.1050 | 1.86 | 93.1 | 0.1032 | 1.88 | 94.0 | +0.9 pp |
+| 432 | 293 | 9.4 | 0.0662 | 2.95 | 87.5 | 0.0624 | 3.11 | 92.2 | +4.7 pp |
+| 512 | 247 | 9.9 | 0.0587 | 3.33 | 83.3 | 0.0550 | 3.53 | 88.2 | +5.0 pp |
+| **864** | **146** | **18.9** | 0.0435 | 4.49 | **66.6** | **0.0378** | **5.13** | **76.1** | **+9.5 pp** |
+
+Three ways of reading the same measurement:
+
+1. **Parallel efficiency at the top rung goes from 66.6 % to 76.1 % — a 9.5-point recovery**,
+   and the gain grows monotonically with rank count (+0.9 → +4.7 → +5.0 → +9.5 pp).
+2. **The best achievable step time on this mesh improves by 13.1 %** (0.0435 → 0.0378 s/step).
+   The baseline cannot reach 0.0378 at *any* rank count in the available range — CORE2 has no
+   partition beyond 864 — so this is not "the same performance sooner", it is performance the
+   mesh could not previously reach at all.
+3. **`pcsi` at 864 ranks carries the SSH burden the baseline had at 512** (3.40 ms / 9.0 % of
+   step, versus baseline 5.81 ms / 9.9 %) — i.e. roughly **1.7 rungs of scaling headroom given
+   back** on the axis that was consuming it.
+
+⚠️ Caveats kept with the number: the 864 rung packs 864 tasks over 7 nodes (~123/node) rather
+than filling them, so its *absolute* time is not perfectly comparable to the fully-packed
+lower rungs — the A/B deltas are unaffected (all legs share the packing) but the efficiency
+column inherits that ragged edge. And the baseline is still *improving* at 864 (0.0587 →
+0.0435), so CORE2 has not turned over; it is losing efficiency, not throughput. A turnover
+point would need a partition beyond 864, which does not exist for this mesh.
 
 ### What these say
 
