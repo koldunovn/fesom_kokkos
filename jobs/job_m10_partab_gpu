@@ -1,0 +1,105 @@
+#!/bin/bash
+#SBATCH --job-name=m10_partabg
+#SBATCH -p gpu
+#SBATCH -C a100_80
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/ab/partabg.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/ab/partabg.%j.err
+#
+# M10 load-balance study — PARTITION A/B: same allocation, same binary, same rank count,
+# only the DECOMPOSITION differs. The solver A/B harness varies knobs within one mesh; this
+# varies the mesh directory instead, which is the only way to compare partitions without
+# paying the ~5-10 % inter-allocation noise.
+#
+# The three arms (all verified byte-identical on the 8 mesh-definition files, so the ONLY
+# difference is dist_*):
+#   core2         the shipped/certified partition            3D balance 9.60x
+#   core2_wgt0    regenerated, FESOM_PART_WGT=0 (2D only)     3D balance 9.32x  <- source control
+#   core2_wgt2    regenerated, FESOM_PART_WGT=2 (dual 2D+3D)  3D balance 1.05x  <- the lever
+#
+# shipped-vs-wgt0 isolates the PARTITIONER SOURCE (the core2_bigpart precedent measured flat
+# METIS partitions 7.4 % slower than the certified mesh's, so this control is mandatory);
+# wgt0-vs-wgt2 is then the PURE weighting effect.
+#
+# ⚠️ The trade being measured: dual weighting removes the compute imbalance (ocean busy
+# max/mean 1.57 -> 1.03) but grows the halo 42 -> 59 nodes/rank (+40 %). Which wins is open.
+#
+# Each arm: 2 timing reps (min-of-2) + 1 phasestats rep (PMPI overhead, so NOT used for timing).
+#
+# Submit: sbatch -N 7 --ntasks=864 --export=ALL,DT=1800,NP=864 jobs/job_m10_partabg
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=${DT:?DT required}
+NSTEPS=${NSTEPS:-300}
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+OUT=/work/ab0995/a270088/port2/m10/ab/partabg_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
+m7_provenance "$OUT" "$FESOM"; cat "$OUT/SHA.txt"
+
+BASE=/work/ab0995/a270088/port2/mesh
+ARMS=${ARMS:-"core2 core2_wgt0 core2_wgt2"}
+export FESOM_SPEED=1                 # the production baseline set
+
+echo "=== M10 PARTITION A/B  nodes=$SLURM_NNODES ntasks=$NPES dt=$DT nsteps=$NSTEPS ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+
+declare -a NAMES TIMES
+for ARM in $ARMS; do
+    MESH=$BASE/$ARM
+    if [ ! -d "$MESH/dist_$NPES" ]; then echo "SKIP $ARM (no dist_$NPES)"; continue; fi
+    # integrity: the arms must differ ONLY in dist_*
+    bad=0
+    for f in nod2d.out elem2d.out nlvls.out elvls.out aux3d.out; do
+        a=$(md5sum "$BASE/core2/$f" | cut -d' ' -f1); b=$(md5sum "$MESH/$f" | cut -d' ' -f1)
+        [ "$a" = "$b" ] || { echo "REFUSE $ARM: $f differs from the certified mesh"; bad=1; }
+    done
+    [ "$bad" = 0 ] || continue
+
+    best=""
+    for rep in ${REPS:-a b}; do
+        srun "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 \
+            > "$OUT/log_${ARM}_$rep.txt" 2> "$OUT/err_${ARM}_$rep.txt"
+        t=$(grep -a 'loop timing' "$OUT/log_${ARM}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+        it=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${ARM}_$rep.txt" | tail -1 | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
+        echo "    $ARM rep $rep: ${t:-?} s/step  iters/solve=${it:-n/a}"
+        [ -n "$t" ] && { [ -z "$best" ] && best=$t || best=$(echo "$t $best" | awk '{print ($1<$2)?$1:$2}'); }
+    done
+    NAMES+=("$ARM"); TIMES+=("${best:-nan}")
+
+    # phase-resolved rep: shows whether the ocean busy SPREAD actually collapses.
+    # 🔴 EXPORT it — an `env`-prefix on srun did NOT reach the model (job 26743981 produced
+    # no [phasestats] output at all), the same dead-knob shape as L80.
+    # 🔴 fesom_speed.hpp:111-113 — on a SERIAL build an opt-in lever resolves to OFF unless
+    # FESOM_SPEED_FORCE_SERIAL=1 ("Serial stays legacy"). Without it PHASESTATS is silently
+    # off, which is why job 26744050 produced no phase table.
+    export FESOM_SPEED_PHASESTATS=1
+    srun "$FESOM" "$MESH" "$OUT" "$DT" 120 -1 "$PHC" 1958 \
+        > "$OUT/ps_${ARM}.txt" 2> "$OUT/pse_${ARM}.txt"
+    unset FESOM_SPEED_PHASESTATS
+    grep -aq "phasestats" "$OUT/ps_${ARM}.txt" || echo "    !! phasestats did NOT fire for $ARM"
+    echo "    --- $ARM phase means (ms/step) ---"
+    grep -a "phasestats\]  " "$OUT/ps_${ARM}.txt" | sed 's/^/      /'
+done
+
+echo "========================================================================"
+echo "PARTITION A/B — $NPES ranks, min-of-2, same allocation"
+printf "  %-14s %10s %10s\n" arm s/step "vs first"
+b0=${TIMES[0]:-nan}
+for i in "${!NAMES[@]}"; do
+    d=$(echo "${TIMES[$i]} $b0" | awk '{if($2>0) printf "%+.2f%%", 100*($1-$2)/$2; else print "n/a"}')
+    printf "  %-14s %10s %10s\n" "${NAMES[$i]}" "${TIMES[$i]}" "$d"
+done
+echo "========================================================================"
+rm -f "$OUT"/*.nc 2>/dev/null || true

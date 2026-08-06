@@ -1856,3 +1856,37 @@ the halo penalty dominates and the lever inverts.
 (`CG_kk abort at iter 1: residual=5.49698e+45`) where the shipped and dual-weighted partitions
 at the same rank count both ran clean — L99 (instability is partition-marginal) in the wild.
 **Any newly generated decomposition needs a stability check before it is used.**
+
+### 🔴 GPU: the SAME imbalance exists, and dual weighting is much WORSE there (26745200)
+
+The imbalance is a property of the partition, not the backend, so GPU runs inherit it exactly.
+Fixing it the same way, however, fails harder. CORE2 GPU **2 nodes / 8 ranks** (15857
+vertices/rank), same allocation, same binary, min-of-2 (reps tight: 0.0807/0.0810):
+
+| arm | s/step | vs shipped | `ocean` busy min/mean/max | `ocean` wait |
+|---|--:|--:|--:|--:|
+| shipped | 0.0622 | — | 12.3 / 16.1 / 20.3 | 8.8 |
+| `wgt0` (2D-only) | 0.0648 | +4.18 % | 12.6 / **16.3** / 19.8 | 7.8 |
+| `wgt2` (dual) | 0.0807 | **+29.74 %** | 18.2 / **19.6** / 22.8 | 11.3 |
+
+**+29.7 % on GPU against +9.6 % on CPU**, and the mechanism is in the *busy* column: ocean
+compute MEAN rises 16.3 → 19.6 ms (**+20 %**) where the halo-node arithmetic predicted +0.7 %.
+
+**The reason is partition FRAGMENTATION, which the halo-node count understates:**
+
+| CORE2 ranks | edgecut 2D-only | edgecut dual | ratio |
+|--:|--:|--:|--:|
+| 8 | 1 335 | 120 883 | **91×** |
+| 16 | 2 549 | 217 791 | 85× |
+| 32 | 4 307 | 375 211 | 87× |
+
+Halo *nodes* grow ~40 %, but cut *edges* grow ~90×. That is a locality collapse, and it costs
+compute on both backends (+13 % CPU, +20 % GPU) — the GPU more, since it is far more sensitive
+to memory-access patterns. Note too that even the regenerated **2D-only** partition is +4.18 %
+against the shipped one on GPU (against +0.68 % on CPU): **GPU punishes partition quality
+generally**, so any regenerated decomposition needs measuring there before use.
+
+**Answer to "do GPUs have the same imbalance and can we fix it?" — yes and no.** The imbalance
+is present and identical in origin, but vertex weighting is not the fix on GPU: it trades a
+~1.2–1.4× compute spread for a ~90× worse cut, and loses by 30 %. The CPU crossover (a win
+below ~250 vertices/core) has **no GPU counterpart** in the range tested.
