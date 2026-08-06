@@ -1580,3 +1580,10 @@ cuobjdump -symbols <binary> | c++filt \
 
 M9 P5 used exactly this to confirm the five fused kernels stayed on the fast path before the first
 GPU job ran (constant-memory count unchanged at 9, local-memory 24 → 29).
+
+**It is not only slow for the kernel that uses it — it serialises its neighbours.** After the M9 P5
+fusion removed 360 of 362 constant-memory launches per step, the median gap before the *owned*
+local-memory kernels fell from 5.47 µs to **1.31 µs**, below even the build that had never had a
+ghost kernel at all (4.38 µs). The constant-memory staging blocks the launch stream, so the cost
+lands partly on whatever is dispatched next. Consequence for measurement: you cannot bound the
+damage by counting the slow kernels and multiplying by their own gap — that undercounts.
