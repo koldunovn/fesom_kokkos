@@ -1451,8 +1451,15 @@ jobs:**
 for "phasestats" miss a message naming `FESOM_SPEED_PHASESTATS`.
 
 **Rules.** (i) Any hand-written CPU job exercising a `FESOM_SPEED_*` lever must export
-`FESOM_SPEED_FORCE_SERIAL=1`, or copy the knob block from `job_m10_ab_cpu`. (ii) Assert the
-lever ANNOUNCED itself before trusting any A/B — L80 applies to physics and diagnostic knobs
-alike. (iii) **Two legs returning identical field diagnostics is proof the knob did not fire**,
-and is the cheapest available check: a real lever changes rounding, so byte-identical output
-across a knob boundary means the boundary was never crossed.
+`FESOM_SPEED_FORCE_SERIAL=1`, or copy the knob block from `job_m10_ab_cpu`. (ii) **Assert the
+lever ANNOUNCED itself** before trusting any A/B — the announce is the only sound test.
+
+🔴 **CORRECTION (same day): the tempting third rule — "identical field diagnostics prove the
+knob did not fire" — is WRONG, and I used it to reach a false conclusion.** Most of the
+`FESOM_SPEED=1` set is *certified bit-identical* (CGPIPE et al.), so identical output across
+that boundary is exactly what a correctly-firing knob produces. In the run that provoked this
+lesson the knob HAD fired (`FESOM_SPEED_FORCEDEV/ROTCACHE/IOACC/BULKTAIL = ON` in the log)
+while the fields matched to the last digit. Conversely **silence is not proof of absence**:
+`FESOM_VISC_OPT` (`fesom_step.cpp:658`) changes the viscosity scheme and announces NOTHING, so
+grepping for it and finding nothing says only that it is a quiet knob. Judge a knob by its
+announce, or by an observable it is *designed* to move — never by field equality.

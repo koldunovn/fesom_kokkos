@@ -1890,3 +1890,63 @@ generally**, so any regenerated decomposition needs measuring there before use.
 is present and identical in origin, but vertex weighting is not the fix on GPU: it trades a
 ~1.2–1.4× compute spread for a ~90× worse cut, and loses by 30 %. The CPU crossover (a win
 below ~250 vertices/core) has **no GPU counterpart** in the range tested.
+
+## ✅ NG5 CPU RESOLVED — a documented physics limit, not an M10 defect (26745567/26745747/26746161)
+
+**The handoff's open item 5 ("NG5 CPU ≥4096 ranks: the BASELINE leg fails (nan)") is wrong in
+three ways.** Measured:
+
+| ranks | v/core | outcome |
+|--:|--:|---|
+| 256 | 28 918 | **OOM** — far too few ranks for 7.4 M nodes, expected |
+| 1024 | 7 229 | **all 8 legs complete** |
+| 2048 | 3 614 | **all 8 legs complete** (baseline 1.1909 s/step, SSH 1.6 %) |
+| 4096 | 1 807 | blow-up mid-run |
+| 8192 | 903 | blow-up mid-run |
+
+So (a) it is not confined to the baseline leg, (b) 1024/2048 were never broken — their "no
+valid row" was the A/B *summary table* failing to render while the per-rep numbers were
+present, and (c) the failure is not at step 2.
+
+**What actually happens.** The model's own guard fires:
+`[fesom_port] BLOWUP at step 175 (uv=5.756e+00 eta=2.640e+00 …) — aborting all ranks`,
+exit code 99. `print_every=999` had hidden this: with 300 steps it prints step 1 and step 300,
+so "last printed step = 1" meant *never reached 300*, not *died at step 2*.
+
+**And the model warned, on stderr, in every NG5 run:**
+
+```
+[wsplit] velocity splitter is OFF (FESOM_WSPLIT unset).
+[wsplit] Production high-resolution setups run it ON; without it the
+[wsplit] model is prone to vertical-CFL blow-up (Fortran NG5 dt180
+[wsplit] cold start dies without it, completes with it).
+```
+
+**No M10 job ever set `FESOM_WSPLIT`** (user caught this). But wsplit alone does not rescue
+*this* configuration — 300-step legs at 4096 ranks, one allocation:
+
+| leg | blow-up |
+|---|--:|
+| default (`opt_visc=7`, no wsplit) | step **175** |
+| `+FESOM_WSPLIT=1` | step **150** |
+| `+FESOM_VISC_OPT=5` | step **175** |
+
+This matches M7 exactly: *"Fortran NG5 dist_4096 dt180 cold **wsplit-ON** opt_visc=7 (26365809)
+**DIES AT STEP 203**"* against *"the port's visc-7 death @200"* — same rank, same cell, same
+endgame, with a few steps of roundoff-seeded onset scatter. **Fortran and the port both die
+here.** M7's only 300-step-clean recipe was `visc-5 + easybsreturn=1.5 + wsplit`, and
+easybsreturn 1.5 is excluded by the user's 2026-07-19 decision (stays 1.0), as is `opt_visc=5`
+on high-resolution meshes.
+
+**⇒ Consequences for M10.** NG5 at dt180 cold **cannot complete the 300-step protocol** at
+≥4096 ranks, in this port or in Fortran. The solver A/B must therefore either run inside the
+stable arc (**≤120 steps**, comfortably below the earliest observed blow-up at 150) or use a
+smaller dt. This also applies to the new 16384/20480/24576 partitions — running them at 300
+steps would reproduce the blow-up three more times.
+
+**Set `FESOM_WSPLIT=1` on high-resolution runs regardless** — it is production practice and
+the model asks for it; it simply is not sufficient here.
+
+**Also explains the "solver-ordered" survival** (`pcsi` cleared 300 steps at 4096; `oati` and
+`pcsi` at 8192): a marginal configuration tipped over by solver-dependent rounding. That is
+L99, and it was never evidence about the solvers.

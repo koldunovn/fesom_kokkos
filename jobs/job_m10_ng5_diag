@@ -31,11 +31,11 @@ source "$ROOT/jobs/m7_provenance.sh"
 source /sw/etc/profile.levante
 source "$ROOT/env.sh"
 export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
-export FESOM_PRINT_EVERY=1          # per-step diagnostics: we need to SEE the blow-up
+export FESOM_PRINT_EVERY=25         # per-step diagnostics: we need to SEE the blow-up
 
 MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
-NSTEPS=${NSTEPS:-30}
+NSTEPS=${NSTEPS:-300}
 NPES=$SLURM_NTASKS
 FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
 OUT=/work/ab0995/a270088/port2/m10/ab/ng5diag_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
@@ -63,11 +63,14 @@ leg () {   # leg <name> <dt> <knobs...>
 # times and reproduced nothing — legs A and B returned byte-identical fields. Every leg below
 # carries the real knob set; only the variable under test differs.
 COMMON="FESOM_SPEED_FORCE_SERIAL=1 FESOM_SSH_STATS=1 FESOM_CG_PROFILE=1"
-
-leg A_repro_speed1   180 FESOM_SPEED=1 $COMMON
-leg B_legacy         180 $COMMON
-leg C_speed1_wsplit  180 FESOM_SPEED=1 FESOM_WSPLIT=1 $COMMON
-leg D_speed1_nocgpipe 180 FESOM_SPEED=1 FESOM_SPEED_CGPIPE=0 $COMMON
+# 🔴 THE 30-STEP RUN COULD NOT SEE IT. M7 records NG5 dist_4096 dt180 COLD with opt_visc=7
+# (the high-res production default) dying at ~STEP 200 in BOTH Fortran (26365809, step 203)
+# and the port (step 200) — same rank, same cell, same endgame, roundoff-seeded onset scatter.
+# The A/B legs ran 300 steps and hit it; my 30-step diagnosis stopped long before.
+# PRINT_EVERY=25 so the CFLz ramp is visible instead of hidden by print_every=999.
+leg A_default_300   180 FESOM_SPEED=1 $COMMON
+leg B_wsplit_300    180 FESOM_SPEED=1 FESOM_WSPLIT=1 $COMMON
+leg C_visc5_300     180 FESOM_SPEED=1 FESOM_VISC_OPT=5 $COMMON
 
 echo "=== done ==="
 rm -f "$OUT"/*.nc 2>/dev/null || true
