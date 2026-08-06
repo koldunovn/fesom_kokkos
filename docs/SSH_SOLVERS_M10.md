@@ -1613,6 +1613,110 @@ count. Two runs are in flight:
   verdict rests on. Diagnostic setting, not a production one; it announces itself on rank 0
   (L80).
 
+## ⭐⭐⭐ WHERE THE TIME ACTUALLY GOES — phase-resolved busy/wait (26742297, 26742298)
+
+**User question (2026-08-06):** *"SSH was supposed to be the main scaling problem, and a 20 %
+reduction should have helped a lot, but it did not. Where do we actually spend time?"* The
+question is fair and the answer needed measurement, not the Amdahl arithmetic alone.
+
+### First, the arithmetic — the solvers capture most of what is available
+
+CORE2 CPU baseline ladder (`FESOM_SPEED=1`), splitting each step into the SSH solve and
+everything else:
+
+| ranks | step ms | SSH ms | rest ms | SSH speed-up | rest speed-up | ideal |
+|--:|--:|--:|--:|--:|--:|--:|
+| 128 | 195.50 | 4.89 | 190.61 | 1.00× | 1.00× | 1.0× |
+| 256 | 105.00 | 4.62 | 100.38 | 1.06× | 1.90× | 2.0× |
+| 432 | 66.20 | 6.22 | 59.98 | 0.79× | 3.18× | 3.4× |
+| 512 | 58.70 | 5.81 | 52.89 | 0.84× | 3.60× | 4.0× |
+| 864 | 43.50 | 8.22 | 35.28 | **0.59×** | **5.40×** | 6.8× |
+
+**The SSH solve is the only part of the model that ANTI-SCALES** — from 128 to 864 ranks
+everything else speeds up 5.40× (79 % efficiency) while the solve gets **41 % slower in
+absolute terms**. The premise of the track is confirmed. But the solve is still only 18.9 % of
+the step at 864 ranks, so Amdahl caps any SSH work there at −18.9 %; we measure −13.10 %, i.e.
+**69 % of the ceiling**, and the captured fraction rises monotonically with rank count
+(29 / 39 / 61 / 64 / 69 % at 128 / 256 / 432 / 512 / 864). Nothing is anomalous: the lever is
+working near its limit, and the limit is what is small.
+
+### Then the measurement — half the step is MPI wait
+
+`FESOM_SPEED_PHASESTATS=1` (per-rank per-phase wall, wait measured *inside* MPI by PMPI
+interposition, so `busy = wall − wait` is structurally complete). 115 timed steps.
+**The phase TOTAL reconciles with the loop timer to 0.1 ms on both configurations**
+(48.2 vs 0.0482 s/step; 84.7 vs 0.0846), so the attribution is trustworthy.
+
+| | CORE2 864 | farc 2048 |
+|---|--:|--:|
+| step | 48.2 ms | 84.7 ms |
+| **MPI wait** | **24.7 ms = 51 %** | **44.6 ms = 53 %** |
+| busy | 23.5 ms = 49 % | 40.1 ms = 47 % |
+| largest busy | `ocean` 13.0 | `ocean` 26.6 |
+| largest wait | `cg` 8.9 | `cg` 20.4 |
+| SSH solve, busy + wait | 9.9 ms = 21 % | 22.9 ms = 27 % |
+| — of which WAIT | 90 % | 89 % |
+
+**The model is synchronisation-bound at these rank counts, and the SSH solve is the single
+largest waiter — but ~90 % of the solve's cost is waiting, not computing** (its own arithmetic
+is 1.0 ms on CORE2, 2.5 ms on farc).
+
+### ⭐⭐ The saving is ENTIRELY wait, and 39 % of it lands in OTHER phases
+
+CORE2 864, baseline vs `pcsi`, same allocation:
+
+| phase | busy | wait | Δwait | MPI calls/step |
+|---|--:|--:|--:|--:|
+| `force` | 6.9 → 6.5 | 3.4 → 1.5 | **−1.9** | 11 → 11 |
+| `ice` | 0.2 → 0.2 | 0.9 → 0.6 | −0.3 | 9 → 9 |
+| `icedyn` | 1.6 → 1.6 | 4.8 → 3.6 | **−1.2** | 240 → 240 |
+| `ocean` | 13.0 → 13.0 | 6.5 → 6.1 | −0.4 | 68 → 68 |
+| `cg` | 1.0 → 1.0 | 8.9 → 3.1 | **−5.8** | 360.8 → 170.2 |
+| **TOTAL** | **23.5 → 23.1** | **24.7 → 15.2** | **−9.5** | 709.8 → 519.2 |
+
+Busy is unchanged (−0.4 ms): the variants do the same arithmetic. **All of the benefit is
+wait, and only 5.8 of the 9.5 ms is in the solver — 3.7 ms (39 %) appears in phases whose MPI
+call counts and busy times are IDENTICAL.** Removing synchronisation points lets neighbouring
+phases stop absorbing skew.
+
+**This closes the open question flagged earlier** (`d_total` exceeding `d_SSH × SSH%` by a
+reproducible ~2.4 ms). The mechanism is measured, not inferred: fewer collectives ⇒ less
+imbalance collected elsewhere. `d_total ≈ d_SSH × SSH%` is a lower bound on the benefit.
+
+### 🔴 The bigger target is LOAD IMBALANCE in the ocean phase, not the solver
+
+`ocean` busy across ranks — this is compute time, not communication:
+
+| config | min | mean | max | spread |
+|---|--:|--:|--:|--:|
+| CORE2 864 | 3.8 | 13.0 | 18.2 | **4.8×** |
+| farc 2048 | 8.8 | 26.6 | 42.5 | **4.8×** |
+
+A bulk-synchronous phase costs `max`, not `mean`, so the imbalance tax in `ocean` alone is
+**5.2 ms = 11 % of the CORE2 step and 15.9 ms = 19 % of the farc step** — comparable to the
+entire SSH solve (21 % / 27 %) and larger than anything the solvers can win. It also
+compounds: that skew must be absorbed at the next collective, which is the SSH solve's first
+allreduce, so **part of `cg`'s wait is the ocean phase's imbalance arriving there, not the
+solver's own latency.** Consistent with the halving of calls (2.12×) reducing `cg` wait by
+more than proportionally (2.87×).
+
+**Implication for the track:** the solvers are worth having and their numbers stand, but the
+step's largest single defect is that one rank does 4.8× another's ocean work. Partitioning
+work would attack the 15.0 ms of `ocean` wait *and* part of the solver's wait.
+
+⚠️ **Caveats.** PMPI interposition inflates wait in proportion to call count, so these runs
+overstate the solver benefit (−20.5 % here vs the −13.10 % A/B of record); trust the ratios,
+the busy figures and the attribution, not the absolute deltas. 115 timed steps, two
+configurations. The imbalance figure needs confirming at the production 512-rank point before
+any re-partitioning is justified by it. The METIS partitions already weight by 2-D and 3-D
+node counts, so part of this spread may be irreducible (ice cover, convection) — that is
+untested.
+
+*(Not pursued: `--sigma-drift` on the farc failing system, jobs 26740825/26741061, timed out
+at 20 min and 1 h — the host-side reference PCG at np32 is too slow on a 638 387-node mesh.
+The guard finding explains the failures, so the σ-drift question is now a mechanism curiosity
+rather than a blocker.)*
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
