@@ -2,12 +2,12 @@
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
 \usepackage{lmodern}
-\usepackage[margin=2.2cm,top=1.8cm]{geometry}
+\usepackage[margin=2.0cm,top=1.5cm]{geometry}
 \usepackage{amsmath}
 \usepackage{booktabs}
 \usepackage{microtype}
 \pagestyle{empty}
-\setlength{\parskip}{0.45em}
+\setlength{\parskip}{0.30em}
 \setlength{\parindent}{0pt}
 
 \begin{document}
@@ -75,13 +75,12 @@ that already exist and adds none. Of the 8.2\,ms ice-dynamics phase we profiled,
 arithmetic, spread over some 480 launches per step, so that is where a substantial gain could still
 be hiding. We cannot bound it from the runs we have.
 
-\textbf{What we propose.} Building the variant you describe --- extend the computation over the
-ring, compute in the natural order, exchange velocities and stress divergence every $K$ sub-cycles
-and recompute everything else --- is a contained change to what already exists, and it answers your
-question with a number rather than an estimate. Since the ring computation is common to it and to
-our wide halo, the difference between them should be the launches and the ordering machinery, both
-of which your formulation avoids. We are
-happy to measure it, and to report the result whichever way it comes out.
+\textbf{What we propose.} We will build the variant you describe --- the ring computation folded
+into the loops that already exist, in the natural order, exchanging velocities and stress
+divergence every $K$ sub-cycles and recomputing the rest --- and measure it against our wide halo
+at the same operating points. The ring computation is common to both, so the difference between
+them should be the launches and the ordering machinery, which your formulation avoids. We will
+report the result whichever way it comes out.
 
 \vspace{0.5em}
 {\footnotesize All numbers above are from the runs described in
