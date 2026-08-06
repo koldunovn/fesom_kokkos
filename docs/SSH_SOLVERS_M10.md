@@ -655,6 +655,72 @@ saves fences but pays them back in extra vector work. **Testing that properly ne
 fence-count/launch-count attribution run — recorded as an open item for T10/T11, not claimed
 here.**
 
+## ⭐⭐⭐ THE SSH-SHARE CAMPAIGN — where the solvers actually pay
+
+**Why this campaign exists.** The first A/B round measured NG5 only, and only whole-step time.
+Both are too narrow: NG5 is the LARGEST mesh, where the SSH solve is ~10 % of the step, so any
+solver win is diluted ~10×; and a whole-step delta cannot say whether the *method* works. This
+round measures **CORE2 / farc / dars / NG5** on **both CPU and GPU**, and reports the SSH-phase
+delta and the SSH share alongside the whole-step delta. `FESOM_SPEED=1` on every leg.
+
+`d_SSH` = the solver's own speed-up. `SSH%` = share of the step available to win.
+`d_total ≈ d_SSH × SSH%/100`.
+
+### GPU (4 ranks/node, `-C a100_80`)
+
+| mesh · rung | nodes/rank | SSH% | `cg2` d_SSH | `oati` d_SSH | `pcsi` d_SSH | best d_total |
+|---|--:|--:|--:|--:|--:|--:|
+| **CORE2 g4n** (16 r) | 7929 | 27.4 | −15.76 | **−18.33** | −16.94 | −5.18 (oati) |
+| **CORE2 g16n** (64 r) | 1982 | **30.5** | −14.49 | **−20.49** | −19.38 | **−6.73 (oati)** |
+| **farc g4n** (16 r) | 39899 | 36.5 | −8.94 | **−12.39** | ⚠️ **+33.30** | −5.12 (oati) |
+| **farc g8n** (32 r) | 19950 | 37.6 | −12.21 | **−14.74** | ⚠️ **+29.91** | −6.81 (oati) |
+| **dars g8n** (32 r) | 98761 | **5.7** | ⚠️ +4.59 | ⚠️ +11.96 | ⚠️ +21.47 | ⚠️ none — all lose |
+| NG5 g16n (64 r) | 115670 | ~10 | −1.25 (total) | −1.16 (total) | −2.24 (total) | −2.24 (pcsi) |
+
+### CPU (128 ranks/node) — CORE2 driven deep into its non-scaling regime
+
+| rung | nodes/rank | SSH% | `cg2` d_SSH | `oati` d_SSH | `pcsi` d_SSH | d_total (pcsi) |
+|---|--:|--:|--:|--:|--:|--:|
+| CORE2 c1n (128 r) | 991 | 2.5 | −8.28 | −8.42 | **−16.60** | −0.72 |
+| CORE2 c2n (256 r) | 496 | 4.4 | −23.61 | −25.79 | **−41.92** | −1.71 |
+| **CORE2 c4n (512 r)** | **248** | **9.9** | −34.12 | −47.38 | **−60.25** | **−6.30** |
+
+### What these say
+
+1. **The premise is confirmed, strongly.** Where the SSH solve is a limiting factor the win is
+   an order of magnitude larger than the NG5 number suggested: `d_SSH` reaches **−20 % on GPU**
+   (CORE2 g16n) and **−60 % on CPU** (CORE2 512 ranks) against −2 % whole-step on NG5.
+2. **Both trends compound on the CPU ladder, which is the "extends the scaling range" result.**
+   As CORE2 thins from 991 → 248 nodes/rank, the SSH share *rises* (2.5 → 4.4 → 9.9 %) **and**
+   the solver gain *rises* (−16.6 → −41.9 → −60.3 %). The step time still falls
+   (0.1955 → 0.1050 → 0.0587), so CORE2 is still scaling at 512 ranks — the ladder must be
+   pushed further (1024+) to find where it stops and show the wall actually moving.
+3. **⚠️ There are real losses, and they are systematic.** On **dars g8n** every solver is
+   *slower* (`pcsi` +21 %). That rung has the largest per-rank workload (98 761 nodes/rank) and
+   the smallest SSH share (5.7 %): the solve is compute-bound, not latency-bound, so the
+   variants' extra vector work costs more than the saved synchronisation buys. This is the
+   crossover, measured.
+4. **⚠️ `pcsi` breaks on farc** — `d_SSH` **+30 to +33 %**, with iterations jumping
+   **212 → 377 (+77 %)**. The Chebyshev iteration count is governed by the eigenbound interval;
+   on farc the estimate is evidently poor. `cg2`/`oati` are unaffected (they are Krylov, not
+   interval-driven). **Open item:** re-run the T8a estimator on a farc dump and compare
+   `[ν,µ]`/κ against CORE2's 486.9 before recommending `pcsi` anywhere near farc.
+5. **The winner depends on the backend, and this refutes my earlier hypothesis.** GPU favours
+   **`oati`**; CPU favours **`pcsi`** by a wide margin. I had proposed that `pcsi`'s edge came
+   from fewer device *fences*, which predicted its advantage would **shrink** on CPU. It
+   **grew** — so that explanation is wrong. The better one: `pcsi` buys fewer reductions at the
+   price of ~15 % more iterations; extra iterations are nearly free on CPU but cost kernel
+   launches on GPU (T2: 3.0 µs async / 8.9 µs fenced), so the trade is excellent on CPU and only
+   break-even on GPU. `oati` keeps the Krylov iteration count and still halves the syncs, which
+   is why it wins where launches are expensive.
+6. `oati` --- which measured as a *null* against `cg2` on NG5 --- is the **best GPU solver** on
+   the small-mesh rungs (−20.49 % vs cg2's −14.49 %). The NG5 null was a low-SSH-share artefact,
+   not a property of the method.
+
+**Still running / to do:** CORE2 g32n, farc g16n, dars g32n, NG5 g16n (GPU); farc + dars CPU;
+NG5 CPU **re-submitted at 1024 ranks** (the 256-rank attempt was cancelled during init —
+7.4 M nodes is too tight there, job 26733444 void, replacement 26733926).
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
