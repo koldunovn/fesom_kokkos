@@ -50,17 +50,19 @@ appropriate to a sea-ice scheme.
 \midrule
 delayed exchange & $K$=2 & $-32$ to $-39\%$ & $-8.3$ to $-9.3\%$ & $-2$ to $-18\%$ & $-0.1$ to $-2.9\%$ \\
 delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%$ & $-0.3$ to $-3.6\%$ \\
-wide halo, exact & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
-wide halo, exact & $K$=8 & $-12$ to $-19\%$ & $-2$ to $-7\%$ & \multicolumn{2}{c}{never profitable} \\
+wide halo, standard form & $K$=8 & $-11$ to $-24\%$ & $-2.2$ to $-5.7\%$ & \multicolumn{2}{c}{never profitable} \\
+wide halo, divergence form & $K$=8 & $+5$ to $-29\%$ & $+0.2$ to $-6.8\%$ & \multicolumn{2}{c}{never profitable} \\
+wide halo, either form & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
 divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-GPU ranges span the four meshes, each at the node count where it still gains from more GPUs:
-CORE2 on 1 node (4 GPUs), fArc on 4, DARS on 8, NG5 on 16. CPU ranges span 128 to 2048 cores on
-CORE2 and fArc. $^\dagger$ one point only (DARS, 8 nodes); the wide halo at $K$=2 is a cost on
-fArc at 4 nodes and a saving at 16, so it needs the larger $K$.
+GPU ranges span the meshes at the node count where each still gains from more GPUs: CORE2 on 1 node
+(4 GPUs), fArc on 4, DARS on 8, NG5 on 16 --- the wide-halo rows cover the first three, NG5 being
+still in the queue. CPU ranges span 128 to 2048 cores on CORE2 and fArc. $^\dagger$ one point only
+(DARS, 8 nodes); at $K$=2 the wide halo is a cost on fArc at 4 nodes and a saving at 16, so it
+needs the larger $K$.
 
 On CPU the saving grows with core count ($-5\%$ of the ice at 128 cores, $-25\%$ at 2048); on GPU it
 falls as each GPU holds more of the mesh ($-58\%$ at 32\,000 surface nodes per GPU, $-37\%$ at
@@ -84,14 +86,21 @@ full note give the profiles, the map and the controls.
 
 \hd{Recommendation}
 
-For production we would use the exact wide halo. It is bit-for-bit identical to the standard scheme,
-so it requires neither an accuracy argument nor the check above, and it removes 12 to 19\% of the
-ice cost on GPU at $K$=8. On CPU it is not profitable on any mesh we tried.
+For production we would use the exact wide halo at $K$=8, in the divergence form on the larger
+meshes and the classic form on the smaller ones. Either is bit-for-bit identical to the standard
+scheme, so neither requires an accuracy argument nor the check above; together they remove 11 to
+29\% of the ice cost on GPU. On CPU the wide halo is not profitable on any mesh we tried.
 
 We do not regard the delayed exchange as usable, although it saves about three times as much: it
 places the domain decomposition in the ice field.
 
-The divergence form is worth having on CPU at large core counts and is a cost on GPU. It is also
-what makes the wide halo cheapest to carry, since everything sub-cycled is then a node quantity.
+The divergence form should be judged in two roles. On its own it costs 2 to 8\% of the ice on GPU
+and saves 2 to 8.5\% on CPU at large core counts. As the carrier of the wide halo it is the better
+of the two forms wherever each GPU holds enough of the mesh: against the classic form it loses by
+17 percentage points on CORE2 at 32\,000 surface nodes per GPU, loses by 4 on fArc at 40\,000, and
+\textbf{gains 5 on DARS at 99\,000} --- the mesh on which the wide halo pays most, and the
+configuration closest to the ones we would run. Everything sub-cycled is then a node quantity, and
+the halved message is what buys this. NG5, at 116\,000 nodes per GPU, is queued and will test
+whether the trend continues.
 
 \end{document}
