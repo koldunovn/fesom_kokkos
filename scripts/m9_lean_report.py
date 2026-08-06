@@ -33,28 +33,31 @@ ICE = ("ice", "icedyn", "iceadv")
 
 
 def ice_cost(legdir):
-    """busy+wait over the three ice phases, in ms/step. None if no rep log has phasestats.
+    """busy+wait over the three ice phases, in ms/step, from **rep 1**. None if it has no
+    phasestats.
 
-    The A/B job writes one log per rep (`run.<rep>.log`); the reported s/step is the MIN over
-    reps, so the phase split is taken from the same place — the rep with the smallest ice cost.
-    Mixing the min step from one rep with the phases of another is the kind of quiet
-    inconsistency that turns a 2 % effect into a 5 % one."""
-    best = None
-    for logpath in sorted(glob.glob(os.path.join(legdir, "run*.log"))):
-        tot, seen = 0.0, False
-        try:
-            with open(logpath, errors="replace") as f:
-                for ln in f:
-                    m = PHASE.search(ln)
-                    if not m or m.group(1) not in ICE:
-                        continue
-                    seen = True
-                    tot += float(m.group(3)) + float(m.group(6))   # busy mean + wait mean
-        except OSError:
-            continue
-        if seen and (best is None or tot < best):
-            best = tot
-    return best
+    🔴 Rep 1, not the min over reps, and the reason is not laziness. The ice cost is only ever
+    quoted as a RATIO against the reference leg, and taking each leg's own best rep makes that a
+    min-of-mins: every leg is biased down by its own noise and the two sides of the ratio come
+    from different reps. Rep 1 keeps the comparison PAIRED inside one rep. It is also what
+    `m9_collect.py` (and therefore every published table and Figure 1) uses, so the two never
+    disagree inside one document — which they did, by 0.3 pp, before this was aligned.
+
+    The s/step column is a different quantity and keeps the campaign's min-of-2 rule; that is a
+    single absolute, where min-of-2 is the right noise estimator."""
+    logpath = os.path.join(legdir, "run.1.log")
+    tot, seen = 0.0, False
+    try:
+        with open(logpath, errors="replace") as f:
+            for ln in f:
+                m = PHASE.search(ln)
+                if not m or m.group(1) not in ICE:
+                    continue
+                seen = True
+                tot += float(m.group(3)) + float(m.group(6))   # busy mean + wait mean
+    except OSError:
+        return None
+    return tot if seen else None
 
 
 runs = {}          # tag -> {"hdr":..., "clean":{leg:s}, "phst":{leg:ms}}
