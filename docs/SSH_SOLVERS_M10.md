@@ -805,8 +805,8 @@ speed-up, `d_tot` = whole-step. WIN = `d_tot` better than −2 %.
 | CORE2 | **GPU** | 8 | 15857 | 25.7 | −19.2 | **−5.65** | WIN |
 | CORE2 | **GPU** | 16 | 7928 | 27.4 | −18.3 | **−5.18** | WIN |
 | CORE2 | **GPU** | 64 | 1982 | 30.5 | −20.5 | **−6.73** | WIN |
-| farc | **GPU** | 16 | 39899 | 36.5 | −12.4 | **−5.12** | WIN |
-| farc | **GPU** | 32 | 19949 | 37.6 | −14.7 | **−6.81** | WIN |
+| ~~farc~~ | ~~GPU~~ | ~~16~~ | 39899 | 36.5 | ~~−12.4~~ | ~~−5.12~~ | ❌ **VOID (fallbacks)** |
+| ~~farc~~ | ~~GPU~~ | ~~32~~ | 19949 | 37.6 | ~~−14.7~~ | ~~−6.81~~ | ❌ **VOID (fallbacks)** |
 | NG5 | **GPU** | 16 / 64 | 462680 / 115670 | 8.5 | −19.6 | **−2.32** | WIN |
 | dars | GPU | 32 | 98760 | 5.7 | +4.6 | −0.64 | marginal |
 | CORE2 | CPU | 864 | 146 | 18.9 | −58.6 | **−13.10** | WIN |
@@ -816,12 +816,55 @@ speed-up, `d_tot` = whole-step. WIN = `d_tot` better than −2 %.
 | CORE2 | CPU | 128 | 991 | 2.5 | −16.6 | −0.72 | marginal |
 | NG5 | CPU | 2048 | 3614 | 1.6 | +5.8 | −0.42 | ❌ LOSE |
 | dars | CPU | 1024 | 3086 | 0.8 | **+149.6** | −0.18 | ❌ LOSE |
-| farc | CPU | 128 | 4987 | 4.3 | +9.5 | +0.21 | ❌ LOSE |
+| ~~farc~~ | ~~CPU~~ | ~~128~~ | 4987 | 4.3 | — | — | ❌ VOID (fallbacks) |
 | dars | CPU | 512 | 6172 | 0.8 | **+77.2** | **+1.25** | ❌ LOSE |
 | NG5 | CPU | 1024 | 7229 | 1.1 | +26.8 | −0.38 | ❌ LOSE |
-| farc | CPU | 64 | 9974 | 3.3 | +12.7 | +0.47 | ❌ LOSE |
+| ~~farc~~ | ~~CPU~~ | ~~64~~ | 9974 | 3.3 | — | — | ❌ VOID (fallbacks) |
 
-### ⚠️ The CPU rows for farc/dars/NG5 are measured OUTSIDE their scaling range — do not conclude from them yet
+### ❌❌ RETRACTION — every farc row is VOID: the solvers do not converge reliably on farc
+
+**All farc A/B legs, on BOTH backends, fired the auto-fallback guard.** My own pre-registered
+certification criterion is *"0 fallback firings across the 300-step measurement runs"*, and I
+was not harvesting that number — so contaminated legs were reported as wins.
+
+| farc run | `cg2` | `oati` | `pcsi` | status |
+|---|--:|--:|--:|---|
+| GPU 4 nodes (16 r) | — | **20** | **6** | ❌ void |
+| GPU 8 nodes (32 r) | **23** | **21** | **5** | ❌ void |
+| CPU 32 r | **20** | **21** | ? | ❌ void |
+| CPU 64 r | **20** | **19** | **6** | ❌ void |
+| CPU 1024 r | **20** | **22** | **4** | ❌ void |
+| CPU 2048 r | **21** | **6** | **6** | ❌ void |
+
+A leg with fallbacks is a **mixture of variant and baseline solves**, so its timing is not an
+A/B point at all — and the absurd iteration counts it produced (`pcsi` 12.03/solve where the
+baseline needs 212; `oati` 69.70) are the averaging artefact of that mixture, not convergence.
+
+**What the guard was actually reporting:** `maxiter exhausted without convergence` (`pcsi`,
+after 501 iterations) and `residual stalled or grew over the watch window` (`cg2`/`oati`, after
+~112). About **20 of 300 solves (≈7 %)** on farc, every run.
+
+**Why farc and not CORE2.** farc is the worst-conditioned system measured (κ = 843 vs CORE2's
+489) and needs **212 iterations/solve** against CORE2's 106. The CG-CG family replaces PCG's
+explicit `(p,Ap)` with a *recurrence*; rounding in that recurrence accumulates with iteration
+count even when the preconditioner is symmetrised, so a system needing twice the iterations
+gets roughly twice the accumulated drift — and on farc it crosses the stall threshold on ~7 %
+of solves. `pcsi` fails differently: its Chebyshev interval is wrong on farc (§eigenbound
+diagnosis), so it exhausts `maxiter` outright.
+
+**This is a real robustness limit of the methods, and arguably the most important negative in
+the campaign:** the communication-avoiding variants are not simply "slower on some meshes" —
+on an ill-conditioned mesh they *fail to converge* on a noticeable fraction of solves, and only
+the armed fallback keeps the model correct. Baseline `cg` fired **zero** fallbacks on every
+farc run.
+
+**Process fix:** `fallbacks=` is now harvested per leg and printed per rep, with an explicit
+`[!! ] this leg is a variant/baseline MIXTURE` warning. **No timing may be quoted without it.**
+
+**Unaffected:** every CORE2 rung (CPU and GPU), every dars rung, and NG5 GPU show
+`fallbacks=0` on all legs — the audit is in the git history and those rows stand.
+
+### ⚠️ The CPU rows for dars/NG5 are measured OUTSIDE their scaling range — do not conclude from them yet
 
 FESOM's rule of thumb (user, and the `namelist.config` guidance): a mesh scales until roughly
 **300–500 vertices per core**. Against that, the CPU rungs above are nowhere near where these

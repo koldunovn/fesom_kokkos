@@ -83,10 +83,17 @@ for leg in "${LEGARR[@]}"; do
         t=$(grep -a 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
         it=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
              | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
+        # ⚠️ CERTIFICATION CRITERION: a leg with ANY fallback firing is NOT a valid A/B point —
+        # it is a mixture of variant and baseline solves. This was not harvested at first, and
+        # every farc run (both backends) turned out to be contaminated while being reported as
+        # a win. Never quote a timing without this number.
+        fb=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
+             | sed -E 's/.*fallbacks=([0-9]+).*/\1/')
         # "CG share: A s (B% of loop), N iters total (K/step, Z ms/iter)"
         sh=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
         mi=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
-        echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter"
+        echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter, fallbacks=${fb:-?}"
+        [ "${fb:-0}" != "0" ] && echo "    [!! ] leg $li fired ${fb} FALLBACKS — this leg is a variant/baseline MIXTURE, not a valid A/B point"
         # min-of-2 on the TOTAL; carry that rep's SSH numbers so the pair stays consistent
         if [ -n "$t" ] && { [ -z "$best" ] || [ "$(python3 -c "print(1 if $t<$best else 0)")" = "1" ]; }; then
             best=$t; share=$sh; cgms=$mi
