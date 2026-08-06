@@ -93,6 +93,7 @@ struct EvpwState {
     Kokkos::View<int*> esoff_d, eroff_d;
     std::vector<MPI_Request> reqs;
     int selfcheck = -1;                         /* env FESOM_EVPWIDE_SELFCHECK */
+    int shipchk   = -1;                         /* env FESOM_EVPWIDE_SHIPCHK (P5 ship audit) */
     long exch_count = 0;
     long msg_count = 0;                         /* MPI_Isend+Irecv POSTED (fused halves it) */
     double dbl_count = 0.0;                     /* doubles received (fusing must not change it) */
@@ -793,6 +794,8 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
 
     S.selfcheck = 0;
     if (const char *sc = getenv("FESOM_EVPWIDE_SELFCHECK")) S.selfcheck = atoi(sc);
+    S.shipchk = 0;
+    if (const char *sc = getenv("FESOM_EVPWIDE_SHIPCHK")) S.shipchk = atoi(sc);
     D.dbg = (S.selfcheck >= 2) ? 1 : 0;
     S.gs_h = m->gradient_sca; S.ea_h = m->elem_area; S.mf_h = m->metric_factor;
 
@@ -1243,6 +1246,60 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
         }
     }
 #endif
+    /* ══ P5 — THE SHIP AUDIT (FESOM_EVPWIDE_SHIPCHK=1) ══════════════════════════════════════
+     * S. Danilov's second objection is that the 11-field per-step ship carries far more than the
+     * sub-cycle needs, and exists only to buy bit-identity. Session 4 measured its COST (1.6-6.2 %
+     * of messages, 3.6-9.2 % of bytes => <= 0.4 pp). This measures whether it is NECESSARY, which
+     * is a different question and the one that decides whether it can be trimmed.
+     *
+     * The claim to test: at a slot inside FESOM's own dist-file halo ([myDim, N)), the model's
+     * ordinary halo exchange has ALREADY put the owner's bytes there, so shipping the field again
+     * is redundant. At an EXTENDED slot ([N, N+next) = BFS rings 2..R) nothing else writes, so the
+     * ship is the only source and cannot be trimmed at any K.
+     *
+     * So: per field, max |arriving owner byte - what I already hold|, over the halo slots only,
+     * with the extended slots counted separately. A field that reports EXACTLY 0.000e+00 is
+     * redundant on the halo; anything nonzero is not, and the size says by how much.
+     * Reads the recv buffer BEFORE the unpack, or it would be comparing bytes with themselves. */
+    if (P.diag == EvpwPlan::PRESTEP_ECHO && S.shipchk) {
+        auto ridx = S.ridx_d;
+        auto rbuf = fused ? S.frbuf_d : S.rbuf_d;
+        const SegIdx IX = RI;
+        const PackViews FF = F; const int Nlim = S.N;
+        double mx[11], gmx[11];
+        for (int f = 0; f < nf; ++f) {
+            double m1 = 0.0; const int fl = f;
+            Kokkos::parallel_reduce("fesom_evpwide_shipchk", Kokkos::RangePolicy<>(0, S.nrecv),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    const int s = ridx(i);
+                    if (s >= Nlim) return;                  /* extended: no local source at all */
+                    const double d = Kokkos::fabs((double)rbuf(IX(i) + fl) - (double)FF.v[fl](s));
+                    if (d > acc) acc = d;
+                }, Kokkos::Max<double>(m1));
+            mx[f] = m1;
+        }
+        for (int f = nf; f < 11; ++f) mx[f] = 0.0;
+        MPI_Reduce(mx, gmx, 11, MPI_DOUBLE, MPI_MAX, 0, p->MPI_COMM_FESOM);
+        long nloc[2] = { 0, 0 }, nglb[2] = { 0, 0 };
+        {   /* how many recv entries could ever be trimmed, and how many never can */
+            auto ridx_h = Kokkos::create_mirror_view(S.ridx_d);
+            Kokkos::deep_copy(ridx_h, S.ridx_d);
+            for (int i = 0; i < S.nrecv; ++i) (ridx_h(i) < S.N ? nloc[0] : nloc[1]) += 1;
+        }
+        MPI_Reduce(nloc, nglb, 2, MPI_LONG, MPI_SUM, 0, p->MPI_COMM_FESOM);
+        if (p->mype == 0) {
+            static const char *fn[11] = { "uice", "vice", "a_ice", "m_ice", "m_snow", "u_w",
+                                          "v_w", "sax", "say", "rhs_a", "rhs_m" };
+            printf("[evpwide-shipchk] halo slots=%ld extended slots=%ld  (only halo slots are "
+                   "trimmable; extended have no local source at any K)\n", nglb[0], nglb[1]);
+            for (int f = 0; f < nf; ++f)
+                printf("[evpwide-shipchk]   %-6s max|owner-local| on halo = %.3e  %s\n",
+                       fn[f], gmx[f], gmx[f] == 0.0 ? "REDUNDANT (FESOM's own halo already has it)"
+                                                    : "NEEDED");
+            fflush(stdout);
+        }
+    }
+
     /* pre-step echo check (nf==11): uice/vice are modified ONLY by the EVP window loop, and
      * the last window ends with a refresh => the incoming ghost bytes MUST equal what we
      * already hold, EXACTLY, on every backend. A nonzero here = plumbing or an unexpected
