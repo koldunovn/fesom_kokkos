@@ -1,80 +1,104 @@
 % M10 — discrepancy report for the communication-avoiding SSH solvers.
-% Build:  module load texlive/live2025-gcc-13.3.0 && latexmk -pdf m10_typo_report.tex
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
 % Source of record: docs/plans/20260805-m10-ssh-derivations.md (branch m10-ssh-solvers).
 \documentclass[11pt,a4paper]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{lmodern}
-\usepackage[margin=25mm]{geometry}
+\usepackage[margin=25mm,top=22mm]{geometry}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
 \usepackage{longtable}
 \usepackage{array}
 \usepackage{xcolor}
 \usepackage{microtype}
-\usepackage[colorlinks=true,linkcolor=black,urlcolor=blue,citecolor=black]{hyperref}
+\usepackage[colorlinks=true,linkcolor=black,urlcolor=blue]{hyperref}
 \usepackage{enumitem}
 \usepackage{titlesec}
+\usepackage{parskip}
 
-\titleformat{\section}{\normalfont\large\bfseries}{\thesection}{0.7em}{}
-\titleformat{\subsection}{\normalfont\normalsize\bfseries}{\thesubsection}{0.7em}{}
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection.}{0.6em}{}
+\titlespacing*{\section}{0pt}{14pt}{6pt}
+\titleformat{\subsection}{\normalfont\normalsize\bfseries}{\thesubsection}{0.6em}{}
+\titlespacing*{\subsection}{0pt}{10pt}{4pt}
 \setlist{itemsep=2pt,parsep=0pt,topsep=3pt}
+\pagestyle{plain}
 
 \newcommand{\Mi}{M^{-1}}
 \newcommand{\Mt}{\widetilde{M}^{-1}}
 \newcommand{\sev}[1]{\textbf{#1}}
 \newcommand{\src}[1]{\textsf{#1}}
-
-\title{\textbf{Communication-avoiding CG variants for the FESOM2 SSH solve}\\[2mm]
-\large Derivation cross-check and discrepancy report}
-\author{N.\ Koldunov\thanks{Report generated from the M10 track of the FESOM2
-Kokkos port. Source of record: \texttt{docs/plans/20260805-m10-ssh-derivations.md},
-branch \texttt{m10-ssh-solvers}.}}
-\date{6 August 2026}
+\newcolumntype{R}[1]{>{\raggedright\arraybackslash}p{#1}}
 
 \begin{document}
-\maketitle
 
-\begin{abstract}
+\begin{center}
+{\Large\bfseries Communication-avoiding CG variants for the FESOM2 SSH solve}\\[1mm]
+{\large Derivation cross-check and discrepancy report}
+\end{center}
+
+\vspace{2mm}
+\hrule
+\vspace{1.5mm}
+\begin{tabbing}
+\hspace{2.4cm}\=\kill
+\textbf{Date}    \> 6 August 2026\\
+\textbf{Scope}   \> \texttt{cg2}, \texttt{pipecg}, \texttt{oati}, \texttt{pcsi} --- re-derived, then
+                    cross-checked against four sources\\
+\textbf{Purpose} \> Report the discrepancies found, and one that explains an observed instability\\
+\textbf{Detail}  \> \texttt{docs/plans/20260805-m10-ssh-derivations.md}, branch
+                    \texttt{m10-ssh-solvers}
+\end{tabbing}
+\vspace{-1mm}
+\hrule
+\vspace{3mm}
+
+\section{What this is, and the one result that matters}
+
+Four communication-avoiding solvers for the FESOM2 sea-surface-height system were
+implemented for the Kokkos port. Rather than transcribe the published listings, each
+was re-derived from first principles and then compared against the papers and against
+the existing Fortran implementation. Nine discrepancies came out of that comparison;
+they are tabulated in \S\ref{sec:table}.
+
+One of them is not a typo but a missing hypothesis, and it matters enough to lead with:
+
+\begin{quote}
+\textbf{The $\alpha$ recurrence used by every Chronopoulos--Gear variant is valid only
+when the preconditioner is symmetric. None of the sources say so. The FESOM
+MITgcm-class preconditioner is not symmetric, and the resulting error in the step
+length reaches $21.8\,\%$ on the production CORE2 matrix.}
+\end{quote}
+
 \noindent
-Four communication-avoiding solvers for the FESOM2 sea-surface-height (SSH) system
---- Chronopoulos--Gear CG (\texttt{cg2}), pipelined PCG (\texttt{pipecg}),
-PIPECG-OATI (\texttt{oati}) and the preconditioned Chebyshev/Stiefel iteration
-(\texttt{pcsi}) --- were re-derived from first principles rather than transcribed,
-then cross-checked against three published listings and one existing Fortran
-implementation. Nine discrepancies were found. The most consequential is that the
-$\alpha$ recurrence shared by the whole Chronopoulos--Gear family is valid
-\emph{only} for a symmetric preconditioner, a hypothesis stated in none of the
-sources; the FESOM MITgcm-class preconditioner is not symmetric, and the resulting
-error in the step length reaches $21.8\,\%$ on the production CORE2 matrix. This
-reproduces, and explains, an instability previously observed with \texttt{cg2}.
-A one-line remedy is given and verified.
-\end{abstract}
+Running \texttt{cg2} with the preconditioner as built makes the solver diverge on 18 of
+20 solves. Symmetrising it --- a one-line change that provably preserves the
+preconditioner's spectrum --- removes the divergence entirely. This reproduces and
+explains the \texttt{cg2} instability that had been observed previously.
+\S\ref{sec:main} gives the derivation, the measurements and the remedy.
 
-\section{Sources}
+\subsection*{Sources referred to}
 
-\begin{longtable}{@{}p{0.06\textwidth}p{0.88\textwidth}@{}}
-\toprule
-\src{[S]} & S.~Danilov, \texttt{solvers.F90} --- \texttt{ssh\_solve\_cg2} and
-\texttt{ssh\_solve\_cg\_pipelined} (FESOM2 working implementation).\\
-\src{[CV]} & S.~Cools, W.~Vanroose, arXiv:1612.01395v3 --- Alg.~4 (preconditioned
-Chronopoulos--Gear CG), Alg.~6 (preconditioned pipelined CG).\\
-\src{[P]} & X.~Huang \emph{et al.}, \emph{Geosci.\ Model Dev.}\ \textbf{9},
-4209--4225 (2016) --- App.~B2 (ChronGear), B3 (P-CSI), C (Lanczos).\\
-\src{[T]} & M.~Tiwari, S.~Vadhiyar, \emph{J.\ Parallel Distrib.\ Comput.}\
-\textbf{163} (2022) 147--155 --- Alg.~3--5 (PIPECG-OATI).\\
-\src{[GV]} & G.~Golub, R.~Varga (1961); Y.~Saad, \emph{Iterative Methods},
-Alg.~12.1 --- Chebyshev semi-iteration.\\
-\bottomrule
-\end{longtable}
+\begin{tabbing}
+\hspace{1.1cm}\=\kill
+\src{[S]}  \> S.~Danilov, \texttt{solvers.F90} --- \texttt{ssh\_solve\_cg2},
+              \texttt{ssh\_solve\_cg\_pipelined}.\\
+\src{[CV]} \> Cools \& Vanroose, arXiv:1612.01395v3 --- Alg.~4 (Chronopoulos--Gear CG),
+              Alg.~6 (pipelined CG).\\
+\src{[P]}  \> Huang \emph{et al.}, \emph{Geosci.\ Model Dev.}\ \textbf{9}, 4209--4225
+              (2016) --- App.~B2, B3, C.\\
+\src{[T]}  \> Tiwari \& Vadhiyar, \emph{J.\ Parallel Distrib.\ Comput.}\ \textbf{163}
+              (2022) 147--155 --- Alg.~3--5.\\
+\src{[GV]} \> Golub \& Varga (1961); Saad, \emph{Iterative Methods}, Alg.~12.1.
+\end{tabbing}
 
 \noindent
-Notation: $A$ is the SSH stiffness matrix (symmetric to $1.4\times10^{-13}$,
-measured), $\Mi$ the applied preconditioner, $r$ the residual,
-$u=\Mi r$, $w=Au$, $\gamma=(r,u)$, $\delta=(w,u)$.
+Notation: $A$ is the SSH stiffness matrix (symmetric to $1.4\times10^{-13}$, measured),
+$\Mi$ the applied preconditioner, $r$ the residual, $u=\Mi r$, $w=Au$, $\gamma=(r,u)$,
+$\delta=(w,u)$.
 
-\section{The principal finding: an unstated symmetry hypothesis}
+\section{The unstated symmetry hypothesis}
 \label{sec:main}
 
 \subsection{What the code builds}
@@ -85,19 +109,15 @@ $u=\Mi r$, $w=Au$, $\gamma=(r,u)$, $\delta=(w,u)$.
   \mathrm{pr}[i,j]=-\frac{1}{2}\,\frac{a_{ij}/d_i}{d_i+d_j}\quad (j\neq i),
   \qquad d_i \equiv A_{ii}.
 \end{equation}
-The transpose entry carries $d_j$ in the leading division, hence
-\begin{equation}
-  \frac{\mathrm{pr}[i,j]}{\mathrm{pr}[j,i]}=\frac{d_j}{d_i}
-  \quad\Longrightarrow\quad \Mi \neq (\Mi)^{\!\top}
-  \ \ \text{wherever } d_i\neq d_j .
-\end{equation}
-On an unstructured ocean mesh the diagonal varies with cell area and depth, so this
-is a structural property, not a small perturbation. Measured on the CORE2 matrix:
+The transpose entry carries $d_j$ in the leading division, so
+$\mathrm{pr}[i,j]/\mathrm{pr}[j,i]=d_j/d_i$ and $\Mi\neq(\Mi)^{\!\top}$ wherever
+$d_i\neq d_j$. On an unstructured ocean mesh the diagonal varies with cell area and
+depth, so this is structural, not a small perturbation. Measured on CORE2:
 
 \begin{center}
 \begin{tabular}{@{}lccc@{}}
 \toprule
-operator & $\max|X_{ij}-X_{ji}|$ & $\max|X_{ij}|$ & \textbf{defect ratio}\\
+operator & $\max|X_{ij}-X_{ji}|$ & $\max|X_{ij}|$ & defect ratio\\
 \midrule
 $\Mi$ (\texttt{pr\_values}) & $8.561\times10^{-8}$ & $1.342\times10^{-7}$ & $\mathbf{0.638}$\\
 $A$ (control)               & $2.150\times10^{-5}$ & $1.510\times10^{8}$  & $1.42\times10^{-13}$\\
@@ -105,26 +125,19 @@ $A$ (control)               & $2.150\times10^{-5}$ & $1.510\times10^{8}$  & $1.4
 \end{tabular}
 \end{center}
 
-\subsection{Why the baseline PCG is unaffected}
+\subsection{Why the baseline PCG does not care, and the variants do}
 
-Baseline PCG forms $\alpha_i=\gamma_i/(p_i,Ap_i)$ with an \emph{explicit} dot product
-every iteration. Nothing is recurred, so no orthogonality identity is invoked, and the
-method converges normally.
-
-\subsection{Why every Chronopoulos--Gear variant is affected}
-
-The family replaces that explicit quantity by the recurrence
+Baseline PCG forms $\alpha_i=\gamma_i/(p_i,Ap_i)$ with an explicit dot product every
+iteration. Nothing is recurred, no orthogonality identity is invoked, and it converges
+normally. The Chronopoulos--Gear family replaces that explicit quantity with
 \begin{equation}
   \sigma_i=\delta_i-\beta_i^2\sigma_{i-1},\qquad \alpha_i=\gamma_i/\sigma_i,
   \qquad \sigma_i\equiv(p_i,Ap_i).
   \label{eq:sigma}
 \end{equation}
 With $p_i=u_i+\beta_i p_{i-1}$ and $A$ symmetric,
-\begin{equation}
-  (p_i,Ap_i)=\delta_i+2\beta_i(u_i,s_{i-1})+\beta_i^2\sigma_{i-1},
-  \qquad s_{i-1}=Ap_{i-1},
-\end{equation}
-so \eqref{eq:sigma} holds \emph{if and only if}
+$(p_i,Ap_i)=\delta_i+2\beta_i(u_i,s_{i-1})+\beta_i^2\sigma_{i-1}$ where
+$s_{i-1}=Ap_{i-1}$, so \eqref{eq:sigma} holds if and only if
 \begin{equation}
   (u_i,s_{i-1}) = -\beta_i\sigma_{i-1}.
   \label{eq:star}
@@ -135,25 +148,24 @@ Using $s_{i-1}=(r_{i-1}-r_i)/\alpha_{i-1}$,
   \qquad
   (\Mi r_i,r_{i-1}) = (r_i,\,M^{-\top}r_{i-1}).
 \end{equation}
-That last term vanishes by the standard PCG residual $M$-orthogonality \emph{only
-when} $M^{-\top}=\Mi$; then
-$(u_i,s_{i-1})=-\gamma_i/\alpha_{i-1}=-\beta_i\sigma_{i-1}$, which is
-\eqref{eq:star}. With a non-symmetric $\Mi$ the term does not vanish,
-\eqref{eq:star} fails, and $\sigma_i$ drifts from the true $(p_i,Ap_i)$
-cumulatively, because $\sigma$ is a recurrence. A wrong $\sigma$ gives a wrong
-$\alpha$, which is no longer the line-search minimiser: the method stops being CG.
+That term vanishes by the standard PCG residual $M$-orthogonality \emph{only when}
+$M^{-\top}=\Mi$; then $(u_i,s_{i-1})=-\gamma_i/\alpha_{i-1}=-\beta_i\sigma_{i-1}$,
+which is \eqref{eq:star}. With a non-symmetric $\Mi$ it does not vanish,
+\eqref{eq:star} fails, and $\sigma_i$ drifts from the true $(p_i,Ap_i)$ --- cumulatively,
+because $\sigma$ is a recurrence. A wrong $\sigma$ gives a wrong $\alpha$, which is no
+longer the line-search minimiser: the method stops being CG.
 
-\subsection{Measured consequence}
+\subsection{What it costs in practice}
 
 A diagnostic replay carries both the true $(p_i,Ap_i)$ and the recurrence
 \eqref{eq:sigma} through a reference PCG solve on a dumped CORE2 system
-($n_{\mathrm{nz}}=870\,146$), first with the preconditioner as built and then with
-the symmetrised form of \S\ref{sec:fix}:
+($n_{\mathrm{nz}}=870\,146$), first with the preconditioner as built, then with the
+symmetrised form of \S\ref{sec:fix}:
 
 \begin{center}
 \begin{tabular}{@{}rrrr@{}}
 \toprule
-iteration & as-built: rel.\ $\sigma$ drift & as-built: $|(u_i,r_{i-1})|/\gamma$ & symmetrised: drift\\
+iteration & as built: rel.\ $\sigma$ drift & as built: $|(u_i,r_{i-1})|/\gamma$ & symmetrised: drift\\
 \midrule
 2  & $1.98\times10^{-2}$ & $1.28\times10^{-2}$ & $5.4\times10^{-14}$\\
 8  & $8.20\times10^{-2}$ & $8.11\times10^{-2}$ & $8.3\times10^{-14}$\\
@@ -166,56 +178,48 @@ worst & $\mathbf{21.8\,\%}$ & $\mathbf{24.1\,\%}$ & $1.17\times10^{-13}$\\
 \end{tabular}
 \end{center}
 
-\noindent
-The quantity required to vanish instead reaches $24\,\%$ of $\gamma$, and the step
-length is wrong by up to $22\,\%$ --- at the production tolerance, on the production
-matrix. Running \texttt{cg2} in the model with the literal preconditioner fires the
-auto-fallback guard on \textbf{18 of 20 solves}, the residual growing to
-$2.9\times10^{4}$ against a tolerance of $\approx 4$. With the symmetrised
-preconditioner: \textbf{zero fallbacks}, $123.35$ iterations per solve. Independently,
-the $\alpha$ sequence departs from reference PCG by $2.017\,\%$ at iteration~2,
-matching the measured $\sigma$ drift of $1.977\,\%$ term for term.
+The quantity required to vanish instead reaches $24\,\%$ of $\gamma$, and the step length
+is wrong by up to $22\,\%$ --- at the production tolerance, on the production matrix.
+In the model, \texttt{cg2} with the literal preconditioner fires the auto-fallback guard
+on \textbf{18 of 20 solves}, the residual growing to $2.9\times10^{4}$ against a tolerance
+of $\approx 4$. With the symmetrised preconditioner: \textbf{no fallbacks}, 123.35
+iterations per solve. Independently, the $\alpha$ sequence departs from reference PCG by
+$2.017\,\%$ at iteration~2, matching the measured $\sigma$ drift of $1.977\,\%$ term for
+term.
 
 \subsection{Remedy}
 \label{sec:fix}
 
-Factor the preconditioner as $\Mi=D^{-1}C$ with $D=\operatorname{diag}(A)$,
-$C_{ii}=1$ and $C_{ij}=-\tfrac12 a_{ij}/(d_i+d_j)$. Since $a_{ij}=a_{ji}$, the matrix
-$C$ \emph{is} symmetric --- the entire asymmetry sits in the left factor $D^{-1}$.
-Define
+Factor the preconditioner as $\Mi=D^{-1}C$ with $D=\operatorname{diag}(A)$, $C_{ii}=1$,
+$C_{ij}=-\tfrac12 a_{ij}/(d_i+d_j)$. Since $a_{ij}=a_{ji}$, the matrix $C$ \emph{is}
+symmetric --- the whole asymmetry sits in the left factor $D^{-1}$. Define
 \begin{equation}
-  \boxed{\ \Mt := D^{-1/2}\,C\,D^{-1/2}\ }
+  \Mt := D^{-1/2}\,C\,D^{-1/2}
   \qquad\text{i.e.}\qquad
   \widetilde{\mathrm{pr}}[i,j]=\mathrm{pr}[i,j]\sqrt{d_i/d_j},
   \quad \widetilde{\mathrm{pr}}[i,i]=\mathrm{pr}[i,i].
 \end{equation}
-Two properties make this the right object:
-\begin{enumerate}
-  \item $\Mt$ is symmetric by construction.
-  \item $\Mt$ is \emph{similar} to $\Mi$, since
-        $D^{1/2}(D^{-1}C)D^{-1/2}=D^{-1/2}CD^{-1/2}$. Similar matrices share their
-        spectrum, so $\Mt$ is exactly the same quality of approximate inverse.
-        (Verified: $\lambda_{\max}(\Mi)$ and $\lambda_{\max}(\Mt)$ agree to ten
-        significant figures.)
-\end{enumerate}
-Cost: one multiplication per stored entry, applied once at setup; the sparsity
-pattern and all halo machinery are unchanged.
+$\Mt$ is symmetric by construction, and it is \emph{similar} to $\Mi$ because
+$D^{1/2}(D^{-1}C)D^{-1/2}=D^{-1/2}CD^{-1/2}$. Similar matrices share their spectrum, so
+this is exactly the same quality of approximate inverse --- symmetry is not being bought
+at the price of conditioning. (Verified: $\lambda_{\max}(\Mi)$ and $\lambda_{\max}(\Mt)$
+agree to ten significant figures.) Cost is one multiplication per stored entry, applied
+once at setup; sparsity and all halo machinery are unchanged.
 
-\medskip
-\noindent\emph{Caveat.} The similarity is a statement about $\Mi$, not about the
-preconditioned operator: $\Mt A$ is not similar to $\Mi A$, and its extreme
-eigenvalue shifts by $0.23\,\%$ on a variable-diagonal test problem. Same
-convergence class, not the identical operator.
+One caveat worth stating: the similarity is a statement about $\Mi$, not about the
+preconditioned operator. $\Mt A$ is not similar to $\Mi A$, and its extreme eigenvalue
+shifts by $0.23\,\%$ on a variable-diagonal test problem. Same convergence class, not the
+identical operator.
 
-\section{Discrepancy report}
+\section{The discrepancies}
+\label{sec:table}
 
-Severity: \sev{S1} --- wrong results if transcribed literally; \sev{S2} --- misleading
-or not executable as written; \sev{S3} --- cosmetic.
+Severity: \sev{S1} --- wrong results if transcribed literally; \sev{S2} --- misleading or
+not executable as written; \sev{S3} --- cosmetic.
 
 \begingroup
 \small
 \setlength{\tabcolsep}{4pt}
-\newcolumntype{R}[1]{>{\raggedright\arraybackslash}p{#1}}
 \begin{longtable}{@{}R{0.05\textwidth}R{0.13\textwidth}R{0.52\textwidth}R{0.07\textwidth}@{}}
 \toprule
 \textbf{id} & \textbf{source} & \textbf{issue} & \textbf{sev.}\\
@@ -230,53 +234,51 @@ or not executable as written; \sev{S3} --- cosmetic.
 
 \textbf{T-1} & \src{[CV]} Alg.~4; \src{[S]}; \src{[T]} &
 The $\alpha$ recurrence $\sigma_i=\delta_i-\beta_i^2\sigma_{i-1}$ is stated without its
-hypothesis. It is valid only for a symmetric $\Mi$ (\S\ref{sec:main}). The sources assume
-an ``SPD preconditioner'' in prose; the FESOM MITgcm-class \texttt{pr\_values} is not
-symmetric (defect ratio $0.638$). Measured consequence: $\alpha$ wrong by up to $21.8\,\%$
-on CORE2, and \texttt{cg2} diverges on 18 of 20 solves. & \sev{S1}\\[2pt]
+hypothesis. It is valid only for a symmetric $\Mi$ (\S\ref{sec:main}). The sources assume an
+``SPD preconditioner'' in prose; the FESOM \texttt{pr\_values} is not symmetric (defect ratio
+$0.638$). Measured: $\alpha$ wrong by up to $21.8\,\%$ on CORE2, \texttt{cg2} diverging on 18
+of 20 solves. & \sev{S1}\\[2pt]
 
 \textbf{T-2} & \src{[P]} App.~B2 &
-Line 4 computes $\sigma_k$ using $\beta_k$, which is only defined on line 5: the listing is
+Line 4 computes $\sigma_k$ using $\beta_k$, which is only defined on line 5 --- the listing is
 not executable in the order printed. Harmless in effect ($\sigma_0=0$ makes the undefined
-$\beta_1$ multiply zero on the first pass), but the reader must reorder from $k\geq2$.
-Likewise $\rho_0=1$ gives $\beta_1=\rho_1$ rather than $0$, harmless only because
+$\beta_1$ multiply zero on the first pass), but from $k\geq2$ the reader must reorder.
+Similarly $\rho_0=1$ gives $\beta_1=\rho_1$ rather than $0$, harmless only because
 $s_0=p_0=0$. & \sev{S2}\\[2pt]
 
 \textbf{T-3} & \src{[T]} Alg.~4, l.~11 &
-The $\gamma_{i+1}$ recurrence folds $(r_i,q_i)$ and $(s_i,u_i)$ into a single
-$2\alpha_i(\cdot)$ term. That identification requires $(r_i,\Mi w_i)=(\Mi r_i,w_i)$,
-i.e.\ a symmetric $\Mi$ --- the same unstated hypothesis as T-1. & \sev{S1}\\[2pt]
+The $\gamma_{i+1}$ recurrence folds $(r_i,q_i)$ and $(s_i,u_i)$ into one $2\alpha_i(\cdot)$
+term. That identification needs $(r_i,\Mi w_i)=(\Mi r_i,w_i)$, i.e.\ a symmetric $\Mi$ ---
+the same unstated hypothesis as T-1. & \sev{S1}\\[2pt]
 
 \textbf{T-4} & \src{[T]} Alg.~4, l.~12 &
 $\delta_{i+1}=\lambda_8-\alpha_i(\lambda_1{+}\beta_i\lambda_2)-\alpha_i(\lambda_1{+}\beta_i\lambda_2)+\dots$
---- the identical product is printed twice instead of $2\alpha_i(\cdot)$. Arithmetically
-equivalent, but it conceals that the two terms arise from \emph{different} inner products
-which coincide only under a symmetric $\Mi$. & \sev{S3}\\[2pt]
+--- the identical product printed twice instead of $2\alpha_i(\cdot)$. Arithmetically the same,
+but it conceals that the two terms come from \emph{different} inner products which coincide
+only under a symmetric $\Mi$. & \sev{S3}\\[2pt]
 
 \textbf{T-5} & \src{[P]} App.~C &
-The Lanczos start vector is printed as $q_1=r_0/(r_0^{\top}s_0)$: normalisation by the
-inner product rather than by its \textbf{square root}. The missing root corrupts $\alpha_1$
-and plants a spurious small eigenvalue in $T$. Measured on a 1024-unknown fixture:
-$\theta_{\min}$ returns $2.49\times10^{-6}$ instead of $5.65\times10^{-3}$ ---
-\textbf{2270$\times$ too small}, and it does \emph{not} wash out with $m$ (identical error at
-$m=30$ and $m=120$). Feeding that $\nu$ to P-CSI inflates the assumed condition number by
-$\sim$2000$\times$, so the Chebyshev polynomial is optimised for a far too wide interval and
-the method converges much more slowly than it should --- silently, since it still converges.
-& \sev{S1}\\[2pt]
+The Lanczos start vector is printed as $q_1=r_0/(r_0^{\top}s_0)$: normalised by the inner
+product rather than by its \textbf{square root}. The missing root corrupts $\alpha_1$ and
+plants a spurious small eigenvalue in $T$. On a 1024-unknown fixture $\theta_{\min}$ comes out
+as $2.49\times10^{-6}$ instead of $5.65\times10^{-3}$ --- \textbf{2270$\times$ too small}, and
+it does not wash out with $m$ (same error at $m=30$ and $m=120$). Feeding that $\nu$ to P-CSI
+inflates the assumed condition number $\sim$2000$\times$, so the Chebyshev polynomial is
+optimised for a far too wide interval and convergence is much slower than it should be ---
+silently, since it still converges. & \sev{S1}\\[2pt]
 
 \textbf{T-6} & \src{[P]} App.~B3, l.~1 &
-The $\omega$ recurrence coefficient is typeset as a fraction that can be read as either
+The $\omega$ recurrence coefficient is typeset as a fraction readable as either
 $\tfrac14\alpha^2$ or $1/(4\alpha^2)$. \emph{Not a defect in the paper} --- a transcription
-hazard. \textbf{Resolved to $1/(4\alpha^2)$} three ways: by derivation
-(\S\ref{sec:omega}), by consistency with the paper's own seed $\omega_0=2/\gamma$, and
-against \src{[GV]}. Recorded so it need not be re-litigated. & \sev{S1}\newline\emph{if misread}\\[2pt]
+hazard. Resolved to $1/(4\alpha^2)$ three ways (\S\ref{sec:omega}). Recorded so it need not be
+re-litigated. & \sev{S1}\newline\emph{if misread}\\[2pt]
 
 \textbf{T-7} & \src{[T]} \S2.2 &
-The method is designed and benchmarked with \textbf{Jacobi} (diagonal) preconditioning,
-where $\Mi$ requires no halo exchange. Not a typo, but a portability caveat: with a sparse
-$\Mi$ carrying $A$'s stencil, every preconditioner application consumes a halo ring, and the
-$n\to g\to h\to e\to f$ chain becomes four chained applications --- roughly doubling the
-exchanged halo volume. & \sev{S2}\\[2pt]
+The method is designed and benchmarked with \textbf{Jacobi} (diagonal) preconditioning, where
+$\Mi$ needs no halo exchange. Not a typo, but a portability caveat: with a sparse $\Mi$
+carrying $A$'s stencil every preconditioner application consumes a halo ring, the
+$n\to g\to h\to e\to f$ chain becomes four chained applications, and the exchanged halo volume
+roughly doubles. & \sev{S2}\\[2pt]
 
 \textbf{T-8} & \src{[S]} both routines &
 \texttt{MPI\_Iallreduce} is followed immediately by \texttt{MPI\_Wait}
@@ -291,11 +293,9 @@ non-converged solve exits silently carrying whatever $X$ holds. & \sev{S2}\\
 \end{longtable}
 \endgroup
 
-\medskip
-\noindent
-Nothing in \src{[CV]} Alg.~4 or Alg.~6 was found to be transcriptionally wrong; both
-listings reproduce the derivations line for line. The substantive issues are the unstated
-symmetry hypothesis (T-1, T-3) and the P-CSI Lanczos normalisation (T-5).
+Nothing in \src{[CV]} Alg.~4 or Alg.~6 was found to be transcriptionally wrong; both listings
+reproduce the derivations line for line. The substantive items are the unstated symmetry
+hypothesis (T-1, T-3) and the P-CSI Lanczos normalisation (T-5).
 
 \section{Resolution of the P-CSI \texorpdfstring{$\omega$}{omega} recurrence (T-6)}
 \label{sec:omega}
@@ -303,42 +303,41 @@ symmetry hypothesis (T-1, T-3) and the P-CSI Lanczos normalisation (T-5).
 Let the preconditioned operator have spectrum in $[\nu,\mu]$ and set
 $\theta=\tfrac12(\mu+\nu)$, $\delta_{\mathrm{h}}=\tfrac12(\mu-\nu)$,
 $\sigma_1=\theta/\delta_{\mathrm{h}}$. The standard three-term form \src{[GV]} is
-$\rho_0=1/\sigma_1$, $\rho_k=1/(2\sigma_1-\rho_{k-1})$ and
-$\Delta x_k=\rho_k\rho_{k-1}\Delta x_{k-1}+(2\rho_k/\delta_{\mathrm{h}})\Mi r_k$.
-With the paper's variables $\alpha=2/(\mu-\nu)=1/\delta_{\mathrm{h}}$ and
-$\gamma=\theta$, put $\omega_k:=2\rho_k/\delta_{\mathrm{h}}$. Then
+$\rho_0=1/\sigma_1$, $\rho_k=1/(2\sigma_1-\rho_{k-1})$,
+$\Delta x_k=\rho_k\rho_{k-1}\Delta x_{k-1}+(2\rho_k/\delta_{\mathrm{h}})\Mi r_k$. With the
+paper's variables $\alpha=2/(\mu-\nu)=1/\delta_{\mathrm{h}}$ and $\gamma=\theta$, put
+$\omega_k:=2\rho_k/\delta_{\mathrm{h}}$. Then
 \begin{equation}
   \omega_k=\frac{2}{\delta_{\mathrm{h}}(2\sigma_1-\rho_{k-1})}
          =\frac{2}{2\theta-\delta_{\mathrm{h}}\rho_{k-1}},
   \qquad \rho_{k-1}=\tfrac12\delta_{\mathrm{h}}\omega_{k-1},
 \end{equation}
-so that
+so that, using $\delta_{\mathrm{h}}=1/\alpha$,
 \begin{equation}
   \omega_k=\frac{1}{\theta-\tfrac14\delta_{\mathrm{h}}^{2}\,\omega_{k-1}}
-         =\boxed{\ \frac{1}{\gamma-\dfrac{\omega_{k-1}}{4\alpha^{2}}}\ }
+         =\frac{1}{\gamma-\dfrac{\omega_{k-1}}{4\alpha^{2}}}.
 \end{equation}
-since $\delta_{\mathrm{h}}=1/\alpha$. The reading $\tfrac14\alpha^2$ is therefore
-incorrect. Two independent confirmations: the paper's own seed $\omega_0=2/\gamma$
-follows from $\rho_0=1/\sigma_1$ only under this reading; and a direct numerical test
-shows the derived coefficient meets the Golub--Varga convergence bound at
+The reading $\tfrac14\alpha^2$ is therefore incorrect. Two independent confirmations: the
+paper's own seed $\omega_0=2/\gamma$ follows from $\rho_0=1/\sigma_1$ only under this reading;
+and numerically, the derived coefficient meets the Golub--Varga convergence bound at
 $k=10,20,40$ while the misread one does not. Note also that the initial step uses
-$\Delta x_0=\gamma^{-1}\Mi r_0$, \emph{not} $\omega_0$; a reader assuming otherwise is
-off by exactly a factor of two on the first step.
+$\Delta x_0=\gamma^{-1}\Mi r_0$, \emph{not} $\omega_0$ --- a reader assuming otherwise is off
+by exactly a factor of two on the first step.
 
-\section{Verification}
+\section{How to check any of this}
 
-All statements above are reproducible from the M10 branch:
+Everything above is reproducible from the \texttt{m10-ssh-solvers} branch:
 \begin{itemize}
-  \item symmetry defect and $\sigma$ drift on real dumped matrices:
-        \texttt{tools/fesom\_ssh\_lab --sym-check}, \texttt{--sigma-drift};
-  \item algorithm equivalence, Chebyshev rate, Lanczos normalisation (T-5) and the
-        $\omega$ resolution (T-6): \texttt{tests/test\_ssh\_solvers.cpp}
-        (18 assertions, host-only, runs in under a second);
-  \item non-blocking-collective progression (T-8):
-        \texttt{tools/iallreduce\_probe.c}, run on both production MPI stacks.
+  \item symmetry defect and $\sigma$ drift on real dumped matrices --- \texttt{tools/}\allowbreak
+        \texttt{fesom\_ssh\_lab} with \texttt{--sym-check} or \texttt{--sigma-drift};
+  \item algorithm equivalence, Chebyshev rate, the Lanczos normalisation (T-5) and the
+        $\omega$ resolution (T-6) --- \texttt{tests/test\_ssh\_solvers.cpp}, 18 assertions,
+        host-only, runs in under a second;
+  \item non-blocking-collective progression (T-8) --- \texttt{tools/iallreduce\_probe.c},
+        run on both production MPI stacks.
 \end{itemize}
-Full derivations for all four solvers, the cross-source tables and the measurement
-provenance are in \texttt{docs/plans/20260805-m10-ssh-derivations.md}; the gate and
-measurement ledger is \texttt{docs/SSH\_SOLVERS\_M10.md}.
+Full derivations for all four solvers, the cross-source tables and the measurement provenance
+are in \texttt{docs/plans/20260805-m10-ssh-derivations.md}; the gate and measurement ledger is
+\texttt{docs/SSH\_SOLVERS\_M10.md}.
 
 \end{document}
