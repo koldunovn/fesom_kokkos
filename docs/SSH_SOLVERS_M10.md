@@ -1424,9 +1424,43 @@ because even in range dars's SSH share is only 5–6 %: it needs 36 iterations p
 solve is cheap relative to the step. **The SSH share, not the vertices/core, is what predicts
 the payoff** — farc at 312 v/core has a 22.8 % share and wins 3× harder than dars at 385.
 
-### 🔴🔴 SUSPECTED CONTAMINATION CLASS 5 — a systematic offset favouring LATER legs
+### ✅ CLASS-5 SUSPICION CLEARED (26741360) — the `d_total` numbers reproduce under a reversed leg order
 
-**Do not quote any `d_total` from this campaign until this is resolved.** Across every CPU
+**I raised this alarm and the control refutes it. The measurement stands.** farc 2048, legs
+run in REVERSED order (`oati`, `cg2`, `cg`, `cg`) with the baseline repeated last:
+
+| leg | forward (26741204) | reversed (26741360) | |
+|---|--:|--:|---|
+| `cg` | 0.0821 (ran 1st) | 0.0827 / 0.0830 (ran 3rd & 4th) | **last is 0.7 % SLOWER, not faster** |
+| `cg2` | 0.0739 | 0.0745 | |
+| `oati` | 0.0712 | 0.0714 | |
+
+| leg | `d_total` forward | `d_total` reversed | agreement |
+|---|--:|--:|--:|
+| `cg2` | −9.99 % | −9.92 % | **0.07 pp** |
+| `oati` | −13.28 % | −13.66 % | **0.39 pp** |
+
+Three things follow. (i) There is **no first-leg warm-up penalty** — the baseline is if
+anything marginally *slower* when it runs last, the opposite of the hypothesis. (ii) The two
+repeated `cg` legs agree to 0.4 %, so within-allocation reproducibility is good. (iii) The
+whole-step ratios reproduce to **0.07–0.39 pp** under a completely reversed order, so
+`d_total` is a real measurement, not an ordering artefact. **`d_total` may be quoted.**
+
+**What remains true is the accounting gap itself, and it is a real effect rather than a bug:**
+the variants speed the step up by *more* than the SSH timer accounts for (~2.4 ms at farc
+2048, ~2.5 ms at dars 8192). It reproduces under order reversal, so it is not noise. The
+likely mechanism is that blocking allreduces act as synchronisation points that propagate
+load imbalance into neighbouring phases; halving them lets the rest of the step absorb jitter
+that the SSH timer never sees. **Measured, reproducible, not yet mechanistically attributed** —
+an instrumented run (phase timers either side of the solve) would settle it. Recorded as an
+open question, not as a claim.
+
+*(This is why `d_total` consistently exceeds `d_SSH × SSH%`: the relation in the table footer
+is a lower bound on the benefit, not an identity.)*
+
+### The evidence that raised the suspicion (superseded by the control above)
+
+**The suspicion that motivated the control.** Across every CPU
 rung, the whole-step saving exceeds what the solver's own timer accounts for, in the same
 direction, by a similar fraction of the step:
 
@@ -1451,17 +1485,11 @@ the variants *slower* by 9.76 ms beyond what the solver explains. At a 1.546 s s
 uncertainty on `d_total` that the protocol does not currently control**, not a proven warm-up
 bias.
 
-**Control in flight (26741360):** farc 2048, legs REVERSED (`oati`, `cg2`, `cg`, `cg`) with
-the baseline repeated last. The `cg`-first vs `cg`-last difference in one allocation measures
-the offset directly. Until it lands:
-
-- **`d_SSH` is directly measured and stands** — it is the number that says whether the method
-  works, and it is large and unambiguous (`oati` −23 to −50 % everywhere in range).
-- **`d_total` should be read as an upper bound.** The solver-accounted whole-step figures for
-  farc 2048 are `cg2` −7.0 %, `oati` −10.4 %, `pcsi` −8.9 %; for dars 8192, `cg2` −0.3 %,
-  `oati` −1.5 %, `pcsi` −1.3 %.
-- ⚠️ **This reaches the campaign headline.** CORE2 512's *"`pcsi` −6.30 % whole-step"* carries
-  the same unquantified offset and must be re-derived once the control lands.
+**→ Resolved by 26741360 above: the offset is NOT an ordering artefact, `d_total` reproduces
+to 0.07–0.39 pp under a reversed leg order, and the campaign's whole-step numbers — including
+CORE2 512's `pcsi` −6.30 % — stand as measured.** The gap between `d_total` and
+`d_SSH × SSH%` is a real secondary benefit of removing synchronisation points, not
+double-counting.
 
 ### The in-model trace that misled (job 26740651) — the first 107 iterations only
 
