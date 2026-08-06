@@ -510,8 +510,8 @@ the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest repo
 | 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ✅ HARVESTED (below) |
 | ~~26723783~~ | NG5 4N | *(intended)* SPEED=1 · +cg2 · +pipecg · +pcsi | ❌ **VOID — see the L80 note below** |
 | ~~26723784/26723867~~ | NG5 16N | *(intended)* same | ❌ cancelled, same defect |
-| **26724474** | **NG5 16N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ⭐ **the number of record** (resubmitted) |
-| **26724475** | **NG5 4N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ⭐ **the number of record** (resubmitted) |
+| **26724474** | **NG5 16N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ✅ **HARVESTED — the numbers of record (below)** |
+| **26724475** | **NG5 4N** | **SPEED=1 · +cg2 · +oati · +pcsi** | ✅ **HARVESTED (below)** |
 
 > ### ⚠️ L80 in the wild: a silent A/B truncation, caught by its own output
 >
@@ -601,6 +601,59 @@ Lanczos-m axes.
 the CGPIPE ring machinery internally — so part of each Δ is the ring saving that
 `FESOM_SPEED=1` already ships in production. Jobs 26723783/84/867 isolate the solver's own
 contribution and are the numbers of record.
+
+## ⭐⭐⭐ THE NUMBERS OF RECORD (26724474 / 26724475)
+
+`FESOM_SPEED=1` held on **every** leg, so only the SSH solver differs. NG5, dt180, 300 steps,
+min-of-2, same allocation, same binary, `-C a100_80`. Each leg's resolved knob set is echoed
+in the log (the L80 guard) and all four differ, as required.
+
+| rung | leg | s/step | **Δ vs production** | iters/solve | µs/iteration |
+|---|---|--:|--:|--:|--:|
+| **NG5 16N** | `FESOM_SPEED=1` (production) | 0.2407 | — | 76.88 | 3130.9 |
+| | `+ cg2` | 0.2377 | **−1.25 %** | 76.10 | 3123.5 |
+| | `+ oati` | 0.2379 | **−1.16 %** | 76.58 | 3106.6 |
+| | **`+ pcsi`** | **0.2353** | **−2.24 %** | 78.33 | **3004.0** |
+| **NG5 4N** | `FESOM_SPEED=1` (production) | 0.6403 | — | 76.87 | 8329.6 |
+| | `+ cg2` | 0.6375 | −0.44 % | 76.14 | 8372.7 |
+| | `+ oati` | 0.6391 | −0.19 % | 76.59 | 8344.4 |
+| | **`+ pcsi`** | **0.6346** | **−0.89 %** | 78.37 | 8097.5 |
+
+**`pcsi` is the winner at both rungs, and the gain is scale-dependent: −2.24 % at 16N,
+−0.89 % at 4N.** Ranking is stable: pcsi > cg2 ≳ oati.
+
+### ⚠️ The honest headline: M10's own contribution is ~3× smaller than the legacy comparison implied
+
+Against **plain PCG** the same solvers measured −5.75 % … −6.40 % at 16N. Against the
+**production** configuration they measure **−1.16 % … −2.24 %**. The difference is the CGPIPE
+ring saving that `FESOM_SPEED=1` already ships — the M10 solvers use that machinery
+internally, so a legacy baseline credits them with it. **The −2.24 % is M10's contribution;
+the −6.40 % is not.** This is exactly why the leg definitions were corrected before any
+number was quoted, and it is the single most important caveat in this ledger.
+
+### Diminishing returns on the sync axis — measured, and it reframes the track
+
+Blocking allreduces per solve on this configuration fall 266.7 (plain) → ~125 (cg2) → 64
+(oati) → ~30 (pcsi). The time does **not** follow that ordering proportionally:
+
+| step on the axis | AR/solve | Δ vs production |
+|---|--:|--:|
+| production `cg` (CGPIPE, 2 AR/iter) | 266.7 | — |
+| `cg2` — halve the reductions | 125.4 | −1.25 % |
+| `oati` — halve them **again** | 64.0 | −1.16 % (**no further gain**) |
+| `pcsi` — remove ~89 % of them | 29.6 | −2.24 % |
+
+**`oati` buys nothing beyond `cg2`** despite halving the sync count a second time — a clean,
+pre-registered honest negative, and a useful one: it says the allreduce axis is *already
+mostly harvested* by the first 2→1 halving, so further sync reduction alone does not pay.
+That `pcsi` nonetheless gains more than either suggests its advantage is **not** the reduction
+count alone. Leading hypothesis (consistent with T2's launch pricing — fenced 8.9 µs vs async
+3.0 µs per launch — but **not yet isolated**): a blocking allreduce forces a device fence and
+drain, and `pcsi` fences only every `K`=5 iterations while also running the simplest
+per-iteration kernel set (3 AXPY-class ops, no dot products at all between checks). `oati`
+saves fences but pays them back in extra vector work. **Testing that properly needs a
+fence-count/launch-count attribution run — recorded as an open item for T10/T11, not claimed
+here.**
 
 ## Frozen binaries
 
