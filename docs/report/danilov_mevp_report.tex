@@ -268,7 +268,10 @@ with your own figure: on fArc at 16 GPU nodes with $K$=8 the divergence form rem
 the ice cost and the classic form $11.9\%$ --- the same configuration and very nearly the same
 number as your $\sim$20\%, the apparent disagreement having been a matter of denominator. On DARS
 at 8 nodes, an operating point rather than a flat one, it reaches $28.8\%$.
-\item It is worth substantially less than the delayed exchange on every mesh.
+\item It is worth substantially less than the delayed exchange on every mesh --- \emph{as
+implemented here. Sect.~6.3b withdraws this: written as a widening of the existing loops the
+same scheme is worth two to five times more, and the whole of the present subsection measures
+our kernel structure alongside the scheme.}
 \item On CPU it never wins, on any mesh, at any $K$.
 \item It needs large $K$. At $K=2$ it is a net \emph{cost} on most configurations, because the
 duplicated ring has not been amortised. This is the opposite of what the delayed exchange wants
