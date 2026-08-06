@@ -1284,6 +1284,63 @@ oscillates for 20 iterations) looks exactly like a genuine breakdown, and it is 
 out of the correct hypothesis. Only running past the abort point distinguishes "stalled" from
 "stalling *right now*". That is what the `FESOM_SSH_STALL_WINDOW` knob was built for.
 
+#### The airtight control (26741140) — the knob is the ONLY difference
+
+Same system, same binary, same `srun`, run twice:
+
+| `FESOM_SSH_STALL_WINDOW` | `cg2` result |
+|---|---|
+| unset (=20) | **FALLBACK at 107 iters**, res 1.6213e+01 → redone with `cg`, 211 iters, bitwise exact |
+| 100000 | **converged at 205 iters**, res 4.3045e-01, 0 fallbacks |
+
+`oati` on the same system fires **0** fallbacks even at the default window (it converges at
+206), which is why the two solvers disagree about which farc solves "fail": the trigger is
+sensitive to exactly where each method's plateau falls relative to a fixed counter.
+
+#### 🔴 The threshold is BELOW what baseline `cg` itself needs (26741140-46)
+
+Longest run of consecutive non-improving iterations, guard widened, over the 7 captured farc
+systems:
+
+| system | `cg` | `cg2` | `oati` |
+|---|--:|--:|--:|
+| step0010 | 9 | 8 | 4 |
+| step0020 | 11 | 12 | 5 |
+| step0030 | 15 | 17 | 8 |
+| step0040 | 9 | 5 | 3 |
+| step0050 | 11 | 10 | 5 |
+| step0060 | 2 | 5 | 2 |
+| **step0037** (the "failure") | **21** | **20** | 7 |
+
+**Baseline `cg` — the certified production solver — plateaus for 21 iterations on farc, above
+the guard's threshold of 20.** So the guard is not merely strict; it is calibrated below what
+the *reference* method requires on this mesh. `cg` escapes only because it is not watched.
+`cg2` tracks `cg` closely (8/12/17/5/10/5/20 against 9/11/15/9/11/2/21), exactly as two
+implementations of the same Krylov method should.
+
+For contrast, CORE2's longest plateau is **2–3** (measured above) — which is why a window of
+20 has never been a problem there, and why the constant survived until a genuinely
+ill-conditioned mesh was tested.
+
+**Sizing a safe window:** it must clear the *baseline's* worst plateau with margin. Observed
+max is 21 on farc over 7 systems; CORE2 is 3. The `resid > 1e3 * best` divergence trigger is
+the one that actually catches the Sergey-class breakdown (α wrong by 21.8 %, residual growing
+without bound), and it stays armed independently — so the plateau counter can be loosened a
+long way without losing real protection. The re-measurement runs below use **200**.
+
+⚠️ **The default is NOT changed in this commit.** Choosing the shipped value is a judgement
+call (how long should the model burn iterations before giving up on a solver?) and belongs
+with the adoption decision — see the recommendation section.
+
+#### Recovering the voided farc rows
+
+The retracted farc A/B legs were void because they were variant/baseline mixtures. With the
+window corrected the mixture should disappear, so the farc verdict can finally be measured:
+**26741203** (farc CPU 1024 = 8 nodes, 623 v/core) and **26741204** (2048 = 16 nodes, 312
+v/core — inside the 300–500 scaling range), four legs each,
+`FESOM_SSH_STALL_WINDOW=200` on every variant leg, binary pinned. `fallbacks=` is harvested
+per leg and must read 0 for these rows to count.
+
 ### The in-model trace that misled (job 26740651) — the first 107 iterations only
 
 farc np32, `cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
