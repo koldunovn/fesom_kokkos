@@ -21,8 +21,14 @@ ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
 cd "$ROOT"
 
 CORE2=/work/ab0995/a270088/port2/mesh/core2       # the PRIVATE copy (standing rule, L73)
+FARC=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
 DARS=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
 NG5=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+
+# 🔴 R8 / E.T1: farc HANGS REPRODUCIBLY AT >= 128 RANKS. Every farc rung here stays at or
+# below 64 ranks (16 GPU nodes) — deliberately, not by accident. Do not raise it without
+# re-testing the hang first.
+FARC_MAX_RANKS=64
 
 # baseline = production; then the three distinct methods (pipecg is ≡ cg2 on this stack, R2)
 LEGS="FESOM_SPEED=1;FESOM_SPEED=1+FESOM_SSH_SOLVER=cg2;FESOM_SPEED=1+FESOM_SSH_SOLVER=oati;FESOM_SPEED=1+FESOM_SSH_SOLVER=pcsi"
@@ -32,6 +38,11 @@ sub () {   # sub <nodes> <ntasks> <mesh> <dt> <tag> [nsteps]
     if [ ! -d "$MESH/dist_$NT" ]; then
         echo "SKIP $TAG — $MESH/dist_$NT missing"; return
     fi
+    case "$MESH" in *farc*)
+        if [ "$NT" -ge 128 ]; then
+            echo "REFUSE $TAG — farc at $NT ranks is the R8/E.T1 reproducible hang (>=128)"; return
+        fi ;;
+    esac
     sbatch -N "$N" --ntasks="$NT" \
         --export=ALL,MESH="$MESH",DT="$DT",TAG="$TAG",NSTEPS="$NS",LEGS="$LEGS" \
         jobs/job_m10_ab | sed "s/^/  $TAG: /"
@@ -42,6 +53,12 @@ echo "    126858 nodes: 7929/rank at 16, 1982/rank at 64, 991/rank at 128"
 sub  4  16 "$CORE2" 1800 share_core2_g4n
 sub 16  64 "$CORE2" 1800 share_core2_g16n
 sub 32 128 "$CORE2" 1800 share_core2_g32n
+
+echo "=== farc — 638387 nodes, ~5x CORE2 and ~5x smaller than dars ==="
+echo "    39899/rank at 16, 19950/rank at 32, 9975/rank at 64 (capped: R8 hang at >=128)"
+sub  4  16 "$FARC"  900  share_farc_g4n
+sub  8  32 "$FARC"  900  share_farc_g8n
+sub 16  64 "$FARC"  900  share_farc_g16n
 
 echo "=== dars — the middle mesh ==="
 echo "    3160340 nodes: 98761/rank at 32, 24690/rank at 128"
