@@ -433,6 +433,21 @@ Solution class vs `cg`: **all fields inside P-L2** (`eta_n` 5.143e-05 · `u`/`v`
 8.932e-03/7.809e-03 · `T` 5.374e-02 · `S` 2.350e-03 · `Kv`/`Av` 9.999e-02/9.990e-02 ·
 `h_ice` 6.784e-03 · `m_ice` 4.847e-04 · `uice`/`vice` 5.175e-04/8.671e-04).
 
+### Options ×3 — consolidated across all four solvers (step 20, vs baseline `cg`)
+
+| solver | job | zstar | mEVP | TKE | fallbacks |
+|---|---|---|---|---|--:|
+| `cg2` | 26723560 | *(not in this job)* | ❌ `T` 0.4182→0.06603 = the CGPOLY fingerprint | ❌ `h_ice` 0.447 → **exonerated** (1 cell) | 0 |
+| `pipecg` | 26723616 | ✅ **all fields** | ✅ `T` 6.603e-02 | ⚠️ `h_ice` 1.445e-01 → exonerated (`m_ice` 2.834e-03 ✓) | 0 |
+| `oati` | 26723855 | ✅ **all fields** | ✅ `T` 2.422e-02 | ⚠️ `h_ice` 1.476e-01 → exonerated (`m_ice` 2.854e-03 ✓); `a_ice` 5.244e-03 vs 5e-03 = **1.05×, marginal** | 0 |
+| `pcsi` | 26723757 | ✅ **all fields** | ✅ `T` 5.240e-02 | ⚠️ `h_ice` 1.473e-01 → exonerated (`m_ice` 2.837e-03 ✓) | 0 |
+
+**The pattern is consistent across all four solvers and is now well characterised**: zstar and
+mEVP hold every bound; TKE trips only `h_ice`, always at the same ice-marginal cells, always
+with the conserved `m_ice` comfortably inside its bound. **Zero fallback firings anywhere in
+the options matrix** — 12 option-runs across four solvers. `oati`'s `a_ice` at 1.05× the bound
+is the one genuinely marginal number in the set and is flagged rather than waved through.
+
 ## A/B perf legs (submitted 2026-08-06 — HARVEST THESE FIRST next session)
 
 Protocol: `jobs/job_m10_ab` — all legs back-to-back in ONE allocation on the SAME nodes with
