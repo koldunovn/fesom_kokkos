@@ -46,7 +46,7 @@ Two points shape how the results below should be read. Every timing is given bot
 model step and as a share of the ice cost; the first divides an ice-only change by about ten, and
 reporting only it led us at first to describe your reformulation as having no effect, which it does
 not (Sect.~6.2). And the cheapest of the three schemes places the domain decomposition in the ice
-field (Sect.~6.6), so although it is the fastest we measured we do not regard it as usable.
+field (Sect.~6.4), so although it is the fastest we measured we do not regard it as usable.
 
 \section*{2. Definitions, configurations and machine}
 
@@ -153,7 +153,7 @@ verified for the wide halo in both forms at $K=4$ and $K=8$, and separately for 
 under standard EVP. The options were also shown to leave the model unchanged when a different
 vertical mixing scheme or vertical coordinate is selected, and the GPU version was checked against
 the CPU version with the options on. The delayed exchange is an approximation, so bit-for-bit
-equality is not available and its accuracy was measured instead (section~6.5).
+equality is not available; what it does to the ice is Sect.~6.4.
 
 \section*{6. Results}
 
@@ -213,7 +213,7 @@ paper.
 \centering
 \includegraphics[width=0.92\textwidth]{fig1_icecost.pdf}
 \caption{Cost of the sea ice relative to the standard scheme, for the schemes that survive
-Sect.~6.6. Negative is a saving. The measure is the ice cost --- ice, ice dynamics and ice
+Sect.~6.4. Negative is a saving. The measure is the ice cost --- ice, ice dynamics and ice
 advection, computation together with time spent waiting for communication --- and not the model
 time step, which divides an ice-only change by about ten. Each mesh is at its own operating point,
 the largest node count at which the model still gains from more GPUs, read off the measured
@@ -246,7 +246,7 @@ the same number as your $\sim$20\%; the apparent disagreement was a matter of de
 \item On CPU it never wins, on any mesh, at any $K$.
 \item It needs large $K$. At $K=2$ it is a net \emph{cost} on most configurations, because the
 duplicated ring has not been amortised. This is the opposite of what the delayed exchange wants
-(section~6.5), so the two options do not share a best $K$.
+(Sect.~6.4), so the two options do not share a best $K$.
 \end{itemize}
 
 \textbf{This reproduces, and sharpens, an earlier assessment.} Our optimisation campaign measured
@@ -274,172 +274,49 @@ A second effect pushes the same way. The ring is a different size on every proce
 it introduces a new load imbalance on top of the one it removes: on fArc CPU the ice-dynamics
 waiting time rose from 8.7 to 25.3\,ms per step when the ring was made deep.
 
-\subsection*{6.4 The delayed exchange}
+\subsection*{6.4 The delayed exchange, and why it is not usable}
 
 Accepting a halo up to $K-1$ sub-cycles old removes 105 of the 120 exchanges per step at $K=8$ and
-costs one conditional. At the four operating points it is worth
-$-14.4$, $-14.3$, $-15.5$ and $-9.9\%$ of the whole model step at $K=8$ (CORE2, fArc, DARS, NG5),
-and $-12.6$, $-11.4$, $-14.2$ and $-8.5\%$ at $K=4$. On CPU the same change is worth $-1$ to
-$-3.4\%$, because a CPU process holds far less of the mesh and the ice exchange is a much smaller
-share of its step. For scale, the largest single code optimisation this port had previously
-achieved was about 8\%.
+costs one conditional. It is much the fastest of the three: at the four operating points it takes
+$-14.4$, $-14.3$, $-15.5$ and $-9.9\%$ off the model step at $K=8$ (CORE2, fArc, DARS, NG5) and
+$-12.6$, $-11.4$, $-14.2$ and $-8.5\%$ at $K=4$, which against the ice cost is $-37$ to $-58\%$ on
+GPU and $-5$ to $-25\%$ on CPU --- about three times what the wide halo gives. On CPU the same
+change is worth $-1$ to $-3.4\%$ of the step, because a CPU process holds far less of the mesh.
 
-Against the ice cost the same option is worth \textbf{$-37$ to $-58\%$ on GPU} and $-5$ to $-25\%$
-on CPU (growing with process count: $-5\%$ at 128, $-25\%$ at 2048).
-\textbf{$K=4$ retains about 90\% of the gain of $K=8$}, which matters because the accuracy evidence
-pushes the other way.
+We nevertheless do not regard it as usable. The stale values lie on the one-cell boundary of each
+sub-domain, and the decomposition is fixed for the run, so the same nodes are perturbed at every
+step. Figure~\ref{fig:artefact} shows the consequence after 60 days on fArc: the difference follows
+the sub-domain boundaries, while the exact wide halo on the same colour scale does not. Averaged on
+those boundaries the difference in ice thickness is 2.5 times its interior value at $K=4$ and 1.7
+times at $K=2$, against 0.85 for two identical runs and 0.87 for the exact wide halo. A polygonal
+structure in the ice field, in the shape of the domain decomposition, is not acceptable in a
+sea-ice model, and that ends the matter.
 
-\begin{figure}[tb]
-\centering
-\includegraphics[width=\textwidth]{fig2_scaling.pdf}
-\caption{Why the gain from delaying the exchange varies. \emph{Left}: change of the model time
-step from exchanging every 8th sub-cycle instead of every one. \emph{Right}: the cost of the very
-same runs under the standard scheme. The gain is largest where the model has stopped scaling and
-communication dominates --- CORE2 past two nodes, where adding GPUs makes the model \emph{slower},
-is exactly where the delayed exchange recovers the most.}
-\label{fig:scaling}
-\end{figure}
-
-Figure~\ref{fig:scaling} shows why the gain varies, and it is as much a caution as an explanation. It is not simply larger with more processes: it tracks how much communication the run
-is already paying for. CORE2 on GPU stops scaling at two nodes and then \emph{degrades} --- more
-GPUs, slower model --- and that is where the delayed exchange recovers the most, $-25.5\%$
-at 16 nodes. That number is real but useless: it is measured in a configuration one would never
-run, and it is why every number here is quoted at an operating point. The same variable
-works in the other direction too --- on NG5 spread over only four nodes, 460\,000 mesh nodes per
-GPU, nothing we tried moved the model by more than 3\%.
-
-The mechanism is the one the 2019 paper describes, measured directly: on fArc with 2304
-CPU cores the ice-dynamics waiting time falls from 4.8 to 1.9\,ms per step (a 60\% cut) while the
-computing time barely moves, and MPI operations per step fall from 240 to 30. \textbf{The gain
-comes from removing idle time, not from computing faster.}
-
-\subsection*{6.5 Accuracy cost of the delayed exchange}
-
-This decides whether the option is usable, so the test was specified in advance and then measured:
-one-year CORE2 integrations at $K=2,4,8$ against the same run exchanging after every sub-cycle, on
-the CPU backend, which is exactly reproducible --- so every difference seen is the approximation
-and nothing else. (On GPU, run-to-run differences in summation order accumulated over a year are
-the same size as the effect being measured, so the GPU cannot answer this question; we confirmed
-it agrees to that resolution.)
-
-The yardstick is mEVP's own reproducibility: the difference between two independent, both correct,
-implementations of the same scheme --- our C port and Fortran FESOM2 --- over the same year.
-
-\begin{center}\small
-\begin{tabular}{@{}lcccccc@{}}
-\toprule
-pattern correlation after 1 year & SST & SSH & ice conc. & ice thickness & $u_{\rm ice}$ & $v_{\rm ice}$ \\
-\midrule
-C port versus Fortran (the yardstick) & 1.00000 & 1.00000 & 0.99999 & 0.99998 & 0.95438 & 0.93908 \\
-delayed exchange, $K=2$ & 1.000000 & 1.000000 & 0.999996 & 0.999998 & 0.970111 & 0.952946 \\
-delayed exchange, $K=4$ & 1.000000 & 1.000000 & 0.999995 & 0.999994 & 0.963328 & 0.950003 \\
-delayed exchange, $K=8$ & 1.000000 & 1.000000 & 0.999992 & 0.999981 & 0.961359 & 0.944857 \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Every field stays inside the yardstick at every $K\le8$ (Figure~\ref{fig:accuracy}). But the margin
-should be read, not just the verdict: on ice velocity the approximation sits only 1.1 to 1.5 times
-inside it, and at $K=8$ ice thickness is only 1.05 times inside. We had expected an order of
-magnitude and were wrong. The delayed halo's effect on the velocity field is of the same order as
-the spread between two implementations of mEVP --- comfortably inside it at $K\le8$, but not by
-much.
-
-Two further results:
-
-\begin{itemize}\itemsep0.12em
-\item The error is \textbf{monotone in $K$} when measured as RMS difference or correlation. (It is
-not monotone in the maximum pointwise difference, which is carried by one to five points at the ice
-edge and is not a usable statistic here.)
-\item \textbf{Integrated ice quantities are untouched.} The largest monthly deviation in Northern
-Hemisphere sea-ice extent at $K=8$ is $0.022\times10^{6}$\,km$^2$ against a seasonal range of
-$7.8$ to $17.5\times10^{6}$\,km$^2$ --- 0.23\% of the amplitude. Surface temperature, salinity and
-sea surface height correlate at 1.000000 at every $K$: over a year the change does not reach the
-ocean surface climate.
-\end{itemize}
-
-On this evidence we would use $K=4$: it keeps most of the speed, and since the error is monotone in
-$K$, the smallest $K$ that pays is the defensible choice. \emph{This is measured at CORE2
-resolution only}; see section~8.
-
-\begin{figure}[tb]
-\centering
-\includegraphics[width=0.70\textwidth]{fig3_accuracy.pdf}
-\caption{Accuracy cost of the delayed exchange on the field that carries it. One-year CORE2
-integrations on the CPU backend (exactly reproducible, so the whole difference is the
-approximation), against the same run exchanging after every sub-cycle. Dashed lines: the same
-correlation between two independent and both-correct implementations of mEVP --- our C port and
-Fortran FESOM2 --- over the same year. The approximation stays inside that spread at every $K$
-tested, by a factor of 1.1 to 1.5.}
-\label{fig:accuracy}
-\end{figure}
-
-\subsection*{6.6 Imprint of the domain decomposition}
-
-The question was put to us directly: would a stale halo show up as artefacts of the domain
-decomposition in the ice? It does, and this is what decides the recommendation.
-
-The stale values lie on the one-cell boundary of each sub-domain, and the decomposition is fixed
-for the run, so the same nodes are perturbed at every step. A domain-wide correlation cannot
-resolve this: a feature one cell wide along sub-domain edges covers a small fraction of the mesh,
-and can leave the correlation near 0.99999 while being plain on a map.
-
-We ran fArc on 16 GPUs for 60 days with daily ice output, all configurations from the same
-executable and the same 16-way decomposition. Each node is assigned its distance in elements from a
-sub-domain boundary, and $|\Delta$ ice thickness$|$ is averaged over the 60 days within each ring.
-A scheme that imprints the decomposition gives an average that peaks at the boundary and decays
-outward; one that does not gives a flat profile. Two configurations serve as negative controls:
-two identical runs, which differ only in the order of summation on the GPU, and the exact wide
-halo, which is bit-identical in exact arithmetic and should therefore behave like the control.
-
-\begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-& rim & interior & \textbf{edge/interior} \\
-\midrule
-two identical runs --- control & 0.00105\,m & 0.00124\,m & \textbf{0.85} \\
-\textbf{wide halo, exact, $K$=8} & 0.00104 & 0.00120 & \textbf{0.87} \\
-delayed exchange, $K$=2 & 0.00432 & 0.00249 & \textbf{1.70} \\
-delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The delayed exchange imprints the decomposition and the exact wide halo does not. The two controls
-sit together at 0.85 and 0.87, which is what makes the measurement interpretable: the same
-statistic that finds an imprint in the approximation reports none for a scheme that is exact. The
-effect is present on the first day, when the difference is still of order $10^{-4}$\,m (ratio 3.1),
-persists for two months, grows with $K$, and appears in ice concentration (2.86) and ice velocity
-(1.76) as well as in thickness. Figure~\ref{fig:artefact} gives the ring profiles and a map, on
-which the difference follows the sub-domain boundaries.
-
-The objection is not the accuracy cost. Section~6.5 stands: the delayed exchange remains inside
-mEVP's own implementation spread and leaves every integral diagnostic untouched. What rules it out
-is that the error is not distributed as an implementation difference is, but forms a polygonal
-structure in a physical field, in the shape of the domain decomposition. That is not acceptable in
-a sea-ice model whatever the correlation coefficient shows. (The pattern also changes with the core
-count, but that is secondary: these models are not bit-reproducible across decompositions in any
-case.) Halving the delay to $K$=2 reduces the ratio to 1.70 and does not remove it.
+Worth recording is that no integral diagnostic sees it. Over a year on CORE2 the ice concentration
+and thickness correlate with the reference at 0.999995 and 0.999994, within the spread between our
+C port and Fortran FESOM2, and hemispheric ice extent departs by 0.23\% of its seasonal amplitude.
+A feature one cell wide along sub-domain edges covers a small fraction of the mesh and leaves a
+domain-wide correlation near 0.99999. The accuracy protocol we had prepared, and had already run,
+would have passed this scheme.
 
 The measurement also separates the two ways of giving up bit-identity that your note treats
 together. Recomputing a shared quantity independently, so that each core may change the last bit on
-a triangle it shares, is harmless: that is exactly our control, and it measures 0.85. Reading a halo
-that is $K-1$ sub-cycles old is a different matter, since the error introduced there is of physical
-magnitude rather than of rounding, and it measures 2.52. The wide halo recomputes; the delayed
-exchange lets values age. Only the second imprints the decomposition.
+a triangle it shares, is harmless: two runs differing only in that respect are our control, at 0.85.
+Reading a halo that is $K-1$ sub-cycles old introduces an error of physical rather than rounding
+magnitude, at 2.52. The wide halo recomputes; the delayed exchange lets values age. Only the second
+imprints the decomposition.
 
 \begin{figure}[tb]
 \centering
-\includegraphics[width=\textwidth]{fig4_artefact.pdf}
-\caption{\emph{Left}: mean $|\Delta$ ice thickness$|$ over 60 days against distance from a
-sub-domain boundary, fArc on 16 GPUs; open markers are the interior. The two exact configurations
-(control, wide halo) are flat; the two approximate ones peak at the boundary and decay. Bracketed
-numbers are the edge/interior ratio --- 1 means no imprint. \emph{Right}: the day-60 difference
-for the delayed exchange at $K$=4 with the 16 sub-domain boundaries drawn on top.}
+\includegraphics[width=0.92\textwidth]{fig4_artefact.pdf}
+\caption{Difference in ice thickness against a run exchanging after every sub-cycle, fArc on 16
+GPUs after 60 days, with the 16 sub-domain boundaries drawn on top and a common colour scale. The
+delayed exchange (left) leaves a difference that follows the boundaries; the exact wide halo
+(right) does not, and differs from the reference only in the order of summation.}
 \label{fig:artefact}
 \end{figure}
 
-\subsection*{6.7 The message count, and a correction to an earlier attribution}
+\subsection*{6.5 The message count, and a correction to an earlier attribution}
 
 This is the result we would most like your view on, because it corrects something we believed
 until two days ago.
@@ -504,7 +381,7 @@ is. Reported here as a negative result. \\
 
 \begin{itemize}\itemsep0.12em
 \item \textbf{The accuracy of the delayed exchange at high resolution.} This was to have been the
-largest remaining gap; Sect.~6.6 rules the scheme out on other grounds, so the one-year CORE2
+largest remaining gap; Sect.~6.4 rules the scheme out on other grounds, so the one-year CORE2
 result stands as a record of what the approximation costs rather than as support for using it.
 \item \textbf{A leaner wide halo.} Our implementation sends eleven auxiliary fields once per step
 so that rings 2\dots$K$, which do not exist in FESOM's data structures, have values at all. That
