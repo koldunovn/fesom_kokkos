@@ -441,8 +441,8 @@ the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest repo
 
 | job | rung | legs | purpose |
 |---|---|---|---|
-| 26723631 | NG5 4N | legacy-cg · cg2 · pipecg | the paper's "plain PCG" reference point |
-| 26723632 | NG5 16N | legacy-cg · cg2 · pipecg | ditto |
+| 26723631 | NG5 4N | legacy-cg · cg2 · pipecg | ✅ HARVESTED (below) |
+| 26723632 | NG5 16N | legacy-cg · cg2 · pipecg | ✅ HARVESTED (below) |
 | 26723692 | NG5 4N | legacy-cg · pcsi · pcsi K=10 | pcsi + its check-interval sensitivity |
 | 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ditto |
 | **26723783** | **NG5 4N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
@@ -456,6 +456,44 @@ the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest repo
 > and 26723784 hold `FESOM_SPEED=1` on **every** leg so only the SSH solver differs — those
 > are the numbers of record; the first four stand as the plain-PCG reference the plan asks
 > for. (Interim leg-0 sanity: NG5 16N legacy `cg` = 0.4228/0.4241 s/step at 76.9 iters/solve.)
+
+### ⭐ FIRST A/B HARVEST (26723631 / 26723632) — vs the plain-PCG reference
+
+NG5, dt180, 300 steps, min-of-2, same allocation, same binary, `-C a100_80`.
+
+| rung | leg | s/step | Δ | iters/solve |
+|---|---|--:|--:|--:|
+| **NG5 4N** | legacy `cg` | 1.2231 | — | 76.86 |
+| | `cg2` | 1.2112 | **−0.97 %** | 76.13 |
+| | `pipecg` | 1.2119 | **−0.92 %** | 77.10 |
+| **NG5 16N** | legacy `cg` | 0.4228 | — | 76.88 |
+| | `cg2` | 0.3985 | **−5.75 %** | 76.13 |
+| | `pipecg` | 0.3981 | **−5.84 %** | 77.11 |
+
+**Two results, and the second one is the important one.**
+
+**(1) The gain scales with node count exactly as an allreduce-latency lever should** —
+−0.97 % at 4N, **−5.75 % at 16N**. That is the signature the whole track was predicated on:
+at 4N the reduction latency is small next to per-rank compute, at 16N it is not (the census
+put the CG phase at 10.4 ms busy + 13.0 ms wait per step at that rung). Iteration counts are
+flat across legs (76.1–77.1), so this is a *cheaper iteration*, not a different count — the
+distinction the crossover claim rests on.
+
+**(2) ⭐ `pipecg` ≡ `cg2` to within noise (−5.84 % vs −5.75 %) — the R2 attribution rule
+fires, exactly as pre-registered.** The overlap buys nothing. This was written down BEFORE
+the run ("a null-or-negative pipecg-vs-cg2 delta is STACK, not algorithm"), on the strength
+of the T2 probe that measured zero `Iallreduce` progression plus a surcharge on both
+production MPI stacks. A pipelined solver that pipelines perfectly and gains nothing is the
+cleanest possible confirmation that the limitation is the MPI stack, not the method — and it
+is the same result Sergey saw on the same machine. **This is paper material as an honest
+negative**, and it carries a concrete portability claim: on a stack with real async
+progression (or with `MPI_THREAD_MULTIPLE` + a progress thread, out of scope here), `pipecg`
+should separate from `cg2`; here it cannot.
+
+⚠️ These legs run against LEGACY `cg` (all knobs cleared), while `cg2`/`pipecg` use the
+CGPIPE ring machinery internally — so part of the −5.75 % is the ring saving that
+`FESOM_SPEED=1` already ships in production. Jobs 26723783/84/867 isolate the solver's own
+contribution and are the numbers of record.
 
 ## Frozen binaries
 
