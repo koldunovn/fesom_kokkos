@@ -204,7 +204,10 @@ step, and the \emph{owned} kernels speed up as well, their launch gap falling fr
 \textbf{Your reformulation wins once the launch structure is removed, and we had been measuring
 past it.} With ring kernels the standard form leads by 13.3 points of ice cost on CORE2 and 3.8 on
 fArc, the divergence form leading only on DARS (4.2). With widened loops the divergence form leads
-at all four meshes, and at every $K$ we tried. An earlier note of ours decomposed the ring-kernel
+at all four meshes and at every $K$ we tried. It is not a law over all configurations, though: a
+scaling sweep across node counts (Sect.~5.4) has it ahead at thirteen of the first fourteen points,
+the exception being fArc on two GPU nodes, where the standard form is 0.7 points ahead --- outside
+the repetition spread there, so real. An earlier note of ours decomposed the ring-kernel
 gap into a message term and a byte term; both were isolated at bit-identical output and both are
 real, but they were smaller than the launch term sitting on top of them, which fell hardest on the
 divergence form because its ring gather was the most expensive of the ring kernels.
