@@ -794,6 +794,69 @@ point would need a partition beyond 864, which does not exist for this mesh.
 NG5 CPU **re-submitted at 1024 ranks** (the 256-rank attempt was cancelled during init —
 7.4 M nodes is too tight there, job 26733444 void, replacement 26733926).
 
+## ⭐⭐⭐ Past the wall: CORE2 to 2048 ranks on purpose-built partitions
+
+CORE2's shipped maximum is 864 ranks, which was not enough to show a turnover. Larger
+partitions were generated with the user's partitioner (METIS 5.1.0, flat single-level,
+2D+3D weighted) into a **separate copy** of the mesh,
+`/work/ab0995/a270088/port2/mesh/core2_bigpart` — never the certified mesh, per the standing
+rule. Integrity was verified before use (`nlvls` 3832750 / `elvls` 7366752 / `nod2d` md5
+identical to the certified mesh). New partitions: 864 (control), 1024, 1536, 2048.
+
+### ⚠️ FIRST: the control says the two ladders are NOT comparable
+
+A regenerated **864** was built specifically to test whether these flat partitions time the
+same as the certified mesh's existing `dist_864`:
+
+| `dist_864` | baseline s/step |
+|---|--:|
+| certified mesh (as shipped) | **0.0435** |
+| `core2_bigpart` (flat METIS, built here) | **0.0467** |
+
+**7.4 % slower on the same mesh, same rank count, same binary** — so the partitioning strategy
+matters, and the certified partitions are better than a naive flat decomposition (most likely
+they are hierarchical; the namelist's own default is `n_levels = 2`). **The new rungs
+therefore must NOT be appended to the 128–864 certified ladder** — a combined curve would
+attribute a partitioner difference to the solvers. The table below is a *separate, internally
+consistent* ladder in which every rung uses a flat partition from the copy.
+
+*(This is why the control was built. Without it the 1024–2048 points would have been plotted
+straight onto the certified curve and the 7.4 % offset would have been read as physics.)*
+
+### The ladder (all `core2_bigpart`, flat partitions, `FESOM_SPEED=1` on every leg)
+
+| ranks | nodes/rank | SSH% | baseline | eff % vs 864 | `cg2` | `oati` | `pcsi` |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 864 | 146 | 21.3 | 0.0467 | 100.0 | −7.49 | −9.85 | **−11.78** |
+| 1024 | 123 | 21.8 | 0.0410 | 96.1 | −6.34 | −10.73 | **−12.68** |
+| 1536 | 82 | 26.4 | 0.0408 | **64.4** | −9.07 | −12.25 | **−13.97** |
+| **2048** | **61** | **29.6** | 0.0355 | **55.5** | −10.42 | −14.08 | **−14.65** |
+
+### The wall, and what the solvers do to it
+
+**The baseline stops scaling between 1024 and 1536: 1.5× the cores buys 1.005× the speed.**
+Parallel efficiency collapses from 96 % to 64 % across that step and reaches 55.5 % at 2048.
+The SSH share climbs to **29.6 %** — nearly a third of the step is the solve — which is
+exactly why this is where the solvers pay most: their whole-step gain grows monotonically
+along the ladder (`pcsi` −11.78 → −12.68 → −13.97 → **−14.65 %**).
+
+**The cleanest statement of the benefit — a 2× core saving:**
+
+| configuration | ranks | s/step |
+|---|--:|--:|
+| baseline | 2048 | 0.0355 |
+| **`pcsi`** | **1024** | **0.0358** |
+
+**`pcsi` at 1024 ranks matches the baseline at 2048 ranks (within 1 %)** — i.e. on this mesh,
+in the regime where it has stopped scaling, the solver delivers the same time on **half the
+cores**. Best achievable step time overall: baseline 0.0355 → `pcsi` 0.0303 (**−14.6 %**),
+`oati` 0.0305, `cg2` 0.0318.
+
+⚠️ Honest limit: `pcsi` also plateaus (1024 → 1536 gives 1.020× for 1.5× cores). The solvers
+**lower the curve and buy roughly one doubling of cores; they do not remove the wall.**
+Something else becomes limiting beyond ~1500 ranks on this mesh, and identifying it is not
+part of M10.
+
 ## ⚠️ Why `pcsi` fails on farc — the eigenbound diagnosis
 
 `pcsi` costs +30…+33 % of the SSH phase on farc, with iterations 212 → 377. The model logs the
