@@ -1425,3 +1425,34 @@ loses everywhere that matters: it wins only on CPU below ~250 vertices/core, has
 counterpart, and the production point sits on the crossover. Do not re-derive this. If the
 imbalance is ever attacked again it must be by a method that does **not** cost edgecut —
 which vertex weighting inherently does.
+
+### L104 — ON A SERIAL BUILD EVERY `FESOM_SPEED_*` LEVER IS INERT WITHOUT `FESOM_SPEED_FORCE_SERIAL=1`. Setting the knob is not the same as the knob acting. (M10, 2026-08-06)
+
+`fesom_speed.hpp:111-113`:
+
+```c
+#ifndef KOKKOS_ENABLE_CUDA
+  if (on && !fesom_speed_force_serial()) on = 0;   /* Serial stays legacy */
+#endif
+```
+
+The lever resolves to **OFF** on a Serial/CPU build unless `FESOM_SPEED_FORCE_SERIAL=1` is
+also set. This is deliberate (the Serial backend is the bit-identical oracle and must stay
+legacy), and `job_m10_ab_cpu` sets it correctly. **It bit twice in one session in hand-written
+jobs:**
+
+1. `FESOM_SPEED_PHASESTATS=1` produced no phase table at all in two 7-node runs.
+2. A NG5 diagnosis job set `FESOM_SPEED=1` without it, so the "speed" and "legacy" legs were
+   **the same run twice** — they returned byte-identical fields (`uv=2.56e+00`, `eta=1.35e+00`)
+   and reproduced none of the failure being investigated.
+
+**Both were silent.** The resolver does warn (`!! … WAS REQUESTED BUT RESOLVES TO OFF`) but on
+*stderr*, which a job that redirects per-leg output will not surface, and case-sensitive greps
+for "phasestats" miss a message naming `FESOM_SPEED_PHASESTATS`.
+
+**Rules.** (i) Any hand-written CPU job exercising a `FESOM_SPEED_*` lever must export
+`FESOM_SPEED_FORCE_SERIAL=1`, or copy the knob block from `job_m10_ab_cpu`. (ii) Assert the
+lever ANNOUNCED itself before trusting any A/B — L80 applies to physics and diagnostic knobs
+alike. (iii) **Two legs returning identical field diagnostics is proof the knob did not fire**,
+and is the cheapest available check: a real lever changes rounding, so byte-identical output
+across a knob boundary means the boundary was never crossed.
