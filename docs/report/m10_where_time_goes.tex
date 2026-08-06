@@ -1,0 +1,147 @@
+% M10: phase-resolved answer to "where does the time go at scale?"
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=15mm,top=11mm,bottom=10mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{parskip}
+\setlength{\parskip}{1.8pt plus 1pt}
+\pagestyle{empty}
+\setlength{\tabcolsep}{4.5pt}
+
+\begin{document}
+
+{\large\bfseries Where the time goes at scale: a phase-resolved profile of FESOM2/Kokkos}\\[1pt]
+{\small Interim note, 6 August 2026 --- Levante, 128-core CPU nodes. Per-rank per-phase wall
+clocks; wait is captured \emph{inside} MPI by PMPI interposition, so busy $=$ wall $-$ wait is
+complete by construction. 115 timed steps.}
+
+\textbf{The question.} The communication-avoiding solvers cut the sea-surface-height (SSH)
+solve by 45--60\,\%, yet the whole step improves by only 6--13\,\%. If the SSH solve is the
+scaling bottleneck, why is the effect not larger, and where does the remaining time go?
+
+\textbf{1. The solve is the only part of the model that anti-scales.} Splitting the CORE2 CPU
+ladder into the solve and everything else settles the premise:
+
+\begin{center}\vspace{-5pt}\footnotesize
+\begin{tabular}{rrrrrrrrr}
+\toprule
+ranks & step (ms) & SSH (ms) & rest (ms) & SSH speed-up & rest speed-up & ideal & ceiling & captured \\
+\midrule
+128 & 195.50 & 4.89 & 190.61 & $1.00\times$ & $1.00\times$ & $1.0\times$ & 2.5\,\% & 29\,\% \\
+256 & 105.00 & 4.62 & 100.38 & $1.06\times$ & $1.90\times$ & $2.0\times$ & 4.4\,\% & 39\,\% \\
+432 & \phantom{0}66.20 & 6.22 & \phantom{0}59.98 & $0.79\times$ & $3.18\times$ & $3.4\times$ & 9.4\,\% & 61\,\% \\
+512 & \phantom{0}58.70 & 5.81 & \phantom{0}52.89 & $0.84\times$ & $3.60\times$ & $4.0\times$ & 9.9\,\% & 64\,\% \\
+864 & \phantom{0}43.50 & 8.22 & \phantom{0}35.28 & $\mathbf{0.59\times}$ & $\mathbf{5.40\times}$ & $6.8\times$ & 18.9\,\% & \textbf{69\,\%} \\
+\bottomrule
+\end{tabular}\vspace{-5pt}
+\end{center}
+
+\noindent
+From 128 to 864 ranks everything except the solve speeds up $5.40\times$ (79\,\% parallel
+efficiency), while the solve becomes 41\,\% \emph{slower} in absolute terms. But it is still
+only 18.9\,\% of the step at 864 ranks, which caps any whole-step gain from it: we measure
+$-13.1\,\%$, or 69\,\% of that ceiling, and the captured fraction rises monotonically with
+rank count. The lever works close to its limit; the limit is what is small.
+
+\textbf{2. Half the step is spent waiting inside MPI.} Per-phase means, baseline solver
+(the phase total reconciles with the loop timer to 0.1\,ms on both configurations):
+
+\begin{center}\vspace{-5pt}\footnotesize
+\begin{tabular}{lrrrrr}
+\toprule
+& \multicolumn{2}{c}{CORE2, 864 ranks} & \multicolumn{2}{c}{fArc, 2048 ranks} & MPI calls \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+phase & busy (ms) & wait (ms) & busy (ms) & wait (ms) & per step \\
+\midrule
+\texttt{force}   &  6.9 &  3.4 &  3.8 &  3.3 & 11 \\
+\texttt{ice}     &  0.2 &  0.9 &  0.6 &  0.8 & 9 \\
+\texttt{icedyn}  &  1.6 &  4.8 &  5.0 &  4.8 & 240 \\
+\texttt{ocean}   & \textbf{13.0} &  6.5 & \textbf{26.6} & 15.0 & 68 \\
+\texttt{cg} (SSH)&  1.0 & \textbf{8.9} &  2.5 & \textbf{20.4} & 361 / 854 \\
+\midrule
+total & 23.5 & \textbf{24.7} & 40.1 & \textbf{44.6} & 710 / 1203 \\
+\bottomrule
+\end{tabular}\vspace{-5pt}
+\end{center}
+
+\noindent
+(\texttt{iceadv} and \texttt{other} are omitted: 0.2--1.0\,ms busy, $\le$0.3 wait, and are in
+the totals.) The step is 48.2\,ms on CORE2 and 84.7 on fArc, so wait is 51 and 53\,\%: the model is
+synchronisation-bound. The solve is the largest single source of wait, yet roughly 90\,\% of
+its cost \emph{is} wait --- its own arithmetic is 1.0 and 2.5\,ms. The largest block of real
+computation is the ocean phase.
+
+\textbf{3. The saving is entirely wait, and two fifths of it appears in other phases.}
+CORE2 at 864 ranks, baseline against \texttt{pcsi} in the same allocation:
+
+\begin{center}\vspace{-5pt}\footnotesize
+\begin{tabular}{lccrc}
+\toprule
+phase & busy (ms) & wait (ms) & $\Delta$wait & MPI calls/step \\
+\midrule
+\texttt{force}  & $6.9\to6.5$ & $3.4\to1.5$ & $-1.9$ & $11\to11$ \\
+\texttt{icedyn} & $1.6\to1.6$ & $4.8\to3.6$ & $-1.2$ & $240\to240$ \\
+\texttt{ocean}  & $13.0\to13.0$ & $6.5\to6.1$ & $-0.4$ & $68\to68$ \\
+\texttt{cg}     & $1.0\to1.0$ & $8.9\to3.1$ & $-5.8$ & $361\to170$ \\
+\midrule
+total & $\mathbf{23.5\to23.1}$ & $\mathbf{24.7\to15.2}$ & $\mathbf{-9.5}$ & $710\to519$ \\
+\bottomrule
+\end{tabular}\vspace{-5pt}
+\end{center}
+
+\noindent
+Compute time is unchanged, so the gain is entirely synchronisation. Only 5.8 of the 9.5\,ms
+is inside the solver: 3.7\,ms, or 39\,\%, falls in phases whose MPI call counts and busy times
+are identical. Removing synchronisation points lets neighbouring phases stop absorbing skew,
+which is why the whole-step gain exceeds the solve's own share of the step.
+
+\textbf{4. The larger target is load imbalance, not the solver.} Compute time in the ocean
+phase spans $3.8/13.0/18.2$\,ms across CORE2 ranks and $8.8/26.6/42.5$ across fArc ranks, a
+factor of $4.8$ either way. A bulk-synchronous phase costs its maximum, not its mean, so this
+imbalance alone is 11\,\% of the CORE2 step and \textbf{19\,\% of the fArc step} --- comparable
+to the entire solve and more than the solvers can win. It compounds too: the skew is absorbed
+at the next collective, the solve's first reduction, so part of what the table attributes to
+solver wait is ocean imbalance arriving there.
+
+\textbf{5. Checking the tolerance less often is worth more than half the solver's benefit.}
+Chebyshev iteration needs no inner products, so P-CSI performs no reduction per iteration and
+its only global communication is the convergence test every $K$ iterations. Sweeping $K$ at
+CORE2 864 ranks (all legs \texttt{fallbacks=0}):
+
+\begin{center}\vspace{-5pt}\footnotesize
+\begin{tabular}{lrrrr}
+\toprule
+leg & s/step & $d_{\mathrm{tot}}$ & $d_{\mathrm{SSH}}$ & iters/solve \\
+\midrule
+baseline \texttt{cg} & 0.0432 & --- & --- & 105.90 \\
+\texttt{pcsi}, $K=1$  & 0.0411 & $-4.86$\,\% & $-20.12$\,\% & 131.17 \\
+\texttt{pcsi}, $K=5$ (default) & 0.0384 & $\mathbf{-11.11}$\,\% & $-53.89$\,\% & 133.35 \\
+\texttt{pcsi}, $K=10$ & 0.0384 & $-11.11$\,\% & $-57.22$\,\% & 134.77 \\
+\texttt{pcsi}, $K=20$ & 0.0379 & $-12.27$\,\% & $-57.78$\,\% & 142.27 \\
+\bottomrule
+\end{tabular}\vspace{-5pt}
+\end{center}
+
+\noindent
+Testing every fifth iteration rather than every one more than doubles the whole-step gain,
+$-4.86 \to -11.11$\,\%. Past five the return flattens and reappears as wasted work: $K=20$
+buys 1.2\,pp more at 6.7\,\% more iterations. Relatedly, that the solve is cheaper than the
+ice holds at the rank counts normally used but reverses here --- the ice block costs 8.0\,ms
+against the solve's 9.9 on CORE2 and 11.8 against 22.9 on fArc, whereas at 128 ranks the solve
+is 2.5\,\% of the step and the ice 5--13\,\%.
+
+\textbf{Caveats.} PMPI interposition adds overhead in proportion to call count, so these runs
+overstate the solver benefit ($-20.5\,\%$ here against the $-13.1\,\%$ of the timing protocol);
+the attribution, the busy figures and the ratios are what these numbers support, not the
+absolute deltas ($\S5$ is free of this: it uses the timing protocol). Two configurations on
+one machine. METIS already weights by 2-D and 3-D node counts, so some ocean spread may be
+irreducible; that is untested, and the imbalance figure wants confirming at the 512-rank
+production point before it justifies re-partitioning.
+
+\end{document}
