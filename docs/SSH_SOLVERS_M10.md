@@ -794,6 +794,56 @@ point would need a partition beyond 864, which does not exist for this mesh.
 NG5 CPU **re-submitted at 1024 ranks** (the 256-rank attempt was cancelled during init —
 7.4 M nodes is too tight there, job 26733444 void, replacement 26733926).
 
+## ⚠️ Why `pcsi` fails on farc — the eigenbound diagnosis
+
+`pcsi` costs +30…+33 % of the SSH phase on farc, with iterations 212 → 377. The model logs the
+interval it computed, so the bounds are recoverable from the A/B runs directly:
+
+| mesh | θmin (Lanczos m=30) | θmax | κ after margins | √κ |
+|---|--:|--:|--:|--:|
+| dars g8n | 1.4548e-02 | 1.3635 | 109.3 | 10.5 |
+| CORE2 g16n | 3.4455e-03 | 1.4440 | 489.0 | 22.1 |
+| **farc** | **2.0274e-03** | 1.4647 | **842.9** | 29.0 |
+
+farc is worse-conditioned, but only by 1.7× against CORE2 — and Chebyshev cost scales like
+**√κ**, so that alone predicts ~1.3× more iterations, not the 3.1× observed. Comparing each
+mesh against the Chebyshev bound `½√κ·ln(2/ε)` at `soltol = 1e-5` settles it:
+
+| mesh | Chebyshev prediction | `pcsi` observed | **observed / predicted** |
+|---|--:|--:|--:|
+| dars | 64 | 48.1 | 0.75 |
+| CORE2 | 135 | 121.4 | 0.90 |
+| **farc** | **177** | **376.4** | **2.12** |
+
+**A Chebyshev iteration cannot converge more slowly than its own bound if the spectrum lies
+inside `[ν,µ]`.** dars and CORE2 come in *under* the bound (0.75, 0.90 — as expected, the bound
+is pessimistic). farc runs at **2.12× the bound**, which is only possible if part of the
+spectrum is **outside** the interval. Since µ is inflated and the polynomial is well-behaved
+above it, the failure must be at the bottom: **Lanczos at m=30 is overestimating λmin on farc**,
+so eigenmodes below ν are not damped at all and convergence stalls on them.
+
+This is precisely the failure mode T-5 warns about (a wrong ν inflates the assumed κ and
+mis-tunes the polynomial) — except here the cause is not the missing square root, which is
+fixed, but simply **too few Lanczos steps for farc's spectrum**. It is also consistent with
+`cg2`/`oati` being unaffected: they are Krylov methods whose iteration count adapts to the
+actual spectrum, with no interval to get wrong.
+
+**Test in flight** (jobs 26734516 farc, 26734517 CORE2 control): sweep
+`FESOM_PCSI_LANCZOS` ∈ {30, 120, 250}. Pre-registered predictions —
+1. On **farc**, θmin should keep falling as m grows (the m=30 value is not converged), and the
+   iteration count should fall with it. If θmin is instead stable at 2.03e-03 across m, the
+   diagnosis is WRONG and the problem is elsewhere (candidates: a genuinely disconnected low
+   cluster that Lanczos finds but the margin does not cover, or a farc-specific conditioning
+   feature) — that outcome gets reported with equal prominence.
+2. On **CORE2** (control), θmin should be essentially flat across m, since its obs/pred of 0.90
+   says the m=30 interval is already good there.
+
+**Consequence for the recommendation either way:** `pcsi`'s cost depends on a per-mesh estimate
+that can silently be wrong, and the only symptom is slowness — it still converges, and the true
+residual still passes. `oati` has no such dependency. This is the substantive argument for
+`oati` as the default and `pcsi` as a per-mesh specialist, independent of which mesh happens to
+win a given A/B.
+
 ## Frozen binaries
 
 *(`/work/ab0995/a270088/port2/m10/bin/` + sha256 here; binaries NEVER in git.)*
