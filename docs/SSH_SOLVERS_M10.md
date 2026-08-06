@@ -1237,6 +1237,35 @@ where `cg` does not, and the guard is doing its job rather than aborting a live 
 evidence instead of by the vacuous counter comparison; its *stated basis* was still wrong.
 Both corrections belong in the record.
 
+### ⭐⭐ …but the failure is RARE, and `cg2` holds iteration parity with `cg` on farc
+
+The same job's aggregates, 60 solves per leg, farc np32 dt900 (`fallbacks=` harvested per the
+process fix):
+
+| leg | solves | iters/solve | exch/solve | ar_blk/solve | fallbacks |
+|---|--:|--:|--:|--:|--:|
+| `cg2` | 60 | **218.85** | 224.37 | 224.37 | **1** (solve 37) |
+| `cg` (baseline) | 60 | **220.83** | 443.67 | 443.67 | 0 *(structurally — see above)* |
+
+**`cg2` matches baseline `cg`'s iteration count on farc to 0.9 %** (218.85 vs 220.83) and
+halves both the exchanges and the blocking allreduces (224 vs 444), exactly as designed. It
+breaks down on **1 solve in 60 = 1.7 %**; the other 98.3 % converge normally.
+
+So the ledger's earlier framing — *"on an ill-conditioned mesh they fail to converge on a
+noticeable fraction of solves"* — **overstates it**. The accurate statement is: `cg2` is
+fully functional on farc and delivers its designed wire saving, but suffers a **rare hard
+breakdown** (~2 % of solves here) that the armed fallback catches. That is a robustness
+defect worth taking seriously — a solver that needs a safety net is not a default — but it is
+categorically different from "does not converge on farc".
+
+⚠️ **Rate discrepancy, unexplained:** this run gives 1/60 = 1.7 %, while the 300-step A/B
+runs gave ~20/300 = 6.7 % at the same np32. The A/B runs cover later model time (300 steps vs
+60), so the rate may not be stationary. Not yet measured; do not quote a single "farc fallback
+rate" until it is.
+
+*(The pre-registered criterion is 0 firings, so the retracted A/B timings stay retracted
+regardless — 1 fallback still makes a leg a mixture.)*
+
 ### The guard is a heuristic, and it fires mid-solve
 
 ```c
