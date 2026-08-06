@@ -487,14 +487,21 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 
 ### Task 8c: pcsi tuning + A/B
 
-- [ ] lab tuning campaign: margins × check-interval × Lanczos-m on all three meshes' dumps
-      (CORE2 on login; dars/NG5 replays as cheap SLURM jobs); zstar drift check on the two
-      6-months-apart CORE2 dumps (R3) — **`FESOM_PCSI_REEIG` is built ONLY if this check shows
-      the bounds move**
+- [~] lab tuning: ⭐ **R3 zstar drift check DONE and CLOSED** — over 180 simulated days the
+      spectrum moves **<0.1 %** (θmin 0.067 %, θmax 0.071 %, κ identical to 4 s.f.) against
+      10 %/5 % margins ⇒ **`FESOM_PCSI_REEIG` stays UNBUILT on evidence**. ⭐ check-interval
+      axis also SETTLED early by the A/B: K=5 vs K=10 indistinguishable (0.3963 s/step both at
+      16N) ⇒ keep K=5, drop that sweep. REMAINING: margins × Lanczos-m on the dars/NG5 dumps.
+      ➕ found: the symmetrisation is APPROXIMATE under zstar (defect 7e-3 vs 2.5e-13 linfs —
+      frozen pr scaled by a drifting diag(A)); non-growing, 100× better than as-built, on the
+      T12 watch list
 - [ ] R4 promotion gate: one in-model 20-step gate reproduces lab iters/solve within ±10 %
       before any tuned constant becomes a default
-- [ ] pre-register + A/B: NG5 4N/16N + dars g8n vs cg2 (iters↑ vs sync↓ — the wager measured);
-      harvest incl. µs/iteration
+- [x] A/B harvested (26723692/93): ⭐ **the wager PAYS — pcsi is the fastest solver at NG5 16N
+      (−6.40 % vs plain PCG; cg2 −5.75 %, pipecg −5.84 %) while taking +6.8 % MORE iterations,
+      i.e. µs/iteration −12.3 %** (5508.7 → 4828.8). "iters↑ vs sync↓" resolved in favour of
+      sync↓ at scale. 4N: −1.01 % (the lever is scale-dependent, as designed). dars rung still
+      to run
 - [ ] ➕ opportunistic: `FESOM_CGPOLY_KAPPA=auto` — feed measured λmin/λmax into CGPOLY in
       place of the assumed κ=30 (lab first; ships only if it helps iterations)
 
