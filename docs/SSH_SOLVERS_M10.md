@@ -1341,6 +1341,56 @@ v/core — inside the 300–500 scaling range), four legs each,
 `FESOM_SSH_STALL_WINDOW=200` on every variant leg, binary pinned. `fallbacks=` is harvested
 per leg and must read 0 for these rows to count.
 
+#### ⭐⭐⭐ RECOVERED — farc CPU 2048 is the BEST CPU result in the campaign (26741204)
+
+16 nodes, 2048 ranks, **312 vertices/core — inside the 300–500 scaling range**, dt 900,
+300 steps, min-of-2, one allocation. **`fallbacks=0` on all four legs.**
+
+| leg | s/step | d_total | SSH ms/step | d_SSH | SSH% | iters/solve | ms/iter |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `cg` | 0.0821 | +0.00 % | 18.72 | +0.00 % | 22.8 | 211.80 | 0.089 |
+| `cg2` | 0.0739 | **−9.99 %** | 13.01 | −30.52 % | 17.6 | 210.82 | 0.062 |
+| **`oati`** | **0.0712** | **−13.28 %** | **10.18** | **−45.61 %** | 14.3 | 211.27 | 0.048 |
+| `pcsi` | 0.0724 | −11.81 % | 11.37 | −39.28 % | 15.7 | 376.43 | 0.030 |
+
+**Iteration parity holds at scale** — 210.82 / 211.27 against `cg`'s 211.80 — which is the
+independent confirmation that the guard, not the mathematics, was the farc problem.
+
+🔴 **This falsifies the ledger's own crossover rule.** "CPU — only when the per-rank problem
+is small. Wins on CORE2 …; loses on farc/dars/NG5" is **wrong for farc**: at its real
+operating point farc is a *bigger* CPU win than CORE2's production configuration
+(`oati` −13.3 % vs −5.3 %). **Two independent errors compounded** to produce the old verdict:
+
+1. farc CPU was measured at 64/128 ranks = 9 974/4 987 vertices/core, 10–30× coarser than
+   its operating range, where the SSH share is 3–4 % of the step and nothing can matter. At
+   2048 ranks the share is **22.8 %**.
+2. Every farc row that *was* in range got voided by the guard's false positives.
+
+Neither error was visible from inside the affected rows — the first needed the scaling-range
+audit, the second needed running past the abort point.
+
+⚠️ **A ~2.9 pp common-mode gap is NOT yet accounted for (L88).** Whole-step saving vs the
+solver's own accounted saving:
+
+| leg | whole-step saved | solver accounts | unaccounted |
+|---|--:|--:|--:|
+| `cg2` | 8.20 ms | 5.71 ms | **2.49 ms (3.0 pp)** |
+| `oati` | 10.90 ms | 8.54 ms | **2.36 ms (2.9 pp)** |
+| `pcsi` | 9.70 ms | 7.35 ms | **2.35 ms (2.9 pp)** |
+
+The gap is near-identical across three different solvers, so it is **systematic, not noise**.
+Candidates: a first-leg warm-up penalty on the baseline (its rep spread is 1.3 % against the
+variants' 0.4 %), or a real secondary benefit (less network contention speeding other phases).
+**Control in flight — 26741360 runs the legs in REVERSED order with a repeated `cg` leg last**;
+if `cg`-last beats `cg`-first in the same allocation, the gap is an ordering artefact and the
+defensible whole-step figures are the solver-accounted ones (`cg2` −7.0 %, `oati` −10.4 %,
+`pcsi` −8.9 %). **Until that lands, quote `d_SSH` — which is directly measured — and treat
+`d_total` as an upper bound.**
+
+*(`--sym-check` on the same farc system: `pr_values` defect ratio **0.741**, the worst of the
+three meshes measured — CORE2 0.638, dars 0.616. Consistent with farc being hardest for the
+CG-CG family, though `SYMPRE=1` neutralises it in practice.)*
+
 ### The in-model trace that misled (job 26740651) — the first 107 iterations only
 
 farc np32, `cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
