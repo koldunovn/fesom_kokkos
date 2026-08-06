@@ -1415,9 +1415,14 @@ regenerated *2D-only* partition is +4.18 % against the shipped one on GPU, versu
 CPU. **Any regenerated decomposition must be measured on GPU before use, not merely checked
 for balance.**
 
-**5. Partition-marginal instability is real (L99 again).** A regenerated 2D-only `dist_128`
-made baseline CG diverge at iteration 1 (`residual=5.49698e+45`) where the shipped and
-dual-weighted partitions at the same rank count both ran clean.
+**5. Some partitions simply do not work — this is known FESOM behaviour, not a port defect
+(user, 2026-08-06; L99 again).** A regenerated 2D-only `dist_128` made baseline CG diverge at
+iteration 1 (`residual=5.49698e+45`) where the shipped and dual-weighted partitions at the
+same rank count both ran clean. **Do not debug this.** A freshly generated decomposition can
+be unusable for reasons that have nothing to do with the port, so the rule is operational, not
+diagnostic: **smoke-test every new partition for a few steps before it is used for anything,
+and discard the ones that fail.** Budget for a fraction of generated partitions being thrown
+away.
 
 **VERDICT — the partition track is CLOSED.** The imbalance is genuine and worth ~6 ms of a
 45 ms step, but vertex weighting trades a 1.2–1.5× compute spread for a ~90× worse cut and
