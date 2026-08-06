@@ -794,7 +794,69 @@ point would need a partition beyond 864, which does not exist for this mesh.
 NG5 CPU **re-submitted at 1024 ranks** (the 256-rank attempt was cancelled during init —
 7.4 M nodes is too tight there, job 26733444 void, replacement 26733926).
 
-## ⭐⭐⭐ THE PRACTICAL RESULT — CORE2 at 512 CPU ranks (the production configuration)
+## ⭐⭐⭐ THE CROSSOVER MAP (F5) — where to use these solvers, and where not to
+
+Every completed rung, both backends, `FESOM_SPEED=1` on all legs. `d_SSH` = the solver's own
+speed-up, `d_tot` = whole-step. WIN = `d_tot` better than −2 %.
+
+| mesh | backend | ranks | nodes/rank | SSH% | best `d_SSH` | best `d_tot` | |
+|---|---|--:|--:|--:|--:|--:|---|
+| CORE2 | **GPU** | 4 (1 node) | 31714 | 24.3 | −17.3 | **−5.19** | WIN |
+| CORE2 | **GPU** | 8 | 15857 | 25.7 | −19.2 | **−5.65** | WIN |
+| CORE2 | **GPU** | 16 | 7928 | 27.4 | −18.3 | **−5.18** | WIN |
+| CORE2 | **GPU** | 64 | 1982 | 30.5 | −20.5 | **−6.73** | WIN |
+| farc | **GPU** | 16 | 39899 | 36.5 | −12.4 | **−5.12** | WIN |
+| farc | **GPU** | 32 | 19949 | 37.6 | −14.7 | **−6.81** | WIN |
+| NG5 | **GPU** | 16 / 64 | 462680 / 115670 | 8.5 | −19.6 | **−2.32** | WIN |
+| dars | GPU | 32 | 98760 | 5.7 | +4.6 | −0.64 | marginal |
+| CORE2 | CPU | 864 | 146 | 18.9 | −58.6 | **−13.10** | WIN |
+| **CORE2** | **CPU** | **512** | **247** | 9.9 | **−60.2** | **−6.30** | **WIN (production)** |
+| CORE2 | CPU | 432 | 293 | 9.4 | −53.9 | **−5.74** | WIN |
+| CORE2 | CPU | 256 | 495 | 4.4 | −41.9 | −1.71 | marginal |
+| CORE2 | CPU | 128 | 991 | 2.5 | −16.6 | −0.72 | marginal |
+| NG5 | CPU | 2048 | 3614 | 1.6 | +5.8 | −0.42 | ❌ LOSE |
+| dars | CPU | 1024 | 3086 | 0.8 | **+149.6** | −0.18 | ❌ LOSE |
+| farc | CPU | 128 | 4987 | 4.3 | +9.5 | +0.21 | ❌ LOSE |
+| dars | CPU | 512 | 6172 | 0.8 | **+77.2** | **+1.25** | ❌ LOSE |
+| NG5 | CPU | 1024 | 7229 | 1.1 | +26.8 | −0.38 | ❌ LOSE |
+| farc | CPU | 64 | 9974 | 3.3 | +12.7 | +0.47 | ❌ LOSE |
+
+### The rule that falls out
+
+**The split is by BACKEND, not by mesh size** (sorting the table by nodes/rank does *not*
+separate the wins from the losses; sorting by backend does):
+
+- **GPU — use them essentially everywhere.** Every GPU rung measured wins, from 1 node to 16,
+  on three meshes. The reason is visible in the SSH% column: on GPU the solve is **8–38 % of
+  the step** because the GPU makes the local compute fast while the solve stays latency-bound.
+  Even NG5 at 462 680 nodes/rank wins.
+- **CPU — only when the per-rank problem is small.** Wins on CORE2 at ≲1000 nodes/rank; loses
+  on farc/dars/NG5, where per-rank data is 3000–10 000 nodes. There the SSH solve is only
+  0.8–4 % of the step *and* the variants make the solve itself **slower** (dars 512 ranks:
+  +77 %; dars 1024: +150 %).
+
+**Why the CPU losses.** The variants trade reductions for vector work and keep more vectors
+live (`cg2` 5, `pipecg`/`oati` 9, vs baseline 4). With ~250 nodes/rank those vectors sit in
+cache and only latency matters — the trade is excellent. With 6000+ nodes/rank the extra
+passes are memory-bandwidth-bound and cost more than the saved synchronisation. On GPU the
+bandwidth is ~an order of magnitude higher, so the extra passes stay cheap and the trade wins
+regardless of per-rank size. *(Mechanism inferred from the measurements, not separately
+instrumented — a bandwidth/cache counter run would confirm it.)*
+
+⚠️ The CPU losses are mostly small in whole-step terms (−0.4 % … +1.25 %) precisely because
+the SSH share is tiny there — but **dars at 512 CPU ranks is a genuine +1.25 % regression**,
+so this is a real "do not enable", not just "no benefit".
+
+### ✅ farc at ≥128 ranks does NOT hang with our environment
+
+The inherited caveat ("farc ≥128 ranks = reproducible proto hang") was **over-general**. The
+M7 finding was specific to the `UCX_PROTO_ENABLE=y` env-package leg; the standard-env legs ran
+clean on the same allocations. Our jobs never set `UCX_PROTO_ENABLE`. Probe job **26735924**
+ran farc at **128 CPU ranks** to completion (0.9480 s/step, 231.65 iters/solve, no hang). The
+GPU probe at 128 ranks (26735925) is still queued. **Corrected caveat: do not set
+`UCX_PROTO_ENABLE=y` on farc at ≥128 ranks — the rank count itself is fine.**
+
+## ⭐ THE PRACTICAL RESULT — CORE2 at 512 CPU ranks (the production configuration)
 
 **This is the number that matters.** CORE2 on 512 CPU ranks is the production setup; everything
 below 300 nodes/rank was previously reported here in terms of large percentages at rank counts
@@ -900,8 +962,13 @@ straight onto the certified curve and the 7.4 % offset would have been read as p
 |--:|--:|--:|--:|--:|--:|--:|--:|
 | 864 | 146 | 21.3 | 0.0467 | 100.0 | −7.49 | −9.85 | **−11.78** |
 | 1024 | 123 | 21.8 | 0.0410 | 96.1 | −6.34 | −10.73 | **−12.68** |
-| ~~1536~~ | 82 | — | — | — | — | — | ❌ **VOID — re-running** |
-| ~~2048~~ | 61 | — | — | — | — | — | ❌ **VOID — re-running** |
+| 1536 | 82 | 26.6 | 0.0408 | 64.4 | −8.09 | −12.25 | **−13.48** |
+| **2048** | **61** | **29.9** | 0.0356 | 55.4 | −9.55 | −14.04 | **−16.57** |
+
+*(1536/2048 RE-MEASURED cleanly as jobs 26735610/26735611 after the tag-collision retraction
+below; the replacements agree with the contaminated values to ~1–2 pp, so the retracted run
+was wrong in provenance rather than wildly wrong in value — but it is the clean pair that is
+quoted.)*
 
 > ### ❌ DATA-INTEGRITY RETRACTION (found 2026-08-06, before the numbers were used)
 >
