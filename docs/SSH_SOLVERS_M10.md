@@ -705,17 +705,51 @@ are relative to the 128-rank rung of each leg:
 | 512 | 247 | 9.9 | 0.0587 | 3.33 | 83.3 | 0.0550 | 3.53 | 88.2 | +5.0 pp |
 | **864** | **146** | **18.9** | 0.0435 | 4.49 | **66.6** | **0.0378** | **5.13** | **76.1** | **+9.5 pp** |
 
-Three ways of reading the same measurement:
+**ALL FOUR legs ran at every rung** — parallel efficiency, each leg against its own 128-rank
+point (an earlier draft of this section showed only `baseline` vs `pcsi`, which oversold
+`pcsi` and hid how close `oati` runs):
 
-1. **Parallel efficiency at the top rung goes from 66.6 % to 76.1 % — a 9.5-point recovery**,
-   and the gain grows monotonically with rank count (+0.9 → +4.7 → +5.0 → +9.5 pp).
-2. **The best achievable step time on this mesh improves by 13.1 %** (0.0435 → 0.0378 s/step).
-   The baseline cannot reach 0.0378 at *any* rank count in the available range — CORE2 has no
-   partition beyond 864 — so this is not "the same performance sooner", it is performance the
-   mesh could not previously reach at all.
-3. **`pcsi` at 864 ranks carries the SSH burden the baseline had at 512** (3.40 ms / 9.0 % of
-   step, versus baseline 5.81 ms / 9.9 %) — i.e. roughly **1.7 rungs of scaling headroom given
-   back** on the axis that was consuming it.
+| ranks | baseline | `cg2` | `oati` | `pcsi` |
+|--:|--:|--:|--:|--:|
+| 128 | 100.0 | 100.0 | 100.0 | 100.0 |
+| 256 | 93.1 | 93.9 | 93.6 | 94.0 |
+| 432 | 87.5 | 90.4 | 91.8 | 92.2 |
+| 512 | 83.3 | 86.5 | 87.5 | 88.2 |
+| **864** | **66.6** | **71.8** | **74.9** | **76.1** |
+
+| ranks | `cg2` d_total | `oati` d_total | `pcsi` d_total | `cg2` d_SSH | `oati` d_SSH | `pcsi` d_SSH |
+|--:|--:|--:|--:|--:|--:|--:|
+| 128 | −0.31 | −0.46 | −0.72 | −8.3 | −8.4 | −16.6 |
+| 256 | −1.14 | −1.05 | −1.71 | −23.6 | −25.8 | −41.9 |
+| 432 | −3.47 | −5.14 | −5.74 | −29.1 | −43.5 | −53.9 |
+| 512 | −4.09 | −5.28 | −6.30 | −34.1 | −47.4 | −60.2 |
+| **864** | **−7.59** | **−11.49** | **−13.10** | −33.0 | −49.9 | −58.6 |
+
+Best achievable step time on this mesh: baseline 0.0435 · `cg2` 0.0402 (−7.6 %) · `oati`
+0.0385 (−11.5 %) · `pcsi` 0.0378 (−13.1 %).
+
+Four readings:
+
+1. **Every solver recovers efficiency, and they rank consistently at every rung**
+   (`pcsi` > `oati` > `cg2` > baseline). At 864: 76.1 / 74.9 / 71.8 / 66.6 % — so even the
+   most conservative option, `cg2`, returns 5.2 points.
+2. **`oati` is within 1.6 pp of `pcsi` and 1.6 % of it in step time** (0.0385 vs 0.0378), while
+   `cg2` gives up about half the benefit. The gap between `oati` and `pcsi` is much smaller
+   than the gap between either and `cg2`.
+3. **The best achievable step time improves 13.1 %** (0.0435 → 0.0378). The baseline cannot
+   reach 0.0378 at *any* rank count available to it — CORE2 has no partition beyond 864 — so
+   this is performance the mesh could not previously reach, not the same performance sooner.
+4. **`pcsi` at 864 ranks carries the SSH burden the baseline had at 512** (3.40 ms / 9.0 % of
+   step vs 5.81 ms / 9.9 %) — roughly **1.7 rungs of scaling headroom returned**.
+
+> **Why this matters for the recommendation, and why it is NOT simply "use pcsi".** `pcsi`
+> wins here by a narrow margin over `oati`, but `pcsi` is also the solver that **fails on farc**
+> (`d_SSH` +30…+33 %, iterations 212 → 377) and **loses hardest on dars g8n** (+21 %), because
+> its iteration count depends on an eigenvalue estimate that can be poor. `oati` is Krylov —
+> its iteration count tracks `cg`'s on every mesh measured so far — and it is the **best GPU
+> solver** on the small-mesh rungs. On the evidence to date `oati` looks like the better
+> default and `pcsi` like the specialist that needs a per-mesh eigenbound check first. That
+> judgement is deferred to T11 pending the farc eigenbound investigation.
 
 ⚠️ Caveats kept with the number: the 864 rung packs 864 tasks over 7 nodes (~123/node) rather
 than filling them, so its *absolute* time is not perfectly comparable to the fully-packed
