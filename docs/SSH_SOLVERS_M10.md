@@ -466,8 +466,8 @@ the SAME binary, min-of-2 reps, 300 steps, `-C a100_80`, NG5 dt180. Harvest repo
 |---|---|---|---|
 | 26723631 | NG5 4N | legacy-cg · cg2 · pipecg | ✅ HARVESTED (below) |
 | 26723632 | NG5 16N | legacy-cg · cg2 · pipecg | ✅ HARVESTED (below) |
-| 26723692 | NG5 4N | legacy-cg · pcsi · pcsi K=10 | pcsi + its check-interval sensitivity |
-| 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ditto |
+| 26723692 | NG5 4N | legacy-cg · pcsi · pcsi K=10 | ✅ HARVESTED (below) |
+| 26723693 | NG5 16N | legacy-cg · pcsi · pcsi K=10 | ✅ HARVESTED (below) |
 | **26723783** | **NG5 4N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
 | **26723784** | **NG5 16N** | **SPEED=1 · +cg2 · +pipecg · +pcsi** | ⭐ **the number of record** |
 
@@ -513,8 +513,34 @@ negative**, and it carries a concrete portability claim: on a stack with real as
 progression (or with `MPI_THREAD_MULTIPLE` + a progress thread, out of scope here), `pipecg`
 should separate from `cg2`; here it cannot.
 
-⚠️ These legs run against LEGACY `cg` (all knobs cleared), while `cg2`/`pipecg` use the
-CGPIPE ring machinery internally — so part of the −5.75 % is the ring saving that
+### ⭐⭐ pcsi A/B (26723692 / 26723693) — the best solver at scale so far
+
+| rung | leg | s/step | Δ | iters/solve | µs/iteration |
+|---|---|--:|--:|--:|--:|
+| **NG5 4N** | legacy `cg` | 1.2226 | — | 76.87 | 15904.8 |
+| | `pcsi` (K=5) | 1.2102 | **−1.01 %** | 82.07 | 14745.9 |
+| | `pcsi` (K=10) | 1.2097 | −1.06 % | 82.07 | 14739.9 |
+| **NG5 16N** | legacy `cg` | 0.4234 | — | 76.86 | 5508.7 |
+| | `pcsi` (K=5) | 0.3963 | **−6.40 %** | 82.07 | **4828.8** |
+| | `pcsi` (K=10) | 0.3963 | −6.40 % | 82.07 | 4828.8 |
+
+**`pcsi` wins at 16N: −6.40 %, ahead of `cg2` (−5.75 %) and `pipecg` (−5.84 %) — and it wins
+while doing MORE work.** It takes 82.07 iterations against `cg`'s 76.86 (+6.8 %), so the
+per-iteration cost falls by **−12.3 %** (5508.7 → 4828.8 µs/iteration) — a bigger drop than
+any other solver, and exactly what a method that removes ~89 % of the blocking reductions
+should show. This is the crossover claim's core evidence in its cleanest form: **more
+iterations, less time**, because the iterations are cheaper on the axis that dominates at
+scale. The Chebyshev wager pays.
+
+**⭐ Tuning result for T8c, already settled: `FESOM_PCSI_CHECK` does not matter.** K=5 and
+K=10 are indistinguishable at both rungs (0.3963 vs 0.3963 at 16N; 1.2102 vs 1.2097 at 4N,
+inside noise) and give the same iteration count (82.07). At K=5 the residual check is already
+off the critical path, so there is nothing to buy by checking less often — **keep the safer
+K=5 default**, and T8c's check-interval sweep can be dropped in favour of the margin and
+Lanczos-m axes.
+
+⚠️ All six legs above run against LEGACY `cg` (all knobs cleared), while the M10 solvers use
+the CGPIPE ring machinery internally — so part of each Δ is the ring saving that
 `FESOM_SPEED=1` already ships in production. Jobs 26723783/84/867 isolate the solver's own
 contribution and are the numbers of record.
 
