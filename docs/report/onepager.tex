@@ -44,16 +44,23 @@ appropriate to a sea-ice scheme.
 \begin{center}\small
 \begin{tabular}{@{}llrrrr@{}}
 \toprule
-& & \multicolumn{2}{c}{\textbf{GPU}} & \multicolumn{2}{c}{\textbf{CPU, at scale}} \\
+& & \multicolumn{2}{c}{\textbf{GPU}} & \multicolumn{2}{c}{\textbf{CPU}} \\
 \cmidrule(lr){3-4}\cmidrule(lr){5-6}
 & & ice cost & model step & ice cost & model step \\
 \midrule
+delayed exchange & $K$=2 & $-32$ to $-39\%$ & $-8.3$ to $-9.3\%$ & $-2$ to $-18\%$ & $-0.1$ to $-2.9\%$ \\
 delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%$ & $-0.3$ to $-3.6\%$ \\
+wide halo, exact & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
 wide halo, exact & $K$=8 & $-12$ to $-19\%$ & $-2$ to $-7\%$ & \multicolumn{2}{c}{never profitable} \\
 divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+GPU ranges span the four meshes, each at the node count where it still gains from more GPUs:
+CORE2 on 1 node (4 GPUs), fArc on 4, DARS on 8, NG5 on 16. CPU ranges span 128 to 2048 cores on
+CORE2 and fArc. $^\dagger$ one point only (DARS, 8 nodes); the wide halo at $K$=2 is a cost on
+fArc at 4 nodes and a saving at 16, so it needs the larger $K$.
 
 On CPU the saving grows with core count ($-5\%$ of the ice at 128 cores, $-25\%$ at 2048); on GPU it
 falls as each GPU holds more of the mesh ($-58\%$ at 32\,000 surface nodes per GPU, $-37\%$ at
@@ -63,40 +70,17 @@ than by arithmetic or memory traffic, so removing element arrays removes work th
 paid for. Danilov's $\sim$20\% for the divergence form with its double halo corresponds to our
 $-19.1\%$ of the ice cost for the same combination (fArc, 16 GPU nodes).
 
-\hd{Imprint of the domain decomposition}
+\hd{Why the delayed exchange is not usable}
 
-Under the delayed exchange the stale values lie on the one-cell boundary of each sub-domain, and the
-decomposition is fixed for the run, so the same nodes are perturbed at every step. Measured on fArc,
-16 GPUs, 60 days with daily output: mean $|\Delta$ ice thickness$|$ on the boundary and in the
-interior.
-
-\begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
-\toprule
-& boundary & interior & \textbf{ratio} \\
-\midrule
-two identical runs (control) & 0.00105\,m & 0.00124\,m & \textbf{0.85} \\
-\textbf{wide halo, exact, $K$=8} & 0.00104 & 0.00120 & \textbf{0.87} \\
-delayed exchange, $K$=2 & 0.00432 & 0.00249 & \textbf{1.70} \\
-delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-The difference is concentrated on the boundary from the first day (ratio 3.1), remains so for two
-months, and appears on maps as a network of differences following the sub-domain edges. Halving the
-delay to $K$=2 reduces the ratio but does not remove it. The two exact configurations, which differ
-from the reference only in the order of summation, sit together at 0.85 and 0.87; that they do is
-what makes the measurement interpretable. An artificial polygonal structure in the ice field, in the
-shape of the domain decomposition, is not acceptable in a sea-ice model. Figure~4 of the full note
-gives the profiles and a map.
-
-The integral diagnostics do not show it. Over a year on CORE2 the ice concentration and thickness
-correlate with the reference at 0.999995 and 0.999994, within the spread between two independent
-implementations of mEVP, and hemispheric ice extent departs by 0.23\% of its seasonal amplitude. A
-feature one cell wide along sub-domain edges covers a small fraction of the mesh and leaves a
-domain-wide correlation near 0.99999. The accuracy protocol we had prepared would not have detected
-it.
+Under the delayed exchange the stale values lie on the one-cell boundary of each sub-domain, and
+the decomposition is fixed for the run, so the same nodes are perturbed at every step. On fArc with
+16 GPUs over 60 days, $|\Delta$ ice thickness$|$ averaged on those boundaries is 2.5 times its
+interior value at $K$=4 and 1.7 times at $K$=2, against 0.85 for two identical runs and 0.87 for
+the exact wide halo. The difference is concentrated there from the first day and appears on maps as
+a network following the sub-domain edges. A polygonal structure in the ice field, in the shape of
+the domain decomposition, is not acceptable in a sea-ice model, and that ends the matter --- the
+scheme's accuracy in the integral diagnostics is beside the point. Section~6.6 and Figure~4 of the
+full note give the profiles, the map and the controls.
 
 \hd{Recommendation}
 
