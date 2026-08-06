@@ -1391,6 +1391,78 @@ defensible whole-step figures are the solver-accounted ones (`cg2` −7.0 %, `oa
 three meshes measured — CORE2 0.638, dars 0.616. Consistent with farc being hardest for the
 CG-CG family, though `SYMPRE=1` neutralises it in practice.)*
 
+#### The other three recovered/new in-range CPU rungs — all `fallbacks=0`
+
+**farc 1024** (8 nodes, 623 v/core, guard widened) — 26741203:
+
+| leg | s/step | d_total | d_SSH | SSH% | iters |
+|---|--:|--:|--:|--:|--:|
+| `cg` | 0.1392 | — | — | 11.7 | 212.06 |
+| `cg2` | 0.1333 | −4.24 % | −23.06 % | 9.4 | 211.10 |
+| **`oati`** | **0.1314** | **−5.60 %** | −35.46 % | 8.0 | 211.66 |
+| `pcsi` | 0.1340 | −3.74 % | −19.37 % | 9.8 | 376.45 |
+
+**dars at its real scaling range for the first time** (`dars_bigpart`, own curve) — 26741040 /
+26741041. Note `FESOM_SSH_STALL_WINDOW` was NOT set on these legs and they still fired zero
+fallbacks: dars is well-conditioned (36 iters/solve against farc's 212), so the guard was
+never close to tripping.
+
+| rung | v/core | leg | s/step | d_total | d_SSH | SSH% |
+|---|--:|---|--:|--:|--:|--:|
+| **6144** (48 N) | 514 | `cg` | 0.1329 | — | — | 5.6 |
+| | | `cg2` | 0.1302 | −2.03 % | −10.78 % | 5.1 |
+| | | `oati` | 0.1289 | **−3.01 %** | −27.26 % | 4.2 |
+| | | `pcsi` | 0.1294 | −2.63 % | −20.02 % | 4.6 |
+| **8192** (64 N) | 385 | `cg` | 0.1014 | — | — | 6.4 |
+| | | `cg2` | 0.0988 | −2.56 % | −4.09 % | 6.3 |
+| | | `oati` | 0.0974 | −3.94 % | −23.46 % | 5.1 |
+| | | `pcsi` | 0.0973 | **−4.04 %** | −20.54 % | 5.3 |
+
+**dars is a win too, not the +1.25 % regression recorded at 512 ranks** — same story as farc:
+the old row sat at 6 172 v/core where SSH is 0.8 % of the step. But the win is modest (3–4 %)
+because even in range dars's SSH share is only 5–6 %: it needs 36 iterations per solve, so the
+solve is cheap relative to the step. **The SSH share, not the vertices/core, is what predicts
+the payoff** — farc at 312 v/core has a 22.8 % share and wins 3× harder than dars at 385.
+
+### 🔴🔴 SUSPECTED CONTAMINATION CLASS 5 — a systematic offset favouring LATER legs
+
+**Do not quote any `d_total` from this campaign until this is resolved.** Across every CPU
+rung, the whole-step saving exceeds what the solver's own timer accounts for, in the same
+direction, by a similar fraction of the step:
+
+| rung | step | unaccounted (`cg2`/`oati`/`pcsi`) | as % of step | as % of the claimed win |
+|---|--:|--:|--:|--:|
+| CORE2 432 | 66.2 ms | 0.49 / 0.70 / 0.45 ms | 0.7–1.1 % | 21 / 21 / 12 % |
+| CORE2 864 | 43.5 ms | 0.59 / 0.90 / 0.88 ms | 1.4–2.1 % | 18 / 18 / 15 % |
+| farc 1024 | 139.2 ms | 2.14 / 2.02 / 2.04 ms | 1.5 % | 36 / 26 / 39 % |
+| farc 2048 | 82.1 ms | 2.49 / 2.36 / 2.35 ms | 2.9 % | 30 / 22 / 24 % |
+| dars 6144 | 132.9 ms | 1.90 / 1.97 / 2.01 ms | 1.5 % | **70 / 49 / 57 %** |
+| dars 8192 | 101.4 ms | 2.33 / 2.48 / 2.77 ms | 2.5 % | **90 / 62 / 68 %** |
+
+On dars 8192 the solver accounts for **0.27 ms of `cg2`'s 2.60 ms** whole-step saving — 90 %
+of that headline number is unexplained. The offset is present for three different solvers with
+very different `d_SSH`, which rules out a solver-specific cause and points at the *protocol*:
+the baseline leg always runs FIRST, and its rep-to-rep spread is consistently wider (1.3 % vs
+the variants' 0.4 %), which is what a first-leg warm-up looks like.
+
+**It is not simply "later is faster", though** — the old out-of-range `lad_dars_c512` row has
+the variants *slower* by 9.76 ms beyond what the solver explains. At a 1.546 s step that is
+0.6 %, i.e. within run-to-run drift. So the honest description is **a ~1–3 % systematic
+uncertainty on `d_total` that the protocol does not currently control**, not a proven warm-up
+bias.
+
+**Control in flight (26741360):** farc 2048, legs REVERSED (`oati`, `cg2`, `cg`, `cg`) with
+the baseline repeated last. The `cg`-first vs `cg`-last difference in one allocation measures
+the offset directly. Until it lands:
+
+- **`d_SSH` is directly measured and stands** — it is the number that says whether the method
+  works, and it is large and unambiguous (`oati` −23 to −50 % everywhere in range).
+- **`d_total` should be read as an upper bound.** The solver-accounted whole-step figures for
+  farc 2048 are `cg2` −7.0 %, `oati` −10.4 %, `pcsi` −8.9 %; for dars 8192, `cg2` −0.3 %,
+  `oati` −1.5 %, `pcsi` −1.3 %.
+- ⚠️ **This reaches the campaign headline.** CORE2 512's *"`pcsi` −6.30 % whole-step"* carries
+  the same unquantified offset and must be re-derived once the control lands.
+
 ### The in-model trace that misled (job 26740651) — the first 107 iterations only
 
 farc np32, `cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
