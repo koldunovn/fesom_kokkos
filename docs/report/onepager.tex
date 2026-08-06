@@ -21,96 +21,98 @@
 
 \vspace{0.4em}\hrule\vspace{0.5em}
 
-\hd{Three ways of exchanging the halo less often}
+\hd{The scheme, and the two ways of writing it}
 
 mEVP advances the ice momentum in 120 sub-cycles per model time step, and the ice-velocity halo is
-at present exchanged after each of them. We implemented and measured three alternatives.
+at present exchanged after each of them. The \emph{wide halo} (Danilov) exchanges every $K$-th
+sub-cycle instead and recomputes a $K$-deep ring of ghost cells in between, so that no value is
+ever stale and the every-sub-cycle trajectory is reproduced exactly. The \emph{divergence form}
+(Danilov) carries $\nabla\!\cdot\!\sigma$ at nodes rather than $\sigma$ at elements, which halves
+the message the wide halo has to send.
 
-\emph{Delayed exchange} --- exchange every $K$-th sub-cycle and accept a halo up to $K-1$ sub-cycles
-old. This is the largest saving of the three, but it leaves the sub-domain boundaries visible in the
-ice field. \emph{Wide halo} (Danilov) --- exchange every $K$-th sub-cycle, and recompute a $K$-deep
-ring of ghost cells in between so that no value is stale; the result reproduces the every-sub-cycle
-trajectory bit for bit. \emph{Divergence form} (Danilov) --- carry $\nabla\!\cdot\!\sigma$ at nodes
-rather than $\sigma$ at elements; it agrees with $\nabla\!\cdot\!\sigma$ to $10^{-15}$ relative,
-and its effect on run time differs between the two backends.
+The ring computation can be written two ways, and this turned out to matter more than either
+proposal: as \textbf{ring kernels} of its own, or as a \textbf{widening of the loops that already
+exist}. Both compute the same ring and put identical traffic on the wire.
 
 \hd{Cost, measured against the model step and against the ice}
 
-Each number is given twice. Sea ice is 5 to 13\% of a CPU model step, so an ice-only change is
-divided by about ten before it reaches the step, and the share of the ice cost (ice, ice dynamics
-and ice advection, computation together with time spent waiting for communication) is the measure
-appropriate to a sea-ice scheme.
+Sea ice is 5 to 13\% of a model step, so an ice-only change is divided by about ten before it
+reaches the step. The share of the \emph{ice cost} --- ice, ice dynamics and ice advection,
+computation together with time spent waiting for communication --- is the measure appropriate to a
+sea-ice scheme, and is what the table gives.
 
 \begin{center}\small
-\begin{tabular}{@{}llrrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-& & \multicolumn{2}{c}{\textbf{GPU}} & \multicolumn{2}{c}{\textbf{CPU}} \\
-\cmidrule(lr){3-4}\cmidrule(lr){5-6}
-& & ice cost & model step & ice cost & model step \\
+change of the sea-ice cost at $K$=8 & CORE2 & fArc & DARS & NG5 \\
+each mesh at its operating point & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
 \midrule
-delayed exchange & $K$=2 & $-32$ to $-39\%$ & $-8.3$ to $-9.3\%$ & $-2$ to $-18\%$ & $-0.1$ to $-2.9\%$ \\
-delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%$ & $-0.3$ to $-3.6\%$ \\
-wide halo, standard form & $K$=8 & $-11$ to $-24\%$ & $-2.2$ to $-5.7\%$ & \multicolumn{2}{c}{never profitable} \\
-wide halo, divergence form & $K$=8 & $+5$ to $-29\%$ & $+0.2$ to $-6.8\%$ & \multicolumn{2}{c}{never profitable} \\
-wide halo, either form & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
-\textbf{wide halo written as widened loops} & $K$=8 & $\mathbf{-37}$ \textbf{to} $\mathbf{-58\%}$\,$^\ddagger$ & $\mathbf{-7.8}$ \textbf{to} $\mathbf{-14.4\%}$ & \multicolumn{2}{c}{not profitable} \\
-divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
+reference: sea-ice cost per step                   & 15.8\,ms & 26.1\,ms & 43.3\,ms & --- \\
+wide halo, standard form, ring kernels             & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ & --- \\
+wide halo, divergence form, ring kernels           & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ & --- \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ & --- \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ & --- \\
+\midrule
+best widened-loop row, as a share of the model step & $-14.4\%$ & $-9.6\%$ & $-12.7\%$ & $-6.8\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-GPU ranges span the meshes at the node count where each still gains from more GPUs: CORE2 on 1 node
-(4 GPUs), fArc on 4, DARS on 8, NG5 on 16 --- the wide-halo rows cover the first three, NG5 being
-still in the queue. CPU ranges span 128 to 2048 cores on CORE2 and fArc. $^\dagger$ one point only
-(DARS, 8 nodes); at $K$=2 the wide halo is a cost on fArc at 4 nodes and a saving at 16, so it
-needs the larger $K$. $^\ddagger$ CORE2, fArc and DARS; NG5 still in the queue. The range spans
-the meshes and the two forms, the divergence form leading at all three.
+NG5's instrumented run is still in the queue; its model step is measured and behaves like the
+others. On CPU the wide halo is not profitable in either writing, at any of the three core counts
+tried --- it at least doubles the ice cost there. The divergence form \emph{on its own}, without a
+wide halo, costs 2 to 17\% of the ice on GPU and saves 2 to 8.5\% on CPU at large core counts.
 
-On CPU the saving grows with core count ($-5\%$ of the ice at 128 cores, $-25\%$ at 2048); on GPU it
-falls as each GPU holds more of the mesh ($-58\%$ at 32\,000 surface nodes per GPU, $-37\%$ at
-460\,000). The divergence form removes 2 to 8.5\% of the ice cost from 512 cores upward, and is
-invisible in the model step only because of the denominator. On GPU it costs, because the sub-cycle there is limited by how often work is dispatched to the device rather
-than by arithmetic or memory traffic, so removing element arrays removes work that was not being
-paid for. Danilov's $\sim$20\% for the divergence form with its double halo corresponds to our
-$-19.1\%$ of the ice cost for the same combination (fArc, 16 GPU nodes).
+\hd{The one number behind the table}
 
-\hd{Why the delayed exchange is not usable}
+Our ring kernels add \textbf{362 GPU kernel launches per model step}, each on a slower launch path
+than the owned kernel it duplicates, because their argument lists cross a threshold in Kokkos above
+which arguments are staged through constant memory. The gap between consecutive launches is
+14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels; per step the ring kernels cost
+5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic. Folding them into the existing loops
+leaves 2 of the 362 on the slow path and takes the ice-dynamics region from 16.5 to 5.5\,ms per
+step. \textbf{Nothing moved on the wire}: each pair of rows above posts identical message and byte
+counts.
 
-Under the delayed exchange the stale values lie on the one-cell boundary of each sub-domain, and
-the decomposition is fixed for the run, so the same nodes are perturbed at every step. On fArc with
-16 GPUs over 60 days, $|\Delta$ ice thickness$|$ averaged on those boundaries is 2.5 times its
-interior value at $K$=4 and 1.7 times at $K$=2, against 0.85 for two identical runs and 0.87 for
-the exact wide halo. The difference is concentrated there from the first day and appears on maps as
-a network following the sub-domain edges. A polygonal structure in the ice field, in the shape of
-the domain decomposition, is not acceptable in a sea-ice model, and that ends the matter --- the
-scheme's accuracy in the integral diagnostics is beside the point. Section~6.6 and Figure~4 of the
-full note give the profiles, the map and the controls.
+\hd{Which form of the scheme is better depends on how the ring is written}
+
+With ring kernels the standard form leads by 13.3 points of ice cost on CORE2 and 3.8 on fArc, the
+divergence form leading only on DARS (4.2). With widened loops \textbf{the divergence form leads on
+all four meshes} --- 1.3, 6.5, 6.7 points and ahead on NG5 too --- and at every $K$ we tried. The
+launch structure was not creating the difference between the two forms; it was hiding it, and it
+fell hardest on the divergence form because its ring gather was the most expensive of the ring
+kernels.
+
+\hd{The accuracy price, and the test that replaces bit-identity}
+
+The ring-kernel writing is exact: it reproduces the every-sub-cycle trajectory bit for bit. The
+widened-loop writing gives that up, because a ring node is summed in the receiving process's
+element order rather than the owner's; after one step of 120 sub-cycles the ice velocity differs by
+8 to 15 units in the last place. In place of the bit check we hold it to a 60-day test of whether
+the domain decomposition becomes visible in the ice --- mean $|\Delta|$ on the one-cell sub-domain
+boundary against the interior, fArc on 16 GPUs:
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+boundary / interior ratio & two identical runs & ring kernels & \textbf{widened loops} \\
+\midrule
+ice thickness & 0.854 & 0.866 & \textbf{0.836} \\
+ice concentration & 0.831 & 0.817 & \textbf{0.796} \\
+ice velocity & 1.325 & 1.211 & \textbf{1.196} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+At or below its own control on every field. Each row carries its own control because the absolute
+ratio is a property of the field: two identical runs already score 1.33 on ice velocity.
 
 \hd{Recommendation}
 
-For production we would use the wide halo at $K$=8 on GPU, in the divergence form, written as a
-widening of the loops that already exist rather than as ring kernels of their own. That single
-change takes the saving from 10--28\% of the ice cost to 37--58\%, and it reverses which form is
-better: with ring kernels the standard form led on the two smaller meshes, with widened loops the
-divergence form leads on all three. Its cost is bit-identity: a ring node is summed in the
-receiving process's element order rather than the owner's, which after a time step moves the ice
-velocity by 8 to 15 units in the last place, and the 60-day decomposition test passes. Where
-bit-identity is required the kernel-per-ring version remains and removes 10 to 28\%. On CPU the
-wide halo is not profitable in either writing, on any mesh we tried.
-
-We do not regard the delayed exchange as usable: it places the domain decomposition in the ice
-field. We had also recorded that it saves about three times as much, and that is no longer true
---- in one allocation on CORE2 the widened-loop wide halo is identical to it in both currencies
-while leaving no imprint, and on fArc and DARS it closes about two thirds of the gap.
-
-The divergence form should be judged in two roles. On its own it costs 2 to 8\% of the ice on GPU
-and saves 2 to 8.5\% on CPU at large core counts. As the carrier of the wide halo, \textbf{how it
-compares with the standard form depends entirely on how the ring is written}, and this is the
-result that changed most. With ring kernels of their own it lost by 13 percentage points of ice
-cost on CORE2 and 4 on fArc and gained 4 on DARS. Written as widened loops it \textbf{leads on all
-three} --- by 1.3, 6.5 and 6.7 points, ordered by how much mesh each GPU holds, and at every $K$
-tried. The ring kernels were not measuring the reformulation; they were burying it under a launch
-cost that fell hardest on the divergence form, whose ring gather was the most expensive of them.
-NG5, at 116\,000 nodes per GPU, is queued and will test whether the ordering continues.
+For production, the wide halo at $K$=8 on GPU, in the divergence form, written as a widening of the
+loops that already exist. That removes 37 to 58\% of the sea-ice cost and 7 to 14\% of the whole
+model step, and its accuracy cost is last-bit. Where bit-identity is required the ring-kernel
+writing remains available and is exact, at 10 to 28\%. On CPU we would not use the wide halo at
+all.
 
 \end{document}
