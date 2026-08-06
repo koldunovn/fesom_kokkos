@@ -1,9 +1,10 @@
 # M10 — SSH solver track: ledger of record
 
-**Status:** ACTIVE — Task 1 (worktree + hygiene)
+**Status:** ACTIVE — T1–T8b COMPLETE (all four solvers implemented, gated, solution-classed;
+first A/B numbers harvested). T8c/T9–T13 open.
 **Plan of record:** `docs/plans/20260805-m10-ssh-solvers.md` (in-tree on this branch)
 **Branch:** `m10-ssh-solvers`, worktree `~/port_kokkos_ssh`
-**Derivations doc:** `docs/plans/20260805-m10-ssh-derivations.md` (Task 4, to be created)
+**Derivations doc:** `docs/plans/20260805-m10-ssh-derivations.md` (Layer-0 math + typo report T-1…T-9)
 **Work area:** `/work/ab0995/a270088/port2/m10/{bin,labdumps,gates,ab,figs}`
 
 Every number in this file carries its SLURM job id (or "login") and the binary md5/sha of
@@ -46,10 +47,10 @@ Every gate/A-B row: date · gate · job id · binary md5 (from the log — R9) �
 | 2026-08-06 | T1 base: knob-free serial 20-step CORE2 byte gate (worktree ROOT, HEAD f42c453) | 26722627 | `54433326…` (log also shows main-checkout `9743f602…` ≠ — R9 armed) | **PASS** diff_snap rc=0 |
 | 2026-08-06 | T2 knob-off byte gate on the [ssh-wire]+VERIFY instrumentation commit | 26722771 | `8f2be32b…` ≠ main `9743f602…` (R9) | **PASS** diff_snap rc=0 |
 | 2026-08-06 | T3 (R7) knob-off byte gate on the CMake OBJECT split + dump/trace/lab code | 26723005 | (in log) ≠ main (R9) | **PASS** diff_snap rc=0 |
-| 2026-08-06 | T5a knob-off byte gate on the dispatch + guard + sympre + cg2 commit | 26723543 | (in log) | *(pending)* |
-| 2026-08-06 | T5a explicit `FESOM_SSH_SOLVER=cg` byte gate (proves the default branch is the certified path) | 26723544 | (in log) | *(pending)* |
-| 2026-08-06 | T5b CUDA fidelity, `cg2` (CUDA vs Serial, same knobs) | 26723550 | (in log) | *(pending)* |
-| 2026-08-06 | T5b CUDA fidelity control, `cg` | 26723551 | (in log) | *(pending)* |
+| 2026-08-06 | T5a knob-off byte gate on the dispatch + guard + sympre + cg2 commit | 26723543 | (in log) | **PASS** diff_snap rc=0 |
+| 2026-08-06 | T5a explicit `FESOM_SSH_SOLVER=cg` byte gate (proves the default branch is the certified path) | 26723544 | (in log) | **PASS** diff_snap rc=0 |
+| 2026-08-06 | T5b CUDA fidelity, `cg2` (CUDA vs Serial, same knobs) | 26723550 | (in log) | **PASS** (identical iters; details below) |
+| 2026-08-06 | T5b CUDA fidelity control, `cg` | 26723551 | (in log) | **PASS** (the reference floors) |
 | 2026-08-06 | T5b options ×3 (TKE/mEVP/zstar) under `cg2` | 26723560 | (in log) | harvested (see below) |
 | 2026-08-06 | T6 knob-off byte gate (pipecg commit) | 26723615 | (in log) | **PASS** |
 | 2026-08-06 | T6 options ×3 under `pipecg` | 26723616 | (in log) | harvested — zstar all-pass |
