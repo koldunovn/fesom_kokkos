@@ -1,5 +1,5 @@
 # M10 discrepancy report — build with:  module load texlive/live2025-gcc-13.3.0 && make
-PDF = m10_typo_report.pdf m10_precond_note.pdf m10_interim_speedup.pdf m10_where_time_goes.pdf
+PDF = m10_typo_report.pdf m10_precond_note.pdf m10_interim_speedup.pdf m10_where_time_goes.pdf m10_load_balance.pdf
 all: $(PDF)
 %.pdf: %.tex
 	pdflatex -interaction=nonstopmode $< >/dev/null
