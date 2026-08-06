@@ -68,16 +68,19 @@ once per step against $120/K$ window exchanges. Removing them altogether therefo
 about 0.4 percentage points of the model step. On this evidence the field shipping is not what
 holds the scheme back.
 
-What we have not measured is the second half of exactness. Our ghost kernels reproduce the owner's
-summation order through a gather built for that purpose, and that runs every sub-cycle rather than
-once per step. It is the only place where a substantial gain could still be hiding, and we cannot
-bound it from the runs we have.
+What we have not measured is the second half. Our implementation performs the ring computation in
+kernels of its own --- two extra per sub-cycle in the classic form and three in the divergence
+form, so 240 to 360 more per model step --- whereas yours simply extends the bounds of the loops
+that already exist and adds none. Of the 8.2\,ms ice-dynamics phase we profiled, only 1.25\,ms is
+arithmetic, spread over some 480 launches per step, so that is where a substantial gain could still
+be hiding. We cannot bound it from the runs we have.
 
 \textbf{What we propose.} Building the variant you describe --- extend the computation over the
 ring, compute in the natural order, exchange velocities and stress divergence every $K$ sub-cycles
 and recompute everything else --- is a contained change to what already exists, and it answers your
 question with a number rather than an estimate. Since the ring computation is common to it and to
-our wide halo, we expect the difference between them to be the ordering machinery alone. We are
+our wide halo, the difference between them should be the launches and the ordering machinery, both
+of which your formulation avoids. We are
 happy to measure it, and to report the result whichever way it comes out.
 
 \vspace{0.5em}
