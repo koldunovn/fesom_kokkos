@@ -1,6 +1,7 @@
 # M10 — SSH solver track: communication-avoiding CG variants + P-CSI
 
-**Date:** 2026-08-05 · **Status:** IN PROGRESS — T1–T4 complete (2026-08-06); T5a underway.
+**Date:** 2026-08-05 · **Status:** T1–T8b COMPLETE + T8c partial (2026-08-06).
+**🔴 SESSION HANDOFF: `docs/plans/20260806-m10-HANDOFF.md` — read that FIRST.**
 **Base:** `f42c453` (= `65a1a71` + this plan commit) — deviation documented in `docs/SSH_SOLVERS_M10.md` §Provenance.
 **Branch:** `m10-ssh-solvers` in worktree `~/port_kokkos_ssh`, base `65a1a71` (= `m7-jupiter` tip = `main`)
 **Source material:** `ssh_sergey/` — Sergey Danilov's `solvers.F90` + three papers (gitignored, third-party)
