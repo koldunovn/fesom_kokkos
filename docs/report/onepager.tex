@@ -53,7 +53,7 @@ delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%
 wide halo, standard form & $K$=8 & $-11$ to $-24\%$ & $-2.2$ to $-5.7\%$ & \multicolumn{2}{c}{never profitable} \\
 wide halo, divergence form & $K$=8 & $+5$ to $-29\%$ & $+0.2$ to $-6.8\%$ & \multicolumn{2}{c}{never profitable} \\
 wide halo, either form & $K$=2 & $-15\%$\,$^\dagger$ & $+1.7$ to $-3.8\%$ & \multicolumn{2}{c}{never profitable} \\
-\textbf{wide halo written as widened loops} & $K$=8 & $\mathbf{-57}$ \textbf{to} $\mathbf{-59\%}$\,$^\ddagger$ & $\mathbf{-14.1}$ \textbf{to} $\mathbf{-14.4\%}$ & \multicolumn{2}{c}{not profitable} \\
+\textbf{wide halo written as widened loops} & $K$=8 & $\mathbf{-37}$ \textbf{to} $\mathbf{-58\%}$\,$^\ddagger$ & $\mathbf{-7.8}$ \textbf{to} $\mathbf{-14.4\%}$ & \multicolumn{2}{c}{not profitable} \\
 divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
 \bottomrule
 \end{tabular}
@@ -63,8 +63,8 @@ GPU ranges span the meshes at the node count where each still gains from more GP
 (4 GPUs), fArc on 4, DARS on 8, NG5 on 16 --- the wide-halo rows cover the first three, NG5 being
 still in the queue. CPU ranges span 128 to 2048 cores on CORE2 and fArc. $^\dagger$ one point only
 (DARS, 8 nodes); at $K$=2 the wide halo is a cost on fArc at 4 nodes and a saving at 16, so it
-needs the larger $K$. $^\ddagger$ CORE2 only so far; the two entries are the standard and
-divergence forms, which this variant makes almost identical.
+needs the larger $K$. $^\ddagger$ CORE2, fArc and DARS; NG5 still in the queue. The range spans
+the meshes and the two forms, the divergence form leading at all three.
 
 On CPU the saving grows with core count ($-5\%$ of the ice at 128 cores, $-25\%$ at 2048); on GPU it
 falls as each GPU holds more of the mesh ($-58\%$ at 32\,000 surface nodes per GPU, $-37\%$ at
@@ -88,26 +88,29 @@ full note give the profiles, the map and the controls.
 
 \hd{Recommendation}
 
-For production we would use the wide halo at $K$=8 on GPU, written as a widening of the loops that
-already exist rather than as ring kernels of their own. That single change takes the saving on
-CORE2 from 11\% of the ice cost to 57\% and makes the two forms of the scheme indistinguishable.
-Its cost is bit-identity: a ring node is summed in the receiving process's element order rather
-than the owner's, which after a time step moves the ice velocity by 8 to 15 units in the last
-place. Where bit-identity is required the kernel-per-ring version remains and removes 11 to 29\%.
-On CPU the wide halo is not profitable in either writing, on any mesh we tried.
+For production we would use the wide halo at $K$=8 on GPU, in the divergence form, written as a
+widening of the loops that already exist rather than as ring kernels of their own. That single
+change takes the saving from 10--28\% of the ice cost to 37--58\%, and it reverses which form is
+better: with ring kernels the standard form led on the two smaller meshes, with widened loops the
+divergence form leads on all three. Its cost is bit-identity: a ring node is summed in the
+receiving process's element order rather than the owner's, which after a time step moves the ice
+velocity by 8 to 15 units in the last place, and the 60-day decomposition test passes. Where
+bit-identity is required the kernel-per-ring version remains and removes 10 to 28\%. On CPU the
+wide halo is not profitable in either writing, on any mesh we tried.
 
 We do not regard the delayed exchange as usable: it places the domain decomposition in the ice
 field. We had also recorded that it saves about three times as much, and that is no longer true
---- in one allocation on CORE2 the widened-loop wide halo matches it on the model step and is
-1.5\% ahead on the ice cost, while leaving no imprint.
+--- in one allocation on CORE2 the widened-loop wide halo is identical to it in both currencies
+while leaving no imprint, and on fArc and DARS it closes about two thirds of the gap.
 
 The divergence form should be judged in two roles. On its own it costs 2 to 8\% of the ice on GPU
-and saves 2 to 8.5\% on CPU at large core counts. As the carrier of the wide halo it is the better
-of the two forms wherever each GPU holds enough of the mesh: against the classic form it loses by
-17 percentage points on CORE2 at 32\,000 surface nodes per GPU, loses by 4 on fArc at 40\,000, and
-\textbf{gains 5 on DARS at 99\,000} --- the mesh on which the wide halo pays most, and the
-configuration closest to the ones we would run. Everything sub-cycled is then a node quantity, and
-the halved message is what buys this. NG5, at 116\,000 nodes per GPU, is queued and will test
-whether the trend continues.
+and saves 2 to 8.5\% on CPU at large core counts. As the carrier of the wide halo, \textbf{how it
+compares with the standard form depends entirely on how the ring is written}, and this is the
+result that changed most. With ring kernels of their own it lost by 13 percentage points of ice
+cost on CORE2 and 4 on fArc and gained 4 on DARS. Written as widened loops it \textbf{leads on all
+three} --- by 1.3, 6.5 and 6.7 points, ordered by how much mesh each GPU holds, and at every $K$
+tried. The ring kernels were not measuring the reformulation; they were burying it under a launch
+cost that fell hardest on the divergence form, whose ring gather was the most expensive of them.
+NG5, at 116\,000 nodes per GPU, is queued and will test whether the ordering continues.
 
 \end{document}
