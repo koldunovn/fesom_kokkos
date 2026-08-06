@@ -19,38 +19,44 @@
 
 We built the variant you describe, and it changes the study's conclusion. Written as you write it
 --- the ring computation folded into the loops that already exist rather than into kernels of its
-own --- the wide halo removes \textbf{58\% of the sea-ice cost} on CORE2 at its operating point,
-against 11\% for our version of the same scheme, and matches the delayed exchange we had rejected.
-The two runs compute the same ring and put identical message and byte counts on the wire; they
-differ by 360 kernel launches per time step. Our earlier conclusion, that exactness costs most of
-the saving, was measuring our implementation.
+own --- the wide halo removes \textbf{57 to 59\% of the sea-ice cost} on CORE2 at its operating
+point and \textbf{37 to 43\%} on fArc, against 11\% and 6 to 11\% for our version of the same
+scheme. \textbf{The rewriting multiplies the saving by three to seven.} The paired runs compute
+the same ring and put identical message and byte counts on the wire; they differ by 360 kernel
+launches per time step. Our earlier conclusion, that exactness costs most of the saving, was
+measuring our implementation.
 
 \begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-CORE2, one node, four GPUs, all six in one allocation & model step & \multicolumn{2}{c}{sea-ice cost} \\
+& \multicolumn{2}{c}{CORE2, 1 node / 4 GPUs} & \multicolumn{2}{c}{fArc, 4 nodes / 16 GPUs} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+each mesh, six legs in one allocation & step & ice cost & step & ice cost \\
 \midrule
-every sub-cycle (reference)                     & 0.0667\,s          & 15.7\,ms          & --- \\
-\emph{delayed exchange (stale halo), $K$=8}     & \emph{$-14.4\%$}   & \emph{6.6\,ms}    & \emph{$-58.0\%$} \\
-wide halo, standard form, our kernels           & $-3.0\%$           & 13.9\,ms          & $-11.5\%$ \\
-wide halo, divergence form, our kernels         & $+1.1\%$           & 16.1\,ms          & $+2.6\%$ \\
-\textbf{wide halo, standard form, your loops}   & $\mathbf{-14.1\%}$ & \textbf{6.8\,ms}  & $\mathbf{-56.7\%}$ \\
-\textbf{wide halo, divergence form, your loops} & $\mathbf{-14.4\%}$ & \textbf{6.5\,ms}  & $\mathbf{-58.6\%}$ \\
+every sub-cycle (reference)                     & 0.0667\,s & 15.7\,ms & 0.1162\,s & 26.0\,ms \\
+\emph{delayed exchange (stale halo), $K$=8}     & \emph{$-14.4\%$} & \emph{$-58.0\%$} & \emph{$-13.7\%$} & \emph{$-62.7\%$} \\
+wide halo, standard form, our kernels           & $-3.0\%$  & $-11.5\%$ & $-2.2\%$ & $-10.8\%$ \\
+wide halo, divergence form, our kernels         & $+1.1\%$  & $+2.6\%$  & $-1.0\%$ & $-5.8\%$ \\
+\textbf{wide halo, standard form, your loops}   & $\mathbf{-14.1\%}$ & $\mathbf{-56.7\%}$ & $\mathbf{-7.8\%}$ & $\mathbf{-36.5\%}$ \\
+\textbf{wide halo, divergence form, your loops} & $\mathbf{-14.4\%}$ & $\mathbf{-58.6\%}$ & $\mathbf{-9.6\%}$ & $\mathbf{-43.1\%}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 The delayed exchange is in the table because it is the scheme we rejected for putting the domain
 decomposition into the ice field, and because we reported it as saving about three times what the
-wide halo saves. \textbf{It no longer does.} In the divergence form the widened-loop wide halo
-matches it exactly on the model step and is 1.5\% ahead of it on the ice; in the standard form it
-is within a third of a percent. The wide halo still computes the ring and still refreshes it
-exactly every window, so it still leaves no imprint. The trade we reported between speed and a
-clean ice field was a property of how we had written the ring, and there is now no speed argument
-for accepting a stale halo at all.
+wide halo saves. That factor was our kernel structure. On CORE2 it is gone entirely --- the
+divergence form matches the delayed exchange on the step and is 1.5\% ahead of it on the ice. On
+fArc it is not: the rewriting closes half to two thirds of the gap and the delayed exchange still
+leads. We would not now describe the wide halo as a fraction of it, but neither can we claim
+parity in general on two meshes.
 
 Giving up the owner's summation order costs what you predicted: after a time step of 120
 sub-cycles the ice velocity differs from the exact wide halo by 8 to 15 units in the last place.
+The 60-day test of the domain decomposition, which replaces the bit-identity we gave up, passes:
+the ratio of boundary to interior differences is 0.84 for ice thickness against 0.85 for two
+identical runs, and on ice velocity 1.20 against a control of 1.33, while the delayed exchange
+gives 2.5 and 1.76.
 
 \textbf{Point 1, the auxiliary fields.} We instrumented the per-step exchange to report, field by
 field, the difference between the owner's arriving value and the value the receiving process
@@ -70,14 +76,16 @@ a threshold in Kokkos above which arguments are staged through constant memory. 
 consecutive launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels. Per step
 the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic.
 
-\textbf{The two forms become indistinguishable.} In our implementation the standard and divergence
-forms differed by 3.5 percentage points, and the previous note decomposed that difference into a
-message term and a byte term. With the ring folded into the existing loops the difference is zero
-to four decimals, while the divergence form still ships 40\% fewer numbers. The gap we decomposed
-was our kernel structure. On CPU at 512 cores the picture differs and favours your form: there the
-ring assembly is arithmetic-bound, and folding the loops removes a recomputation the divergence
-form was doing about six times over, worth 3 percentage points, while in the standard form the
-same change costs 5.
+\textbf{Your reformulation now wins, and we had been measuring past it.} With ring kernels the
+standard form beat the divergence form by 14 points of ice cost on CORE2 and 5 on fArc, and our
+previous note decomposed that gap into a message term and a byte term. With the ring folded into
+the existing loops \emph{the ordering reverses}: the divergence form leads by 1.9 points on CORE2
+and 6.5 on fArc, growing with the mesh, which is the behaviour the halved nodal message should
+produce. The launch structure was not creating the difference between the two forms, it was
+hiding it. On CPU the same rewriting also favours your form --- there the ring assembly is
+arithmetic-bound, and folding the loops removes a recomputation the divergence form was doing
+about six times over, worth 3 to 5 percentage points, while in the standard form it costs 6.
+Neither is profitable on CPU in either writing, at 512 or 2048 cores.
 
 \textbf{Point 2, extending the computation over the ring.} You were right, and the correction runs
 deeper than we allowed. Recomputing the ring does remove the imprint --- averaging $|\Delta$ ice
@@ -86,9 +94,9 @@ against 0.85 for two identical runs and 2.52 for the delayed exchange. What we w
 same change removes most of the saving and that we had found no intermediate that was both cheap
 and clean. That was a statement about our kernels, not about the scheme.
 
-\textbf{Open.} The table is CORE2 at its operating point; fArc, DARS and NG5 are queued. The
-60-day boundary test is being repeated for this variant and is the gate we hold it to, since it is
-no longer bit-identical and cannot be checked the way the exact version was.
+\textbf{Open.} DARS and NG5 are still queued. Both are points where each GPU holds more of the
+mesh than on fArc, so they are where the divergence form's lead should be largest if the trend
+above is real.
 
 \vspace{0.35em}
 {\footnotesize All numbers are from the runs described in \texttt{danilov\_mevp\_report.pdf}; the

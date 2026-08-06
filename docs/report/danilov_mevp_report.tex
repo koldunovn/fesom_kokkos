@@ -320,36 +320,43 @@ thereafter, assembling the ring nodes by the same scatter the owned nodes use in
 the owner's summation order --- gives, on CORE2 at its operating point:
 
 \begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-CORE2, one node, four GPUs, all six in one allocation & model step & \multicolumn{2}{c}{sea-ice cost} \\
+& \multicolumn{2}{c}{CORE2, 1 node / 4 GPUs} & \multicolumn{2}{c}{fArc, 4 nodes / 16 GPUs} \\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+each mesh, six legs in one allocation & step & ice cost & step & ice cost \\
 \midrule
-every sub-cycle (reference)                  & 0.0667\,s          & 15.7\,ms         & --- \\
-\emph{delayed exchange (stale halo), $K$=8}  & \emph{$-14.4\%$}   & \emph{6.6\,ms}   & \emph{$-58.0\%$} \\
-wide halo, standard form, separate kernels   & $-3.0\%$           & 13.9\,ms         & $-11.5\%$ \\
-wide halo, divergence form, separate kernels & $+1.1\%$           & 16.1\,ms         & $+2.6\%$ \\
-\textbf{wide halo, standard form, widened loops}   & $\mathbf{-14.1\%}$ & \textbf{6.8\,ms} & $\mathbf{-56.7\%}$ \\
-\textbf{wide halo, divergence form, widened loops} & $\mathbf{-14.4\%}$ & \textbf{6.5\,ms} & $\mathbf{-58.6\%}$ \\
+every sub-cycle (reference)                  & 0.0667\,s & 15.7\,ms & 0.1162\,s & 26.0\,ms \\
+\emph{delayed exchange (stale halo), $K$=8}  & \emph{$-14.4\%$} & \emph{$-58.0\%$} & \emph{$-13.7\%$} & \emph{$-62.7\%$} \\
+wide halo, standard form, separate kernels   & $-3.0\%$  & $-11.5\%$ & $-2.2\%$ & $-10.8\%$ \\
+wide halo, divergence form, separate kernels & $+1.1\%$  & $+2.6\%$  & $-1.0\%$ & $-5.8\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-14.1\%}$ & $\mathbf{-56.7\%}$ & $\mathbf{-7.8\%}$ & $\mathbf{-36.5\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-14.4\%}$ & $\mathbf{-58.6\%}$ & $\mathbf{-9.6\%}$ & $\mathbf{-43.1\%}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
 Three points, in order of how much they change the study.
 
-\textbf{The trade between speed and a clean ice field does not exist.} The delayed exchange is in
-the table because Sect.~6.4 rejects it for putting the decomposition into the ice field while
-recording that it saves about three times what the wide halo saves. It no longer does: in the
-divergence form the widened-loop wide halo matches it exactly on the model step and is 1.5\% ahead
-of it on the ice cost, and in the standard form it is within a third of a percent. The wide halo
-still computes the ring and still refreshes it exactly every window, so it still leaves no
-imprint. The factor of three was our kernel structure, and with it goes the only argument this
-study had for a stale halo.
+\textbf{The trade between speed and a clean ice field is much smaller than we reported, and on one
+mesh it is gone.} Sect.~6.4 rejects the delayed exchange for putting the decomposition into the
+ice field while recording that it saves about three times what the wide halo saves. That factor
+was our kernel structure. On CORE2 it disappears: the widened-loop wide halo in the divergence
+form matches the delayed exchange on the model step and is 1.5\% ahead of it on the ice cost,
+while still computing the ring, still refreshing it exactly every window, and still leaving no
+imprint. On fArc it does not disappear --- the rewriting closes half to two thirds of the ice-cost
+gap and the delayed exchange still leads. What holds on both meshes is that the rewriting
+multiplies the wide halo's own saving by three to seven.
 
-\textbf{The two forms become indistinguishable.} They differ by 3.5 percentage points with
-separate ring kernels and by nothing to four decimals with widened loops, although the divergence
-form still ships 40\% fewer numbers. Sect.~6.5's decomposition of that gap into a message term and
-a byte term is not withdrawn --- both terms were isolated at bit-identical output --- but what it
-decomposed was smaller than the implementation term sitting on top of it.
+\textbf{The divergence form wins once the launch structure is removed, and we had been measuring
+past it.} With separate ring kernels the standard form leads by 14.0 points of ice cost on CORE2
+and 5.0 on fArc. With widened loops \emph{the ordering reverses}: the divergence form leads by 1.9
+points on CORE2 and 6.5 on fArc, ordered by how much mesh each GPU holds, which is what a halved
+nodal message should produce. Sect.~6.5's decomposition of the earlier gap into a message term and
+a byte term is not withdrawn --- both were isolated at bit-identical output --- but it was made in
+a build spending 362 launches per step on the slow path, worth more than either term and falling
+hardest on the divergence form, whose ring gather is the most expensive of the ring kernels. The
+launch structure was hiding the difference between the two forms rather than creating it.
 
 \textbf{It is a compute result, not a communication one.} The two rows of each pair post identical
 message and byte counts: 390.5 messages and 1\,542\,053 doubles per step for the standard form in
@@ -360,13 +367,18 @@ element order rather than the owner's. After a step of 120 sub-cycles the ice ve
 from the exact wide halo by 8 to 15 units in the last place, and after twenty steps by about as
 much as this port's own GPU and CPU arms differ at identical arithmetic. Since that removes the
 bit-identity gate, the 60-day boundary/interior test of Sect.~6.4 becomes the acceptance criterion
-for this variant rather than a diagnostic.
+for this variant rather than a diagnostic, and \textbf{it passes}: 0.836 for ice thickness against
+0.854 for two identical runs, 0.796 for concentration against 0.831, and 1.196 for ice velocity
+against a control of 1.325 --- at or below its own control on every field, where the delayed
+exchange gives 2.52, 2.86 and 1.76. Ice velocity is the field where the control itself sits above
+1.2, which is why each field is quoted against its own.
 
 On CPU the same change is not a gain, and the reason is instructive: with no launches to remove it
 only trades a gather of plain reads for an atomic scatter. In the standard form, where the gather
-merely re-read stored stresses, that costs 5 percentage points at 512 cores on fArc. In the
-divergence form, where the gather had to recompute each element's stress once per incident ring
-node, about six times over, it saves 3.
+merely re-read stored stresses, that costs 5 to 6 percentage points on fArc. In the divergence
+form, where the gather had to recompute each element's stress once per incident ring node, about
+six times over, it saves 3 to 5. Neither is profitable, at 512 or at 2048 cores, so the CPU
+verdict of Sect.~6.3 is unchanged and only the ordering of the two forms moves.
 
 \subsection*{6.4 The delayed exchange, and why it is not usable}
 
