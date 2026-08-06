@@ -56,7 +56,7 @@ clear_knobs() { while read -r v; do unset "$v"; done \
 echo "=== M10 A/B  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?} nsteps=${NSTEPS:-300} ==="
 echo "nodes: $SLURM_JOB_NODELIST"
 
-declare -a NAMES TIMES ITERS
+declare -a NAMES TIMES ITERS CGSH CGMS
 IFS=';' read -ra LEGARR <<< "${LEGS:?LEGS required}"
 li=0
 for leg in "${LEGARR[@]}"; do
@@ -66,41 +66,57 @@ for leg in "${LEGARR[@]}"; do
         IFS='+' read -ra KV <<< "$leg"; for kv in "${KV[@]}"; do export "$kv"; done
     fi
     export FESOM_SSH_STATS=1          # counts + iters/solve; no VERIFY (it costs an SpMV)
+    export FESOM_CG_PROFILE=1         # SSH-phase wall + ms/iteration (2 fences per SOLVE)
     echo "--- leg $li: $name ---"
     # L80 guard: show the knobs this leg ACTUALLY has. Two legs printing the same set means
     # the leg list was truncated (see the LEGS syntax warning above) — the numbers are then
     # the same configuration measured twice, not an A/B.
     echo -n "    knobs: "; env | grep -E '^FESOM_(SPEED|SSH|PCSI)' | sort | tr '\n' ' '; echo
-    best=""; iters=""
+    best=""; iters=""; share=""; cgms=""
     for rep in a b; do
         srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
             > "$OUT/log_${li}_$rep.txt" 2> "$OUT/err_${li}_$rep.txt"
         t=$(grep 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
         it=$(grep 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
              | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
-        echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve"
-        [ -n "$t" ] && { [ -z "$best" ] && best=$t || best=$(python3 -c "print(min($best,$t))"); }
+        # "CG share: A s (B% of loop), N iters total (K/step, Z ms/iter)"
+        sh=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
+        mi=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
+        echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter"
+        # min-of-2 on the TOTAL; carry that rep's SSH numbers so the pair stays consistent
+        if [ -n "$t" ] && { [ -z "$best" ] || [ "$(python3 -c "print(1 if $t<$best else 0)")" = "1" ]; }; then
+            best=$t; share=$sh; cgms=$mi
+        fi
         [ -n "$it" ] && iters=$it
     done
     NAMES[$li]="$name"; TIMES[$li]="${best:-nan}"; ITERS[$li]="${iters:-nan}"
+    CGSH[$li]="${share:-nan}"; CGMS[$li]="${cgms:-nan}"
     li=$((li+1))
 done
 
 echo
-/work/ab0995/a270088/mambaforge/envs/nereus/bin/python - "$TAG" "${NAMES[*]}" "${TIMES[*]}" "${ITERS[*]}" <<'PY'
+/work/ab0995/a270088/mambaforge/envs/nereus/bin/python - "$TAG" "${NAMES[*]}" "${TIMES[*]}" "${ITERS[*]}" "${CGSH[*]}" "${CGMS[*]}" <<'PY'
 import sys
 tag = sys.argv[1]
 names = sys.argv[2].split(); times = sys.argv[3].split(); iters = sys.argv[4].split()
-print("=" * 92); print(f"A/B RESULT — {tag}   (min-of-2, same allocation, same binary)"); print("=" * 92)
-print(f"  {'leg':<44} {'s/step':>10} {'delta':>9} {'iters':>9} {'us/iter':>10}")
-base = float(times[0])
-for n, t, k in zip(names, times, iters):
-    t = float(t); k = float(k)
-    us = 1e6 * t / k if k > 0 else float('nan')
-    d = 100.0 * (t - base) / base
-    print(f"  {n:<44} {t:10.4f} {d:+8.2f}% {k:9.2f} {us:10.1f}")
-print("=" * 92)
-print("  us/iter = whole-STEP time per CG iteration — it moves with both the solver AND the")
-print("  rest of the step, so read it as a within-mesh comparator, not an absolute solver cost.")
+share = sys.argv[5].split(); cgms = sys.argv[6].split()
+f = lambda x: float(x) if x not in ("nan", "") else float("nan")
+print("=" * 104)
+print(f"A/B RESULT — {tag}   (min-of-2, same allocation, same binary)")
+print("=" * 104)
+print(f"  {'leg':<40} {'s/step':>9} {'d_total':>9} | {'SSH ms/st':>10} {'d_SSH':>9} {'SSH%':>6} "
+      f"{'iters':>7} {'ms/iter':>8}")
+t0 = f(times[0]); s0 = f(share[0]); c0 = t0 * s0 * 10.0   # ms/step in the SSH phase
+for n, t, k, s, m in zip(names, times, iters, share, cgms):
+    t, k, s, m = f(t), f(k), f(s), f(m)
+    c = t * s * 10.0                                       # s/step * (%/100) * 1000 ms
+    dt = 100.0 * (t - t0) / t0
+    dc = 100.0 * (c - c0) / c0 if c0 == c0 and c0 > 0 else float("nan")
+    print(f"  {n:<40} {t:9.4f} {dt:+8.2f}% | {c:10.2f} {dc:+8.2f}% {s:6.1f} {k:7.2f} {m:8.3f}")
+print("=" * 104)
+print("  d_total = whole-step speed-up (what the model user feels; diluted by everything else)")
+print("  d_SSH   = the SOLVER's own speed-up  <-- the number that says whether the method works")
+print("  SSH%    = share of the step spent in the SSH solve on THIS mesh/rung; d_total ~ d_SSH * SSH%/100")
+print("  ms/iter = true solver time per CG iteration (from FESOM_CG_PROFILE, not a whole-step proxy)")
 PY
 rm -f "$OUT"/*.monthly.nc 2>/dev/null || true

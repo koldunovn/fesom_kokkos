@@ -3860,8 +3860,28 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         const int kind = ssh_solver_kind();
         if (kind != FESOM_SSHSOLV_CG) {
             ssh_solver_check_interactions(kind, parallel ? partit->npes : 1);
+            /* FESOM_CG_PROFILE must cover the VARIANTS too, otherwise the SSH-phase share is
+             * reported only for baseline cg and a variant run looks like it has no solver
+             * time at all. Same shape as the baseline timer below (2 fences per SOLVE, not
+             * per iteration — ~18 µs against a ms-scale solve, so it does not bias the A/B).
+             * The baseline path keeps its own timer; this one covers only the variant branch,
+             * so nothing is double-counted. */
+            static const bool var_prof = (getenv("FESOM_CG_PROFILE") != NULL);
+            double _v_t0 = 0.0;
+            if (var_prof) { Kokkos::fence(); _v_t0 = MPI_Wtime(); }
             const int rc = ssh_solve_variant(kind, S, si, mesh, dyn);
-            if (rc >= 0) return rc;
+            if (rc >= 0) {
+                if (var_prof) {
+                    Kokkos::fence();
+                    g_fesom_cg_wall  += MPI_Wtime() - _v_t0;
+                    g_fesom_cg_iters += rc;
+                }
+                return rc;
+            }
+            /* guard tripped: the variant's partial time still belongs to the SSH phase, and
+             * the baseline retry below adds its own — the sum is the honest cost of the
+             * fallback, which is what a run with firings should report. */
+            if (var_prof) { Kokkos::fence(); g_fesom_cg_wall += MPI_Wtime() - _v_t0; }
             g_sshwire.s_exch = 0; g_sshwire.s_arb = 0;
             g_sshwire.s_ari = 0;  g_sshwire.s_launch = 0;
         }
