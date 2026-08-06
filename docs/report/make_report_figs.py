@@ -35,52 +35,9 @@ def pct(r, leg):
     return None if not d else d.get("pct_vs_ref")
 
 
-# --------------------------------------------------------------------- Figure 1
-# Each mesh at its OWN operating point -- the largest node count at which the model still gains
-# from more GPUs, read off the measured strong-scaling curve of the standard scheme. Quoting a
-# common node count would have flattered the result badly: CORE2 on 16 nodes gives -25.5% for
-# the delayed exchange, and CORE2 on 16 nodes is not a configuration anyone runs (it is already
-# 45% SLOWER there than on 2 nodes).
-MESHES = [("op_core2_g4",  "CORE2, 127 k nodes\n1 node / 4 GPUs\n(knee at 2 nodes)"),
-          ("op_farc_g16",  "fArc, 638 k\n4 nodes / 16 GPUs\n(flat past 4)"),
-          ("op_dars_g32",  "DARS, 3.2 M\n8 nodes / 32 GPUs\n(still scaling)"),
-          ("rep_ng5_g64",  "NG5, 7.4 M\n16 nodes / 64 GPUs\n(still scaling)")]
-SER = [("lagged_k8", "delayed exchange, every 8th sub-cycle", C_LAG8),
-       ("lagged_k4", "delayed exchange, every 4th sub-cycle", C_LAG4),
-       ("wide_std_fused_k8", "wide halo, standard form (exact)", C_WIDE),
-       ("wide_div_k8", "wide halo, divergence form (exact)", C_WDIV)]
-
-rows = [(lab, run(tag)) for tag, lab in MESHES]
-missing = [lab.split("\n")[0] for lab, r in rows if r is None]
-if missing:
-    print(f"figure 1: no data yet for {', '.join(missing)}", file=sys.stderr)
-
-rows = [(lab, r) for lab, r in rows if r is not None]
-if rows:
-    fig, ax = plt.subplots(figsize=(7.4, 4.2), constrained_layout=True)
-    x = range(len(rows))
-    w = 0.20
-    for i, (key, lab, col) in enumerate(SER):
-        xs = [xx + (i - 1.5) * w for xx in x]
-        ys = [pct(r, key) for _, r in rows]
-        ax.bar(xs, [y if y is not None else float("nan") for y in ys], width=w,
-               color=col, label=lab, zorder=3)
-        for xi, yi in zip(xs, ys):
-            if yi is not None:
-                ax.annotate(f"{yi:.1f}", (xi, yi), ha="center", va="top", fontsize=6.4,
-                            xytext=(0, -3), textcoords="offset points", zorder=4)
-    ax.axhline(0, color="k", lw=1.0, zorder=3)
-    ax.set_xticks(list(x))
-    ax.set_xticklabels([lab for lab, _ in rows], fontsize=7.6)
-    ax.set_ylabel("change of the model time step  [%]")
-    ax.set_title("Cost of one model time step relative to the standard scheme,\n"
-                 "each mesh at a node count where the model still scales", fontsize=9)
-    ax.grid(axis="y", alpha=.3, zorder=0)
-    # legend BELOW the axes: in-axes it sat on top of CORE2's two tallest bars and hid their
-    # value labels, and CORE2 is the mesh whose numbers a reader checks first.
-    fig.legend(fontsize=8, ncol=2, frameon=False, loc="outside lower center")
-    fig.savefig(os.path.join(OUT, "fig1_meshes.pdf"))
-    print("fig1 written")
+# Figure 1 is now make_icecost_fig.py: the ice cost, not the model step, and without the delayed
+# exchange, which Sect. 6.6 rules out. The old model-step version led with that scheme's bars and
+# would contradict the report if it were rebuilt.
 
 # --------------------------------------------------------------------- Figure 2
 # Why the gain varies: it tracks how much communication the run is already paying for.

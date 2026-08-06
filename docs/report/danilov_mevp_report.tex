@@ -211,26 +211,29 @@ paper.
 
 \begin{figure}[tb]
 \centering
-\includegraphics[width=\textwidth]{fig1_meshes.pdf}
-\caption{Cost of one model time step relative to the standard scheme (exchange after every
-sub-cycle). Negative is faster. \textbf{Each mesh is shown at its own operating point} --- the
-largest node count at which the model still gains from more GPUs, read off the measured
-strong-scaling curve --- rather than at a common node count, which would have flattered every
-option: CORE2 on 16 nodes gives $-25.5\%$ for the delayed exchange and is 45\% slower there than
-on two nodes. Each mesh was measured in a single allocation with all configurations run back to
-back. The two wide-halo bars are \emph{exact} --- they reproduce the standard trajectory bit for
-bit --- while the two delayed bars are approximations whose accuracy is
-Figure~\ref{fig:accuracy}.}
+\includegraphics[width=0.92\textwidth]{fig1_icecost.pdf}
+\caption{Cost of the sea ice relative to the standard scheme, for the schemes that survive
+Sect.~6.6. Negative is a saving. The measure is the ice cost --- ice, ice dynamics and ice
+advection, computation together with time spent waiting for communication --- and not the model
+time step, which divides an ice-only change by about ten. Each mesh is at its own operating point,
+the largest node count at which the model still gains from more GPUs, read off the measured
+strong-scaling curve of the standard scheme; each was measured in a single allocation with all
+configurations run back to back. Both wide-halo bars are exact and reproduce the standard
+trajectory bit for bit.}
 \label{fig:meshes}
 \end{figure}
 
 \subsection*{6.3 The wide halo}
 
-Figure~\ref{fig:meshes} is the summary of the speed results. Every mesh there is shown at
-\emph{its own operating point} --- the largest node count at which the model still gains from
-more GPUs, read off the measured strong-scaling curve. That matters: at a common large node count
-these numbers roughly double, but a configuration past its scaling limit is not one anybody runs,
-and quoting it would flatter every option in this study.
+Figure~\ref{fig:meshes} summarises what the wide halo removes from the ice cost. Every mesh is
+shown at \emph{its own operating point} --- the largest node count at which the model still gains
+from more GPUs, read off the measured strong-scaling curve. That matters: at a common large node
+count these numbers roughly double, but a configuration past its scaling limit is not one anybody
+runs, and quoting it would flatter every option in this study.
+
+At those operating points the wide halo removes \textbf{11\% of the ice cost on CORE2 and fArc,
+and 24 to 29\% on DARS}, where the ice is a larger share of the step. The divergence form on its
+own adds 2 to 8\% there, for the reason given in Sect.~6.2.
 
 Reading the figure:
 
@@ -274,7 +277,7 @@ waiting time rose from 8.7 to 25.3\,ms per step when the ring was made deep.
 \subsection*{6.4 The delayed exchange}
 
 Accepting a halo up to $K-1$ sub-cycles old removes 105 of the 120 exchanges per step at $K=8$ and
-costs one conditional. At the four operating points of Figure~\ref{fig:meshes} it is worth
+costs one conditional. At the four operating points it is worth
 $-14.4$, $-14.3$, $-15.5$ and $-9.9\%$ of the whole model step at $K=8$ (CORE2, fArc, DARS, NG5),
 and $-12.6$, $-11.4$, $-14.2$ and $-8.5\%$ at $K=4$. On CPU the same change is worth $-1$ to
 $-3.4\%$, because a CPU process holds far less of the mesh and the ice exchange is a much smaller
@@ -301,7 +304,7 @@ Figure~\ref{fig:scaling} shows why the gain varies, and it is as much a caution 
 is already paying for. CORE2 on GPU stops scaling at two nodes and then \emph{degrades} --- more
 GPUs, slower model --- and that is where the delayed exchange recovers the most, $-25.5\%$
 at 16 nodes. That number is real but useless: it is measured in a configuration one would never
-run, and it is why Figure~\ref{fig:meshes} quotes operating points instead. The same variable
+run, and it is why every number here is quoted at an operating point. The same variable
 works in the other direction too --- on NG5 spread over only four nodes, 460\,000 mesh nodes per
 GPU, nothing we tried moved the model by more than 3\%.
 
