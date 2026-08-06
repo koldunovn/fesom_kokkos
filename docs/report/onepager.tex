@@ -16,28 +16,30 @@
 \begin{document}
 \small
 
-{\Large\bfseries Sea-ice sub-cycling in the FESOM2 GPU port: what pays, and what it costs}\\[0.2em]
-{\small N. Koldunov, 6 August 2026 --- summary of the mEVP communication study}
+{\Large\bfseries Halo communication in the mEVP sea-ice solver of the FESOM2 GPU port}\\[0.2em]
+{\small N. Koldunov, 6 August 2026 --- summary of measurements}
 
 \vspace{0.4em}\hrule\vspace{0.5em}
 
-\hd{Three ways to stop exchanging the halo 120 times per step}
+\hd{Three ways of exchanging the halo less often}
 
-mEVP runs 120 sub-cycles per model time step and currently exchanges the ice-velocity halo after
-every one. Three ways to do it less often were implemented and measured:
+mEVP advances the ice momentum in 120 sub-cycles per model time step, and the ice-velocity halo is
+at present exchanged after each of them. We implemented and measured three alternatives.
 
-\textbf{delayed exchange} --- exchange every $K$-th sub-cycle and let the halo go stale. Fastest by
-far, \emph{but it writes the sub-domain boundaries into the ice field}: \textbf{not usable} (below).
-\textbf{Wide halo} (Danilov) --- exchange every $K$-th sub-cycle but recompute a $K$-deep ghost
-ring in between, so nothing is stale: \emph{exact}, bit for bit, and no imprint; smaller gain.
-\textbf{Divergence form} (Danilov) --- carry $\nabla\!\cdot\!\sigma$ at nodes instead of $\sigma$
-at elements: exact to $10^{-15}$, pays on CPU, costs on GPU.
+\emph{Delayed exchange} --- exchange every $K$-th sub-cycle and accept a halo up to $K-1$ sub-cycles
+old. This is the largest saving of the three, but it leaves the sub-domain boundaries visible in the
+ice field. \emph{Wide halo} (Danilov) --- exchange every $K$-th sub-cycle, and recompute a $K$-deep
+ring of ghost cells in between so that no value is stale; the result reproduces the every-sub-cycle
+trajectory bit for bit. \emph{Divergence form} (Danilov) --- carry $\nabla\!\cdot\!\sigma$ at nodes
+rather than $\sigma$ at elements; it agrees with $\nabla\!\cdot\!\sigma$ to $10^{-15}$ relative,
+and its effect on run time differs between the two backends.
 
-\hd{What they buy --- in both currencies}
+\hd{Cost, measured against the model step and against the ice}
 
-Percent of the \emph{model step} is what a production run feels; percent of the \emph{ice cost}
-(ice + ice dynamics + ice advection, compute \emph{and} MPI wait) is what judges a sea-ice scheme.
-They differ 5--10$\times$, and quoting only the first makes a good scheme look like nothing.
+Each number is given twice. Sea ice is 5 to 13\% of a CPU model step, so an ice-only change is
+divided by about ten before it reaches the step, and the share of the ice cost (ice, ice dynamics
+and ice advection, computation together with time spent waiting for communication) is the measure
+appropriate to a sea-ice scheme.
 
 \begin{center}\small
 \begin{tabular}{@{}llrrrr@{}}
@@ -47,34 +49,33 @@ They differ 5--10$\times$, and quoting only the first makes a good scheme look l
 & & ice cost & model step & ice cost & model step \\
 \midrule
 delayed exchange & $K$=4 & $-37$ to $-58\%$ & $-8.5$ to $-14\%$ & $-5$ to $-25\%$ & $-0.3$ to $-3.6\%$ \\
-wide halo, exact & $K$=8 & $-12$ to $-19\%$ & $-2$ to $-7\%$ & \multicolumn{2}{c}{never wins} \\
+wide halo, exact & $K$=8 & $-12$ to $-19\%$ & $-2$ to $-7\%$ & \multicolumn{2}{c}{never profitable} \\
 divergence form alone & --- & $+2$ to $+17\%$ & $0$ to $+1.6\%$ & $-2$ to $-8.5\%$ & $-0.5$ to $0\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The CPU columns grow with core count ($-5\%$ of the ice at 128 ranks, $-25\%$ at 2048); the GPU
-columns shrink with the mesh a GPU holds ($-58\%$ at 32\,k nodes per GPU, $-37\%$ at 460\,k).
-The divergence form is \textbf{not} a null result: on CPU at 512 ranks and above it takes 2--8.5\%
-off the ice and is simply invisible in the model step. On GPU it costs, because there the sub-cycle
-is limited by the number of GPU operations issued rather than by arithmetic or memory traffic, so
-removing element arrays removes work that was not being paid for. Danilov's own $\sim$20\% for the
-divergence form with its double halo matches our \textbf{$-19.1\%$ of the ice cost} for that
-combination (fArc, 16 GPU nodes).
+On CPU the saving grows with core count ($-5\%$ of the ice at 128 cores, $-25\%$ at 2048); on GPU it
+falls as each GPU holds more of the mesh ($-58\%$ at 32\,000 surface nodes per GPU, $-37\%$ at
+460\,000). The divergence form removes 2 to 8.5\% of the ice cost from 512 cores upward, and is
+invisible in the model step only because of the denominator. On GPU it costs, because the sub-cycle there is limited by how often work is dispatched to the device rather
+than by arithmetic or memory traffic, so removing element arrays removes work that was not being
+paid for. Danilov's $\sim$20\% for the divergence form with its double halo corresponds to our
+$-19.1\%$ of the ice cost for the same combination (fArc, 16 GPU nodes).
 
-\hd{\textcolor{red}{Why the fast option is out: it draws the decomposition into the ice}}
+\hd{Imprint of the domain decomposition}
 
-The delayed exchange reads halo values up to $K-1$ sub-cycles old, and those nodes are exactly the
-one-cell rim of each sub-domain. The partition is static, so the same nodes are perturbed every
-step of the run. Measured on fArc, 16 GPUs, 60 days of daily output --- mean $|\Delta$ ice
-thickness$|$ on the rim against the interior:
+Under the delayed exchange the stale values lie on the one-cell boundary of each sub-domain, and the
+decomposition is fixed for the run, so the same nodes are perturbed at every step. Measured on fArc,
+16 GPUs, 60 days with daily output: mean $|\Delta$ ice thickness$|$ on the boundary and in the
+interior.
 
 \begin{center}\small
 \begin{tabular}{@{}lrrr@{}}
 \toprule
-& rim & interior & \textbf{ratio} \\
+& boundary & interior & \textbf{ratio} \\
 \midrule
-two identical runs (control --- no lever at all) & 0.00105\,m & 0.00124\,m & \textbf{0.85} \\
+two identical runs (control) & 0.00105\,m & 0.00124\,m & \textbf{0.85} \\
 \textbf{wide halo, exact, $K$=8} & 0.00104 & 0.00120 & \textbf{0.87} \\
 delayed exchange, $K$=2 & 0.00432 & 0.00249 & \textbf{1.70} \\
 delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
@@ -82,32 +83,31 @@ delayed exchange, $K$=4 & 0.01178 & 0.00452 & \textbf{2.52} \\
 \end{tabular}
 \end{center}
 
-It is there on \textbf{day one} (ratio 3.1), persists for two months, and is visible as a web of
-differences following the sub-domain boundaries. Reducing the delay to $K$=2 halves it but does not
-remove it. The exact wide halo scores like the control, as it must, which also validates the
-diagnostic. \textbf{An artificial polygonal structure in the ice, in the shape of the processor
-grid, is not something a sea-ice model can carry.} The ring profiles and the map that show
-it are Figure~4 of the full note.
+The difference is concentrated on the boundary from the first day (ratio 3.1), remains so for two
+months, and appears on maps as a network of differences following the sub-domain edges. Halving the
+delay to $K$=2 reduces the ratio but does not remove it. The two exact configurations, which differ
+from the reference only in the order of summation, sit together at 0.85 and 0.87; that they do is
+what makes the measurement interpretable. An artificial polygonal structure in the ice field, in the
+shape of the domain decomposition, is not acceptable in a sea-ice model. Figure~4 of the full note
+gives the profiles and a map.
 
-\textbf{Note what this says about global metrics.} The same runs pass every integral check we
-made: over a year on CORE2 the ice-concentration and thickness correlations against the reference
-are 0.999995 and 0.999994, inside the spread between two independent correct implementations of
-mEVP, and hemispheric ice extent moves 0.23\% of its seasonal amplitude. A one-cell-wide feature
-along sub-domain edges is a small fraction of the mesh, so it leaves a domain-wide correlation at
-0.99999 while being obvious on a map. \textbf{The accuracy test we designed could not have found
-this; only looking for it could.}
+The integral diagnostics do not show it. Over a year on CORE2 the ice concentration and thickness
+correlate with the reference at 0.999995 and 0.999994, within the spread between two independent
+implementations of mEVP, and hemispheric ice extent departs by 0.23\% of its seasonal amplitude. A
+feature one cell wide along sub-domain edges covers a small fraction of the mesh and leaves a
+domain-wide correlation near 0.99999. The accuracy protocol we had prepared would not have detected
+it.
 
 \hd{Recommendation}
 
-\textbf{For production, the exact wide halo.} Bit-for-bit identical to the standard scheme, so no
-accuracy argument and no partition imprint, and worth 12--19\% of the ice cost on GPU at $K$=8. It
-does not pay on CPU on any mesh.
+For production we would use the exact wide halo. It is bit-for-bit identical to the standard scheme,
+so it requires neither an accuracy argument nor the check above, and it removes 12 to 19\% of the
+ice cost on GPU at $K$=8. On CPU it is not profitable on any mesh we tried.
 
-\textbf{The delayed exchange is a no-go}, despite being worth three times as much, and we report it
-as a measured negative: it is the fastest thing we found and it cannot be used, because it puts the
-processor decomposition into the ice field. No amount of speed buys that back.
+We do not regard the delayed exchange as usable, although it saves about three times as much: it
+places the domain decomposition in the ice field.
 
-\textbf{The divergence form} is worth having on CPU at scale, is a cost on GPU, and is what makes
-the wide halo cheapest to carry.
+The divergence form is worth having on CPU at large core counts and is a cost on GPU. It is also
+what makes the wide halo cheapest to carry, since everything sub-cycled is then a node quantity.
 
 \end{document}
