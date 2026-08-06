@@ -78,17 +78,17 @@ for leg in "${LEGARR[@]}"; do
     for rep in a b; do
         srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
             > "$OUT/log_${li}_$rep.txt" 2> "$OUT/err_${li}_$rep.txt"
-        t=$(grep 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
-        it=$(grep 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
+        t=$(grep -a 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+        it=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
              | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
         # "CG share: A s (B% of loop), N iters total (K/step, Z ms/iter)"
-        sh=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
-        mi=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
+        sh=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
+        mi=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
         echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter"
         # L80 assertion: on CPU the whole comparison is void unless CGPIPE actually fired in
         # the baseline. Prove it from the model's own announce rather than assuming.
         if [ "$li" = "0" ] && [ "$rep" = "a" ]; then
-            if grep -q "cgpipe. built" "$OUT/err_${li}_$rep.txt"; then
+            if grep -aq "cgpipe. built" "$OUT/err_${li}_$rep.txt"; then
                 echo "    [ok] baseline leg: CGPIPE announce present — the production path IS active"
             else
                 echo "    [!! ] baseline leg: NO CGPIPE announce — FORCE_SERIAL did not take."

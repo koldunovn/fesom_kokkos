@@ -76,12 +76,12 @@ for leg in "${LEGARR[@]}"; do
     for rep in a b; do
         srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
             > "$OUT/log_${li}_$rep.txt" 2> "$OUT/err_${li}_$rep.txt"
-        t=$(grep 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
-        it=$(grep 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
+        t=$(grep -a 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+        it=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
              | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
         # "CG share: A s (B% of loop), N iters total (K/step, Z ms/iter)"
-        sh=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
-        mi=$(grep 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
+        sh=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
+        mi=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
         echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter"
         # min-of-2 on the TOTAL; carry that rep's SSH numbers so the pair stays consistent
         if [ -n "$t" ] && { [ -z "$best" ] || [ "$(python3 -c "print(1 if $t<$best else 0)")" = "1" ]; }; then
