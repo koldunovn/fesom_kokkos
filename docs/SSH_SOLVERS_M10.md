@@ -1213,6 +1213,30 @@ apparent result produced by an asymmetry in the harness rather than by the physi
 timing is not an A/B point. What does not stand is the inference "the variants fail to
 converge where `cg` succeeds" — that was never measured.)*
 
+### ⭐⭐ MEASURED on a real failing farc solve — the breakdown is REAL (job 26740651)
+
+**This refutes the "the guard is too aggressive" reading, including my own.** farc np32,
+`cg2`, solve 37 (`labdumps/farc_np32_fb/step0037`), rtol = **4.3743e-01**:
+
+| iteration | residual | comment |
+|--:|--:|---|
+| 1 | 8.268e+03 | |
+| 20 | 2.995e+02 | converging cleanly, 2–4 % per iteration |
+| 60 | 3.975e+01 | |
+| **87** | **1.582e+01** | ⬅ **best residual ever reached** |
+| 88–96 | 1.623 → 1.825e+01 | residual **GROWS** |
+| 97–106 | oscillates 1.59–1.66e+01 | never beats it-87 again |
+| 107 | 1.621e+01 | guard fires: 20 consecutive non-improving steps |
+
+The residual does not plateau near convergence — it **turns around at iteration 87 and
+stagnates at ~37× rtol**. On the same trajectory baseline `cg` goes 1.7533e+01 at iteration
+100 → **5.1488e-01 at iteration 200**, converging at ~212. So `cg2` genuinely breaks down
+where `cg` does not, and the guard is doing its job rather than aborting a live solve.
+
+**Net effect on the retraction:** its *conclusion* survives and is now backed by direct trace
+evidence instead of by the vacuous counter comparison; its *stated basis* was still wrong.
+Both corrections belong in the record.
+
 ### The guard is a heuristic, and it fires mid-solve
 
 ```c
@@ -1221,9 +1245,11 @@ else if (++stall >= STALL_WINDOW || resid > 1e3 * best)  ->  SSH_FB_STALL
 ```
 
 `STALL_WINDOW` = 20 (`cg2`/`pipecg`) or 10 (`pcsi`/`oati`). So the trigger is **N consecutive
-steps without a 0.1 % residual drop** — not divergence, not a residual increase. On farc it
-fires at **~112 iterations of a solve that baseline `cg` completes in 212**: squarely
-mid-solve, in exactly the region where an ill-conditioned CG plateaus by nature.
+steps without a 0.1 % residual drop** — not divergence, not a residual increase. That is a
+*heuristic*, and on farc it fires at ~112 iterations of a solve baseline `cg` completes in
+212, which is why "the guard is aborting a converging solve" was the natural first
+hypothesis. **The trace above shows it is not what happens** — but the heuristic's looseness
+is still worth stating, because the same reasoning applies wherever it has NOT been traced.
 
 ### ⭐ MEASURED — iteration count alone does NOT produce stalls (login, `core2_np1/step0020`)
 
@@ -1243,6 +1269,14 @@ iterations, a 10× margin against the guard.** Baseline `cg` on the same system:
 plateau 3. Iteration count is therefore *not* the driver, and the σ-drift-accumulates story
 does not survive its first test. This is consistent with the §0.4b table, where the
 *symmetrised* drift is flat at ~1e-13…1e-14 from iteration 2 to 60 rather than growing.
+
+**So the cause is a property of the farc MATRIX, not of how long the solve runs.** Both
+candidate explanations that were on the table — σ drift accumulating with iteration count,
+and the guard aborting a healthy solve — are now falsified. What remains is farc-specific
+conditioning/structure: whether the σ recurrence drifts on *this* matrix (the `--sigma-drift`
+leg), and whether the symmetrised preconditioner `D^{−1/2}CD^{−1/2}` is itself poorly behaved
+on a strongly variable-resolution mesh, where the diagonal `d` spans a far wider dynamic
+range than on CORE2 and the `sqrt(d_i/d_j)` scaling is correspondingly extreme.
 
 *(⚠️ `--tol` is plumbed to the variant paths only, not to baseline `cg`, whose rtol comes from
 the dump's `soltol` — the four `cg` rows of that sweep are the same run and only the `cg2`
