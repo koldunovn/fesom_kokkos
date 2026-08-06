@@ -179,20 +179,18 @@ same schedule, gives:
 change of the sea-ice cost at $K$=8, & CORE2 & fArc & DARS & NG5 \\
 each mesh at its operating point & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
 \midrule
-reference: sea-ice cost per step             & 15.8\,ms & 26.1\,ms & 43.3\,ms & --- \\
-wide halo, standard form, ring kernels       & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ & --- \\
-wide halo, divergence form, ring kernels     & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ & --- \\
-\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ & --- \\
-\textbf{wide halo, divergence form, widened loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ & --- \\
+reference: sea-ice cost per step             & 15.8\,ms & 26.1\,ms & 43.3\,ms & 39.5\,ms \\
+wide halo, standard form, ring kernels       & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ & $-13.4\%$ \\
+wide halo, divergence form, ring kernels     & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ & $-16.7\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ & $\mathbf{-35.2\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ & $\mathbf{-44.1\%}$ \\
 \midrule
 best widened-loop row, as a share of the model step & $-14.4\%$ & $-9.6\%$ & $-12.7\%$ & $-6.8\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-NG5's instrumented run was still in the queue at the time of writing; its model-step column is
-measured and behaves like the others (ring kernels $-1.8$ and $-2.6\%$, widened loops $-5.5$ and
-$-6.8\%$). Two things in the table matter beyond the headline.
+Two things in the table matter beyond the headline.
 
 \textbf{It is a compute result, not a communication one.} Each pair of rows posts identical message
 and byte counts --- 390.5 messages and 1\,542\,053 doubles per step for the standard form in both
@@ -204,10 +202,13 @@ step, and the \emph{owned} kernels speed up as well, their launch gap falling fr
 \textbf{Your reformulation wins once the launch structure is removed, and we had been measuring
 past it.} With ring kernels the standard form leads by 13.3 points of ice cost on CORE2 and 3.8 on
 fArc, the divergence form leading only on DARS (4.2). With widened loops the divergence form leads
-at all four meshes and at every $K$ we tried. It is not a law over all configurations, though: a
-scaling sweep across node counts (Sect.~5.4) has it ahead at every point but one, the exception
-being fArc on two GPU nodes, where the standard form is 0.7 points ahead --- outside the repetition
-spread there, so real rather than noise. An earlier note of ours decomposed the ring-kernel
+at all four meshes, and its lead is ordered by how much mesh each GPU holds: 1.3, 6.5, 6.7 and 8.9
+points of ice cost against 32, 40, 99 and 116 thousand surface nodes per GPU. That is what a halved
+nodal message should produce, and it is monotone across the four. It is ahead at every $K$ we tried
+as well. It is not a law over every configuration, though: a scaling sweep across node counts
+(Sect.~5.4) has it ahead at every point but one, the exception being fArc on two GPU nodes, where
+the standard form is 0.7 points of the model step ahead --- outside the repetition spread there, so
+real rather than noise. An earlier note of ours decomposed the ring-kernel
 gap into a message term and a byte term; both were isolated at bit-identical output and both are
 real, but they were smaller than the launch term sitting on top of them, which fell hardest on the
 divergence form because its ring gather was the most expensive of the ring kernels.
@@ -355,8 +356,6 @@ available and is exact.
 \section*{7. Not measured}
 
 \begin{itemize}\itemsep0.12em
-\item \textbf{NG5's instrumented run}, so its ice-cost column in Sect.~5.3 is missing; its model
-step is measured and consistent with the other three.
 \item \textbf{The divergence form over a long integration.} The $2.1\times10^{-11}$ per-step
 non-equivalence of Sect.~5.1 has not been followed to its long-term consequences.
 \item \textbf{Core counts above 2304 on fArc.} The 2019 paper reaches 6912; the partition set we

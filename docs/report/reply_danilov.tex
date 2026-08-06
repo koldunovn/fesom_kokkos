@@ -19,24 +19,24 @@
 
 We built the variant you describe, and it changes the study's conclusion. Written as you write it
 --- the ring computation folded into the loops that already exist rather than into kernels of its
-own --- the wide halo removes \textbf{37 to 58\% of the sea-ice cost} across three meshes, against
+own --- the wide halo removes \textbf{35 to 58\% of the sea-ice cost} across four meshes, against
 10 to 28\% for our version of the same scheme: \textbf{the rewriting multiplies the saving by two
 to five}. The paired runs compute the same ring and put identical message and byte counts on the
 wire; they differ by 360 kernel launches per time step. Our earlier conclusion, that exactness
 costs most of the saving, was measuring our implementation.
 
 \begin{center}\small
-\begin{tabular}{@{}lrrr@{}}
+\begin{tabular}{@{}lrrrr@{}}
 \toprule
-change of the sea-ice cost, $K$=8, & CORE2 & fArc & DARS \\
-all legs per mesh in one allocation & 1 node / 4 GPUs & 4 / 16 & 8 / 32 \\
+change of the sea-ice cost, $K$=8, & CORE2 & fArc & DARS & NG5 \\
+all legs per mesh in one allocation & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
 \midrule
-wide halo, standard form, our kernels           & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ \\
-wide halo, divergence form, our kernels         & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ \\
-\textbf{wide halo, standard form, your loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ \\
-\textbf{wide halo, divergence form, your loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ \\
+wide halo, standard form, our kernels           & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ & $-13.4\%$ \\
+wide halo, divergence form, our kernels         & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ & $-16.7\%$ \\
+\textbf{wide halo, standard form, your loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ & $\mathbf{-35.2\%}$ \\
+\textbf{wide halo, divergence form, your loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ & $\mathbf{-44.1\%}$ \\
 \midrule
-same, as a share of the whole model step        & $-14.4\%$ & $-9.6\%$ & $-12.7\%$ \\
+same, as a share of the whole model step        & $-14.4\%$ & $-9.6\%$ & $-12.7\%$ & $-6.8\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -76,9 +76,9 @@ the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic
 \textbf{Your reformulation now wins almost everywhere, and we had been measuring past it.} With ring
 kernels the standard form beat the divergence form by 13 points of ice cost on CORE2 and 4 on
 fArc, and our previous note decomposed that gap into a message term and a byte term. With the ring
-folded into the existing loops \emph{the divergence form leads at all three meshes} --- by 1.3,
-6.5 and 6.7 points, ordered by how much mesh each GPU holds, which is the behaviour a halved nodal
-message should produce. It is ahead at every $K$ we tried as well, and at every node count in the
+folded into the existing loops \emph{the divergence form leads at all four meshes} --- by 1.3,
+6.5, 6.7 and 8.9 points against 32, 40, 99 and 116 thousand surface nodes per GPU, monotone in how
+much mesh each GPU holds, which is exactly the behaviour a halved nodal message should produce. It is ahead at every $K$ we tried as well, and at every node count in the
 sweep but one --- fArc on two GPU nodes, where the standard form is 0.7 points ahead, outside the
 repetition spread there. So it is a strong tendency rather than a law. The launch structure was not
 creating the difference between the two forms; it was hiding it, and it fell hardest on yours
@@ -94,8 +94,8 @@ the paragraph above confirms it survives the rewriting. What we wrote in additio
 same change removes most of the saving, and that we had found no intermediate that was both cheap
 and clean. That was a statement about our kernels, not about the scheme.
 
-\textbf{Open.} NG5, at 116\,000 surface nodes per GPU, is still queued; it is the point where the
-divergence form's lead should be largest if the ordering above is real.
+\textbf{Open.} A scaling sweep on the two larger meshes is still running; the numbers above are at
+one node count per mesh.
 
 \vspace{0.35em}
 {\footnotesize All numbers are from the runs described in \texttt{danilov\_mevp\_report.pdf}; the
