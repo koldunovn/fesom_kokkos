@@ -1468,3 +1468,45 @@ while the fields matched to the last digit. Conversely **silence is not proof of
 `FESOM_VISC_OPT` (`fesom_step.cpp:658`) changes the viscosity scheme and announces NOTHING, so
 grepping for it and finding nothing says only that it is a quiet knob. Judge a knob by its
 announce, or by an observable it is *designed* to move — never by field equality.
+
+### L105 — A MESH SHIPS PARTITIONS OF DIFFERENT QUALITY, AND A BAD ONE BLOWS THE MODEL UP. Check the partition before blaming the timestep. (M10, 2026-08-06)
+
+**Measured (26749650):** NG5, 4096 ranks, dt180, cold start, one allocation, one binary, only
+the decomposition differing:
+
+| partition at 4096 ranks | 3-D balance | 300 steps |
+|---|--:|---|
+| /pool, as shipped | **13.89×** | **BLOWUP at step 175** (`uv` 5.76 and climbing) |
+| freshly generated, our partitioner | **1.05×** | **completed**, `uv` 3.25, 0.6205 s/step |
+
+**The /pool NG5 partitions are not homogeneous, and the split predicts the failure exactly:**
+
+| shipped | 3-D balance | outcome |
+|---|--:|---|
+| `dist_1024` | 1.03× | completes |
+| `dist_2048` | 1.04× | completes |
+| `dist_4096` | **13.89×** | blows up |
+| `dist_8192` | **13.98×** | blows up |
+
+The small counts were built with dual 2-D+3-D weighting; the large ones were not. Four for
+four, balance predicts survival.
+
+🔴 **This RETRACTS the M10 reading that "NG5 at dt180 cold is a physics limit shared with
+Fortran", and it undermines the M7 evidence it rested on.** M7 recorded the same death at step
+200 (port) / 203 (Fortran) — but only ever on `dist_4096`, i.e. on one of the two anomalous
+partitions. Fortran dying there too proves only that Fortran also dislikes that decomposition.
+**Neither campaign varied the partition, so both read a property of one bad decomposition as a
+property of the configuration.**
+
+**Rules.** (i) When a high-resolution mesh blows up, **measure the partition's 3-D balance
+before touching dt, viscosity or the solver** — it is minutes of analysis against hours of
+node time chasing physics. (ii) Do not assume the partitions shipped with a mesh were all
+built the same way; check, per rank count. (iii) A regenerated decomposition is not
+automatically worse — here it was strictly better, and it unblocked measurements that had
+looked physically impossible. (iv) Balance is a *marker*, not the mechanism: skewed work costs
+time, not accuracy, so what actually breaks the model is whatever else is wrong with a
+badly-formed partition (elongated or fragmented subdomains). The mechanism is untested.
+
+*(Consistent with the standing user observation that some FESOM partitions simply do not work
+— L103 §5. The difference here is that the failure is not random: it tracks a measurable
+property of the partition, so it can be screened for in advance.)*
