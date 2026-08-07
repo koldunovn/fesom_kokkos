@@ -259,14 +259,17 @@ steeply.
 
 \textbf{The saving therefore grows with the number of GPUs}, which is the opposite of how an
 optimisation usually ages, and is the reason a table at one node count per mesh understates the
-scheme. In the divergence form it reaches $-52\%$ of the ice cost on fArc at 16 nodes, $-51\%$ on
-DARS at 8, $-44\%$ on NG5 at 16, and $-55$ to $-62\%$ on CORE2, which is past its scaling limit
-from 2 nodes on.
+scheme. In the divergence form, comparing each mesh's smallest and largest node count, it goes from
+$-58$ to $-65\%$ of the ice cost on CORE2, $-40$ to $-52\%$ on fArc, $-31$ to $-51\%$ on DARS and
+$-30$ to $-44\%$ on NG5. The individual points are not perfectly monotone --- CORE2 dips to
+$-49\%$ at 2 nodes and NG5 peaks at $-47\%$ at 8 --- but every mesh ends better than it starts.
 
 \textbf{On CPU the sea ice scales cleanly} --- on fArc 91.9\,ms at 1 node down to 10.4 at 16 ---
 and the wide halo is a uniform penalty, between $+46$ and $+173\%$ of the ice cost across all
-sixteen points. Because the ice is a small share of a CPU step, that appears as $+3$ to $+22\%$ of
-the step. There is no node count at which it becomes profitable.
+fourteen points measured, which is $+2.9$ to $+22\%$ of the model step. There is no node count at
+which it becomes profitable. Two intended CPU points are absent: DARS on one node exhausts memory
+(3.2 million surface nodes do not fit in one 128-core node), and NG5 on four nodes exceeded its
+time limit and is being repeated.
 
 \begin{figure}[tb]
 \centering

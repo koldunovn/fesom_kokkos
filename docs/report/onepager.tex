@@ -93,9 +93,11 @@ across the same range; NG5 48.7 to 39.1 from 2 to 16). The ocean around it scale
 still improves, but adding GPUs buys nothing on the ice. The widened-loop wide halo lowers that cost
 and partly restores its scaling: in the divergence form the ice cost \emph{falls} where the standard
 scheme's rises (fArc 16.9, 15.0, 13.5, 12.8\,ms at 2 to 16 nodes; NG5 34.2, 26.0, 25.6, 22.1).
-\textbf{The saving therefore grows with the number of GPUs} --- reaching $-52\%$ of the ice on fArc
-at 16 nodes and $-44\%$ on NG5 --- so the single-node-count table above understates it. On CPU the
-ice scales cleanly and the wide halo is a uniform penalty at every one of the sixteen points tried.
+\textbf{The saving therefore grows with the number of GPUs} --- from the smallest to the largest
+node count on each mesh it goes $-58$ to $-65\%$ of the ice on CORE2, $-40$ to $-52\%$ on fArc,
+$-31$ to $-51\%$ on DARS and $-30$ to $-44\%$ on NG5 --- so the single-node-count table above
+understates it. On CPU the ice scales cleanly and the wide halo is a uniform penalty at every one
+of the fourteen points measured.
 
 \hd{The accuracy price, and the test that replaces bit-identity}
 
