@@ -195,13 +195,52 @@ is far more sensitive to memory-access locality. Note that halo node counts unde
 damage --- they grow 40\,\% where the edge cut grows ninetyfold --- so the cut, not the halo,
 is the quantity to watch.
 
+\subsection{A mesh's shipped partitions are not all built the same way}
+
+The partitions distributed with a mesh can differ in quality, and a poor one is not merely
+slow: it can destabilise the model. NG5 illustrates both halves. Its shipped decompositions at
+1024 and 2048 pieces balance 3-D nodes to within 4\,\%, while those at 4096 and 8192 pieces
+are skewed by a factor of 13.9 --- the small counts were built with dual 2-D+3-D weighting and
+the large ones were not.
+
+That split predicts the model's behaviour exactly. Holding mesh, timestep, cold start, binary
+and rank count fixed and varying only the decomposition, the shipped partition at 4096 pieces
+reaches the model's blow-up guard at step 175 with velocities still climbing, while a freshly
+generated one completes all 300 steps at 0.6205\,s/step:
+
+\begin{center}\small
+\begin{tabular}{lrl}
+\toprule
+NG5, 4096 ranks, dt 180, cold & 3-D balance & 300 steps \\
+\midrule
+shipped partition & $13.89\times$ & blow-up at step 175 \\
+freshly generated & $1.05\times$ & completed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+We had previously read this blow-up as a stability limit of the timestep, following an earlier
+campaign that measured the same death at step 200 in this port and step 203 in Fortran. That
+evidence came from the same shipped partition, so both readings attributed to the
+configuration what belongs to one decomposition; Fortran failing there as well shows only that
+Fortran dislikes it too. Balance is a marker rather than the mechanism --- uneven work costs
+time, not accuracy --- so what destabilises the model is presumably some other malformation of
+those partitions, which we have not identified. The practical rule is cheap: measure a
+partition's 3-D balance before attributing a blow-up to the timestep, the viscosity scheme or
+the solver.
+
 \section{Status and limitations}
 
-CPU and GPU coverage is complete for CORE2, fArc and DARS. NG5 has no valid CPU row: at
-$\geq$4096 ranks the model reaches its own vertical-CFL blow-up guard between steps 150 and
-175. That limit is documented for this mesh, timestep and cold start, and Fortran reaches it
-at step 203 against the port's 200, so measuring NG5 requires either a window shorter than
-about 120 steps or a smaller timestep. NG5 on GPU rests on a single 16-node configuration.
+CPU and GPU coverage is complete for CORE2, fArc and DARS. NG5 has no valid CPU row yet, but
+the obstacle has turned out to be the shipped partitions rather than the model: on a
+regenerated decomposition NG5 runs the full 300 steps at 4096 ranks. Partitions at 16384,
+20480 and 24576 pieces --- 451, 361 and 301 vertices per core, the range at which NG5 is
+actually run --- have been generated and are usable, so the measurement is now possible where
+it previously appeared not to be. It has not been made: at the rank counts measured so far the
+solve is 1.6--2.3\,\% of the NG5 step, below the level at which any effect is resolvable, and
+the smallest of those partitions needs 128 nodes. NG5 on GPU rests on a single 16-node
+configuration.
 
 All numbers come from one machine and a 300-step window. The default solver is unchanged: the
 switch selects a variant only when set, and which variant to adopt --- together with the value
