@@ -1263,3 +1263,40 @@ That is consistent with Finding 16 rather than an accident of it: at a rank coun
 node, METIS's labelling already keeps 97 % of the halo local and there is nothing to win; at a
 ragged one, 9 % is in play and a partitioner that happens to group differently picks up part of
 it.
+
+### The fArc zoo — the strongest feasible engine result in the campaign
+
+fArc's shipped partitions ARE this tool's output (Finding 5), so these deltas are against a
+partition the production configuration actually uses, not against a reconstruction. ε = 3 %,
+w = a + nlev; deltas vs the shipped METIS partition at the same rank count:
+
+| point | arm | cut | total commvol | **cv_max** | 2-D imb | 3-D max/min |
+|---|---|--:|--:|--:|--:|--:|
+| **2048** (16 nodes) | mtkahypar a=100 | −3.3 % | −2.4 % | **−18.0 %** | 1.209 | 8.78 |
+| | kaminpar a=100 | +1.1 % | +3.6 % | −12.2 % | 1.203 | 7.08 |
+| | mtkahypar a=0 | −7.2 % | +7.0 % | −34.0 % | *4.80* | 1.67 |
+| | kahip a=0 | −9.8 % | +6.2 % | −26.1 % | *4.83* | 2.67 |
+| **64** | mtkahypar a=100 | +0.5 % | −7.3 % | **−12.1 %** | 1.191 | 7.60 |
+| | mtkahypar a=0 | −3.7 % | +1.2 % | −21.4 % | *2.41* | 1.24 |
+| **16** | mtkahypar a=100 | −28.0 % | −28.0 % | **−9.6 %** | 1.187 | 3.84 |
+| | kahip a=0 | −42.0 % | −26.5 % | +1.8 % | *2.06* | 1.13 |
+
+*italic* = fails the `n2d_imb ≤ 1.30` feasibility filter.
+
+**`Mt-KaHyPar` with `w = 100 + nlev` cuts the max-per-rank communication volume by 10–18 % at
+every fArc rank count while keeping the 2-D imbalance under 1.21** — the only arm in the zoo
+that improves the metric the step waits on without breaking the balance the ice model needs. It
+is the B-family's headline candidate and the fArc shortlist entry.
+
+Two cautions to carry into the race:
+
+- At fArc 16 the engines look spectacular (cut −26…−42 %, comm volume −25…−28 %) because the
+  shipped 16-rank partition is dual-constrained and pays heavily for its 1.02 3-D balance. That
+  is the same trade as Finding 14, not a new lever.
+- Every one of these arms is ε = 3 %. Finding 15 says the advantage evaporates at FESOM's own
+  0.1 %. The race therefore tests *both* the arm and the slack; if `mtkahypar a=100` wins, the
+  next question is whether METIS at `UFACTOR=30` gets there too (arm A5), which is much cheaper
+  to adopt than a new dependency.
+
+**Updated shortlist to race** — CORE2 512 (4 arms + anchor, above), CORE2 864 (`kaminpar a=100`,
+`kahip unweighted` — the per-node-max placement arms), fArc 2048 (`mtkahypar a=100`).
