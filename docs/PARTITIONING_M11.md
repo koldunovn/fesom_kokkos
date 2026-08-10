@@ -1400,3 +1400,39 @@ every mesh (2,464 vs 353 on dars) — the long tail RCM's mean hides.
 So the two independent verdicts agree, which is worth stating because they were reached
 separately: RCM fails the SSH-iteration gate at two CORE2 rank counts (Finding 12), and it is
 the wrong objective for this code's access pattern (here). Hilbert is the ordering arm.
+
+## ⭐⭐ ORDERING RACE — CPU 864 r, the point FIXISO restored (job 26855115)
+
+| arm | s/step | vs base |
+|---|--:|--:|
+| base (settled) | 0.0448 | — |
+| **hilbert** | 0.0438 | **−2.23 %** |
+| rcm | 0.0440 | −1.79 % |
+
+Pure-ordering precheck EXACT for both arms, so this is the decomposition the baseline carries,
+relabelled. The point exists at all because of Finding 13; it was dropped in session 1.
+
+### 🔴 This kills the mechanism the campaign has been quoting
+
+Session 1 explained the ordering gain as a working-set effect — "the gain shrinks as ranks grow;
+at 512 ranks CORE2 holds only ~248 vertices per rank, small enough that the numbering barely
+matters, while a single GPU holding ~32 k is where locality pays". The full CPU set now reads:
+
+| ranks | vertices/rank | hilbert |
+|--:|--:|--:|
+| 256 | ~496 | −2.42 % |
+| 512 | ~248 | −1.51 % |
+| 864 | ~147 | **−2.23 %** |
+
+**Not monotone.** The smallest per-rank working set gives nearly the largest gain, so the
+working-set story cannot be the whole mechanism and should not be repeated as if it were. A
+plausible replacement — untested, and labelled as such — is that two terms compete: the
+element/edge gather inside the kernels, whose share falls as ranks grow, and the halo
+pack/unpack gather, whose share rises (halo/owned goes 0.137 at 256 ranks to 0.33 at 864, and at
+864 nine per cent of that halo crosses a node boundary, Finding 16). Renumbering makes both
+gathers contiguous. Deciding between them needs a phase breakdown, not another race.
+
+What is safe to say without a mechanism: **the ordering lever gives −1.5 % to −2.4 % on CPU at
+every rank count measured (256, 512, 864) and −1.5 % to −4.9 % on GPU, and it does not decay
+with scale.** That is a better result than the session-1 story implied, and it rests on four CPU
+points and two GPU points rather than on the explanation.
