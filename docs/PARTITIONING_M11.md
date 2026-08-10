@@ -1656,3 +1656,64 @@ over-balanced arm doubles the step time.
 **Communication quality is worth nothing; 3-D load balance is worth 4–7 %, provided the 2-D
 imbalance stays near 1.2–1.3.** Every arm that pushed 3-D balance further by sacrificing 2-D
 balance lost catastrophically (+53 %, +71 %, +105 %).
+
+## ⭐⭐⭐ Finding 24 — the partition lever is CPU/high-rank only, and the predictor is the SHIPPED 3-D imbalance
+
+GPU races (CUDA `h17`, `-C a100_80`, `FESOM_SPEED=1`, min-of-3, fresh allocations) plus same-day
+replications of the CPU points in fresh allocations. Every number below is min-of-3.
+
+**GPU, CORE2, 1 node / 4 ranks** (job 26858541) — the sensible CORE2 GPU point:
+
+| arm | s/step | vs base | spread |
+|---|--:|--:|--:|
+| base | 0.0664 | — | 2.3 % |
+| **hil (renumbered)** | 0.0631 | **−4.97 %** | 0.6 % |
+| kahip `w=100+nlev` | 0.0684 | **+3.01 %** | 1.0 % |
+| hil + kahip | 0.0640 | −3.61 % | 0.9 % |
+| METIS `w=100+nlev` u30 | 0.0669 | +0.75 % | 0.9 % |
+
+**GPU, fArc, 4 nodes / 16 ranks** (job 26858542):
+
+| arm | s/step | vs base |
+|---|--:|--:|
+| base | 0.1161 | — |
+| mtkahypar `w=100+nlev` | 0.1183 | **+1.89 %** |
+| mtkahypar pure-nlev | 0.1640 | +41.26 % |
+
+**The partition lever LOSES at both GPU points**, while the ordering lever gives −4.97 % — and the
+day-1 GPU renumbering number (−4.89 %) replicates to within 0.08 pp on fresh nodes.
+
+### The predictor, and it was in the Task-2 baseline table all along
+
+| point | shipped partition's 3-D max/min | best partition arm |
+|---|--:|--:|
+| CORE2 GPU 4 r | **1.01** | +0.75 % |
+| fArc GPU 16 r | **1.02** | +1.89 % |
+| CORE2 CPU 512 r | 9.26 | −3.6 … −4.2 % |
+| CORE2 CPU 864 r | 9.60 | −4.1 % |
+| fArc CPU 2048 r | 9.40 | **−6.8 … −7.6 %** |
+
+**The partition lever pays exactly what the shipped partition wastes.** At 4 or 16 ranks the
+existing decomposition is already balanced in 3-D to 1 %, so there is nothing to recover and the
+extra 2-D imbalance a weighted arm introduces is a pure cost. Bathymetry-driven imbalance grows
+with rank count (CORE2: 1.01 at 4 ranks → 9.26 at 512 → 9.60 at 864), and so does the gain.
+
+⇒ **Rule for adoption: score the shipped partition first. 3-D max/min near 1 ⇒ do not
+repartition. Near 9–10 ⇒ repartition, and expect 4–8 %.**
+
+## Same-day replication in fresh allocations (min-of-3)
+
+The two-day adoption rule is replaced, at the user's direction, by replication in a fresh
+allocation on the same day — which controls for node-specific effects but not for slow system
+drift, and that limitation is stated rather than papered over.
+
+| point | arm | first run | replication | agree to |
+|---|---|--:|--:|--:|
+| CORE2 CPU 512 | hil | −1.85 % | −1.19 % | 0.7 pp |
+| | kahip `w=100+nlev` | −4.03 % | −3.57 % | 0.5 pp |
+| | **METIS `w=100+nlev` u30** | −4.21 % | **−3.57 %** | matches KaHIP to the digit in both runs |
+| | **hil + kahip (both levers)** | −5.54 % | **−5.09 %** | 0.5 pp |
+| fArc CPU 2048 | mtkahypar `w=100+nlev` | −6.77 % | **−7.58 %** | 0.8 pp |
+| CORE2 GPU 4 r | hil | −4.89 % (day 1) | −4.97 % | 0.08 pp |
+
+Every sign reproduces and every magnitude agrees within 0.8 pp.
