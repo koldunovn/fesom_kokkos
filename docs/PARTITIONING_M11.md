@@ -483,3 +483,233 @@ old→new where new→old was needed. Fixed; the distinction is now spelled out 
 | 26852056 | renumbering smoke: permute → inject → model → scorecard | 0:47 | **PASS** |
 
 **Node-hour ledger:** 0.03 node-h. Task 1–5 cumulative: **0.13 node-h**; sandbox 1.3 GB.
+
+---
+
+## PRE-REGISTRATION — ordering arms (Task 10, ordering slice) · written 2026-08-10, BEFORE any race
+
+Brought forward from its plan position at user request: the ordering lever has the campaign's
+largest offline signal (CORE2 mean |Δindex| −98.6 %, element-gather locality 27.6 % → 86.8 %),
+the meshes are built and verified, and nothing about it depends on the engine or zoo tasks.
+Everything below is fixed before a single timing number exists.
+
+**Arms** (pure ordering — the partition CONTENT is identical across arms by construction, via
+label-permuted dists; Task 5's smoke proved all 30 invariant scorecard metrics equal):
+
+| arm | mesh | partition |
+|---|---|---|
+| `base` | `core2_m11` (shipped numbering) | its own `dist_N` |
+| `hil` | `core2_hil` (3-D Hilbert on unit-sphere xyz) | `dist_N` label-permuted from `base` |
+| `rcm` | `core2_rcm` (reverse Cuthill-McKee) | `dist_N` label-permuted from `base` |
+
+fArc is **not** raced for ordering: Task 5 measured the SFCs making its locality worse
+(+10.6 %, +14.3 %) and only RCM helping (−29.3 %). fArc RCM is deferred to Task 9 and is not
+part of this pre-registration.
+
+**Points.** CPU Serial `h17` (`5c3c90fc`): CORE2 256 r (2 nodes), 512 r (4 nodes), 864 r
+(7 nodes). GPU CUDA `h17` (`f8384e86`, `-C a100_80`): CORE2 4 r (1 node), 8 r (2 nodes).
+The 512 r point is production; 256 r sits on the winning side of M10's crossover and 864 r on
+the losing side, so the grid spans the regime.
+
+**Protocol.** 300 steps, dt 1800 (CORE2 protocol), PHC + JRA55 1958 forcing, `snap_every=-1`,
+`FESOM_PRINT_EVERY=999` (printing OFF during timing — M9 measured a per-step diagnostic print at
+41 % of a fArc GPU 2N step). All three arms of a point run inside ONE allocation, 2 reps each,
+**min-of-2**, same day. `BIN=` pinned and md5-checked in-job.
+
+**Gates, all pre-registered:**
+
+1. **Halo/dist correctness** — the gid identity test, automatic in every run and proven
+   non-vacuous in Task 1. Any abort kills the arm.
+2. **Stability screen** — 300 steps with no blow-up-guard hit. Failing arms are discarded, not
+   debugged (L99/M10: a fresh partition can simply be unusable).
+3. **SSH iteration bound** — a symmetric permutation changes only the ORDER of the CG
+   reductions, so per-solve iteration counts must satisfy **|Δ| ≤ 1 per step and mean |Δ| < 0.5**
+   over the gate leg. A systematic shift means the operator changed, i.e. a bug, not an
+   ordering effect. Measured on a SEPARATE 20-step leg with `FESOM_PRINT_EVERY=1`, never on a
+   timed leg.
+4. **Accuracy** — the printed per-step maxima (`uv`, `eta`, `w`) and `T`/`S` ranges are global
+   reductions and therefore **permutation-invariant quantities**: they need no field
+   permutation to compare. Pre-registered bound: **relative |Δ| ≤ 1e-9 at step 1** on every one
+   of them. A pure relabelling perturbs only summation order, so anything larger is a mesh
+   error, not round-off — and it means STOP and diagnose rather than adjust the bound.
+5. **Invariant-block equality** — already green (Task 5): if a label-permuted dist ever fails
+   it, that arm is not a pure ordering arm and must not be raced as one.
+
+**Adoption rule.** ≥ **2 %** net step-time improvement, per backend, reproduced on **two
+same-day pair days**, with all four gates green and rule 0.41 (stability re-proven at protocol
+length) satisfied before the word "adopted" is used. A result between 0 and 2 % is reported as
+measured and NOT adopted. A negative result is reported with the same prominence.
+
+**Budget.** ≤ 1.5 node-h for the CPU points, ≤ 0.5 node-h for the GPU points, ≤ 0.2 node-h for
+the gate legs. GPU stays ≤ 16 nodes (2 here).
+
+**What would falsify the lever:** no arm reaching 2 % on either backend at any of the five
+points, despite the −98.6 % locality change. That outcome is publishable as-is — it would say
+that a vertex-centred FV ocean code on this hardware is not index-stream-bound, which nobody
+has measured.
+
+### ⭐⭐ Finding 8 — `check_partitioning` is not idempotent, and it broke the pure-ordering setup
+
+Building the race inputs, the invariant-block gate refused two of five rank counts
+(job **26852384**): the label-permuted arms were **not** carrying the baseline's partition at
+N=256 and N=864. The mapping to the scorecard is exact — those are precisely the two shipped
+partitions that still contain nodes with ≤1 same-partition neighbour:
+
+| N | shipped `isolated_nodes` | invariant block after label-permutation |
+|--:|--:|---|
+| 4, 8, 512 | 0 | identical |
+| 256 | 1 | **mismatch** |
+| 864 | 71 | **mismatch** |
+
+On injection `check_partitioning` relocates those nodes, and because it walks `do n=1,nod2D`
+consulting running per-partition loads, **which** node moves **where** depends on the numbering.
+So the two arms stopped carrying the same decomposition, and racing them would have been an
+ordering-plus-repartitioning race reported as a pure ordering one. The gate caught it before a
+single timing number existed — which is what a pre-registered gate is for.
+
+**Fix: settle the baseline to a fixed point first** (job 26852646). Injecting each shipped
+vector back into the old mesh once lets the post-pass act there; the settled partition is then
+what all three arms carry. Results of settling:
+
+| N | nodes moved while settling | `isolated_nodes` after |
+|--:|--:|--:|
+| 4, 8, 512 | 0 | 0 |
+| 256 | 1 | 0 |
+| 864 | **71** | **1** ← still not a fixed point |
+
+⇒ **repairing 71 isolated nodes created a new one.** The post-pass is a single sweep, not an
+iteration to convergence, so its output is not guaranteed to satisfy its own criterion. Job
+26852879 iterates the injection until `isolated_nodes == 0` and rebuilds the arms from that
+fixed point.
+
+Two consequences worth carrying beyond M11: (i) any freshly generated FESOM partition may
+contain the very defect the post-pass exists to remove, and only the scorecard will say so;
+(ii) the **baseline arm for the ordering race is the settled partition**, not the shipped one —
+a fairer comparison, since it removes a confound that has nothing to do with numbering, and it
+is documented here rather than folded silently into the numbers.
+
+### ⭐⭐⭐ Finding 9 — an upstream `check_partitioning` bug, found by relabelling
+
+Iterating the settle at N=864 (job 26852879) never converged: five passes, each flagging the
+**same** node and leaving it exactly where it was.
+
+| numbering | the node | its neighbours' partitions, in adjacency order | outcome |
+|---|---|---|---|
+| shipped | 103748 in part 356 | `356 353 351` — **first is its own** | flagged 5×, **never moved** |
+| rcm | 98137 in part 356 | `356 353 351` | flagged, **not moved** |
+| hil | 55318 in part 356 | `353 351 356` | **"moved to part 353"** — repaired |
+
+Same mesh, same partition, same physical node: the repair succeeds or silently no-ops depending
+on the **order of the adjacency list**, which depends on the node numbering. The cause is one
+line — `fvom_init.F90:1885`:
+
+```fortran
+np = 1
+ne_part(1) = node_neighb_part(1)          ! seeded WITHOUT excluding part(n)
+...
+do i = 1, cnt
+   if (node_neighb_part(i) == part(n)) cycle   ! the loop DOES exclude it
+```
+
+The candidate list is seeded with the first neighbour unconditionally, while the loop that
+fills the rest explicitly skips neighbours in the node's own partition. When the adjacency list
+happens to begin with the node's own partition, that partition becomes a move candidate, wins,
+and the node is "moved" to where it already was. The routine reports success and the isolated
+node survives every subsequent pass.
+
+This is a genuine upstream defect with a one-line fix (seed from the first neighbour **not** in
+`part(n)`, or drop the seeding and let the loop build the list). It is invisible without doing
+exactly what M11 did — relabel a mesh and compare — and it belongs in the Task-18 upstream PR.
+
+**Consequence for this race:** N=864 cannot be brought to a fixed point by this route, so its
+arms cannot be made invariant-identical, so it is **dropped from the pure-ordering race** and
+recorded here rather than raced with a silent one-node difference. The grid keeps CPU 256/512
+and GPU 4/8.
+
+---
+
+## ORDERING RACE — results (2026-08-10, pair day 1)
+
+Protocol exactly as pre-registered: 300 steps, dt 1800, PHC + JRA55 1958, printing and
+snapshots off, all three arms in one allocation, 2 reps, min-of-2, `BIN=` md5-checked in job.
+
+| point | base (s/step) | hilbert | rcm |
+|---|--:|--:|--:|
+| CPU 256 r (2 nodes) | 0.1074 | 0.1046 **−2.61 %** | 0.1044 **−2.79 %** |
+| CPU 512 r (4 nodes) | 0.0596 | 0.0587 −1.51 % | 0.0585 −1.85 % |
+| GPU 4 r (1 node) | 0.0675 | 0.0642 **−4.89 %** | 0.0640 **−5.19 %** |
+| GPU 8 r (2 nodes) | 0.0619 | 0.0610 −1.45 % | 0.0609 −1.62 % |
+
+**Renumbering wins on both backends, at every point measured, −1.5 % to −5.2 %.** RCM is
+marginally ahead of Hilbert everywhere, consistent with its better locality proxy (288 vs 459).
+The gain shrinks as ranks grow — at 512 ranks CORE2 holds only ~248 vertices per rank, a
+working set small enough that the numbering barely matters, while a single GPU holding ~32 k
+vertices is where locality pays. That is the mechanism the lever predicts, and the ordering of
+the four points follows it.
+
+### Gates — one passed, one failed on my own instrument
+
+**SSH iterations** (job 26852882, 20 steps, separate from every timed leg): hilbert max |Δ| = 1,
+mean 0.050 → **PASS**. RCM max |Δ| = 2, mean 0.550 → **FAILS** the pre-registered bound
+(max ≤ 1, mean < 0.5), marginally. Base iterations run 127–141 per step, so a 2-iteration
+excursion is ~1.5 %.
+
+**Accuracy — the pre-registered bound was wrong, and it was my error.** I registered "relative
+|Δ| ≤ 1e-9 at step 1 on the printed maxima". That is untestable: the diagnostic print carries
+three significant digits. It is also the wrong physics — `Kv`, `Av` and `w` are threshold-driven
+quantities in a model whose mixing scheme flips boundary-layer depths on round-off, so they are
+the worst possible choice for a round-off-level comparison. The gate failed on its instrument,
+not necessarily on the meshes. **I am not retrofitting a pass.**
+
+What the evidence actually shows, measured afterwards against the project's own standard — a
+**partition-class floor** from control pairs (L79). Both controls hold the numbering fixed and
+change only the partition, so they need no permutation, and the comparison tool self-checks the
+permutation on `lon`/`lat` before touching any physics (exact, max |Δ| = 0):
+
+| comparison | temp rms | temp p50 | temp p99.99 | ssh rms | ssh p50 |
+|---|--:|--:|--:|--:|--:|
+| control A — one node moved | 7.03e-06 | 6.0e-14 | 9.8e-06 | 5.5e-08 | 2.5e-10 |
+| **control B — different partition** | **4.58e-02** | **1.7e-07** | **2.33** | **6.8e-03** | **7.9e-05** |
+| ordering — hilbert | 6.73e-02 | 1.1e-06 | 2.25 | 3.99e-03 | 2.2e-04 |
+| ordering — rcm | 1.19e-01 | 1.7e-06 | 3.79 | 9.55e-03 | 4.9e-04 |
+
+The ordering arms land **in the same class as repartitioning** — same distribution shape (median
+~1e-6 K over 5.96 M points, a fat tail from a small set of columns), rms within 1.5× (hilbert)
+and 2.6× (rcm) of the partition-class floor the project already accepts, and orders of magnitude
+above the one-node control. Combined with the mesh-level evidence — provably identical graph,
+element areas identical as a multiset, `lon`/`lat` mapping back exactly, halo gate green, SSH
+iterations within 1–2 — this is round-off amplified through the mixing thresholds, not a mesh
+error. Worth stating plainly though: at the **median**, ordering perturbs ssh ~3–6× more than a
+full repartitioning does, plausibly because renumbering reshuffles the local summation order of
+every field on every rank whereas repartitioning only regroups the global sums.
+
+### Verdict: measured, NOT adopted
+
+The timing result is real and reproducible within the day. Adoption is **withheld**, for three
+independent reasons, none of which the numbers can talk their way out of:
+
+1. the pre-registered accuracy gate failed, and its replacement was designed after seeing the
+   data — that makes it evidence, not a passed gate. It must be re-registered and re-run.
+2. RCM misses the pre-registered SSH-iteration bound.
+3. the adoption rule requires a **second same-day pair day**, which by definition cannot exist yet.
+
+Next actions, in order: re-register the accuracy gate as a partition-class-floor comparison with
+the floor measured first; re-run both gates; second pair day; then decide. The CPU 864 point
+returns only if Finding 9 is fixed locally.
+
+**Run table**
+
+| job id | what | nodes | elapsed | verdict |
+|---|---|--:|--:|---|
+| 26852384 | label-permuted dists v1 | 1 | 4:38 | **refused by the invariant gate** at N=256/864 (Finding 8) |
+| 26852646 | settled baselines + arms | 1 | 5:10 | 4 of 5 counts green; 864 still not a fixed point |
+| 26852879 | settle 864 to a fixed point | 1 | 2:54 | **never converges** → Finding 9 |
+| 26852880 | CPU race 256 r | 2 | 4:12 | base 0.1074 / hil −2.61 % / rcm −2.79 % |
+| 26852881 | CPU race 512 r | 4 | 2:51 | base 0.0596 / hil −1.51 % / rcm −1.85 % |
+| 26852883 | GPU race 4 r | 1 | 2:42 | base 0.0675 / hil −4.89 % / rcm −5.19 % |
+| 26852884 | GPU race 8 r | 2 | 2:34 | base 0.0619 / hil −1.45 % / rcm −1.62 % |
+| 26852882 | ordering gate leg | 2 | 0:46 | SSH iters hil PASS / rcm FAIL; accuracy bound unusable |
+| 26853331 | accuracy control (first try) | 2 | 0:04 | **failed on my bash bug** — `local t=$1 o="$OUT/$t"` expands all args before assigning, so `$t` was unbound. The race scripts carried the same latent bug and only worked because their loop variables happened to share the names; fixed in all four |
+| 26853377 | accuracy control | 2 | 0:41 | controls A and B measured |
+
+**Node-hour ledger:** ordering race 0.72 node-h. Campaign cumulative: **0.85 node-h**.
