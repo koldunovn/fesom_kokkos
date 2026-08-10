@@ -1577,3 +1577,82 @@ whether FESOM needs an external partitioner at all, and both are one race:
   at a = 100 bracket it.
 
 Both are queued (jobs 26857589, 26857590).
+
+## ⭐⭐⭐ Finding 21 — the win is available from METIS ALONE, and it is two knob settings
+
+Job 26857651, CORE2 512 ranks, same protocol. The question was whether the 4.4 % belongs to
+KaHIP or to the *formulation* KaHIP was given (a single scalar weight at 3 % slack).
+
+| arm | s/step | vs base | rep spread |
+|---|--:|--:|--:|
+| base — METIS as shipped (dual constraint, `UFACTOR=1`) | 0.0594 | — | 2.0 % |
+| **METIS `w=100+nlev`, `UFACTOR=30` (3 %)** | **0.0569** | **−4.21 %** | 0.2 % |
+| **KaHIP `w=100+nlev`, ε=3 %** | **0.0569** | **−4.21 %** | 0.4 % |
+| METIS `w=100+nlev`, `UFACTOR=1` (0.1 %) | 0.0579 | −2.53 % | 0.3 % |
+| METIS `w=100+nlev`, `UFACTOR=100` (10 %) | 0.0578 | −2.69 % | 0.7 % |
+| KaHIP `w=40+nlev` | 0.0572 | −3.70 % | 0.7 % |
+| KaHIP `w=15+nlev` | 0.0645 | **+8.59 %** | 0.0 % |
+
+**METIS at 3 % slack lands on KaHIP's number to four digits.** The external engines are not
+needed for this lever; what was needed was to stop asking METIS for the wrong thing. Two runtime
+knobs, both already in `partm11`:
+
+```
+FESOM_PART_KWAY=1 FESOM_PART_OBJ=vol FESOM_PART_VSIZE=1 FESOM_PART_WGT_A=100 FESOM_PART_UFACTOR=30
+```
+
+Both settings matter and both have an interior optimum: the same weight at FESOM's own
+`UFACTOR=1` gives only −2.53 %, at 10 % slack −2.69 %; and along the weight axis a=15 is
+**8.6 % slower**, a=40 −3.70 %, a=100 −4.21 %, unweighted 0.00 %, pure-nlev +71 %.
+
+This also retires Finding 15 as a conclusion about the engines: METIS did beat them at 0.1 %
+slack, but the right reading is that **0.1 % was the wrong tolerance**, not that the engines are
+weak.
+
+## ⭐⭐⭐ Finding 22 — the two levers stack: 2×2 factorial, CORE2 512 (job 26857849)
+
+Ordering × partition in one allocation, four arms, `MIXED_NUMBERING=1` so the mesh-identity
+check groups by numbering instead of refusing:
+
+| arm | numbering | partition | s/step | vs base |
+|---|---|---|--:|--:|
+| base | shipped | METIS shipped | 0.0596 | — |
+| hil | **Hilbert** | METIS shipped | 0.0585 | −1.85 % |
+| kahip | shipped | **`w=100+nlev` 3 %** | 0.0572 | −4.03 % |
+| **hil_kahip** | **Hilbert** | **`w=100+nlev` 3 %** | **0.0563** | **−5.54 %** |
+
+Sum of the single-lever gains is −5.88 %; measured together, −5.54 %. **The levers are ~94 %
+additive** — they act on different things (index locality inside a rank versus how much work each
+rank has) and the small negative interaction is the overlap. Rep spreads on the three fast arms
+are 0.0–0.2 %, so the ordering of the table is not noise.
+
+## ⭐⭐⭐ Finding 23 — fArc 2048 on 16 nodes: −6.8 %, the largest win in the campaign
+
+Job 26857848, dt 900 (fArc's production step; the first attempt at CORE2's dt 1800 blew up on
+**every** arm including the baseline, which identified it as my protocol error rather than a
+partition failure — recorded because a partition campaign that reads a blow-up as an arm result
+is one wrong dt away from a false verdict).
+
+| arm | s/step | vs base | 2-D imb | 3-D max/min |
+|---|--:|--:|--:|--:|
+| base — fArc's shipped `dist_2048` | 0.0827 | — | 1.004 | 9.40 |
+| **mtkahypar `w=100+nlev`** | **0.0771** | **−6.77 %** | 1.209 | 8.78 |
+| kahip unweighted | 0.0845 | +2.18 % | 1.027 | 12.19 |
+| mtkahypar pure-nlev | 0.1696 | **+105.08 %** | 4.80 | 1.67 |
+
+The pattern replicates on a production mesh five times CORE2's size and at four times the rank
+count: the scalar-weighted arm wins, the cut-optimised unweighted arm **loses** 2.2 %, and the
+over-balanced arm doubles the step time.
+
+### The law, stated across four raced points
+
+| point | best arm | gain | the arm that only improved the CUT |
+|---|---|--:|--:|
+| CORE2 512 | `w=100+nlev`, 3 % | −4.2 % | ±0.00 % |
+| CORE2 864 | `w=100+nlev`, 3 % | −4.1 % | −0.23 % |
+| fArc 2048 | `w=100+nlev`, 3 % | **−6.8 %** | +2.18 % |
+| CORE2 512, + Hilbert | both levers | **−5.5 %** | — |
+
+**Communication quality is worth nothing; 3-D load balance is worth 4–7 %, provided the 2-D
+imbalance stays near 1.2–1.3.** Every arm that pushed 3-D balance further by sacrificing 2-D
+balance lost catastrophically (+53 %, +71 %, +105 %).

@@ -49,12 +49,24 @@ for spec in "${SPECS[@]}"; do
 done
 echo "    arms:$NAMES"
 
-echo "--- the arms must differ ONLY in the partition"
-for f in nod2d.out elem2d.out aux3d.out nlvls.out elvls.out; do
-    u=$(for n in $NAMES; do md5sum "${MESH[$n]}/$f" | cut -d' ' -f1; done | sort -u | wc -l)
-    [ "$u" = 1 ] || { echo "REFUSE: $f is not identical across the arms"; exit 2; }
+# Arms must differ ONLY in the partition — unless the race is deliberately a 2x2 over
+# numbering AND partition (MIXED_NUMBERING=1), in which case arms are grouped by their mesh
+# files and the identity requirement is enforced WITHIN each group. Anything else is a race
+# whose arms differ in a way nobody wrote down.
+echo "--- mesh-file identity"
+declare -A GRP
+for n in $NAMES; do
+    GRP[$n]=$(for f in nod2d.out elem2d.out aux3d.out nlvls.out elvls.out; do
+                  md5sum "${MESH[$n]}/$f" | cut -d' ' -f1; done | md5sum | cut -c1-8)
 done
-echo "    five mesh files md5-identical across all arms"
+ngrp=$(for n in $NAMES; do echo "${GRP[$n]}"; done | sort -u | wc -l)
+if [ "$ngrp" != 1 ] && [ "${MIXED_NUMBERING:-0}" != 1 ]; then
+    echo "REFUSE: the arms carry $ngrp different meshes and MIXED_NUMBERING is not set"
+    for n in $NAMES; do printf "    %-16s mesh-group %s\n" "$n" "${GRP[$n]}"; done
+    exit 2
+fi
+echo "    $ngrp mesh group(s) across $(echo $NAMES | wc -w) arms"
+for n in $NAMES; do printf "    %-16s mesh-group %s   %s\n" "$n" "${GRP[$n]}" "${MESH[$n]}"; done
 for n in $NAMES; do
     printf "    %-14s %s\n" "$n" "${MESH[$n]}"
 done
