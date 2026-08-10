@@ -1194,3 +1194,47 @@ variants at CORE2 512:
 So the hypergraph arm is not optimising a proxy: whatever Mt-KaHyPar improves, FESOM stops
 shipping. (Which makes Finding 15 sharper rather than softer — the engine optimises the right
 quantity and still loses to METIS once it is held to FESOM's own balance tolerance.)
+
+### Task 10 (partial) — the CORE2 512 shortlist, with the prediction written down first
+
+`scripts/m11_pareto.py`. With five objectives almost nothing is dominated (15 of 16 arms sit on
+the front), so a bare Pareto front is not a prune. The prune is **feasibility first, front
+second**, and the feasibility filter is stated rather than buried in a weighted score:
+
+> **`n2d_imb ≤ 1.30`.** The ice model and every per-rank 2-D allocation scale with the 2-D node
+> count, so an arm's 2-D imbalance multiplies the slowest rank's ice work directly. M9 measured
+> the ice at 5–13 % of the GPU step and more on CPU; a 4–5× 2-D imbalance cannot be bought back
+> by any communication saving. Ten of sixteen arms fail it — every `a ∈ {0, 15, 40}` variant.
+
+Front after the filter (CORE2 512, 4 nodes):
+
+| arm | cv_max | off-node 3-D | 3-D max/min | 2-D imb | disc |
+|---|--:|--:|--:|--:|--:|
+| kahip a=100 | **2,895** | 35,900 | 6.91 | 1.275 | 13 |
+| mtkahypar a=100 | 2,958 | 31,688 | 7.53 | 1.259 | 24 |
+| kaminpar a=100 | 3,100 | 37,381 | 6.74 | 1.251 | 18 |
+| kahip unweighted | 3,156 | 29,413 | 10.54 | **1.025** | **7** |
+| METIS settled (baseline) | 3,185 | **26,617** | 9.26 | **1.005** | 8 |
+
+**Shortlist to race**, four arms and an anchor, each with the question it answers:
+
+1. `metis_settled` — the baseline.
+2. `kahip a=100` — the best feasible max-per-rank comm volume (−9.1 %) at a 1.28 2-D imbalance.
+3. `kahip unweighted` — the same balance profile as the baseline (2-D 1.025) with −6.1 % total
+   comm volume but **+10.5 % off-node**: it isolates cut quality from balance, and it tests
+   whether total or off-node volume is the currency.
+4. `mtkahypar a=0` — **deliberately infeasible** (2-D imbalance 5.07) and raced anyway: it has
+   the best 3-D balance in the whole zoo (1.51 vs the baseline's 9.26) and off-node volume
+   within 4 % of the baseline. It is the test of the feasibility filter itself. If it wins, the
+   filter is wrong and there is a large lever behind it; if it loses, the filter is validated by
+   measurement instead of assertion.
+5. anchor `core2_wgt2` — M10's dual-constraint arm, exempt from pruning so the
+   predicted-vs-measured regression spans the range.
+
+**Prediction, registered before the race:** all four engine arms land within ±2 % of the
+baseline at CORE2 512. Reasoning: at this point only 2.9 % of the halo leaves the node, and the
+off-node volume moves from 26,617 to 27,628–37,381 across the shortlist while total comm volume
+moves −6 % … +2 %. If a ±2 % band is what comes out, the honest conclusion is that partition
+quality is not the lever at 512 ranks and the campaign's weight should go to the ordering lever
+and to the ragged-rank-count effect (Finding 16). A result outside the band falsifies the
+off-node-volume model and is the more interesting outcome.

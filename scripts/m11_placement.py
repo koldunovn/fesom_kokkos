@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--compare-relabel", action="store_true")
     ap.add_argument("--emit-relabelled", metavar="FILE")
     ap.add_argument("--label", default="")
+    ap.add_argument("--arm", help="arm name for the csv row (joins with the scorecard's `arm`)")
+    ap.add_argument("--csv", help="append one row per run")
     a = ap.parse_args()
 
     npes = a.dist or a.npes
@@ -138,6 +140,17 @@ def main():
     print(f"  OFF-NODE     2-D {v['off2']:>10,} ({v['frac2']*100:5.1f} %)"
           f"   3-D {v['off3']:>12,} ({v['frac3']*100:5.1f} %)")
     print(f"  off-node 3-D per node: max {v['pernode_max']:,}  mean {v['pernode_mean']:,.0f}")
+
+    if a.csv:
+        import csv as _csv
+        row = dict(arm=a.arm or tag, npes=npes, ranks_per_node=rpn, **v)
+        new = not os.path.exists(a.csv)
+        with open(a.csv, "a", newline="") as f:
+            w = _csv.DictWriter(f, fieldnames=list(row))
+            if new:
+                w.writeheader()
+            w.writerow(row)
+        print(f"  csv row -> {a.csv}")
 
     if a.compare_relabel or a.emit_relabelled:
         new = relabel_greedy(imp, own, lev, npes, rpn)
