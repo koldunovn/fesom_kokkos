@@ -1174,3 +1174,23 @@ on-node, against METIS's 97.1 %:
 So KaHIP's 6 % saving in *total* comm volume comes with 10 % *more* of it crossing a node
 boundary — the currency that costs. Any Pareto prune that ranks on total comm volume alone would
 pick it for the wrong reason; the shortlist uses the off-node column too.
+
+#### ⭐⭐ Mt-KaHyPar's reported objective IS FESOM's communication volume — exactly, on every arm
+
+Task 3 verified the star expansion for a single partition (km1 of the written hypergraph =
+47,620 = METIS's `totalv` with `vsize = nlev`). The engine's own optimisation target now
+confirms it end to end: Mt-KaHyPar's final `km1` and the scorecard's `commvol_total`, computed
+independently from the mesh and the part vector, agree **to the digit** on all five weight
+variants at CORE2 512:
+
+| arm | km1 (engine) | commvol (scorecard) |
+|---|--:|--:|
+| a=0 | 913,637 | 913,637 |
+| a=15 | 891,062 | 891,062 |
+| a=40 | 880,739 | 880,739 |
+| a=100 | 875,706 | 875,706 |
+| unweighted | 910,438 | 910,438 |
+
+So the hypergraph arm is not optimising a proxy: whatever Mt-KaHyPar improves, FESOM stops
+shipping. (Which makes Finding 15 sharper rather than softer — the engine optimises the right
+quantity and still loses to METIS once it is held to FESOM's own balance tolerance.)

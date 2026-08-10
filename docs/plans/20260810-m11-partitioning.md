@@ -317,7 +317,7 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
       → all three produce a valid `FESOM_PART_FILE` at CORE2 512 (2 s / 5 s / 29 s) and every
       row balances `w=100+nlev` to 3 %, the ε they were given.
 - [ ] verify: one engine vector → `FESOM_PART_FILE` → dist → Serial smoke + halo/dist
-      correctness gate green
+      correctness gate green  ⚠️ needs the queue; the vectors exist and pass the importer.
 
 ### Task 7: A-family zoo (METIS) — generate & score
 
@@ -334,6 +334,13 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
       MINCONN + CONTIG; A5 UFACTOR {1,10,30,100} on best; A7 hierarchical — CPU (nodes×128 at
       512/2048) AND GPU (nodes×4 at CORE2 8, fArc 16/64) — incl. shipped-864 mystery probe
       (hierarchical vs flat vs seed)
+- [ ] ➕ **A7/A8 now have an OFFLINE predictor** — `scripts/m11_placement.py` scores off-node
+      halo volume for a given ranks-per-node, which is exactly what a relabelling or a
+      hierarchical call moves and what no invariant metric can see. Measured before any race
+      (Finding 16): off-node share 1.4 % at CORE2 256, 2.9 % at 512, **9.0 % at 864** (a rank
+      count that does not tile the node), 5.9 % at fArc 2048; hierarchical headroom −65 % at
+      864, −18 % at 512, −19 % at fArc; a naive greedy relabelling loses 67 % at fArc. Race A7
+      at 864 and fArc 2048 only; A8 is downgraded to a documented negative.
 - [ ] ➕ **A8 rank-relabelling arm** (from Task 2 Finding 4): the shipped `dist_864` and our
       `wgt0` regeneration are indistinguishable on every invariant metric (cut 34,159 vs 34,157,
       halo 42.1 vs 42.1, elem repl 1.473 vs 1.474) yet differ 7.4 % in step time ⇒ the difference
@@ -351,9 +358,15 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 **Files:**
 - Create: `scripts/m11_zoo_b.sh` (drives `m11_engines.sh` + `m11_partgen.sh` injection)
 
-- [ ] run the three engines at the Task-7 grid with the A3-best weight variant
+- [x] run the three engines at the Task-7 grid with the A3-best weight variant
+      → `scripts/m11_zoo_b.sh`; CORE2 {256, 512, 864} × {a=0, 100, unweighted} at ε=3 %, the
+      full a-sweep {0,15,40,100,none} at 512, and a matched-slack repeat at ε=0.1 %. fArc
+      {16, 64, 2048} in progress. Findings 14 (single-constraint) and 15 (METIS wins at
+      FESOM's own slack) in the session log.
 - [ ] KaHIP arm: verify parts are actually connected (components == 1 per part)
-- [ ] Mt-KaHyPar arm: record km1 (claimed comm volume) vs scorecard-measured comm volume
+- [x] Mt-KaHyPar arm: record km1 (claimed comm volume) vs scorecard-measured comm volume
+      → **identical to the digit on all five weight variants** at CORE2 512 (913,637 / 891,062 /
+      880,739 / 875,706 / 910,438). The engine's objective IS the quantity FESOM pays.
 - [ ] score; merge into the joint Pareto pruning with A-family
 - [ ] verify: one injected dist per engine per mesh passes Serial smoke + halo/dist gate
 
@@ -385,8 +398,12 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 - [ ] PRE-REGISTER before any race: arms, gates, adoption rule (≥~2 % net, reproduced across two
       same-day pair days, per backend), SSH-iteration bound (|Δ| ≤ 1/solve, mean < 0.5),
       phasestats-second-pass policy, node-hour budget per task
-- [ ] measure the **partition-class accuracy floor** from control pairs (shipped-vs-regenerated
+- [x] measure the **partition-class accuracy floor** from control pairs (shipped-vs-regenerated
       same-count Serial, 300 steps, diff_snap) per mesh; floors recorded BEFORE arm results exist
+      → CORE2 done at 256 AND 512 ranks with a THREE-control ensemble (one node moved / a
+      different partition / a different METIS seed), 20 steps: temp rms floor 7.19e-02 (256) and
+      5.56e-02 (512). fArc/dars/NG5 floors still owed. ⚠️ Finding 11: the floor is set by the
+      SSH solver's stopping criterion, so it cannot be tightened by measuring harder.
 - [ ] SSH iteration behaviour: gate for pure-ordering arms; diagnostic for partition arms
 - [ ] verify: every shortlisted dist has md5-frozen mesh + exact-cover + reciprocity green +
       scorecard row in the log
