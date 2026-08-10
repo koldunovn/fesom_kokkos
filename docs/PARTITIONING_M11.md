@@ -1436,3 +1436,38 @@ What is safe to say without a mechanism: **the ordering lever gives −1.5 % to 
 every rank count measured (256, 512, 864) and −1.5 % to −4.9 % on GPU, and it does not decay
 with scale.** That is a better result than the session-1 story implied, and it rests on four CPU
 points and two GPU points rather than on the explanation.
+
+## 🔴🔴 Finding 18 — `commvol_max_rank` is an extreme-value statistic, and the seed alone moves it 10–17 %
+
+The zoo-A job carried a control I had not planned to use this way: `legacy` and `seedb` differ
+**only** in the METIS seed. At CORE2 512 they read cut 34,878 vs 34,778 (−0.3 %), total comm
+volume 1,115,243 vs 1,112,111 (−0.3 %) — and **`cv_max` 3,295 vs 2,981, a 9.5 % move.**
+
+Checked directly on the engine side, three seeds of the *same* Mt-KaHyPar configuration at
+fArc 2048:
+
+| seed | cut | total commvol | cv_max |
+|---|--:|--:|--:|
+| 1 | 120,849 | 3,166,661 | 3,238 |
+| 2 | 121,084 | 3,174,100 | 3,745 |
+| 3 | 120,763 | 3,167,078 | 3,776 |
+| **spread** | **0.3 %** | **0.2 %** | **16.6 %** |
+
+`cv_max` is a maximum over k parts, so it samples the tail of a distribution and moves with the
+seed while the sums do not.
+
+**Consequence, and it is a correction to this session's own reporting:** the headline I recorded
+for the fArc B-family — `mtkahypar a=100` at **−18.0 % cv_max** — is *inside the noise of its own
+engine at a different seed*. It is not a lever as stated. The same applies to every `cv_max`
+delta in this log below ~17 %: the CORE2 512 shortlist's "−9.1 %", the 864 "−12.2 %", the fArc
+"−9.6 / −12.1 %".
+
+What survives, because the sums are stable to 0.3 %: the **cut**, the **total comm volume**, the
+**off-node volume** (a sum), the balances, and the fragmentation counts. The Pareto objective set
+is corrected accordingly — `commvol_max_rank` is demoted from an objective to a reported
+diagnostic, and any arm ranked on it must be regenerated at 2–3 seeds first (which is what
+Task 14 already requires of finalists, one task too late to have caught this).
+
+Re-reading the shortlist under the corrected rule: `kahip unweighted` at CORE2 512 (cut −6.1 %,
+total comm volume −6.1 %, both stable metrics) and `mtkahypar a=100` at fArc 2048 (cut −3.3 %,
+total comm volume −2.4 %) remain worth racing; the arms whose entire case was `cv_max` do not.
