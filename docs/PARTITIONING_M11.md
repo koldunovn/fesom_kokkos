@@ -1238,3 +1238,28 @@ moves −6 % … +2 %. If a ±2 % band is what comes out, the honest conclusion 
 quality is not the lever at 512 ranks and the campaign's weight should go to the ordering lever
 and to the ragged-rank-count effect (Finding 16). A result outside the band falsifies the
 off-node-volume model and is the more interesting outcome.
+
+#### The 864 point is where an engine arm has something to win
+
+Repeating the placement analysis at CORE2 864 — the ragged rank count, where 9.0 % of the halo
+leaves the node instead of 2.9 % — changes which arms look interesting:
+
+| arm | off-node 3-D | vs METIS | **per-node max** | vs METIS |
+|---|--:|--:|--:|--:|
+| METIS settled | 108,760 | — | 24,028 | — |
+| kaminpar a=100 | 101,664 | **−6.5 %** | **20,062** | **−16.5 %** |
+| kahip unweighted | 105,701 | −2.8 % | 20,395 | **−15.1 %** |
+| mtkahypar unweighted | 106,209 | −2.3 % | 25,471 | +6.0 % |
+| mtkahypar a=0 | 109,899 | +1.0 % | 21,131 | −12.1 % |
+| kahip a=0 | 134,039 | +23.2 % | 23,980 | −0.2 % |
+
+Two arms cut the **per-node maximum** off-node volume — the node whose NIC has the most to ship,
+which is what the step actually waits on — by 15–17 %, where at 512 ranks the same arms moved it
+by nothing worth racing. ⇒ **the B-family shortlist gets a second point: CORE2 864 with
+`kaminpar a=100` and `kahip unweighted`.** Both keep 2-D imbalance inside the feasibility filter
+(1.25 and 1.03), so no assumption has to be relaxed to race them.
+
+That is consistent with Finding 16 rather than an accident of it: at a rank count that tiles the
+node, METIS's labelling already keeps 97 % of the halo local and there is nothing to win; at a
+ragged one, 9 % is in play and a partitioner that happens to group differently picks up part of
+it.
