@@ -1107,3 +1107,70 @@ the envelope they are designed and tuned for (their papers report ε ≥ 1 %).
 matched test in the other direction — give METIS the engines' slack (`UFACTOR` 10/30/100, arm A5)
 — is the one that decides whether FESOM should keep `UFACTOR=1` at all. That arm is queued in
 zoo A wave 2.
+
+### ➕ `scripts/m11_placement.py` — scoring what the scorecard is blind to
+
+Task-2 Finding 4 left a hole: the shipped CORE2 `dist_864` and our regeneration agree on every
+invariant metric yet differ 7.4 % in step time, so the difference has to live in something
+invariant metrics cannot see — the rank **labels**, and therefore which subdomains share a node.
+This tool measures that directly. With SLURM's block distribution (`--ntasks-per-node=128`, what
+every race job uses), rank *r* lives on node *r*//128, so the halo traffic splits into on-node
+and off-node parts:
+
+| partition | nodes | off-node 2-D | off-node 3-D | as % of all halo |
+|---|--:|--:|--:|--:|
+| CORE2 `dist_256` | 2 | 239 | 8,317 | **1.4 %** |
+| CORE2 `dist_512` | 4 | 797 | 26,617 | **2.9 %** |
+| CORE2 `dist_864` | 7 | 3,126 | 108,760 | **9.0 %** |
+| fArc `dist_2048` | 16 | 7,139 | 192,754 | **5.9 %** |
+
+#### ⭐⭐⭐ Finding 16 — a rank count that does not tile the node triples the off-node traffic
+
+fArc at 2048 ranks spreads over **16** nodes and ships 5.9 % of its halo off-node. CORE2 at 864
+spreads over **7** and ships 9.0 % — more inter-node traffic across fewer node boundaries, on a
+mesh five times smaller. The difference is that 2048 = 16 × 128 exactly while
+864 = 6.75 × 128: METIS 5 labels parts in recursive-bisection order, which is spatially
+coherent, so consecutive blocks of 128 ranks land on one node **only when the rank count tiles
+the node**. 256 = 2 × 128 and 512 = 4 × 128 tile it and sit at 1.4 % and 2.9 %; 864 does not and
+pays 3× the trend.
+
+What that is worth, measured as the inter-block halo of the best top-level cut we can build
+(which is exactly the off-node volume a hierarchical `n_part = <nodes>,128` would pay):
+
+| point | flat, off-node 3-D | best top-level cut | headroom |
+|---|--:|--:|--:|
+| CORE2 512 → 4 nodes | 26,617 | 21,836 (Mt-KaHyPar) | −18 % of 2.9 % ⇒ **negligible** |
+| CORE2 864 → 7 nodes | 108,760 | **37,917** (Mt-KaHyPar) | **−65 %** |
+| fArc 2048 → 16 nodes | 192,754 | 155,493 (Mt-KaHyPar) | −19 % |
+
+⇒ Two concrete recommendations, both testable in one race:
+
+1. **At a ragged rank count, hierarchical partitioning is worth 65 % of the off-node traffic**
+   (arm A7). At a tiling rank count it is worth nothing — METIS's natural labelling is already
+   there. That is a sharper statement than "try hierarchical", and it says where.
+2. **Or simply run 896 ranks instead of 864.** 864 on 7 nodes leaves 32 cores idle *and* pays
+   the ragged-labelling penalty; 896 = 7 × 128 fills the nodes and tiles the labelling.
+
+Also measured: a naive greedy re-labelling of an existing partition (agglomerate the
+part-communication graph into groups of 128) buys −5.1 % of off-node volume at CORE2 864 and
+**loses 67 %** at fArc 2048. METIS's labelling is near a local optimum and should not be
+disturbed by hand — which downgrades arm **A8** from "a free lever" to "measured, ~5 % of a
+9 % term at the one rank count where it helps at all". The placement hypothesis for the
+shipped-864 mystery survives but does not explain it: shipped 109,037 vs regenerated 112,246 is
+**2.9 %** of off-node volume, in the right direction but an order of magnitude short of 7.4 % of
+step time.
+
+Applied to the B-family arms at CORE2 512 (4 nodes), placement erodes but does not erase their
+advantage — all three engines number their blocks coherently enough to keep 96–97 % of the halo
+on-node, against METIS's 97.1 %:
+
+| arm | off-node 3-D | vs METIS | total commvol vs METIS |
+|---|--:|--:|--:|
+| METIS settled | 26,617 | — | — |
+| Mt-KaHyPar a=0 | 27,628 | +3.8 % | +1.2 % |
+| KaHIP unweighted | 29,413 | **+10.5 %** | **−6.1 %** |
+| KaMinPar a=100 | 37,381 | +40.4 % | +2.0 % |
+
+So KaHIP's 6 % saving in *total* comm volume comes with 10 % *more* of it crossing a node
+boundary — the currency that costs. Any Pareto prune that ranks on total comm volume alone would
+pick it for the wrong reason; the shortlist uses the off-node column too.
