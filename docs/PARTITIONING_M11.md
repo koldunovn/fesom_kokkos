@@ -1272,8 +1272,10 @@ w = a + nlev; deltas vs the shipped METIS partition at the same rank count:
 
 | point | arm | cut | total commvol | **cv_max** | 2-D imb | 3-D max/min |
 |---|---|--:|--:|--:|--:|--:|
-| **2048** (16 nodes) | mtkahypar a=100 | −3.3 % | −2.4 % | **−18.0 %** | 1.209 | 8.78 |
+| **2048** (16 nodes) | mtkahypar a=100 | −3.3 % | −2.4 % | **−18.0 %** | 1.209 | **8.78** |
+| | kahip a=100 | −6.4 % | −3.7 % | −14.9 % | 1.209 | 10.76 |
 | | kaminpar a=100 | +1.1 % | +3.6 % | −12.2 % | 1.203 | 7.08 |
+| | kahip unweighted | −6.3 % | −6.3 % | −9.5 % | 1.027 | 12.19 |
 | | mtkahypar a=0 | −7.2 % | +7.0 % | −34.0 % | *4.80* | 1.67 |
 | | kahip a=0 | −9.8 % | +6.2 % | −26.1 % | *4.83* | 2.67 |
 | **64** | mtkahypar a=100 | +0.5 % | −7.3 % | **−12.1 %** | 1.191 | 7.60 |
@@ -1284,9 +1286,12 @@ w = a + nlev; deltas vs the shipped METIS partition at the same rank count:
 *italic* = fails the `n2d_imb ≤ 1.30` feasibility filter.
 
 **`Mt-KaHyPar` with `w = 100 + nlev` cuts the max-per-rank communication volume by 10–18 % at
-every fArc rank count while keeping the 2-D imbalance under 1.21** — the only arm in the zoo
-that improves the metric the step waits on without breaking the balance the ice model needs. It
-is the B-family's headline candidate and the fArc shortlist entry.
+every fArc rank count while keeping the 2-D imbalance under 1.21** — and at 2048 it is the only
+feasible arm that also *improves* the 3-D balance (8.78 against the shipped 9.40). KaHIP at the
+same weight takes twice as much off the cut (−6.4 %) but gives 3-D balance back (10.76), and
+KaHIP unweighted keeps the 2-D balance at 1.027 with 3-D at 12.19. So the three feasible arms
+are not variations on one candidate: they trade cut, off-node volume and 3-D balance against
+each other, which is what makes racing them informative rather than redundant.
 
 Two cautions to carry into the race:
 
