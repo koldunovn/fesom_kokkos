@@ -1526,3 +1526,54 @@ Gates: `owned cover` and `com_info reciprocity` ok on all three; Serial 20-step 
 ⚠️ `check_partitioning` moved **128 nodes** when injecting `kahip a=100` (0 for the other two),
 so that arm as raced is the engine's partition with 128 nodes relocated — recorded rather than
 assumed away, and it is why the move count is printed for every arm.
+
+---
+
+## ⭐⭐⭐ Finding 20 — RACED: a partition arm wins 4.4 % at CORE2 512, and it is NOT the one the cut predicted
+
+Job 26857530. Five partitions of the same mesh (five mesh files md5-identical across all arms),
+one allocation, interleaved reps, min-of-2, 300 steps, 512 ranks:
+
+| arm | s/step | vs base | rep spread | offline: cut | total commvol | 2-D imb | 3-D max/min |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| base (METIS dual, UFACTOR=1) | 0.0595 | — | 1.8 % | 25,382 | 902,491 | 1.005 | 9.26 |
+| **kahip a=100** | **0.0569** | **−4.37 %** | 0.4 % | 23,896 | 865,264 | 1.275 | **6.91** |
+| wgt2 (M10's dual anchor) | 0.0584 | −1.85 % | 0.7 % | 34,878 | 1,115,243 | 1.017 | **1.04** |
+| kahip unweighted | 0.0595 | **+0.00 %** | 0.0 % | 23,861 | 847,778 | 1.025 | 10.54 |
+| mtkahypar a=0 | 0.1018 | **+71.09 %** | 0.2 % | 24,618 | 913,637 | **5.07** | 1.51 |
+
+**Three things fall out, and my pre-registered prediction (±2 % for every arm) is falsified —
+which is the outcome I said would be the more interesting one.**
+
+1. **The lever is 3-D load balance, not communication.** `kahip unweighted` improves the cut by
+   6.0 % and the total communication volume by 6.1 % and buys **exactly nothing** (+0.00 %, with
+   a 0.0 % rep spread — the cleanest null in the campaign). `kahip a=100` improves the cut by
+   about the same amount and wins 4.4 % — and the only material difference between them is 3-D
+   imbalance, 6.91 against 10.54. **Cut quality alone is worth zero here.** Every offline metric
+   the campaign has been ranking on except the balances would have picked the wrong arm.
+2. **The 2-D feasibility filter is validated, hard.** `mtkahypar a=0` has the best 3-D balance in
+   the zoo (1.51) and is **71 % slower** because its 2-D imbalance is 5.07. The filter was a
+   stated modelling assumption at `n2d_imb ≤ 1.30`; racing an arm that violates it deliberately
+   turned it into a measurement. There is an optimum in `a`, and it is interior.
+3. **M10's dual arm is 1.85 % FASTER at 512 ranks**, not slower. That is consistent with their
+   own crossover law (dual wins at 256, neutral at 512, loses at 864) and with reading 3-D
+   balance as the lever — but it also means the "repartitioning is out" conclusion belongs to
+   864 ranks, not to CORE2 generally.
+
+Every delta above except `kahip unweighted`'s exceeds its arm's rep spread, and the three fast
+arms have spreads of 0.2–0.7 %, so the ordering of the table is not noise. One pair day, so the
+adoption rule still wants a second.
+
+### What this changes about what to measure next
+
+The winning arm is a **scalar weight `w = a + nlev` at 3 % slack**. Two questions now decide
+whether FESOM needs an external partitioner at all, and both are one race:
+
+- **Is it the weight or the slack?** METIS with the *same* scalar weight at its own tight
+  `UFACTOR=1` (arm `a3_a100`, already generated) against METIS with the same weight at 3 %
+  (`a5_u30`) against the KaHIP winner.
+- **Where is the optimum in `a`?** The engine sweep spans 2-D imbalance 2.26 / 1.60 / 1.28 and
+  3-D 3.06 / 5.31 / 6.91 for a = 15 / 40 / 100. The 71 % catastrophe at a = 0 and the 4.4 % win
+  at a = 100 bracket it.
+
+Both are queued (jobs 26857589, 26857590).
