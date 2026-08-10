@@ -139,22 +139,34 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 **Files:**
 - Create: `scripts/m11_scorecard.py`
 
-- [ ] input = mesh dir + (`dist_N` | raw part-vector file); reuse the verified rpart parser by
+- [x] input = mesh dir + (`dist_N` | raw part-vector file); reuse the verified rpart parser by
       import from `scripts/m7_part_spread.py` (never re-implement)
-- [ ] **permutation-invariant block**: 2-D/3-D/weighted imbalance (max/mean, `w=a+nlev` for given
+- [x] **permutation-invariant block**: 2-D/3-D/weighted imbalance (max/mean, `w=a+nlev` for given
       a, plus Σw per arm for the int32 ledger), `edgecut_unweighted`, `cutweight_nlev`, total +
       max-per-rank comm volume (`vsize=nlev`), neighbour count max/mean, connected components per
       part + stray-vertex count, halo fraction, element + edge replication factors, wet-graph
       component count; owned-cover + com_info reciprocity gates
-- [ ] **ordering-sensitive block** (exempt from invariance gates, review M9): mean |Δindex| over
+      → ➕ `isolated_nodes` (≤1 same-part neighbour = check_partitioning's own criterion) and
+      the stray count split into `noncore_vertices` / `singleton_vertices`: a part in two large
+      lobes and a part trailing loose vertices are different defects.
+- [x] **ordering-sensitive block** (exempt from invariance gates, review M9): mean |Δindex| over
       edges, gather-stream stride histogram for elem→node and edge→node streams
-- [ ] output: one CSV row per (mesh, N, arm) + human summary; `--compare` mode
-- [ ] verify (regression): reproduce ALL Testing-Strategy targets in their CORRECT units;
+- [x] output: one CSV row per (mesh, N, arm) + human summary; `--compare` mode
+- [x] verify (regression): reproduce ALL Testing-Strategy targets in their CORRECT units;
       **recompute the dual arms' unweighted cut** and record the true wgt0→wgt2 cut ratio —
       then correct `PARTITIONING_M11_RESEARCH.md` §0 and the memory file with the measured
       number before it is quoted anywhere else (review B1)
-- [ ] verify (invariance): invariant block identical under a synthetic label permutation of a
+      → **12/12 PASS**; true ratio ×1.44–1.61 unweighted / ×1.22–1.30 weighted; digest §0 and
+      both memory files updated.
+      → ⚠️ one target needed a mechanism, not a tolerance: the 16r weighted cut is 217,796 on
+      disk vs the 217,791 METIS printed, because `check_partitioning` runs AFTER the print.
+      ➕ new Task-4 verification item below.
+- [x] verify (invariance): invariant block identical under a synthetic label permutation of a
       small dist; ordering block changes as expected
+      → 26/26 invariant keys identical under a random relabelling; all 11 ordering keys moved.
+- [x] ➕ verify (gate, cross-check with Task 1): the scorecard's reciprocity check FAILS on the
+      `gate_negctl` dist that made the model abort, naming the right block
+      (`rank 0<-1: 1 of 142 gids differ, first at slot 0`) and exiting 1.
 
 ### Task 3: Graph exporter + part-vector importer
 
@@ -199,6 +211,14 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
       CORE2 + fArc; dump partm11's in-memory `nlevels_nod2D`/`nlevels` and diff vs on-disk
       `nlvls.out`/`elvls.out` per mesh copy — log agreement or state the discrepancy in every
       weight-arm row (review M5)
+      → note: Task 2 already showed the on-disk `nlvls.out` and `elvls.out` of
+      `core2_wgt0`/`core2_wgt2` are mutually consistent (0 nodes differ from
+      max-over-incident-elements), so any in-memory divergence would be a *third* value.
+- [ ] ➕ verify (from Task 2): reproduce the print-vs-file cut gap. Run wgt2 at CORE2 16r with
+      UNFILTERED stdout and confirm `check_partitioning` reports moving gid 125423 from part 9
+      to part 8; the printed edgecut must then be 5 BELOW the scorecard's reading of the file.
+      Record how often the post-pass moves anything at all across the Task-7 zoo (it moved
+      nothing in 5 of the 6 CORE2 arms M10 generated).
 - [ ] verify (knobs): each announces; bogus value aborts; Kway+VOL+CONTIG runs on CORE2 with
       component pre-connect engaging iff the wet graph is disconnected (component count from
       Task 2 decides; never silent)
@@ -258,6 +278,12 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
       MINCONN + CONTIG; A5 UFACTOR {1,10,30,100} on best; A7 hierarchical — CPU (nodes×128 at
       512/2048) AND GPU (nodes×4 at CORE2 8, fArc 16/64) — incl. shipped-864 mystery probe
       (hierarchical vs flat vs seed)
+- [ ] ➕ **A8 rank-relabelling arm** (from Task 2 Finding 4): the shipped `dist_864` and our
+      `wgt0` regeneration are indistinguishable on every invariant metric (cut 34,159 vs 34,157,
+      halo 42.1 vs 42.1, elem repl 1.473 vs 1.474) yet differ 7.4 % in step time ⇒ the difference
+      cannot be partition quality. Relabel the ranks of ONE partition (pure permutation of the
+      part vector — identical geometry, identical cut, identical scorecard row) and race it:
+      a null result kills the placement hypothesis, a positive one is a free lever.
 - [ ] scorecard CSV every arm; `m11_check_sources` after every partitioner invocation
 - [ ] Pareto prune on the invariant block + 1–2 diversity picks; **known-bad anchors exempt
       from pruning** (wgt2-style dual at 864 + one deliberately high-cut arm) so the

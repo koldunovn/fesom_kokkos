@@ -16,12 +16,30 @@ checked). This file is the track's reference; the plan lives in `docs/plans/`.
 - The dual-constraint experiment (`ncon=2`, balance 2-D and 3-D counts): 3-D balance 9.60×→1.05×,
   halo nodes +40 %, net **+9.55 % slower** CPU 864r, **+29.7 %** GPU 8r (ocean busy itself +20 % —
   fragmentation multiplies *replicated element/edge work*, not just halo bytes).
-  ⚠️ **CORRECTED 2026-08-10 (plan-review B1)**: the earlier "edgecut ×87–91" reading
-  (1,335 → 120,883) mixes UNITS — `fort_part.c:191-205` sets `adjwgt` only for weighted runs, so
-  the METIS print is an unweighted cut COUNT for wgt0 but an nlev-weighted cut SUM for dual arms.
-  The true unweighted-cut ratio is unknown (plausibly ~1.5–2×: mean edge weight ~50–60, and
-  120,883 raw edges would be ~32 % of CORE2's 371k — irreconcilable with +40 % halo). The
-  scorecard (plan Task 2) re-measures both quantities; M10's report tables carry the same mix.
+  ⚠️ **CORRECTED 2026-08-10 (plan-review B1), now MEASURED (Task 2 scorecard, 12/12 regression)**:
+  the earlier "edgecut ×87–91" reading (1,335 → 120,883) mixes UNITS — `fort_part.c:11` defines
+  `USE_EDGE_WEIGHTS` and lines 191-205 fill `adjwgt` only when `wgt_type != 0`, so the METIS
+  print is an unweighted cut COUNT for wgt0 but an nlev-weighted cut SUM (`w_ij = nlev_i+nlev_j`)
+  for the dual arms. **Measured on CORE2, both quantities for both arms:**
+
+  | ranks | unweighted cut wgt0 → wgt2 | ratio | nlev-weighted cut wgt0 → wgt2 | ratio | M10's mixed ratio |
+  |--:|--:|--:|--:|--:|--:|
+  | 8 | 1,335 → 2,144 | **×1.61** | 93,260 → 120,883 | **×1.30** | ×90.5 |
+  | 16 | 2,549 → 3,724 | **×1.46** | 178,042 → 217,796 | **×1.22** | ×85.4 |
+  | 32 | 4,307 → 6,200 | **×1.44** | 303,326 → 375,211 | **×1.24** | ×87.1 |
+
+  **So the true cost of dual weighting in cut terms is ×1.4–1.6 (unweighted) or ×1.2–1.3
+  (weighted), not ×90.** The inflation factor is the mean edge weight, 61.5 on CORE2
+  (×1.61 × 56.4 = ×90.5). The measured ×1.4–1.6 is consistent with the +40 % halo growth,
+  which the ×90 never was. M10's report tables carry the same mix — hand them the corrected
+  numbers, do not edit their docs.
+  ⚠️ **The METIS print is not the shipped partition's cut**: `check_partitioning`
+  (`fvom_init.F90:1809`) runs AFTER the print and moves nodes with ≤1 same-partition
+  neighbour. On CORE2 wgt2 16r it moved exactly one node (gid 125423, degree 3, nlev 5 →
+  from part 9 to part 8), lowering the unweighted cut by 1 and raising the weighted cut by 5
+  (217,791 printed vs 217,796 on disk; unique explanation, found by exhaustive search over
+  every node × adjacent part). **Every cut number in M11 comes from the scorecard reading the
+  file, never from the partitioner's stdout.**
 - Sign flips with rank count: dual weighting **wins −4.6 % at 256r** (495 verts/core), 0.0 % at
   512r, loses +8.7 % at 864r. Production CORE2 512 sits on the crossover.
 - User-reported additional defects: up to ~140 disconnected stray vertices in a part; objective
@@ -85,9 +103,12 @@ Key literature verdicts:
   `vwgt` (compute) and `vsize` (comm volume) **independently** — model both.
 - METIS manual explicitly: the **nodal graph is the correct comm model for vertex-centred codes**
   (dual graph is not) — our graph is already the right one; the objective was not.
-- `CONTIG` caveat: **silently ignored if the input graph is disconnected** — the global ocean graph
-  IS disconnected (Caspian etc.) ⇒ must pre-connect components (virtual edges) or partition
-  components separately, else CONTIG is a no-op again.
+- `CONTIG` caveat: **silently ignored if the input graph is disconnected** — must pre-connect
+  components (virtual edges) or partition components separately, else CONTIG is a no-op again.
+  ⚠️ **MEASURED 2026-08-10 (Task 2): CORE2 and fArc both have exactly ONE wet-graph component**,
+  so on these two meshes CONTIG would be honoured as-is and the pre-connect machinery is not
+  needed. It stays in the plan as a *guarded, announced* path for dars/NG5 (component count
+  measured before use — never assumed).
 - Max-per-rank comm volume objective: only UMPa (dead code) / PuLP (low quality); practical route =
   minimize total volume + post-process outliers (MINCONN pass).
 

@@ -132,3 +132,118 @@ mtime sweep catches anything M11 adds on top.
 | 26850057 | halo gate: control + corrupted-com_info legs, CORE2 dist_4 | 1×4 (compute) | 30 s used / 10 min req | h17 Serial `5c3c90fc` | **PASS** (control clean, corrupt aborts) |
 
 **Node-hour ledger:** 26850057 = 0.008 node-h. Task-1 total 0.008 node-h.
+
+---
+
+### Task 2 — scorecard `m11_scorecard.py` ✅ (2026-08-10)
+
+Runs entirely on the login node (no queue): CORE2 ≈ 20 s/arm, fArc 2048r ≈ 43 s/arm including
+the 4,096 `my_list`/`com_info` files.
+
+**Regression: 12/12 PASS** against the published M10 numbers — edgecut at CORE2 8/16/32r in both
+units, 3-D imbalance (shipped 864r 9.60×, `wgt2` 1.05×), halo 42 → 59 nodes/rank at 864r, and
+fArc `/pool dist_2048` 1.004× (2-D) / 9.40× (3-D). Permutation invariance: 26/26 invariant keys
+identical under a random relabelling, all 11 ordering keys moved. Negative control: the
+scorecard's reciprocity gate FAILs on `gate_negctl` naming the right block
+(`rank 0<-1: 1 of 142 gids differ, first at slot 0`) and exits 1.
+
+#### ⭐⭐ Finding 1 — "edgecut ×90" is dead; the true cost of dual weighting is ×1.4–1.6
+
+`fort_part.c:11` defines `USE_EDGE_WEIGHTS`, and lines 191-205 fill `adjwgt` only when
+`wgt_type != 0`. So METIS prints an unweighted cut COUNT for the 2-D-only arm and an
+nlev-weighted cut SUM (`w_ij = nlev_i + nlev_j`) for the dual arm. M10 divided the second by the
+first. Measured, both quantities for both arms, on CORE2:
+
+| ranks | unweighted cut wgt0 → wgt2 | ratio | nlev-weighted cut wgt0 → wgt2 | ratio | M10's mixed ratio |
+|--:|--:|--:|--:|--:|--:|
+| 8 | 1,335 → 2,144 | **×1.61** | 93,260 → 120,883 | **×1.30** | ×90.5 |
+| 16 | 2,549 → 3,724 | **×1.46** | 178,042 → 217,796 | **×1.22** | ×85.4 |
+| 32 | 4,307 → 6,200 | **×1.44** | 303,326 → 375,211 | **×1.24** | ×87.1 |
+
+The inflation factor is CORE2's mean edge weight, 61.5 (×1.61 × 56.4 = ×90.5). The corrected
+figure is consistent with the +40 % halo growth M10 also measured; ×90 never was. Back-propagated
+to `PARTITIONING_M11_RESEARCH.md` §0, `project-m11-partitioning.md` and `MEMORY.md`. M10's own
+docs still carry the mix — hand them the number at Task 18, do not edit their files.
+
+#### ⭐⭐ Finding 2 — the METIS "edgecut" print is not the shipped partition's cut
+
+One regression target refused to reproduce: CORE2 `wgt2` 16r, on disk 217,796 against the 217,791
+METIS printed — 5 parts in 217,791, while the other five cut targets from the same two jobs
+matched to the digit. Ruled out in turn: the graph and the cut definition (the three `wgt0`
+unweighted targets match exactly, so both are right); stale weights (`nlvls.out` agrees with
+max-over-incident-elements of `elvls.out` at every one of the 126,858 nodes, and the same array
+gives exact matches at 8r and 32r); wrong provenance (`dist_8` and `dist_16` carry the mtime of
+job 26744882, the run that printed those numbers).
+
+What remains is the only code between the print and the file write: `check_partitioning`
+(`fvom_init.F90:1809`) relocates every node with ≤1 same-partition neighbour. An exhaustive
+search over every node × every adjacent part (`find_checkpart_moves`) returns **exactly one**
+candidate in the whole mesh:
+
+> node gid **125423**, degree 3, `nlev` 5, neighbours with `nlev` 20/5/5. METIS put it in part 9
+> where it had one same-part neighbour — the post-pass criterion exactly — and moved it to part 8
+> where it had two. The edge to part 9 (weight 25) became cut, the two edges to part 8
+> (weight 10 each) became uncut: unweighted cut **−1**, weighted cut **+5**.
+
+⇒ **Rule for the campaign: every cut number comes from the scorecard reading the dist files,
+never from the partitioner's stdout.** The post-pass moved nothing in the other five CORE2 arms,
+so this is rare rather than systematic — Task 4 will confirm the mechanism directly against
+unfiltered partitioner output and count how often it fires across the zoo.
+
+#### Baseline scorecard table
+
+`/work/ab0995/a270088/port2/m11/scorecard_baselines.csv` (22 arms).
+`disc` = parts split into >1 component; `offlobe` = vertices outside their part's largest
+component; `iso` = nodes with ≤1 same-part neighbour; `halo` = mean halo nodes/rank;
+`el_repl` = Σ per-rank elements / elem2D.
+
+| mesh | N | 2Dimb | 3D max/min | cut_unw | cut_nlev | volmax | nbr_max | disc | offlobe | iso | halo | el_repl |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| core2 shipped | 4 | 1.001 | 1.01 | 1,190 | 63,761 | 9,200 | 3 | 3 | 24,970 | 0 | 304.0 | 1.015 |
+| core2 shipped | 8 | 1.000 | 1.97 | 1,361 | 94,750 | 10,840 | 3 | 1 | 6,097 | 0 | 172.8 | 1.018 |
+| core2 shipped | 16 | 1.000 | 2.38 | 2,563 | 180,481 | 10,665 | 6 | 2 | 2,237 | 0 | 162.5 | 1.033 |
+| core2 shipped | 32 | 1.000 | 4.18 | 4,400 | 310,575 | 9,114 | 6 | 2 | 3,146 | 0 | 139.9 | 1.057 |
+| core2 shipped | 256 | 1.001 | 9.11 | 16,792 | 1,154,687 | 4,558 | 9 | 6 | 889 | 1 | 68.1 | 1.225 |
+| core2 shipped | 512 | 1.005 | 9.26 | 25,382 | 1,722,478 | 3,185 | 8 | 8 | 492 | 0 | 52.1 | 1.346 |
+| core2 shipped | 864 | 1.028 | 9.60 | 34,159 | 2,280,429 | 2,735 | 10 | 9 | 324 | **71** | 42.1 | 1.473 |
+| core2_wgt0 | 8 | 1.000 | 1.96 | 1,335 | 93,260 | 9,903 | 4 | 1 | 6,201 | 0 | 169.5 | 1.017 |
+| core2_wgt0 | 16 | 1.000 | 2.92 | 2,549 | 178,042 | 9,943 | 6 | 1 | 3,029 | 0 | 161.5 | 1.033 |
+| core2_wgt0 | 32 | 1.000 | 4.72 | 4,307 | 303,326 | 8,661 | 6 | 2 | 2,994 | 0 | 136.8 | 1.056 |
+| core2_wgt0 | 256 | 1.001 | 9.20 | 16,822 | 1,161,066 | 4,675 | 9 | 6 | 994 | 0 | 68.2 | 1.226 |
+| core2_wgt0 | 512 | 1.005 | 9.21 | 25,318 | 1,712,679 | 3,289 | 9 | 5 | 371 | 0 | 52.0 | 1.345 |
+| core2_wgt0 | 864 | 1.015 | 9.32 | 34,157 | 2,289,966 | 2,707 | 11 | 12 | 507 | 0 | 42.1 | 1.474 |
+| core2_wgt2 | 8 | 1.002 | 1.01 | 2,144 | 120,883 | 8,994 | 6 | 7 | 26,445 | 0 | 274.0 | 1.027 |
+| core2_wgt2 | 16 | 1.003 | 1.01 | 3,724 | 217,796 | 10,479 | 7 | 13 | 24,311 | 0 | 237.9 | 1.048 |
+| core2_wgt2 | 32 | 1.003 | 1.02 | 6,200 | 375,211 | 8,842 | 11 | 28 | 25,556 | 0 | 198.5 | 1.080 |
+| core2_wgt2 | 256 | 1.007 | 1.03 | 23,325 | 1,405,784 | 4,037 | 15 | 203 | 28,542 | 3 | 95.7 | 1.314 |
+| core2_wgt2 | 512 | 1.017 | 1.04 | 34,878 | 2,106,731 | 3,295 | 15 | 405 | 31,153 | 9 | 72.7 | 1.480 |
+| core2_wgt2 | 864 | 1.028 | 1.05 | 46,871 | 2,815,073 | 2,530 | 14 | **677** | 32,491 | 40 | 58.9 | **1.659** |
+| farc /pool | 16 | 1.001 | 1.02 | 9,652 | 455,602 | 20,506 | 7 | 13 | 139,989 | 0 | 609.2 | 1.024 |
+| farc /pool | 64 | 1.000 | 7.70 | 16,914 | 896,031 | 14,759 | 7 | 4 | 8,049 | 0 | 267.1 | 1.043 |
+| farc /pool | 2048 | 1.004 | 9.40 | 124,915 | 6,224,017 | 4,127 | 10 | 21 | 1,884 | 1 | 63.7 | 1.332 |
+
+#### ⭐⭐ Finding 3 — the fragmentation currency, and where dual weighting really pays
+
+Dual weighting at 864r splits **677 of 864 parts** into multiple components (vs 12 for `wgt0`)
+and pushes element replication 1.474 → 1.659, i.e. **+12.6 % more replicated element work**.
+That is a far better predictor of M10's measured +20 % GPU ocean-busy than the halo-node count's
++0.7 % prediction, and it is measurable offline. Element/edge replication and
+`parts_disconnected` are therefore the fragmentation metrics the Pareto prune will use.
+
+#### ⭐⭐ Finding 4 — the shipped-864 mystery is NOT visible in any invariant metric
+
+M10 found the shipped CORE2 `dist_864` 7.4 % faster than our flat regeneration (and +4.18 % on
+GPU for the regenerated one). Their scorecards are nearly identical: cut 34,159 vs 34,157, halo
+42.1 vs 42.1, element replication 1.473 vs 1.474, comm volume max/rank 2,735 vs 2,707,
+disconnected parts 9 vs 12. **Partition QUALITY does not distinguish them.** What the scorecard
+cannot see is rank *labelling* — which subdomain becomes which MPI rank, and therefore which
+subdomains land on the same node/socket/GPU. That makes the shipped-864 probe (Task 7, A7) a
+test of **placement**, not of quality, and adds a cheap new arm: relabel the ranks of an existing
+partition (a pure permutation of the dist files — identical geometry, identical cut) and race it.
+➕ recorded against Task 7.
+
+One incidental oddity worth carrying: the **shipped** `dist_864` contains **71 nodes with ≤1
+same-partition neighbour**, the exact defect `check_partitioning` exists to remove, while every
+partition we generated has 0. The shipped partition predates the current tool.
+
+**Node-hour ledger:** 0 (login-node only).
