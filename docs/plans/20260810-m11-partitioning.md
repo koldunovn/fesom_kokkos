@@ -174,16 +174,28 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 - Create: `scripts/m11_graph_export.py`
 - Create: `scripts/m11_part_import.py`
 
-- [ ] exporter: mesh → METIS .graph (adjacency = share-an-element, matching `stiff_mat_ini`
+- [x] exporter: mesh → METIS .graph (adjacency = share-an-element, matching `stiff_mat_ini`
       semantics), variants: unweighted / `vwgt=a+nlev` / `vsize=nlev` / both; plus star-expansion
       hypergraph (hMETIS format) for Mt-KaHyPar km1 (net per vertex = {v}∪N(v), net weight nlev)
-- [ ] importer: engine output (one part id per line, 0/1-based autodetect) → `FESOM_PART_FILE`
+      → also `--weights dual` (ncon=2, `(1, nlev+100)`) so the legacy arm can be reproduced in an
+      external engine, and `--edge-weights` (`adjwgt = nlev_i+nlev_j`) mirroring fort_part.c.
+      Graph comes from `m11_scorecard.Mesh.graph()` by import — one implementation, not two.
+- [x] importer: engine output (one part id per line, 0/1-based autodetect) → `FESOM_PART_FILE`
       format + sanity (k parts nonempty, exact cover); `--from-dist` mode extracting the part
       vector from an existing `dist_N` (the extractor Tasks 4/5/9 use)
-- [ ] verify: exported CORE2 graph symmetric; importer round-trip (dist → vector → import →
+      → `--from-dist` additionally cross-checks the derived assignment against rpart's own
+      per-rank count block (an independent witness inside the same file).
+- [x] verify: exported CORE2 graph symmetric; importer round-trip (dist → vector → import →
       identical vector); edgecut of shipped vector on exported graph == scorecard edgecut
       (consistency only — the authoritative CSR diff happens in Task 4 via the dump knob)
-- [ ] verify: star-expansion pin counts and net weights spot-checked against node patches
+      → CORE2 and fArc: symmetry exact (743,288 / 3,783,940 directed entries), edge multiset
+      identical to `Mesh.graph()`, cut from file == cut from graph (1,361 / 124,915), round-trip
+      identical both ways, scorecard on the part FILE == scorecard on the dist.
+- [x] verify: star-expansion pin counts and net weights spot-checked against node patches
+      → net weight = nlev on every net, net size = degree+1 on every net (870,146 pins = n+2m),
+      three random patches equal {v}∪N(v), and ➕ **km1 of the written file = 47,620 = METIS
+      totalv(vsize=nlev) exactly** — the premise of the Mt-KaHyPar arm verified numerically,
+      not just asserted.
 
 ### Task 4: Patched partitioner `partm11` — two builds (injection + knobs + METIS 5.2.1 + pre-connect)
 

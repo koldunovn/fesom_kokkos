@@ -247,3 +247,47 @@ same-partition neighbour**, the exact defect `check_partitioning` exists to remo
 partition we generated has 0. The shipped partition predates the current tool.
 
 **Node-hour ledger:** 0 (login-node only).
+
+---
+
+### Task 3 — graph exporter + part-vector importer ✅ (2026-08-10)
+
+`scripts/m11_graph_export.py` and `scripts/m11_part_import.py`. Both login-node tools; CORE2
+export + full verification 1.9 s, fArc 8.8 s.
+
+**Exporter.** METIS graph format with `fmt = <vsize><vwgt><adjwgt>`; weight variants
+`none | vwgt (a+nlev) | vsize (nlev) | both | dual (ncon=2, (1, nlev+100))`, optional
+`--edge-weights` (`adjwgt = nlev_i+nlev_j`, what `fort_part.c` hands METIS on weighted arms).
+hMETIS star expansion for Mt-KaHyPar: one net per vertex, `net_v = {v} ∪ N(v)`, net weight
+`nlev(v)`. The graph itself is imported from `m11_scorecard.Mesh.graph()` — a second
+implementation would be a second thing to keep true.
+
+**Importer.** Engine output → `FESOM_PART_FILE` (0-based, one rank per line) with 0/1-based
+autodetect, plus `--from-dist` extraction. Refuses to emit a vector with a wrong length, a
+non-contiguous rank range, or an empty part — all three would only surface at model start.
+
+**Verification (all PASS, CORE2 and fArc):**
+
+| check | CORE2 | fArc |
+|---|---|---|
+| header `sum(degree) = 2m` | 743,288 = 2 × 371,644 | 3,783,940 = 2 × 1,891,970 |
+| adjacency symmetry (exact multiset) | ✅ | ✅ |
+| edge multiset == `Mesh.graph()` | ✅ | ✅ |
+| `adjwgt = nlev_i+nlev_j` on every entry | ✅ | ✅ |
+| `vsize = nlev`, `vwgt = a + nlev`, dual `(1, nlev+100)` | ✅ | ✅ |
+| int32 ledger Σ vwgt (a=100) | 16,518,550 | 78,800,827 |
+| cut of a known partition: from file == from graph | 1,361 (dist_8) | 124,915 (dist_2048) |
+| importer round-trip dist → vector → import | identical | identical |
+| rpart count block agrees with derived assignment | 8/8 ranks | 2048/2048 ranks |
+| scorecard on the part FILE == on the dist | 1,361 / 94,750 | — |
+
+⭐ **The star expansion is verified numerically, not asserted:** km1 of the written hypergraph
+under CORE2 `dist_8` is **47,620**, exactly METIS's total communication volume with
+`vsize = nlev` (scorecard `commvol_total`). Net weight = nlev on every net, net size =
+degree + 1 on every net, 870,146 pins = n + 2m, three random patches equal {v} ∪ N(v). So
+Mt-KaHyPar's `-o km1` will optimise the quantity we actually pay for, rather than a proxy.
+
+File sizes (for the Task-6/8 storage ledger): CORE2 4.5 MB unweighted / 7.6 MB fully weighted /
+6.2 MB hypergraph; fArc 41.5 MB fully weighted.
+
+**Node-hour ledger:** 0 (login-node only).
