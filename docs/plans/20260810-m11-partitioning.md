@@ -364,10 +364,14 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
       {16, 64, 2048} in progress. Findings 14 (single-constraint) and 15 (METIS wins at
       FESOM's own slack) in the session log.
 - [ ] KaHIP arm: verify parts are actually connected (components == 1 per part)
+      ⚠️ `--connected_blocks` variant built into the wrapper (`kahip-conn`) but not yet run.
 - [x] Mt-KaHyPar arm: record km1 (claimed comm volume) vs scorecard-measured comm volume
       → **identical to the digit on all five weight variants** at CORE2 512 (913,637 / 891,062 /
       880,739 / 875,706 / 910,438). The engine's objective IS the quantity FESOM pays.
-- [ ] score; merge into the joint Pareto pruning with A-family
+- [x] score; merge into the joint Pareto pruning with A-family
+      → `scripts/m11_pareto.py`; ⚠️ **Finding 18 corrected the objective set mid-flight**:
+      `commvol_max_rank` moves 9.5–16.6 % on a seed change alone (cut and total comm volume move
+      0.3 %), so it is demoted to a diagnostic and arms are ranked on sums only.
 - [ ] verify: one injected dist per engine per mesh passes Serial smoke + halo/dist gate
 
 ### Task 9: C-family zoo (orderings)
@@ -376,8 +380,12 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 - Create: `scripts/m11_zoo_c.sh` (drives `m11_renumber.py` + `m11_partgen.sh`)
 - Create (off-repo): renumbered meshes `mesh_m11/{core2,farc}_m11_{hil,s2,rcm}`
 
-- [ ] generate 6 renumbered mesh copies (2 meshes × 3 orderings); edge files regenerated via
+- [x] generate 6 renumbered mesh copies (2 meshes × 3 orderings); edge files regenerated via
       `partm11-a`; md5-freeze after
+      → CORE2 `hil` + `rcm` built and raced. fArc NOT built: ➕ **Finding 17** surveyed fArc,
+      dars, NG5 and FORCA20 with `scripts/m11_ordering_survey.py` and every one of them already
+      ships at 88 % element-gather locality (CORE2: 27.6 %), so both SFCs make them worse and
+      RCM destroys the gather stream. **CORE2 is the only mesh that needs renumbering.**
 - [ ] label-permuted baseline dists (identical partition content) at all race counts — the pure
       ordering A/B inputs
 - [ ] combined-arm dists: the SCORECARD-BEST partition arm from Tasks 7/8 (available now,
