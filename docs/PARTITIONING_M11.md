@@ -1347,3 +1347,14 @@ not of the mesh.
 the RCM verdict is overturned, the ordering lever is a CORE2 lever carried by Hilbert alone.
 This is an inference from CORE2 measurements; it should be stated as such in the report, and it
 costs one gate leg on fArc to convert into a measurement if the lever ever matters there.
+
+### ➕ Combined arms (Task 9's third bullet) prepared offline
+
+The combined arm — the Hilbert numbering carrying a *partition* arm rather than the baseline
+partition — needs no new partitioning: it is the flat arm's part vector read through the same
+node permutation the mesh was built with. Written for the three CORE2 512 shortlist partitions
+(`core2_hil_{kahip_anone,kahip_a100,mtkahypar_a0}_k512.part` under
+`/work/ab0995/a270088/port2/m11/engines/`), each verified to carry per-part sizes identical to
+its flat twin. They inject through `jobs/m11_zoo_b_dists.sh` like any other vector, and the
+invariant-block gate applies to them unchanged — so a combined arm that fails it is not a
+combined arm.
