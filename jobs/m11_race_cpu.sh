@@ -40,10 +40,18 @@ echo "=== M11 ordering race CPU  CORE2  ranks=$NPES nodes=$SLURM_NNODES  dt=$DT 
 echo "    BIN=$BIN md5=$md5   $(date '+%F %T')"
 m7_provenance "$OUT" "$BIN"
 
-declare -A MESH=( [base]=$SB/core2_m11 [hil]=$SB/core2_hil [rcm]=$SB/core2_rcm )
+# 🔴 base = core2_base, the SETTLED baseline, NOT the shipped core2_m11 (Finding 10). At
+# N=256 the shipped and settled partitions differ by the one node check_partitioning relocates,
+# so a race against the shipped mesh is an ordering-plus-one-node race. The precheck below
+# refuses rather than trusts this comment.
+declare -A MESH=( [base]=$SB/core2_base [hil]=$SB/core2_hil [rcm]=$SB/core2_rcm )
 for a in base hil rcm; do
     [ -d "${MESH[$a]}/dist_$NPES" ] || { echo "REFUSE: ${MESH[$a]}/dist_$NPES missing"; exit 2; }
 done
+PY=${PY:-/work/ab0995/a270088/mambaforge/envs/nereus/bin/python}
+echo "--- pure-ordering precheck"
+$PY "$ROOT/scripts/m11_pure_ordering_check.py" --npes "$NPES" --base "${MESH[base]}" \
+    --arm "hil=${MESH[hil]}" --arm "rcm=${MESH[rcm]}" || exit 2
 
 run() {   # run <arm> <rep>
     local a=$1 r=$2

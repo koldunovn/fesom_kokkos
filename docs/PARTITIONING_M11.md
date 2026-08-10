@@ -713,3 +713,397 @@ returns only if Finding 9 is fixed locally.
 | 26853377 | accuracy control | 2 | 0:41 | controls A and B measured |
 
 **Node-hour ledger:** ordering race 0.72 node-h. Campaign cumulative: **0.85 node-h**.
+
+---
+
+# SESSION 2 (2026-08-10, evening)
+
+## ⭐⭐ Finding 10 — the day-1 gate leg and the 256-rank race arm were run against the WRONG baseline
+
+Before re-registering anything, a check of the inputs the day-1 numbers were produced from.
+`jobs/m11_race_cpu.sh` and `jobs/m11_ordering_gate.sh` both set the base arm to
+`core2_m11` — the **shipped** mesh — while `hil` and `rcm` carry the **settled** partition that
+Finding 8 introduced precisely because the shipped one could not be relabelled invariantly.
+Measured on the files:
+
+| N | `core2_m11/dist_N/rpart.out` vs `core2_base/dist_N/rpart.out` |
+|--:|---|
+| 4 | identical |
+| 8 | identical |
+| **256** | **differs** (the one node `check_partitioning` moved while settling) |
+| 512 | identical |
+
+So three of the four raced points were clean, and **CPU 256 r was an ordering-plus-one-node
+race** — the point with the largest CPU gain (−2.79 %) and the point every gate leg was run at.
+The confound is one node in 126,858 and cannot plausibly explain a 2.8 % step-time difference,
+but it does invalidate the words "pure ordering" at that point, and it is a live confound in the
+SSH-iteration gate, where a single relocated node reorders the CG reductions on two ranks.
+
+Fixed in both jobs (base = `core2_base`), with a **refusal** added: each job now extracts the
+part vector of every arm's `dist_N` and aborts unless all three are the same partition up to the
+node permutation. A confound that is one `sed` away from returning should not be prevented by
+remembering.
+
+## RE-REGISTRATION — ordering gates, v2 · written 2026-08-10 18:5x, BEFORE the new legs ran
+
+The day-1 accuracy gate failed on its own instrument (three-significant-digit prints of
+threshold-driven quantities), and its replacement was designed after seeing the data. This
+section replaces it. What follows is fixed before the jobs are submitted; the numbers it will be
+judged on do not exist yet.
+
+**Honesty note, recorded rather than hidden.** I have already seen the day-1 evidence table
+(hilbert temp rms 1.5×, rcm 2.6× of a *single* control), and the day-1 SSH-iteration numbers
+(hil max 1 / mean 0.050, rcm max 2 / mean 0.550) — both against the wrong baseline. Any
+multiplier I choose now is therefore informed, not blind. Two things are done about that rather
+than claimed away: (i) gate **R1** below is a genuinely blind test — its bound comes from
+floating-point arithmetic, not from any measured M11 number, and it discriminates by ten orders
+of magnitude, so no choice of constant changes its verdict; (ii) gates **R2**/**R3** are
+calibrated against an *ensemble* of three partition-class controls instead of the single control
+day 1 used, and every control is reported alongside every arm so a reader can apply their own
+multiplier.
+
+### R1 — step-1 field identity (blind, first-principles, the gate that actually tests the mesh)
+
+Each arm runs **1 step** (dt 1800, cold start, monthly output = the state after step 1) and is
+compared to the reference through the node permutation, which is itself self-checked on
+`lon`/`lat` (exact, max |Δ| = 0) before any physics is read.
+
+**Bound: median |ΔT| ≤ 1e-12 K, median |ΔS| ≤ 1e-12 psu, median |Δssh| ≤ 1e-12 m.**
+
+Derivation, independent of every M11 measurement: the fields are O(1)–O(30) in double
+precision, so one arithmetic operation carries ~1e-15 relative round-off; a single time step
+applies O(10²) operations per node, so a difference in *summation order alone* cannot move the
+median past ~1e-13. A mesh error of the class this campaign risks — any node-indexed array left
+unpermuted, a triangle's vertex cycle rotated, `nlvls` following the wrong node — displaces
+whole columns and moves the median to O(1e-2)–O(1). The bound sits ten orders below the smallest
+such error and three above pure round-off, so it cannot be tuned into either verdict.
+
+The **maximum** is explicitly NOT gated: KPP's boundary-layer depth is a discontinuous
+functional of the state, so a handful of columns will differ at O(1) at step 1 in any run of
+this class — including the controls. That is the mechanism day 1 mistook for a failure.
+
+The same instrument is run on the controls. If a control (same numbering, different partition)
+fails R1, the instrument is measuring something other than round-off and the gate is void.
+
+### R2 — partition-class floor, ensemble (the in-class check)
+
+20 steps, reference = the settled baseline, statistic = **rms over the whole field** for
+`temp`, `salt`, `ssh`. Three controls, all holding the numbering fixed and changing only the
+partition, so none needs a permutation:
+
+| control | what changes |
+|---|---|
+| A | one node reassigned (shipped vs settled `dist_256`) |
+| B | a wholly different partition (`core2_wgt0` `dist_256`, M10's 2-D-only arm) |
+| C | the same recipe at a different METIS seed (`FESOM_PART_SEED`, fresh `dist_256`) |
+
+**Bound: arm rms ≤ 3 × max(control A, B, C) for each of temp, salt, ssh.**
+K = 3, fixed here. Rationale for the multiplier rather than the number: three controls sample a
+distribution whose spread is not known in advance, and the gate must fail an arm that is out of
+class by an order of magnitude while not failing one that is an ordinary draw from it.
+
+### R3 — SSH iterations, re-derived from first principles
+
+The day-1 bound (max |Δ| ≤ 1, mean |Δ| < 0.5) assumed the iteration count is insensitive to
+round-off. It is not, and the assumption was wrong for a reason worth writing down: the count is
+a **threshold crossing on a residual norm**, and from step 2 onward the two model states
+themselves differ — the mixing scheme amplifies round-off to O(1) in individual columns within
+one step. So |Δ| has no a-priori bound of 1, on any arm, for any correct mesh.
+
+What the gate exists to catch is the failure it was named for: **the operator changed**. That
+shows up as a *systematic* shift — consistently more (or fewer) iterations — not as a symmetric
+excursion. Measured over the same 20-step leg, for every control and every arm against the same
+reference:
+
+- **R3a (no systematic shift):** |mean signed Δ| ≤ max(0.5, 2 × max over controls |mean signed Δ|)
+- **R3b (magnitude in class):** mean |Δ| ≤ 2 × max over controls mean |Δ|, **and**
+  max |Δ| ≤ max(2, 2 × max over controls max |Δ|)
+
+K_ssh = 2, fixed here. The per-step signed sequence is reported for every arm so the shift, if
+any, is visible rather than summarised.
+
+### Unchanged from the day-1 pre-registration
+
+Arms, points, protocol, the halo/dist correctness gate, the stability screen, the
+invariant-block equality gate, the ≥ 2 % adoption threshold, and the requirement of **two
+same-day pair days**. Day 1's CPU-256 pair is retired by Finding 10 and re-run; the other three
+points stand.
+
+## ORDERING GATES v2 — results (2026-08-10 evening, jobs 26854848 at 256 r and 26854938 at 512 r)
+
+Two rank counts, six legs each (reference + three controls + two arms), R1 at 1 step and R2/R3
+at 20 steps, all inside one allocation per rank count.
+
+### The instrument proves itself first
+
+At 512 ranks the shipped and settled `dist_512` are byte-identical, so the `ship` leg is a
+bitwise null — and it reports **exactly zero** on every statistic: temp/salt/ssh rms 0.000e+00,
+median 0.000e+00, max 0.000e+00, SSH iteration Δ = 0 at all 20 steps. The whole chain (netCDF
+read, permutation handling, statistics) returns a hard zero when nothing changed. At 256 the
+same leg is the one-node control instead, and it reports temp median exactly 0 with ssh median
+1.7e-13.
+
+### ⭐⭐⭐ Finding 11 — the accuracy floor is the SSH SOLVER TOLERANCE, not machine epsilon
+
+R1 was pre-registered with the clause "if a control fails, the instrument is void, not the arm".
+**That clause fired**: two of the three controls miss the 1e-12 median bound at both rank
+counts. The derivation behind the bound assumed round-off is the only mechanism available in
+one time step. It is not, and the reason is measurable:
+
+| leg (256 r) | SSH iteration Δ over 20 steps | temp median at step 1 | ssh median at step 1 |
+|---|--:|--:|--:|
+| ship (one node moved) | 0 at every step | **0.000e+00** | **1.70e-13** |
+| wgt0 (different partition) | 2 steps differ | 7.14e-09 | 1.25e-05 |
+| seed (different seed) | 2 steps differ | 9.70e-09 | 1.90e-05 |
+| hil | 1 step differs | 6.26e-08 | 9.16e-05 |
+| rcm | 9 steps differ | 1.22e-07 | 2.18e-04 |
+
+The SSH solve is a CG iteration stopped on a **relative residual of 1e-5**
+(`FESOM_PHASE1_SOLTOL`, `src/fesom_constants.h:105`; `rtol = soltol·√(‖rhs‖²/N)`, break on
+`residual < rtol`, `fesom_ssh.cpp:446,518`). Two decompositions that follow the **same**
+iteration path land on the **same iterate** and stay at round-off — that is the `ship` leg. Any
+decomposition change that alters the path lands on a **different admissible iterate**, and the
+set of admissible iterates is as wide as the stopping criterion allows: a residual of 1e-5
+relative becomes a solution difference of `1e-5 × κ(A)`. Measured against the step-1 ssh field
+(rms 0.0375 m, max 0.35 m):
+
+| leg | median \|Δssh\| | relative to the field rms |
+|---|--:|--:|
+| ship (same iteration path) | 1.70e-13 m | **4.5e-12** |
+| wgt0 | 1.25e-05 m | 3.3e-04 |
+| seed | 1.90e-05 m | 5.1e-04 |
+| hil | 9.16e-05 m | 2.4e-03 |
+| rcm | 2.18e-04 m | 5.8e-03 |
+
+Eight orders of magnitude separate the leg that kept the iteration path from the four that did
+not, and the four sit at 3e-4 … 6e-3 relative — consistent with a 1e-5 residual tolerance and an
+operator conditioning of O(10²–10³), which is ordinary for a 2-D elliptic SSH operator. The
+floor is realised in **step 1** and it is domain-wide (a median over 5.96 M points, not a few
+columns). The two ordering arms land 7× and 17× further out than the repartitioning controls —
+inside the same admissible set, but further inside it.
+
+Three consequences worth carrying beyond M11:
+
+1. **No accuracy gate on this model can be tighter than 1e-5 relative for any change that
+   touches the decomposition or the numbering.** Day 1's "relative |Δ| ≤ 1e-9 at step 1" was
+   unreachable for any instrument, not just for a three-digit print.
+2. The project's partition-class floor (L79) is not a convention — it is the only bound the
+   solver leaves available.
+3. The **maximum** is uninformative here for a second, independent reason: KPP's boundary-layer
+   depth is a discontinuous functional, so O(1) column differences appear in every leg,
+   controls included (temp max 4.7–10.3 K at step 1 across all of them).
+
+R1 is therefore recorded as **void by its own control clause**. The mesh-identity question it
+was meant to answer is settled offline instead — 10/10 renumbering invariants, 30/30 scorecard
+invariant keys, element areas identical as a multiset, and `lon`/`lat` mapping back exactly in
+the model's own output (checked in every leg above).
+
+### R2 — partition-class floor, both arms in class at both rank counts
+
+rms over the whole field at 20 steps, arms compared through the node permutation:
+
+| | temp rms | salt rms | ssh rms | verdict |
+|---|--:|--:|--:|---|
+| **256 r** control floor (max of A/B/C) | 7.19e-02 | 2.83e-01 | 8.96e-03 | |
+| hil | 6.73e-02 (0.94×) | 3.16e-02 (0.11×) | 3.99e-03 (0.45×) | **PASS** |
+| rcm | 1.19e-01 (1.66×) | 7.18e-02 (0.25×) | 9.55e-03 (1.07×) | **PASS** |
+| **512 r** control floor | 5.56e-02 | 1.70e-01 | 6.42e-03 | |
+| hil | 6.83e-02 (1.23×) | 1.99e-01 (1.17×) | 7.32e-03 (1.14×) | **PASS** |
+| rcm | 1.14e-01 (2.05×) | 2.81e-01 (1.65×) | 1.62e-02 (2.52×) | **PASS** |
+
+Both arms sit inside the pre-registered 3× band at both counts. Hilbert is consistently the
+quieter of the two — at or below the floor at 256, ~1.2× at 512 — while RCM runs 1.7–2.5×.
+
+### ⭐⭐ Finding 12 — RCM fails the re-derived SSH-iteration gate at BOTH rank counts
+
+| | mean signed Δ | mean \|Δ\| | max \|Δ\| | bound (2× control ensemble) | verdict |
+|---|--:|--:|--:|---|---|
+| 256 r hil | −0.050 | 0.050 | 1 | 0.500 / 0.200 / 2 | **PASS** |
+| 256 r rcm | −0.450 | **0.550** | 2 | 0.500 / 0.200 / 2 | **FAIL** mean \|Δ\| |
+| 512 r hil | −0.050 | 0.050 | 1 | 0.500 / 0.100 / 2 | **PASS** |
+| 512 r rcm | −0.450 | **0.850** | 2 | 0.500 / 0.100 / 2 | **FAIL** mean \|Δ\| |
+
+Not marginal: RCM is 5.5× the bound at 256 and 8.5× at 512, against controls that sit at
+0.00–0.10. And the per-step sequence has a shape — at 512 it runs
+`[-1,0,1,1,1,1,0,0,0,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-2]`: a sustained one-iteration deficit that
+sets in after ~10 steps at both counts. Hilbert's sequence is a single −1 in 20 steps, exactly
+what the controls do.
+
+The bound was re-derived from first principles **before** these legs ran (see the
+re-registration above), and the failure reproduces at two independent rank counts, so this is a
+gate result and not a tuned one. Why RCM perturbs the solver ~10× more than a repartitioning
+while Hilbert does not is **not explained** here; the mesh is provably the same mesh, so the
+difference is in summation order alone, and its magnitude is unaccounted for.
+
+### Verdict on the ordering arms: carry Hilbert, drop RCM
+
+**RCM is dropped.** It fails a pre-registered, first-principles gate at both rank counts, and
+the handoff's own condition for keeping it ("either RCM is dropped, or the bound is re-derived
+from first principles *before* re-measuring") was met and it still failed.
+
+**Hilbert is carried.** It passes R2 and R3 at both rank counts, sits inside the control
+ensemble on every statistic, and gives up almost nothing in speed (below).
+
+## ORDERING RACE — CPU 256 r re-run on the corrected baseline (job 26854862)
+
+Same protocol, same allocation, min-of-2, with `base` = the settled `core2_base`:
+
+| point | base s/step | hilbert | rcm |
+|---|--:|--:|--:|
+| day 1, shipped base (retired) | 0.1074 | −2.61 % | −2.79 % |
+| **corrected, settled base** | **0.1073** | **−2.42 %** | **−2.24 %** |
+
+Two things change. The gain is ~0.2–0.5 pp smaller, and **the day-1 claim that "RCM is
+marginally ahead of Hilbert everywhere" does not survive the re-run** — here Hilbert leads. The
+arms' own absolute times moved 0.1 % (hil 0.1046 → 0.1047) and 0.5 % (rcm 0.1044 → 0.1049)
+between the two same-day runs, so the hil–rcm separation (0.2 pp) was always inside the noise.
+The lever is ~2.4 % at this point either way.
+
+The other three points (CPU 512, GPU 4, GPU 8) used dists that are byte-identical between the
+shipped and settled meshes, so their day-1 numbers stand unchanged.
+
+## ⭐⭐⭐ Finding 13 — the `check_partitioning` fix, and 864 rejoins the race (job 26854955)
+
+`FESOM_PART_FIXISO=1` (default off) builds the candidate list only from neighbours outside
+`part(n)`. Announced by the tool, aborts on any value but 0/1, and **verified to fire** (the
+`[M11] FESOM_PART_FIXISO=1` line is present in the ON leg's log and absent in the OFF leg's —
+L80, not a dead knob).
+
+**The seed line has two defects, and the second one is what actually fired here.** Besides
+admitting the node's own partition as a move candidate, the seed counts the first neighbour
+**twice** — once in the seed, once again when the loop finds it already in the list. At CORE2
+864 the node Finding 9 named (gid 103748, own partition 356, neighbours in `356 353 351`):
+
+| numbering | candidate list, stock | outcome, stock | outcome, FIXISO=1 |
+|---|---|---|---|
+| shipped / rcm | `{356:1, 353:1, 351:1}` → kmax count 1 | not moved (`ne_part_num(kmax) <= 1`) | not moved |
+| hil (`353 351 356`) | `{353:`**2**`, 351:1}` → kmax count 2 | **"moved to part 353"** | **not moved** |
+
+So under the stock code the repair fires or not depending on whether the double-counted
+neighbour happens to be first — which is a property of the numbering, not of the mesh. With the
+fix, the node is left in place under **every** numbering, with the honest reason the routine
+already has for this case ("no chance — this is probably a boundary node that has only two
+neighbours").
+
+**`isolated_nodes == 0` was the wrong convergence criterion, and my leg C used it.** That node
+is genuinely irreparable by this heuristic: it has exactly one neighbour in each of two other
+partitions, so no move can give it two same-partition neighbours. Iterating the injection with
+the fix gives passes 2–5 of `flagged 1, moved 0` — the partition **is** a fixed point; what is
+not zero is a metric. The right criterion is idempotence, which leg D tests directly:
+
+| N=864 with FIXISO=1 | result |
+|---|---|
+| pure-ordering check (part vector under the permutation) | **EXACT** for both arms |
+| invariant block, 30 keys, base vs hil | **IDENTICAL** |
+| invariant block, 30 keys, base vs rcm | **IDENTICAL** |
+| cover / reciprocity gates | ok / ok |
+
+⇒ **CPU 864 is back in the ordering race** (it was dropped in session 1 precisely because these
+arms could not be made invariant-identical), and the fix is upstream-PR material with a
+two-defect explanation and a reproduction.
+
+The job exits FAIL only because leg C asserts the wrong criterion; the criterion is fixed in the
+job for the next run rather than the verdict being reinterpreted after the fact.
+
+Also settled by leg A: **the rebuilt executable with no knobs still reproduces the reference
+`dist_8` byte-for-byte** (17 files, `METIS edgecut 120883`). ➕ Correction to Task 4's
+provenance note: the pristine and patched 5.1.0 executables are **not** md5-identical
+(`f46b794e…` vs `0af460a2…`, and they differ in size by 48 KB — build-path and flag noise; even
+`gpmetis` differs). The rule that came out of it is unchanged and now doubly true: record BOTH
+md5s, because the C knobs live in `libfesom_meshpart_C.so` and the Fortran fix lives in the
+executable. Current partm11-a: executable `29b14f200547eb0d473c47e408470061`, libC
+`a49236f712ecfb71a6dad6ca40254260`.
+
+### Run table — session 2
+
+| job id | what | nodes | elapsed | verdict |
+|---|---|--:|--:|---|
+| 26854807 | control C (seed-variant `dist_256`) | 1 | 1:40 | PASS |
+| 26854848 | ordering gate v2, 256 r | 2 | 2:07 | R1 void (controls fail), R2 both PASS, R3 hil PASS / rcm FAIL |
+| 26854862 | CPU race 256 r, corrected baseline | 2 | 4:08 | base 0.1073 / hil −2.42 % / rcm −2.24 % |
+| 26854917 | control C `dist_512` | 1 | 0:47 | PASS |
+| 26854938 | ordering gate v2, 512 r | 4 | 2:05 | same pattern; `ship` leg is a bitwise zero null |
+| 26854955 | FIXISO: null re-verify + Finding-9 case + settle + 864 arms | 1 | 4:09 | null-1 PASS, knob fires, **864 arms invariant-identical**; exits FAIL on leg C's wrong criterion |
+
+**Node-hour ledger:** 0.028 + 0.071 + 0.14 + 0.013 + 0.14 + 0.069 = **0.46 node-h**.
+Campaign cumulative: **1.31 node-h**.
+
+---
+
+### Task 6 — engine builds + wrappers ✅ (2026-08-10)
+
+`scripts/m11_engines.sh` (one entry point for six engine variants) and `scripts/m11_zoo_b.sh`
+(the sweep driver). Trees under `/work/ab0995/a270088/port2/partm11/engines/`.
+
+| engine | tag | build | CORE2 512 wall time |
+|---|---|---|--:|
+| KaMinPar | v3.7.3 | `-DKAMINPAR_BUILD_DISTRIBUTED=OFF -DKAMINPAR_BUILD_WITH_SPARSEHASH=OFF -DKAMINPAR_BUILD_WITH_MTUNE_NATIVE=OFF` | 0–2 s |
+| Mt-KaHyPar | v1.6.2 | `-DKAHYPAR_DOWNLOAD_TBB=On`, then re-configure with `-DCMAKE_EXE_LINKER_FLAGS=-pthread` for the CLI | 3–6 s |
+| KaHIP | v3.25 | `-DNOMPI=ON -DPARHIP=OFF -DNONATIVEOPTIMIZATIONS=ON` | 28–29 s |
+
+Toolchain: `gcc/13.4.0-gcc-13.4.0` + `cmake/3.31.11-gcc-13.4.0`, built on the **login node** —
+KaMinPar and Mt-KaHyPar fetch TBB over the network at configure time and a compute node has no
+external route. None of the three had to be dropped; each cost exactly one flag:
+
+- KaMinPar wants Google Sparsehash, which Levante does not carry (`KAMINPAR_BUILD_WITH_SPARSEHASH`
+  defaults ON).
+- Mt-KaHyPar's **library** links but its **CLI** does not: `undefined reference to
+  pthread_setspecific … DSO missing from command line`. `CMAKE_EXE_LINKER_FLAGS=-pthread` and a
+  relink fix it; nothing else needs rebuilding.
+- KaHIP's default build wants MPI for ParHIP/kaffpaE; `kaffpa` alone is sequential.
+- Mt-KaHyPar v1.6.2 no longer needs Boost (older versions did — the plan's note is out of date).
+
+All three consume the Task-3 exports unchanged and their output passes `m11_part_import.py`'s
+refusals (length, contiguous rank range, no empty part) at CORE2 512.
+
+#### ⭐⭐⭐ Finding 14 — every external engine is SINGLE-constraint, and that is the whole story
+
+KaMinPar, Mt-KaHyPar and KaHIP all balance **one** vertex weight. FESOM's legacy arm balances
+**two** (`ncon=2`, `(1, nlev+100)`), which is why `core2_wgt2` reaches 2-D imbalance 1.017 **and**
+3-D max/min 1.037 at the same time. No external engine can express that, so the shared axis for
+the whole zoo is the scalar `w = a + nlev`. Measured at CORE2 512 (`--weights none` = unit
+weights), the trade is severe and monotone:
+
+| arm (ε = 3 %) | cut_unw | commvol | **cv_max** | 2-D imb | 3-D max/min | disc | offlobe |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| shipped (METIS dual, UFACTOR=1) | 25,382 | 902,540 | 3,185 | 1.005 | 9.26 | 8 | 492 |
+| `core2_wgt2` (METIS dual) | 34,878 | 1,115,000 | 3,295 | **1.017** | **1.04** | 405 | 31,153 |
+| kahip a=0 | **23,656** | 909,267 | **2,657** | 4.40 | 1.66 | **2** | **233** |
+| kahip a=15 | 23,962 | 891,692 | 2,796 | 2.26 | 3.06 | 8 | 709 |
+| kahip a=100 | 23,897 | 865,277 | 2,895 | 1.275 | 6.91 | 13 | 1,012 |
+| kahip unweighted | 23,861 | **847,778** | 3,156 | **1.025** | 10.54 | 7 | 645 |
+| mtkahypar a=0 | 24,618 | 913,637 | 2,735 | 5.07 | 1.51 | 10 | 1,294 |
+| kaminpar a=100 | 25,686 | 920,917 | 3,100 | 1.251 | 6.74 | 18 | 1,255 |
+
+Reading the table: at their design slack the engines beat METIS's shipped cut by 5–7 % and its
+**max-per-rank comm volume by up to 17 %** (2,657 vs 3,185) — but every arm that fixes the 3-D
+imbalance pays 4–5× in 2-D node count, which is the currency the ice model and every per-rank
+2-D allocation are billed in. The dual constraint buys both balances for +37 % cut; the engines
+buy cut and comm volume for one balance or the other. **That trade, not algorithmic strength, is
+the real difference between FESOM's partitioner and the state of the art.**
+
+#### ⭐⭐⭐ Finding 15 — at FESOM's OWN slack, METIS beats all three engines on every metric
+
+The comparison above is not matched: the engines ran at ε = 3 %, FESOM's partitioner at
+`UFACTOR=1` = **0.1 %**. Re-run at ε = 0.001:
+
+| arm (ε = 0.1 %) | cut_unw | commvol | cv_max | disc | iso |
+|---|--:|--:|--:|--:|--:|
+| shipped METIS (UFACTOR=1) | **25,382** | **902,540** | **3,185** | **8** | **0** |
+| kaminpar unweighted | 26,764 | 947,222 | 3,546 | 96 | 68 |
+| kahip unweighted | 27,421 | 965,709 | 3,895 | 35 | 31 |
+| mtkahypar unweighted | 31,705 | 1,142,816 | 4,072 | 127 | 279 |
+| kaminpar a=0 | 27,056 | 1,037,215 | 3,426 | 123 | 110 |
+| mtkahypar a=0 | 31,470 | 1,138,316 | 3,782 | 106 | 303 |
+| kahip a=0 | 33,886 | 1,313,085 | 5,258 | 166 | 95 |
+
+**Every engine loses to METIS on cut, on total and max comm volume, on disconnected parts and on
+isolated nodes** — by 5 % (KaMinPar) to 33 % (KaHIP a=0) on the cut, and by an order of magnitude
+on fragmentation. The engines' 3 %-slack advantage was the slack, not the algorithm; asked for
+0.1 % balance they fall apart, which is fair to say only with the caveat that 0.1 % is outside
+the envelope they are designed and tuned for (their papers report ε ≥ 1 %).
+
+⇒ **The lever is not "a better partitioner". It is the balance/imbalance trade itself**, and the
+matched test in the other direction — give METIS the engines' slack (`UFACTOR` 10/30/100, arm A5)
+— is the one that decides whether FESOM should keep `UFACTOR=1` at all. That arm is queued in
+zoo A wave 2.

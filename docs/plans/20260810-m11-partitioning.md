@@ -298,13 +298,24 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 - Create (off-repo): `/work/ab0995/a270088/port2/partm11/engines/{kaminpar,mtkahypar,kahip}/`
 - Create: `scripts/m11_engines.sh` (wrappers: `m11_graph_export.py` → engine → `m11_part_import.py`)
 
-- [ ] build from source with Levante gcc/cmake modules, pinned: KaMinPar v3.7.3, Mt-KaHyPar
+- [x] build from source with Levante gcc/cmake modules, pinned: KaMinPar v3.7.3, Mt-KaHyPar
       v1.6.2 (TBB+Boost), KaHIP v3.25; exact commits + module list in the session log
-- [ ] wrappers: KaMinPar (`-P default|strong`, `-e {0.01,0.03}`), Mt-KaHyPar (`quality`,
+      → all three built with gcc 13.4.0 + cmake 3.31.11 on the login node. Three build traps,
+      all logged: KaMinPar needs `-DKAMINPAR_BUILD_WITH_SPARSEHASH=OFF` (Sparsehash is not on
+      Levante); Mt-KaHyPar's CLI fails to link without `-pthread`
+      (`CMAKE_EXE_LINKER_FLAGS=-pthread`); KaHIP builds sequential-only with
+      `-DNOMPI=ON -DPARHIP=OFF`. Mt-KaHyPar v1.6.2 no longer needs Boost, and both it and
+      KaMinPar download TBB themselves (login node has network; a compute node does not).
+- [x] wrappers: KaMinPar (`-P default|strong`, `-e {0.01,0.03}`), Mt-KaHyPar (`quality`,
       `-o km1`, star-expansion), KaHIP (`--preconfiguration=strong --connected_blocks`,
       pre-connected graph)
-- [ ] any engine that fights the toolchain is DROPPED with a session-log note, not fought
-- [ ] verify: each engine on CORE2 512 → importer sanity + scorecard row (balance within its ε)
+      → `scripts/m11_engines.sh`, one entry point for all six variants; graphs are exported
+      once and cached per (mesh, weight variant).
+- [x] any engine that fights the toolchain is DROPPED with a session-log note, not fought
+      → none dropped; the three build traps above cost one flag each.
+- [x] verify: each engine on CORE2 512 → importer sanity + scorecard row (balance within its ε)
+      → all three produce a valid `FESOM_PART_FILE` at CORE2 512 (2 s / 5 s / 29 s) and every
+      row balances `w=100+nlev` to 3 %, the ε they were given.
 - [ ] verify: one engine vector → `FESOM_PART_FILE` → dist → Serial smoke + halo/dist
       correctness gate green
 

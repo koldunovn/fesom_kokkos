@@ -44,10 +44,17 @@ echo "    BIN=$BIN md5=$md5  FESOM_SPEED=$FESOM_SPEED  $(date '+%F %T')"
 echo "    nodes: $SLURM_JOB_NODELIST"; nvidia-smi -L | head -1
 m7_provenance "$OUT" "$BIN"
 
-declare -A MESH=( [base]=$SB/core2_m11 [hil]=$SB/core2_hil [rcm]=$SB/core2_rcm )
+# 🔴 base = core2_base, the SETTLED baseline, NOT the shipped core2_m11 (Finding 10). The GPU
+# points (4 and 8 ranks) have byte-identical shipped and settled dists, so this changes nothing
+# here — but the two race jobs must not disagree about what "base" means.
+declare -A MESH=( [base]=$SB/core2_base [hil]=$SB/core2_hil [rcm]=$SB/core2_rcm )
 for a in base hil rcm; do
     [ -d "${MESH[$a]}/dist_$NPES" ] || { echo "REFUSE: ${MESH[$a]}/dist_$NPES missing"; exit 2; }
 done
+PY=${PY:-/work/ab0995/a270088/mambaforge/envs/nereus/bin/python}
+echo "--- pure-ordering precheck"
+$PY "$ROOT/scripts/m11_pure_ordering_check.py" --npes "$NPES" --base "${MESH[base]}" \
+    --arm "hil=${MESH[hil]}" --arm "rcm=${MESH[rcm]}" || exit 2
 
 run() {   # run <arm> <rep>
     local a=$1 r=$2
