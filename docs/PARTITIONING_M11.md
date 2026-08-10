@@ -1471,3 +1471,58 @@ Task 14 already requires of finalists, one task too late to have caught this).
 Re-reading the shortlist under the corrected rule: `kahip unweighted` at CORE2 512 (cut −6.1 %,
 total comm volume −6.1 %, both stable metrics) and `mtkahypar a=100` at fArc 2048 (cut −3.3 %,
 total comm volume −2.4 %) remain worth racing; the arms whose entire case was `cv_max` do not.
+
+## ⭐⭐⭐ Finding 19 — M10's shipped-864 "7.4 %" does NOT reproduce (job 26855293)
+
+Three partitions of the same mesh (five mesh files verified md5-identical across all three
+directories), one allocation, interleaved reps, min-of-2, CORE2 864 ranks:
+
+| arm | s/step | vs shipped |
+|---|--:|--:|
+| ship (the shipped `dist_864`, an older tool) | 0.0442 | — |
+| base (the same partition settled with FIXISO) | 0.0441 | −0.23 % |
+| **wgt0 (M10's flat regeneration)** | 0.0448 | **+1.36 %** |
+
+M10 reported this regeneration **7.4 % slower**. Measured here it is **1.36 % slower** — same
+sign, five times smaller, and within sight of the run-to-run spread (the reps of an arm differ by
+0.4–1.1 % once the first, cold run of the job is excluded; min-of-2 is what the protocol takes).
+
+⇒ **The shipped-864 mystery is retired.** It was never explicable by partition quality (Task 2),
+placement (−2.9 % of off-node volume, Finding 16) or per-node aggregate work (identical), and the
+reason those three offline explanations all fell short by an order of magnitude is that the
+effect they were asked to explain is itself an order of magnitude smaller than reported. The
+honest reading: there is a real but small penalty for the flat regeneration at 864 ranks, ~1.4 %,
+and no mystery.
+
+Two things this does **not** say. It does not say M10 measured wrong — a different binary,
+build or day can carry a different number, and their GPU leg (+4.18 %) is untested here. And it
+does not license reading 1.36 % as a finding: it is one pair day at two reps, so it is an upper
+bound on the size of whatever is there.
+
+Incidental, and useful: **settling the shipped partition costs nothing** (−0.23 %, i.e. nothing
+at this resolution), which is what the ordering race needed to be true of its baseline.
+
+## Task 8 closed — the engine dists exist, run, and are better on the metrics that are stable
+
+Job 26855445 injected the three shortlisted engine vectors, generated real `dist_512`
+directories, scored them **with the dist files present** (which is where element replication and
+halo counts come from) and smoke-ran one under the halo/dist correctness gate:
+
+| arm | cut | commvol | halo/rank | elem repl | edge repl |
+|---|--:|--:|--:|--:|--:|
+| METIS settled | 25,382 | 902,491 | 52.1 | 1.3463 | 1.1389 |
+| kahip a=100 | 23,896 (−5.9 %) | 865,264 | 49.3 (**−5.5 %**) | 1.3300 (**−1.21 %**) | 1.1310 |
+| kahip unweighted | 23,861 (−6.0 %) | 847,778 | 49.1 (**−5.7 %**) | 1.3286 (**−1.31 %**) | 1.1307 |
+| mtkahypar a=0 | 24,618 (−3.0 %) | 913,637 | 50.7 (−2.6 %) | 1.3383 (−0.59 %) | 1.1351 |
+
+All three carry **less halo and less element replication than the METIS baseline**, and both are
+sums rather than extreme-value statistics, so unlike `cv_max` (Finding 18) they are not seed
+noise. Element replication is the fragmentation currency that predicted M10's +20 % GPU ocean
+busy where halo counts predicted +0.7 % (Finding 3), so a −1.3 % on it is a small but honest
+prediction of a win rather than a wash.
+
+Gates: `owned cover` and `com_info reciprocity` ok on all three; Serial 20-step smoke on
+`kahip a=100` clean with the halo identity test announcing and passing.
+⚠️ `check_partitioning` moved **128 nodes** when injecting `kahip a=100` (0 for the other two),
+so that arm as raced is the engine's partition with 128 nodes relocated — recorded rather than
+assumed away, and it is why the move count is printed for every arm.
