@@ -1306,20 +1306,6 @@ Two cautions to carry into the race:
 **Updated shortlist to race** — CORE2 512 (4 arms + anchor, above), CORE2 864 (`kaminpar a=100`,
 `kahip unweighted` — the per-node-max placement arms), fArc 2048 (`mtkahypar a=100`).
 
-### Consequence for fArc: the ordering lever has no adoptable arm there
-
-Task 5 measured the two space-filling curves making fArc's index locality **worse** (+10.6 %,
-+14.3 % mean |Δindex| over graph edges) because its shipped numbering is already spatially local
-(88.5 % of element-gather strides within 64 indices). Only RCM helped (−29.3 %). RCM has now
-failed the SSH-iteration gate at two CORE2 rank counts, and the mechanism the failure points at
-— a reordering of every local summation, not of the global ones — is a property of the ordering,
-not of the mesh.
-
-⇒ **fArc's ordering arms are: two documented negatives and one arm that fails a gate.** Unless
-the RCM verdict is overturned, the ordering lever is a CORE2 lever carried by Hilbert alone.
-This is an inference from CORE2 measurements; it should be stated as such in the report, and it
-costs one gate leg on fArc to convert into a measurement if the lever ever matters there.
-
 #### ⚠️ …and the placement column tempers it: at fArc 2048 the engines' advantage is in the CHEAP traffic
 
 The `cv_max` improvements above are max-per-**rank** communication volume. Split that by where
@@ -1347,3 +1333,17 @@ stays on the shortlist because it is the only arm that improves the per-node max
 settles something an offline score cannot. If it wins clearly, `cv_max` is the right currency
 and the off-node column is a distraction; if it loses, the off-node column is the one to score
 the rest of the campaign on.
+
+### Consequence for fArc: the ordering lever has no adoptable arm there
+
+Task 5 measured the two space-filling curves making fArc's index locality **worse** (+10.6 %,
++14.3 % mean |Δindex| over graph edges) because its shipped numbering is already spatially local
+(88.5 % of element-gather strides within 64 indices). Only RCM helped (−29.3 %). RCM has now
+failed the SSH-iteration gate at two CORE2 rank counts, and the mechanism the failure points at
+— a reordering of every local summation, not of the global ones — is a property of the ordering,
+not of the mesh.
+
+⇒ **fArc's ordering arms are: two documented negatives and one arm that fails a gate.** Unless
+the RCM verdict is overturned, the ordering lever is a CORE2 lever carried by Hilbert alone.
+This is an inference from CORE2 measurements; it should be stated as such in the report, and it
+costs one gate leg on fArc to convert into a measurement if the lever ever matters there.
