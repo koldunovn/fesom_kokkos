@@ -284,11 +284,75 @@ def check_hmetis(path, mesh, part=None):
     return 0
 
 
+def check_vs_dump(mesh, dump):
+    """Diff our graph against the CSR the PARTITIONER handed METIS (FESOM_PART_GRAPH_DUMP).
+
+    This is the authoritative check: everything else in the campaign assumes the Python
+    graph is the Fortran graph. The dump also carries `nlevels_nod2D` as the partitioner
+    RECOMPUTED it in memory, which settles review M5 — the partitioner keeps a pre-existing
+    nlvls.out on disk while partitioning with freshly computed values, so the two can
+    silently disagree.
+    """
+    print(f"\n--- {dump} vs Mesh.graph()")
+    with open(dump) as f:
+        head = f.readline().split()
+        n, nnz = int(head[0]), int(head[1])
+        has_w = len(head) > 2 and head[2] == "1"
+        v = np.fromstring(f.read(), dtype=np.int64, sep="\n")
+    indptr = v[:n + 1] - 1                      # dump is 1-based Fortran CSR
+    adj = v[n + 1:n + 1 + nnz] - 1
+    wgt = v[n + 1 + nnz:] if has_w else None
+    fails = []
+    print(f"  dump: n={n:,} nnz={nnz:,} weights={'yes' if has_w else 'no'}")
+    if n != mesh.nod2D:
+        fails.append(f"n {n} != nod2D {mesh.nod2D}")
+
+    gi, gj = mesh.graph()
+    ours_ptr, ours_adj = csr(mesh)
+    if not np.array_equal(np.diff(indptr), np.diff(ours_ptr)):
+        d = np.nonzero(np.diff(indptr) != np.diff(ours_ptr))[0]
+        fails.append(f"degree differs at {d.size} vertices, first {d[:5].tolist()}")
+    else:
+        print(f"  rowptr              identical at all {n + 1:,} entries  OK")
+    # colind order is insertion order in stiff_mat_ini, ours is sorted: compare per row
+    same = True
+    for k in range(n):
+        a = np.sort(adj[indptr[k]:indptr[k + 1]])
+        b = ours_adj[ours_ptr[k]:ours_ptr[k + 1]]
+        if a.size != b.size or not np.array_equal(a, b):
+            same = False
+            fails.append(f"adjacency of vertex {k + 1} differs: dump {a.tolist()[:8]} "
+                         f"vs ours {b.tolist()[:8]}")
+            break
+    if same:
+        print(f"  colind (per row, sorted)  identical at all {nnz:,} entries  OK")
+
+    if wgt is not None:
+        if wgt.size != n:
+            fails.append(f"weight array has {wgt.size} entries, expected {n}")
+        elif np.array_equal(wgt, mesh.nlev_nod):
+            print(f"  in-memory nlevels_nod2D == on-disk nlvls.out at all {n:,} nodes  OK "
+                  "(review M5: no divergence on this mesh)")
+        else:
+            d = np.nonzero(wgt != mesh.nlev_nod)[0]
+            fails.append(f"REVIEW M5 DIVERGENCE: in-memory nlevels differs from nlvls.out at "
+                         f"{d.size} nodes, e.g. node {d[0]+1}: memory {wgt[d[0]]} vs file "
+                         f"{mesh.nlev_nod[d[0]]}")
+    if fails:
+        for f_ in fails:
+            print(f"  FAIL: {f_}")
+        return 1
+    print("  RESULT: PASS")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mesh_dir")
-    ap.add_argument("-o", "--out", required=True)
+    ap.add_argument("-o", "--out")
+    ap.add_argument("--vs-dump", metavar="CSR",
+                    help="diff Mesh.graph() against a FESOM_PART_GRAPH_DUMP file and exit")
     ap.add_argument("--format", choices=["metis", "hmetis"], default="metis")
     ap.add_argument("--weights", choices=["none", "vwgt", "vsize", "both", "dual"],
                     default="none")
@@ -300,6 +364,10 @@ def main():
     a = ap.parse_args()
 
     mesh = Mesh(a.mesh_dir)
+    if a.vs_dump:
+        return check_vs_dump(mesh, a.vs_dump)
+    if not a.out:
+        ap.error("-o/--out is required unless --vs-dump is given")
     if a.format == "metis":
         write_metis(mesh, a.out, a.weights, a.wgt_a, a.edge_weights)
     else:

@@ -291,3 +291,105 @@ File sizes (for the Task-6/8 storage ledger): CORE2 4.5 MB unweighted / 7.6 MB f
 6.2 MB hypergraph; fArc 41.5 MB fully weighted.
 
 **Node-hour ledger:** 0 (login-node only).
+
+---
+
+### Task 4 — patched partitioner `partm11`, two builds ✅ (2026-08-10)
+
+Trees, patches and build recipe: `docs/partm11/` (`README.md` +
+`fort_part.c.m11.patch` + `mesh_part_CMakeLists.metis521.patch`). Harness:
+`scripts/m11_partgen.sh`. Jobs: `jobs/m11_null_partitioner.sh`, `jobs/m11_knob_gate.sh`,
+`jobs/m11_a0_and_farcdump.sh`.
+
+| build | METIS | executable md5 | `libfesom_meshpart_C.so` md5 |
+|---|---|---|---|
+| `fesom2_ref` (pristine) | 5.1.0 bundled | `f46b794eaab2b529dedd2a031ae200b7` | `9cd8b071c8785346d1ec09f18dc85f92` |
+| **partm11-a** (patched) | 5.1.0 bundled | `f46b794eaab2b529dedd2a031ae200b7` | `a49236f712ecfb71a6dad6ca40254260` |
+| **partm11-b** (patched) | **5.2.1** (`f5ae915`) + GKlib (`3b7d61b`) | `efe4fbd7a61f211dfee4b2079a4a8be7` | `43169061af5d5e56052181cd6da713f8` |
+
+🔴 **The executable md5 is identical between the pristine and patched 5.1.0 builds.** The C
+partitioning code compiles into the shared library, so editing `fort_part.c` never changes the
+executable. Provenance for this tool is the **`.so`**; `m11_partgen.sh` prints both on every
+run. (Related: the executable resolves the library through `$ORIGIN/../lib64`, so **copying it
+into a work dir breaks it** — job 26851114 died exactly that way. Run it in place.)
+
+**Knobs** (all announce, all abort on an unrecognised value): `FESOM_PART_FILE`,
+`_GRAPH_DUMP`, `_WGT`, `_WGT_A`, `_KWAY`, `_OBJ`, `_VSIZE`, `_CONTIG`, `_MINCONN`, `_UFACTOR`,
+`_NCUTS`, `_NITER`, `_SEED`, `_TPWGTS_FILE`. Two deliberate refusals beyond the plan:
+
+- `OBJ=vol`, `MINCONN` and `CONTIG` **abort unless `KWAY=1`**. METIS accepts and silently
+  ignores them under `PartGraphRecursive` — which is precisely how contiguity and the
+  comm-volume objective were off for every FESOM partition ever generated. The tool now
+  refuses to repeat that quietly.
+- `CONTIG=1` counts connected components first and **refuses on a disconnected graph** rather
+  than pre-connecting behind the user's back (METIS would ignore CONTIG there without a word).
+
+**Verification**
+
+| gate | job | result |
+|---|---|---|
+| null-1: patched, no knobs ≡ pristine | 26851187 | **PASS** — 17 files byte-identical, `METIS edgecut 120883` = M10's value |
+| null-2: inject a partition's own vector | 26851187 | **PASS** — 0 `check_partitioning` moves, `dist_8` byte-identical |
+| knob announce / refuse | 26851421 | **26/26 PASS** (13 accept, 12 refuse, 1 short-vector refusal) |
+| A0 = 5.2.1 announces its version | 26851421 | PASS — `Metis version 5.2.1` |
+| exporter graph vs `FESOM_PART_GRAPH_DUMP` CSR | — | CORE2 **and** fArc: rowptr and colind identical at every entry (743,288 / 3,783,940) |
+| M5: in-memory `nlevels_nod2D` vs on-disk `nlvls.out` | — | CORE2 **0 nodes differ**; fArc **1 node differs** (see below) |
+| reproducibility of the whole pipeline | 26851187 | our fresh 5.1.0 default `dist_8` is byte-identical to M10's `core2_wgt2/dist_8` |
+
+#### ⭐⭐ Finding 5 — the shipped fArc partitions ARE our tool's output; CORE2's are not
+
+`farc_dump/dist_16`, generated here from the sandbox copy with the historical defaults, is
+**byte-identical to `/pool/.../farc/dist_16`**. So fArc's shipped decomposition was produced by
+exactly this tool at these settings (dual+100, Recursive, `UFACTOR=1`, `NCUTS=10`, seed 35243,
+METIS 5.1.0). CORE2's shipped `dist_864`, by contrast, is *not* reproduced by the same recipe
+(M10 measured it 7.4 % faster than our regeneration). That sharpens Task-2 Finding 4: the CORE2
+mystery is a partition made by a **different, older tool**, not a different setting of this one.
+
+#### ⭐ Finding 6 — the M5 divergence is real, bounded, and mesh-dependent
+
+The partitioner keeps a pre-existing `nlvls.out` on disk while partitioning with freshly
+recomputed in-memory levels. Measured at the seam:
+
+- **CORE2**: in-memory == on-disk at all 126,858 nodes. No divergence.
+- **fArc**: they differ at **exactly 1 node of 638,387** — node 1, a coastal node
+  (`coast_flag=1`, 140.11 °E 66.84 °S) with only 2 incident elements. On disk `nlvls.out` = 5,
+  in memory = **17**. The on-disk arrays are self-consistent (`nlvls.out` equals
+  max-over-incident-elements of `elvls.out` at every one of the 638,387 nodes), and **17 is
+  exactly the RAW, pre-smoothing level**: `elvls_raw.out` gives 17 for both of that node's
+  elements while `elvls.out` gives 5. So this run's rough-topography smoothing did not
+  reproduce the archived pass at that node.
+
+Impact bound: the fArc `dist_16` produced *with* the divergent weight came out byte-identical
+to the shipped partition, so at 16 ranks it changed nothing. The check is cheap and now
+automatic (`m11_graph_export.py --vs-dump`), and must be run **per mesh** — it is mesh-
+dependent, and dars/NG5 are unmeasured.
+
+#### Arm A0 — METIS 5.2.1 at the historical settings is a wash
+
+| metric | N=8 | N=16 | N=32 |
+|---|--:|--:|--:|
+| cut, unweighted | +3.3 % | +1.6 % | +1.1 % |
+| cut, nlev-weighted | −0.8 % | −0.1 % | +0.7 % |
+| comm volume (total) | −0.5 % | −0.1 % | +0.6 % |
+| max neighbours/part | 6 → 7 | 7 → 10 | 11 → 11 |
+| disconnected parts | 7 → 7 | 13 → 11 | 28 → 26 |
+| vertices off main lobe | −2.7 % | −8.2 % | −5.7 % |
+| halo nodes/rank | +3.8 % | +1.6 % | +1.0 % |
+
+Nothing here justifies 5.2.1 on quality grounds — which is the useful result: it means any gain
+the Task-7 Kway/VOL/CONTIG/MINCONN arms show is attributable to **those options**, not to the
+version bump that makes them reachable. A0 is still raced as the null.
+
+Incidental: `check_partitioning` moved 1 node in the A0 16-rank run too (0 at 8 and 32), so the
+print-vs-file gap is a recurring, not a one-off, phenomenon.
+
+**Run table**
+
+| job id | what | elapsed | verdict |
+|---|---|--:|---|
+| 26851114 | null tests, first attempt | 0:38 | **FAILED as designed** — harness refused when the copied executable could not find its `.so` (rc=127); cause was my copy breaking `$ORIGIN` |
+| 26851187 | null-1 + null-2 + CORE2 CSR/levels dump | 1:24 | **PASS** |
+| 26851421 | knob gate + A0 version + check_partitioning reproduction | 2:12 | **26/26 PASS** |
+| 26851516 | arm A0 at 8/16/32 + fArc CSR dump | 1:02 | PASS |
+
+**Node-hour ledger:** 0.09 node-h (4 jobs, 5 min 16 s total). Task 1–4 cumulative: 0.10 node-h.

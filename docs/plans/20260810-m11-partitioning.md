@@ -205,35 +205,58 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
   `mesh_part/CMakeLists.txt`, `lib/` (metis-5.2.1 + GKlib alongside bundled 5.1.0)
 - Create: `scripts/m11_partgen.sh` (job template sourcing `m11_guards.sh`)
 
-- [ ] copy tree; port `FESOM_PART_WGT`; add `FESOM_PART_FILE` (read 0-based vector, SKIP the
+- [x] copy tree; port `FESOM_PART_WGT`; add `FESOM_PART_FILE` (read 0-based vector, SKIP the
       `part[i]--` renumbering decrement, keep `check_partitioning`; assert min=0, max=npes-1,
       every part nonempty, print per-rank histogram — review m14); add `FESOM_PART_GRAPH_DUMP`
       (write the exact `ssh_stiff` CSR handed to METIS — review m16)
-- [ ] add `FESOM_PART_*` knobs: KWAY, OBJ(cut/vol), MINCONN, CONTIG, UFACTOR, WGT_A (scalar
+      → the dump also carries the **in-memory `nlevels_nod2D`**, which settles review M5 at
+      this seam without patching Fortran at all.
+- [x] add `FESOM_PART_*` knobs: KWAY, OBJ(cut/vol), MINCONN, CONTIG, UFACTOR, WGT_A (scalar
       `w=a+nlev`; `-1`=legacy dual), TPWGTS_FILE — every knob announces itself, aborts on
       unrecognized values (L80)
-- [ ] **build `partm11-a`** = patches on bundled METIS **5.1.0** → verify the two nulls here
+      → plus VSIZE, NCUTS, NITER and **SEED** (Task 14 needs seed variants and the seed was
+      compile-time). ➕ **OBJ=vol / MINCONN / CONTIG now ABORT unless KWAY=1** — METIS ignores
+      them under Recursive without a word, which is exactly how they were silently off for
+      every FESOM partition ever generated. ➕ CONTIG counts components first and refuses on a
+      disconnected graph rather than pre-connecting behind the user's back.
+- [x] **build `partm11-a`** = patches on bundled METIS **5.1.0** → verify the two nulls here
       (review B2): (null-1) default-knob `dist_8` byte-identical to the unpatched binary, same
       seed; (null-2) injection: `--from-dist` vector re-fed → `check_partitioning` moves == 0 AND
       output byte-identical (if moves > 0: diagnose, log as deviation, do not ship — review m15)
-- [ ] **build `partm11-b`** = same patches on **5.2.1** → its default output is NOT expected to
+      → job **26851187**: null-1 PASS (17 files identical, edgecut 120883 = M10's value),
+      null-2 PASS (0 moves, byte-identical).
+- [x] **build `partm11-b`** = same patches on **5.2.1** → its default output is NOT expected to
       match; define arm **A0** (5.2.1, Recursive, dual+100, UFACTOR=1, seed 35243) whose delta
       vs 5.1.0 is scored and raced as an explicit lever; record both binaries' md5 in the log
-- [ ] verify: exporter graph (Task 3) diffs EXACTLY against `FESOM_PART_GRAPH_DUMP` CSR on
+      → job **26851421** leg A0 announces "Metis version 5.2.1"; arm generated at 8/16/32 by
+      job 26851516 and scored. ⚠️ three silent traps in the 5.2.1 build, all documented in
+      `docs/partm11/README.md` (`i64=0` selects **64-bit**; `cflags=` is dropped by its
+      Makefile and its `-fPIC` is GCC-branch-only; GKlib installs to `lib64`, METIS reads `lib`).
+- [x] verify: exporter graph (Task 3) diffs EXACTLY against `FESOM_PART_GRAPH_DUMP` CSR on
       CORE2 + fArc; dump partm11's in-memory `nlevels_nod2D`/`nlevels` and diff vs on-disk
       `nlvls.out`/`elvls.out` per mesh copy — log agreement or state the discrepancy in every
       weight-arm row (review M5)
+      → CORE2: rowptr identical at all 126,859 entries, colind identical at all 743,288, and
+      **in-memory `nlevels_nod2D` == on-disk `nlvls.out` at all 126,858 nodes** — no M5
+      divergence on this mesh. fArc via job 26851516.
       → note: Task 2 already showed the on-disk `nlvls.out` and `elvls.out` of
       `core2_wgt0`/`core2_wgt2` are mutually consistent (0 nodes differ from
       max-over-incident-elements), so any in-memory divergence would be a *third* value.
-- [ ] ➕ verify (from Task 2): reproduce the print-vs-file cut gap. Run wgt2 at CORE2 16r with
+- [x] ➕ verify (from Task 2): reproduce the print-vs-file cut gap. Run wgt2 at CORE2 16r with
       UNFILTERED stdout and confirm `check_partitioning` reports moving gid 125423 from part 9
       to part 8; the printed edgecut must then be 5 BELOW the scorecard's reading of the file.
       Record how often the post-pass moves anything at all across the Task-7 zoo (it moved
       nothing in 5 of the 6 CORE2 arms M10 generated).
-- [ ] verify (knobs): each announces; bogus value aborts; Kway+VOL+CONTIG runs on CORE2 with
+      → job **26851421** leg E, exact: `Isolated node 125423 in partition 9` /
+      `Neighbouring nodes are in partitions 9 8 8`, with `METIS edgecut 217791` printed against
+      the file's 217,796. Predicted from the dist files alone, confirmed in the tool's own
+      stdout. Move counts are now logged by `m11_partgen.sh` on every arm.
+- [x] verify (knobs): each announces; bogus value aborts; Kway+VOL+CONTIG runs on CORE2 with
       component pre-connect engaging iff the wet graph is disconnected (component count from
       Task 2 decides; never silent)
+      → job **26851421**: **26/26 PASS** — 13 accept-and-announce legs, 12 refuse legs, plus a
+      short part vector refused rather than padded. CONTIG announces "1 connected component"
+      on CORE2 and proceeds, so no pre-connect is engaged (and none is needed there).
 
 ### Task 5: Renumbering converter `m11_renumber.py`
 

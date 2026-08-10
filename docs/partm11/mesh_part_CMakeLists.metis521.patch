@@ -1,0 +1,43 @@
+--- /work/ab0995/a270088/port2/partm11/fesom2/mesh_part/CMakeLists.txt	2026-05-28 22:13:15.000000000 +0200
++++ /work/ab0995/a270088/port2/partm11/fesom2_b/mesh_part/CMakeLists.txt	2026-08-10 16:39:03.000000000 +0200
+@@ -55,8 +55,25 @@
+ )
+ set(sources_C ${src_home}/fort_part.c)
+ 
+-# Check if metis exists
+-if(EXISTS ${METIS_ROOT} AND IS_DIRECTORY ${METIS_ROOT})
++# --- M11 partm11-b: link a PREBUILT METIS 5.2.1 (+ GKlib) instead of the bundled
++# 5.1.0 sources. 5.2.1 has its own build system and needs GKlib as a separate library,
++# so add_subdirectory() no longer applies. METIS_PREBUILT_ROOT must be an install
++# prefix holding include/metis.h and lib64/{libmetis.a,libGKlib.a}.
++# 🔴 The install prefix's metis.h MUST say IDXTYPEWIDTH 32: the Fortran side passes
++# int32 arrays. Note METIS 5.2.1's Makefile tests `ifneq ($(i64),not-set)`, so even
++# `make config i64=0` selects 64-bit -- omit i64 entirely.
++if(DEFINED METIS_PREBUILT_ROOT)
++    message(STATUS "Using PREBUILT METIS from: ${METIS_PREBUILT_ROOT}")
++    file(READ ${METIS_PREBUILT_ROOT}/include/metis.h _metis_hdr LIMIT 200)
++    if(NOT _metis_hdr MATCHES "IDXTYPEWIDTH 32")
++        message(FATAL_ERROR "${METIS_PREBUILT_ROOT}/include/metis.h is not IDXTYPEWIDTH 32")
++    endif()
++    add_library(metis STATIC IMPORTED)
++    set_target_properties(metis PROPERTIES IMPORTED_LOCATION ${METIS_PREBUILT_ROOT}/lib64/libmetis.a)
++    add_library(gklib STATIC IMPORTED)
++    set_target_properties(gklib PROPERTIES IMPORTED_LOCATION ${METIS_PREBUILT_ROOT}/lib64/libGKlib.a)
++    include_directories(${METIS_PREBUILT_ROOT}/include)
++elseif(EXISTS ${METIS_ROOT} AND IS_DIRECTORY ${METIS_ROOT})
+     message(STATUS "Using METIS from: ${METIS_ROOT}")
+     add_subdirectory(${METIS_ROOT} ${PROJECT_BINARY_DIR}/metis)
+     include_directories(${METIS_ROOT}/include)
+@@ -81,7 +98,11 @@
+     PART_WEIGHTED
+     METISRANDOMSEED=35243
+ )
+-target_link_libraries(${PROJECT_NAME}_C metis)
++if(DEFINED METIS_PREBUILT_ROOT)
++    target_link_libraries(${PROJECT_NAME}_C metis gklib m)
++else()
++    target_link_libraries(${PROJECT_NAME}_C metis)
++endif()
+ 
+ # Main executable
+ add_executable(${PROJECT_NAME} ${sources_Fortran})
