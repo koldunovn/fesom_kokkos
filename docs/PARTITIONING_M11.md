@@ -393,3 +393,93 @@ print-vs-file gap is a recurring, not a one-off, phenomenon.
 | 26851516 | arm A0 at 8/16/32 + fArc CSR dump | 1:02 | PASS |
 
 **Node-hour ledger:** 0.09 node-h (4 jobs, 5 min 16 s total). Task 1–4 cumulative: 0.10 node-h.
+
+#### Finding 6, closed: the current tool does not reproduce fArc's archived smoothed levels
+
+Follow-up job **26851891** ran the partitioner on mesh dirs holding only
+`nod2d/elem2d/aux3d`, so it had to write `nlvls.out` and `elvls.out` itself:
+
+| mesh | `elvls_raw.out` (pre-smoothing) | `elvls.out` (smoothed) | `nlvls.out` |
+|---|---|---|---|
+| CORE2 | identical | **identical** | **identical** |
+| fArc | identical | **2 of 1,253,306 elements differ** | **1 of 638,387 nodes differs** |
+
+The differing elements are 1 and 2 — the only two touching node 1, that 2-element Antarctic
+coastal node. Archived says 5 (which is `thers_zbar_lev`, the minimum-level floor), fresh says
+17 (the raw depth-derived level). So the archived run's **iterative rough-topography pass**
+collapsed that isolated cell to the floor and the current one does not; the raw levels agree
+byte-for-byte on both meshes, so nothing upstream of the smoothing has moved. Total 3-D nodes:
+14,962,127 archived vs 14,962,139 fresh — 12 in 15 million.
+
+Bounded impact for M11: the fArc `dist_16` produced with the divergent weight is byte-identical
+to the shipped one. The check is automatic per mesh (`m11_graph_export.py --vs-dump`); dars and
+NG5 remain unmeasured. Worth reporting upstream as an isolated-cell edge case, not worth
+chasing here.
+
+---
+
+### Task 5 — renumbering converter `m11_renumber.py` ✅ (2026-08-10)
+
+Three orderings: `hilbert-xyz` (Skilling transpose, 21 bits/dim on unit-sphere xyz — the
+sphere is embedded in 3-D so there is no dateline or pole seam), `s2` (gnomonic cubed-sphere
+face + per-face 2-D Hilbert), `rcm` (scipy, on the same graph METIS partitions). Elements sort
+by `minvertex` (default) or `centroid`.
+
+**Classification is mandatory and fails closed.** Every entry in the source directory is
+classified node-indexed / element-indexed / special / regenerate / stale / copy, and an
+unrecognised name **aborts**. This is the Z7 guard: one node-indexed file left unpermuted is
+bitwise-correct at step 1 and wrong at step 2. ➕ `elvls_raw.out` is element-indexed and is
+permuted with the rest.
+
+Rows are permuted **as text** wherever their values do not change, so coordinates and depths
+are carried through byte-for-byte with no float round-trip. Only `elem2d.out` is parsed, because
+its values must be mapped through P_node — with each triangle's vertex **cycle** preserved,
+never rotated or sorted.
+
+#### ⭐⭐ Finding 7 — renumbering is a CORE2 lever; on fArc only RCM helps at all
+
+Mean |Δindex| over graph edges, before → after:
+
+| mesh | baseline | hilbert-xyz | s2 | rcm |
+|---|--:|--:|--:|--:|
+| CORE2 | 32,043 | 459 (**−98.6 %**) | 467 (−98.5 %) | **288 (−99.1 %)** |
+| fArc | 956 | 1,058 (**+10.6 %**) | 1,093 (**+14.3 %**) | **676 (−29.3 %)** |
+
+fArc's shipped numbering is already spatially local (Task 2: 88.5 % of element-gather strides
+within 64 indices), so a space-filling curve has nothing to add there and actually **loses**.
+CORE2's is arbitrary, so everything helps. This decides Task 9's arms before any of them costs
+node-hours: **CORE2 races one SFC + RCM; fArc races RCM only**, with the SFCs kept as documented
+negatives.
+
+After renumbering, CORE2's element-gather stream goes from **27.6 % to 86.8 %** of accesses
+within 64 indices — essentially fArc's native 88.5 %.
+
+#### Smoke, sequenced (job 26852056) — PASS end to end
+
+1. Label-permuted the CORE2 `dist_8` onto the Hilbert mesh; per-part sizes identical.
+2. Injected it: the partitioner regenerated `edges/edge_tri/edgenum` for the new numbering,
+   `check_partitioning` moved 0 nodes, and no mesh-definition file changed.
+3. Certified Serial `h17` ran clean on the renumbered mesh; the halo identity gate announced
+   itself and passed.
+4. Scorecard: the invariant block is **identical on all 30 keys** — including halo nodes/rank
+   and element/edge replication, which are read from the *regenerated* dist files rather than
+   derived from the graph — while all 11 ordering keys moved. Cover and reciprocity gates green.
+
+That is the property every ordering A/B depends on: the decomposition is provably the same
+decomposition, so any timing difference is attributable to the numbering alone.
+
+**Verification (10/10):** P∘P⁻¹ = id for both permutations; coordinates, coast flag and `nlvls`
+follow their node; `elvls` follows its element; `elem2d` vertices mapped with cycles preserved;
+element areas identical as a multiset to 0.000e+00; the graph is the same graph under the
+permutation; edge files absent; id column the identity.
+⚠️ One check initially failed and the bug was in the *check*, not the conversion — it applied
+old→new where new→old was needed. Fixed; the distinction is now spelled out in the code.
+
+**Run table**
+
+| job id | what | elapsed | verdict |
+|---|---|--:|---|
+| 26851891 | fresh-vs-archived level reproduction, CORE2 + fArc | 1:10 | closes Finding 6 |
+| 26852056 | renumbering smoke: permute → inject → model → scorecard | 0:47 | **PASS** |
+
+**Node-hour ledger:** 0.03 node-h. Task 1–5 cumulative: **0.13 node-h**; sandbox 1.3 GB.

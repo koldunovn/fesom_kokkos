@@ -263,24 +263,34 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 **Files:**
 - Create: `scripts/m11_renumber.py`
 
-- [ ] orderings: `hilbert-xyz` (Skilling, 21 bits/dim on unit-sphere xyz), `s2` (cubed-sphere
+- [x] orderings: `hilbert-xyz` (Skilling, 21 bits/dim on unit-sphere xyz), `s2` (cubed-sphere
       gnomonic + per-face 2-D Hilbert), `rcm` (scipy reverse_cuthill_mckee on the Task-3 graph —
       review M6); stable sort → P_node (saved old→new + inverse); P_elem = centroid-key (or
       min-new-vertex) sort
-- [ ] permutation spec (review m17): P_node → nod2d rows (id column rewritten to identity),
+      → all three implemented; `--elem-order minvertex|centroid`, default `minvertex` (ties the
+      element order straight to the node order and is defined for RCM too, which has no
+      geometric key).
+- [x] permutation spec (review m17): P_node → nod2d rows (id column rewritten to identity),
       aux3d DEPTH block (header nl+zbar untouched), nlvls; P_elem → elem2d rows + elvls, with
       elem2d VALUES mapped through P_node (vertex cycles preserved, never rotated); DELETE
       edges/edge_tri/edgenum (regenerate); delete pyfesom2 caches + griddes; MD5MANIFEST +
       provenance README into a NEW `mesh_m11/` copy (guarded)
-- [ ] exhaustive-classification pass: every file in the source mesh dir is classified
+      → ➕ `elvls_raw.out` is ALSO element-indexed and is permuted when present (the partitioner
+      writes it as a diagnostic; it is never read back, but leaving it stale would be a trap for
+      whoever reads it next). Rows are permuted AS TEXT wherever values do not change, so
+      coordinates and depths carry through byte-for-byte with no float round-trip.
+- [x] exhaustive-classification pass: every file in the source mesh dir is classified
       (node-indexed / elem-indexed / neither / delete); UNKNOWN file ⇒ abort (Z7-class risk)
-- [ ] `--permute-labels` mode: carry an existing dist's part vector (via
+- [x] `--permute-labels` mode: carry an existing dist's part vector (via
       `m11_part_import.py --from-dist`) through P_node → `FESOM_PART_FILE` for the renumbered mesh
-- [ ] verify: P∘P⁻¹ = id; invariants (depth/nlvls/coast follow their node; element areas equal
+- [x] verify: P∘P⁻¹ = id; invariants (depth/nlvls/coast follow their node; element areas equal
       as multisets); scorecard invariant block: (new mesh, label-permuted vector) == (old mesh,
       old dist) exactly
-- [ ] verify (smoke, sequenced): renumbered CORE2 → `partm11-a` regenerates edge files + a
+      → 10/10 invariants PASS; scorecard invariant block **identical on all 30 keys**, including
+      halo and replication, which come from the regenerated dist files rather than the graph.
+- [x] verify (smoke, sequenced): renumbered CORE2 → `partm11-a` regenerates edge files + a
       label-permuted `dist_8` → Serial `h17` short run + halo/dist correctness gate green
+      → job **26852056** PASS end to end.
 
 ### Task 6: Engine builds + wrappers
 
