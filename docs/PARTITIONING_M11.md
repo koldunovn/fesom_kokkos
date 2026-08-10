@@ -1319,3 +1319,31 @@ not of the mesh.
 the RCM verdict is overturned, the ordering lever is a CORE2 lever carried by Hilbert alone.
 This is an inference from CORE2 measurements; it should be stated as such in the report, and it
 costs one gate leg on fArc to convert into a measurement if the lever ever matters there.
+
+#### ⚠️ …and the placement column tempers it: at fArc 2048 the engines' advantage is in the CHEAP traffic
+
+The `cv_max` improvements above are max-per-**rank** communication volume. Split that by where
+it goes (128 ranks/node, 16 nodes):
+
+| arm | off-node 3-D | vs shipped | per-node max off-node | vs shipped |
+|---|--:|--:|--:|--:|
+| METIS shipped | 192,754 (5.9 %) | — | 27,962 | — |
+| mtkahypar a=100 | 200,026 (6.3 %) | **+3.8 %** | 26,954 | −3.6 % |
+| kahip unweighted | 211,686 (7.0 %) | +9.8 % | 30,422 | +8.8 % |
+| kahip a=100 | 215,883 (6.9 %) | +12.0 % | 30,721 | +9.9 % |
+| kaminpar a=100 | 229,716 (6.8 %) | +19.2 % | 33,462 | +19.7 % |
+| mtkahypar a=0 | 218,479 (6.3 %) | +13.3 % | 26,155 | −6.5 % |
+
+**Every engine arm ships more data across node boundaries than the shipped partition does** —
+by 4 % to 19 % — while cutting the busiest rank's total volume by 10–18 %. The two currencies
+disagree in sign because at 128 ranks per node most of a rank's exchange is with neighbours on
+the same node, so `cv_max` is dominated by traffic that never touches the fabric. The saving is
+mostly in the cheap kind; the expensive kind gets worse.
+
+⇒ **Revised expectation for the fArc 2048 race, registered before it runs:** `mtkahypar a=100`
+lands between −1 % and +1 % of the baseline, not at the −18 % its headline metric suggests. It
+stays on the shortlist because it is the only arm that improves the per-node maximum *and* the
+3-D balance, and because a two-currency disagreement is precisely the case where a measurement
+settles something an offline score cannot. If it wins clearly, `cv_max` is the right currency
+and the off-node column is a distraction; if it loses, the off-node column is the one to score
+the rest of the campaign on.
