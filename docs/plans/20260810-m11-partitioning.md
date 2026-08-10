@@ -109,22 +109,30 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 **Files:**
 - Create: `scripts/m11_guards.sh`
 - Create: `docs/PARTITIONING_M11.md`
+- ➕ Create: `scripts/m11_corrupt_com_info.py` (halo-gate negative control)
+- ➕ Create: `jobs/m11_gate_halo.sh` (two-leg gate job)
 - Create (off-repo): `/work/ab0995/a270088/port2/mesh_m11/{core2_m11,farc_m11}/` + `MD5MANIFEST`
 
-- [ ] `m11_guards.sh`: `m11_assert_sandbox <path>` (readlink -f, abort unless under `mesh_m11/`;
+- [x] `m11_guards.sh`: `m11_assert_sandbox <path>` (readlink -f, abort unless under `mesh_m11/`;
       callers pass the MeshPath **re-read from the namelist after sed**, M10 pattern),
       `m11_md5_check`/`m11_md5_write <meshdir>` (five mesh files), `m11_check_sources`
       (md5 over the five mesh files of BOTH source meshes + `find <src> -newermt <job-start>`
       must be empty — run after every partitioner invocation)
-- [ ] copy sources with `cp -aL` (dereference symlinks); assert `find mesh_m11 -type l` empty;
+      → ⚠️ `readlink -m` (not `-f`): the target of a sandbox assert usually does not exist yet.
+      → ⚠️ `/pool/data/...` is a symlink into `/work/pd1284/...`, so the forbidden-root list must
+      name the resolved project root too (a `/pool`-prefix test alone never matches).
+- [x] copy sources with `cp -aL` (dereference symlinks); assert `find mesh_m11 -type l` empty;
       write MD5MANIFESTs; record source md5s for `m11_check_sources`
-- [ ] start `docs/PARTITIONING_M11.md` (decisions, run table, env block, node-hour ledger,
+- [x] start `docs/PARTITIONING_M11.md` (decisions, run table, env block, node-hour ledger,
       plan-review record)
-- [ ] verify: guard aborts on a /pool path, on the private CORE2 path, and on a symlinked path;
-      passes on sandbox
-- [ ] verify: halo/dist correctness gate exists and FIRES (corrupt one com_info entry on a
+- [x] verify: guard aborts on a /pool path, on the private CORE2 path, and on a symlinked path;
+      passes on sandbox → `bash scripts/m11_guards.sh selftest` 22/22 PASS
+- [x] verify: halo/dist correctness gate exists and FIRES (corrupt one com_info entry on a
       scratch dist copy → model-side gid-identity test must abort; scorecard reciprocity check
       must flag it); source-dir `-newermt` sweep clean after the copies
+      → job **26850057**: control leg rc=0 with the positive announcement; corrupted leg rc=1
+      with exactly the 2 predicted gid mismatches. Scorecard-side reciprocity check lands in
+      Task 2 and is re-verified against this same `gate_negctl` dist there.
 
 ### Task 2: Scorecard `m11_scorecard.py`
 
