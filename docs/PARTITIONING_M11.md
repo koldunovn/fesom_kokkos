@@ -1358,3 +1358,45 @@ node permutation the mesh was built with. Written for the three CORE2 512 shortl
 its flat twin. They inject through `jobs/m11_zoo_b_dists.sh` like any other vector, and the
 invariant-block gate applies to them unchanged — so a combined arm that fails it is not a
 combined arm.
+
+---
+
+## ⭐⭐⭐ Finding 17 — CORE2 is the ONLY mesh that needs renumbering (dars, NG5, FORCA20 surveyed)
+
+`scripts/m11_ordering_survey.py`, read-only against the production mesh directories, no cluster
+time. Calibrated against Finding 7 first: it reproduces CORE2 hilbert at 86.8 % element-gather
+stride and −98.6 % mean |Δindex|, and fArc's +10.6 %/+14.3 %/−29.3 %, to the digit.
+
+| mesh | nodes | **shipped** mean \|Δidx\| | **shipped** elem stride ≤64 | hilbert-xyz | s2 | rcm |
+|---|--:|--:|--:|--:|--:|--:|
+| **CORE2** | 126,858 | **32,043** | **27.6 %** | −98.6 % | −98.5 % | −99.1 % |
+| fArc | 638,387 | 956 | 88.5 % | +10.6 % | +14.3 % | −29.3 % |
+| FORCA20 | 2,127,871 | 1,613 | 88.5 % | +5.4 % | +25.1 % | −34.0 % |
+| dars | 3,160,340 | 2,022 | 88.2 % | +2.6 % | +31.5 % | −39.6 % |
+| NG5 | 7,402,886 | 2,935 | 88.3 % | +6.0 % | +42.3 % | −29.9 % |
+
+(percentages are the change in mean |Δindex| over graph edges; negative = better locality)
+
+**CORE2 is the outlier, not the rule.** Every other production mesh already ships with a
+spatially local numbering — element-gather stride 88.2–88.5 %, against CORE2's 27.6 %, and mean
+|Δindex| of 1,000–3,000 on meshes of 2–7 million nodes. There is nothing for a space-filling
+curve to fix: on all four, Hilbert is a wash to slightly worse (+2.6 % to +10.6 %) and the
+cubed-sphere curve is clearly worse (+14 % to +42 %).
+
+⇒ **dars, NG5 and FORCA20 do not need renumbering, and none is built.** The ordering lever is a
+repair for one mesh's arbitrary numbering, not a general optimisation. Task 15's "renumbered
+variants only if an ordering was adopted" is answered before it costs anything: for these meshes
+the answer is no, on measurement rather than on budget.
+
+### ⭐⭐ …and the survey explains WHY RCM had to be dropped
+
+RCM is the one ordering that improves the bandwidth proxy on every mesh (−29 % to −40 %) — and
+it is the only one that **destroys the element-gather stream**: 88 % → 36 % on every large mesh,
+27.6 % → 40.1 % on CORE2 where Hilbert reaches 86.8 %. RCM minimises matrix bandwidth, which is
+the mean |Δindex| over *graph edges*; the kernels pay for consecutive *gather addresses*, and
+those are different objectives. Its p95 |Δindex| is 3–13× worse than the shipped numbering's on
+every mesh (2,464 vs 353 on dars) — the long tail RCM's mean hides.
+
+So the two independent verdicts agree, which is worth stating because they were reached
+separately: RCM fails the SSH-iteration gate at two CORE2 rank counts (Finding 12), and it is
+the wrong objective for this code's access pattern (here). Hilbert is the ordering arm.
