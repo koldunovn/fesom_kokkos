@@ -1837,3 +1837,48 @@ solvable.** Two routes remain, both outside that space:
 
 Recommendation: stop spending GPU node-hours on repartitioning. The lever is CPU-side, it is
 worth 4–8 % there, and it is available from METIS alone.
+
+## ⭐⭐⭐ Finding 27 — MY PREDICTION WAS WRONG: on GPU the currency is MESSAGE COUNT, not volume
+
+I predicted `MINCONN=1 CONTIG=1` would lose on GPU, from its offline profile: worse max halo
+(891 vs 876), worse 3-D balance (4.56 vs 1.02), worse 2-D balance (1.274 vs 1.003). Raced at
+fArc 16 GPUs, min-of-3 (job 26868366):
+
+| arm | s/step | vs base | spread | comm volume | **max/rank** | **neighbours/rank** | max halo |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| base (shipped) | 0.1179 | — | 2.2 % | 228,972 | 20,506 | **5.25** | 876 |
+| **MINCONN+CONTIG** | **0.1145** | **−2.88 %** | 0.4 % | 203,572 | 25,815 (**+26 %**) | **3.62 (−31 %)** | 891 |
+| mtkahypar `w=100+nlev` | 0.1189 | +0.85 % | 0.3 % | **164,751 (−28 %)** | **18,537** | 4.00 | **810** |
+
+**The arm with the worst max-per-rank volume and the worst max halo won; the arm with the best
+of both won nothing.** The only metric that orders these three correctly is the **number of
+communication partners per rank** — 3.62 against 5.25 and 4.00.
+
+That is a coherent mechanism rather than a coincidence: a GPU rank pays a fixed cost per
+*message* (launch, latency, and on this fabric a staging copy), and the step carries 120 MPI
+calls in ice dynamics and 640 in the solver. Cutting the partner count by 31 % removes messages;
+cutting the volume by 28 % removes bytes, which are not what is scarce.
+
+It also retires my own Finding-26 conclusion in the direction that matters: I wrote that "within
+the space of partitioner weights and constraints the GPU imbalance is not solvable" on the
+strength of a halo model. The halo model was the wrong model. `MINCONN` — a knob that has never
+been active in any FESOM partition ever generated, because `PartGraphRecursive` silently ignores
+it — is worth **−2.9 %** on GPU.
+
+### Two different machines want two different partitioners
+
+| | CPU (512–2048 ranks) | GPU (16 ranks) |
+|---|---|---|
+| what is imbalanced | owned 3-D work, 9.3–9.6× | nothing in the owned work (1.01×) |
+| what predicts the win | 3-D load balance | **communication partner count** |
+| the setting | `WGT_A=100 UFACTOR=30` | `MINCONN=1 CONTIG=1` |
+| measured | −4.1 … −7.6 % | **−2.9 %** |
+| the arm that loses | unweighted (best cut) | `w=100+nlev` (best volume) |
+
+This answers the earlier question — *do CPU and GPU want different METIS settings?* — with a
+measured **yes**, and the two settings are almost disjoint.
+
+⚠️ One point, one day, min-of-3 with a 0.4 % rep spread against a 2.88 % delta. `MINCONN` and
+`CONTIG` are not yet separated (jobs 26869443/26869445 generate each alone, plus the pair with
+`UFACTOR=30`, at fArc 16 and CORE2 4/512), and nothing is replicated. It is a lead with one
+measurement behind it, not an adoption.
