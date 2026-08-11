@@ -1882,3 +1882,32 @@ measured **yes**, and the two settings are almost disjoint.
 `CONTIG` are not yet separated (jobs 26869443/26869445 generate each alone, plus the pair with
 `UFACTOR=30`, at fArc 16 and CORE2 4/512), and nothing is replicated. It is a lead with one
 measurement behind it, not an adoption.
+
+## ⭐⭐⭐ Finding 28 — the knobs separate: slack is the CPU lever, MINCONN is not
+
+CORE2 512 CPU, min-of-3, all five arms in one allocation (job 26872968):
+
+| arm | knobs on top of Kway+VOL+`w=100+nlev` | s/step | vs base | spread |
+|---|---|--:|--:|--:|
+| base | shipped (dual, Recursive, `UFACTOR=1`) | 0.0591 | — | 2.5 % |
+| **`a5_u30`** | **`UFACTOR=30`** | **0.0569** | **−3.72 %** | 0.4 % |
+| `a4u30` | `MINCONN=1 CONTIG=1 UFACTOR=30` | 0.0572 | −3.21 % | 0.5 % |
+| `a4` | `MINCONN=1 CONTIG=1` (UFACTOR=1) | 0.0590 | −0.17 % | 0.5 % |
+| `a4m` | `MINCONN=1` (UFACTOR=1) | 0.0591 | **+0.00 %** | 0.2 % |
+
+**On CPU, `MINCONN`/`CONTIG` are worth nothing** (+0.00 % and −0.17 %, both inside their rep
+spreads) and they **cost 0.5 pp when added to the winner** (−3.21 % against −3.72 %). The entire
+CPU gain comes from the balance tolerance.
+
+That is the exact mirror of the GPU result, where `MINCONN`+`CONTIG` won −2.88 % and the
+tolerance arm won nothing. The two backends are not just tuned differently — **each backend's
+lever is the other backend's null.**
+
+CPU recommendation, now measured three times in three separate allocations
+(−4.21 %, −3.57 %, −3.72 % at CORE2 512):
+
+```
+FESOM_PART_KWAY=1 FESOM_PART_OBJ=vol FESOM_PART_VSIZE=1 FESOM_PART_WGT_A=100 FESOM_PART_UFACTOR=30
+```
+
+and **do not add `MINCONN` or `CONTIG` on CPU**.
