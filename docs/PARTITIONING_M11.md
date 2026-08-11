@@ -2013,3 +2013,68 @@ rule 0.41 in its original form: *a stability verdict is only as long as its meas
 Either way `MINCONN` at `UFACTOR=1` now wins at a fourth mesh (−4.08 % on dars), and it is the
 only arm that survived a protocol I got wrong — which is a weak form of evidence, but it points
 the same way as the other four points.
+
+## ⭐⭐⭐ Finding 31 — dars confirms the prediction; NG5 splits the lever open
+
+### dars: the failures WERE my timestep, exactly as predicted
+
+Re-run at the cold-start ladder dt 120 instead of the production dt 240 (job 26885210), 2048 CPU
+ranks, min-of-2:
+
+| arm | s/step | vs base | at dt 240 |
+|---|--:|--:|---|
+| base | 0.4148 | — | works |
+| **`MINCONN`** | **0.3960** | **−4.53 %** | works, −4.08 % |
+| `UFACTOR=30` | 0.3995 | −3.69 % | **FAILED** |
+| `MINCONN`+`CONTIG`+u30 | 0.3999 | −3.59 % | **FAILED** |
+| KaMinPar `w=100+nlev` | 0.4000 | −3.57 % | **FAILED** |
+
+**Every arm that died at dt 240 runs clean at dt 120 and wins 3.6–4.5 %.** The prediction was
+recorded before the job landed and it held: three "unusable partitions" were a protocol error of
+mine, not a property of the decompositions. Rep spreads 0.0–0.2 %.
+
+⇒ A partition arm must be screened at the mesh's **cold-start** ladder dt, not its production dt.
+A campaign that screens at the wrong dt will discard good partitions and call it a finding.
+
+### NG5: the same arm gives the campaign's largest win AND an unusable partition
+
+| point | `MINCONN` |
+|---|--:|
+| **NG5, 64 GPUs** | **−9.96 %** (base 0.2511 → 0.2261, spreads 0.1–0.2 %) |
+| NG5, 2048 CPU ranks | **FAILS** — `CG_kk abort at iter 1: pp·App = nan (s_old=nan)` |
+
+Same mesh, same knob, same partitioner. At 64 ranks it is the best result in the campaign; at
+2048 it produces a partition the model cannot start on. The failure is **not** a slow divergence:
+`s_old` is the initial ‖rhs‖² and it is already NaN at the **first** solve of the **first** step.
+The halo identity gate passes immediately before it, so the decomposition transports correctly.
+
+Nothing in the scorecard predicts it:
+
+| NG5 2048 | 2-D max/mean | 3-D max/min | disconnected | off-lobe | isolated |
+|---|--:|--:|--:|--:|--:|
+| base (works) | 1.008 | 1.04 | **1,720** | **1,182,621** | 3 |
+| `a4m` (FAILS) | 1.485 | 8.45 | 45 | 54,683 | **0** |
+
+The failing arm is the *cleaner* partition on every fragmentation metric — 45 disconnected parts
+against the baseline's 1,720, and zero isolated nodes against three.
+
+⇒ **Recorded as open.** What it means for adoption is not open: **no partition may be shipped
+without a short smoke run at the target rank count**, because neither the scorecard nor the halo
+gate catches this class of failure. `jobs/m11_zoo_b_dists.sh` already carries that smoke leg; it
+now becomes mandatory rather than a convenience.
+
+### Where the matrix stands after dars and NG5
+
+| point | best arm | gain |
+|---|---|--:|
+| CORE2 4 GPU | `MINCONN` | −7.5 % |
+| **NG5 64 GPU** | `MINCONN` | **−9.96 %** |
+| fArc 16 GPU | `MINCONN`+`CONTIG` | −2.5 % |
+| CORE2 512 CPU | `UFACTOR=30` | −3.7 % |
+| CORE2 864 CPU | `MINCONN`+`CONTIG`+u30 | −2.7 % |
+| fArc 2048 CPU | external engine (`MINCONN` −4.8 %) | −7.3 % |
+| **dars 2048 CPU** | `MINCONN` | **−4.53 %** |
+| NG5 2048 CPU | none — `MINCONN` unusable, slack +0.87 % | — |
+
+`MINCONN` is the best arm at five of eight points and within a point of best at two more. It
+fails at exactly one, and that failure is not predicted by any offline metric.
