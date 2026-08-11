@@ -1911,3 +1911,62 @@ FESOM_PART_KWAY=1 FESOM_PART_OBJ=vol FESOM_PART_VSIZE=1 FESOM_PART_WGT_A=100 FES
 ```
 
 and **do not add `MINCONN` or `CONTIG` on CPU**.
+
+## ⭐⭐⭐ Finding 29 — the full matrix: the best setting is MESH- AND RANK-DEPENDENT, and two of my earlier claims were wrong
+
+Five points raced with the same arm family, min-of-3, each point in one allocation. Deltas
+against that point's shipped partition; **bold = best at that point**.
+
+| arm (all Kway + OBJ=vol + `w=100+nlev`) | CORE2 4 GPU | fArc 16 GPU | CORE2 512 CPU | CORE2 864 CPU | fArc 2048 CPU |
+|---|--:|--:|--:|--:|--:|
+| `UFACTOR=30` (slack only) | +0.59 % | +1.9 % | **−3.72 %** | −0.23 % | −1.33 % |
+| `MINCONN` only | **−7.51 %** | −2.30 % | +0.00 % | −0.68 % | **−4.84 %** |
+| `CONTIG` only | — | −1.96 % | — | — | — |
+| `MINCONN`+`CONTIG` | −1.18 % | **−2.47 %** | −0.17 % | — | — |
+| `MINCONN`+`CONTIG`+`UFACTOR=30` | **−7.66 %** | +0.34 % | −3.21 % | **−2.71 %** | −1.93 % |
+| external engine, `w=100+nlev` 3 % | +0.85 % | +0.85 % | −3.57 % | −4.07 % | **−7.26 %** |
+
+Rep spreads are 0.2–1.4 % against deltas of 2–8 %, so the ordering is real. **There is no single
+recipe**: the best arm differs at every one of the five points.
+
+### Two corrections to what this log said earlier
+
+1. **"On CPU, `MINCONN` is worth nothing" (Finding 28) is false in general.** It is true at
+   CORE2 512 (+0.00 %) and false at fArc 2048, where `MINCONN` alone is **−4.84 %** — the second
+   largest CPU gain in the campaign. Finding 28 measured one point and generalised.
+2. **"METIS alone gets the whole win" (Finding 21) holds only at CORE2 512.** There METIS
+   (−3.72 %) matches the engine (−3.57 %) to within a rep spread. At CORE2 864 the engine gives
+   −4.07 % against METIS's best −2.71 %, and at fArc 2048 the engine gives **−7.26 %** against
+   METIS's best −4.84 %. The external engines are worth 1.4–2.4 pp at the large points.
+
+### What does survive: the partner count explains the GPU, and it does so exactly
+
+CORE2 on 4 GPUs, where the shipped partition's owned work is balanced to 1 %:
+
+| arm | neighbours/rank | 3-D max/min | result |
+|---|--:|--:|--:|
+| base | **3.00** | 1.01 | — |
+| `MINCONN`+`CONTIG` | 2.50 | 1.46 | −1.18 % |
+| `MINCONN` | **2.00** | 1.41 | **−7.51 %** |
+| `MINCONN`+`CONTIG`+u30 | **2.00** | 1.67 | **−7.66 %** |
+| `UFACTOR=30` | 2.50 | 1.40 | +0.59 % |
+
+Partner count orders the table perfectly and nothing else does — the winning arms have the
+**worst** 3-D balance (1.41, 1.67 against the baseline's 1.01). Going from 3 partners to 2 at
+four ranks removes a third of the messages and buys 7.5 %.
+
+⚠️ `CONTIG` is not free: at CORE2/4 it costs 6 pp on top of `MINCONN` (−1.18 % against −7.51 %)
+because it pushes the partner count back up to 2.50, and only the extra slack recovers it. At
+fArc/16 it is worth −1.96 % on its own. It should never be set without measuring.
+
+### Practical recommendation, as measured
+
+| where | setting | gain |
+|---|---|--:|
+| **GPU, few ranks** (CORE2 1 node) | `KWAY=1 OBJ=vol VSIZE=1 WGT_A=100 MINCONN=1` | **−7.5 %** |
+| **GPU, more ranks** (fArc 4 nodes) | add `CONTIG=1` | −2.5 % |
+| **CPU, moderate ranks** (CORE2 512) | `… WGT_A=100 UFACTOR=30`, no MINCONN | **−3.7 %** |
+| **CPU, many ranks** (fArc 2048) | `… WGT_A=100 MINCONN=1`, or an external engine | −4.8 % / **−7.3 %** |
+
+`MINCONN` helps at four of the five points and has **never been active in any FESOM partition
+ever generated**, because `PartGraphRecursive` silently ignores it.
