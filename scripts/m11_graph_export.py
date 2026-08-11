@@ -56,9 +56,25 @@ def csr(mesh):
     return indptr, dst
 
 
-def write_metis(mesh, path, weights="none", wgt_a=0, edge_weights=False):
+def write_metis(mesh, path, weights="none", wgt_a=0, edge_weights=False, vwgt_file=None):
+    """vwgt_file: an explicit per-node integer weight vector, which SUPERSEDES `a + nlev`.
+
+    The campaign needs this because the only weights FESOM's partitioner can express are
+    `a + nlev` and the legacy dual constraint, and both describe OCEAN work. Sea ice is the one
+    component whose cost is spatially concentrated (CORE2 across 4 parts: 2-D nodes balance to
+    1.00 and 3-D to 1.01, while nodes poleward of 60 deg run 3.35x max/min), so testing an
+    ice-aware weight means supplying the vector from outside.
+    """
     indptr, adj = csr(mesh)
     nl = mesh.nlev_nod
+    vw = None
+    if vwgt_file:
+        vw = np.loadtxt(vwgt_file, dtype=np.int64).reshape(-1)
+        if vw.size != mesh.nod2D:
+            sys.exit(f"vwgt file has {vw.size} entries, mesh has {mesh.nod2D} nodes")
+        if vw.min() < 1:
+            sys.exit("vertex weights must be >= 1 (METIS/engine requirement)")
+        weights = "vwgt"
     ncon = 1
     has_vsize = weights in ("vsize", "both")
     has_vwgt = weights in ("vwgt", "both", "dual")
@@ -80,7 +96,7 @@ def write_metis(mesh, path, weights="none", wgt_a=0, edge_weights=False):
         if weights == "dual":
             head += ["1", str(int(nl[v]) + 100)]
         elif has_vwgt:
-            head.append(str(int(wgt_a + nl[v])))
+            head.append(str(int(vw[v] if vw is not None else wgt_a + nl[v])))
         if ew_s is None:
             body = " ".join(nbr_s[s:e])
         else:
@@ -93,7 +109,8 @@ def write_metis(mesh, path, weights="none", wgt_a=0, edge_weights=False):
         f.write("\n".join(lines) + "\n")
     print(f"wrote {path}: {mesh.nod2D:,} vertices, {mesh.graph()[0].size:,} edges, "
           f"fmt {fmt}, ncon {ncon}, weights={weights}"
-          + (f", vwgt = {wgt_a} + nlev" if has_vwgt and weights != 'dual' else "")
+          + (f", vwgt from {vwgt_file} (sum {int(vw.sum()):,})" if vw is not None else
+             f", vwgt = {wgt_a} + nlev" if has_vwgt and weights != 'dual' else "")
           + (", adjwgt = nlev_i+nlev_j" if edge_weights else ""))
     return path
 

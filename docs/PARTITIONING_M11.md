@@ -1717,3 +1717,80 @@ drift, and that limitation is stated rather than papered over.
 | CORE2 GPU 4 r | hil | −4.89 % (day 1) | −4.97 % | 0.08 pp |
 
 Every sign reproduces and every magnitude agrees within 0.8 pp.
+
+---
+
+## ⭐⭐⭐ Finding 25 — the GPU imbalance is REAL on large meshes, and it is the HALO, not the load
+
+Measured with the frozen PHASESTATS build (`m7/bin/phst1`, commit `0ec70cf`) — a different
+binary from the certified `h17`, so its absolute step times are diagnostics only. 100 steps,
+`FESOM_SPEED=1`, `-C a100_80`. ⚠️ The first CPU attempt printed
+`FESOM_SPEED_PHASESTATS WAS REQUESTED BUT RESOLVES TO OFF` — the Serial backend needs
+`FESOM_SPEED_FORCE_SERIAL=1`. The binary refused to pretend, which is the L80 rule working.
+
+| point | busy max/min | owned 2-D max/min | owned 3-D max/min | halo max/min | corr(busy, 3-D) | corr(busy, halo) |
+|---|--:|--:|--:|--:|--:|--:|
+| CORE2, 4 GPUs | **1.03** | 1.00 | 1.01 | — | — | — |
+| fArc, 16 GPUs | **1.30** | 1.00 | 1.02 | **2.89** | 0.18 | **0.47** |
+| NG5, 64 GPUs | **1.27** | 1.01 | 1.01 | **2.70** | −0.22 | **0.59** |
+| CORE2, 512 CPU ranks | **3.51** | 1.01 | **9.26** | 15.0 | **0.91** | 0.79 |
+
+**Two different machines.** On CPU at high rank counts the busy time tracks owned 3-D work at
+r = 0.91 — M10's bathymetry result reproduced (they measured 0.967 at 864 ranks) — and a depth
+weight removes part of it, which is the 4–8 % this campaign raced. On GPU the owned work is
+already balanced to 1–2 % in **both** currencies at every point measured, and the busy time still
+spreads 27–30 %; the only per-rank quantity that tracks it is the **halo**, which spreads 2.7–2.9×.
+
+That is why every weighted partition arm lost on GPU: it optimised a currency that was already
+balanced, and paid in 2-D imbalance.
+
+### The ice hypothesis, killed a second time — now by direct measurement
+
+M10 rejected it on CPU by correlation (ocean busy vs 3-D nodes r = 0.967, vs 2-D nodes r = 0.003).
+The GPU probe kills it directly. CORE2 on 4 GPUs, ice-covered nodes taken from the model's own
+January `a_ice`:
+
+| rank | ice-covered nodes | ice-dyn busy |
+|---|--:|--:|
+| 2 | 5,038 | 9.9 ms |
+| 3 | **17,356** | **10.3 ms** |
+
+**3.45× the ice, 4 % more time.** Fitting the four ranks, the ice-dependent part of the ice
+dynamics kernel is 0.16–0.56 ms of ~10 ms; the other ~95 % is a fixed cost, because the kernels
+run over all 2-D nodes whether or not there is ice on them. Perfectly balancing the ice would
+save ~0.2 ms of a 73 ms step: **0.3 %**. An ice-aware vertex weight is built
+(`scripts/m11_ice_weight.py`, mask from a model run rather than a latitude cut) and is **not
+worth generating partitions for** on this evidence.
+
+➕ The same measurement is a lead for someone else: the ice phases are **11.9 ms of 60.4 ms busy,
+~20 % of the CORE2 GPU step**, and ~95 % of that is spent on ice-free water (29 % of CORE2's
+nodes carry ice in January). Masking or compacting the ice kernels to ice-covered nodes is a
+code lever, outside M11, and it also explains M9's result that the sea ice does not strong-scale
+on GPU — a fixed per-rank cost cannot.
+
+### Can the halo be balanced? The target is the MAX, and nothing we have hits it
+
+| arm | mean halo | **max halo** | max/mean |
+|---|--:|--:|--:|
+| fArc shipped, 16 GPUs | 609 | **876** | 1.44 |
+| fArc mtkahypar `w=100+nlev` | 439 (−28 %) | 810 (−7.5 %) | 1.85 |
+| fArc mtkahypar pure-nlev | 406 (−33 %) | 691 (−21 %) | 1.70 |
+| NG5 shipped, 64 GPUs | 1,347 | **1,922** | 1.43 |
+
+Every engine arm cuts the **mean** halo substantially and leaves the **max** nearly alone, because
+partitioners minimise a SUM (total cut, total comm volume) and the GPU step waits for the
+slowest rank. That mismatch of objective is the finding.
+
+Two routes exist and both are now buildable:
+
+1. **Compensate** — `scripts/m11_tpwgts.py`: give the ranks with expensive halos a smaller share
+   of owned work via `FESOM_PART_TPWGTS_FILE`, iterate to a fixed point. First-order estimate on
+   fArc/16: −0.9 % of max cost; on the NG5 fit, −10.5 % of max busy. **Those two disagree by an
+   order of magnitude and the cost model's R² is 0.28–0.35**, with the owned-3-D regressor nearly
+   collinear with the intercept because owned work barely varies. The prize is not established,
+   and the tool prints that warning itself rather than reporting a number.
+2. **Reduce the max directly** — `MINCONN` + `CONTIG` (METIS Kway) shape compact parts, which is
+   what a 1.44 max/mean says is missing. Generation queued (arm `a4` at fArc 16).
+
+⚠️ Not measured: dars at 32 and 64 GPUs died with `task Killed` on both attempts while NG5 —
+five times larger — ran fine at 64. That is unexplained and recorded as such.
