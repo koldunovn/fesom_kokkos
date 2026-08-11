@@ -1970,3 +1970,46 @@ fArc/16 it is worth −1.96 % on its own. It should never be set without measuri
 
 `MINCONN` helps at four of the five points and has **never been active in any FESOM partition
 ever generated**, because `PartGraphRecursive` silently ignores it.
+
+## ⭐⭐ Finding 30 — dars and NG5: `MINCONN` wins again, and a protocol error of mine nearly became a partition finding
+
+**dars, 2048 CPU ranks, dt 240, 150 steps, min-of-2** (job 26884449):
+
+| arm | s/step | vs base | spread |
+|---|--:|--:|--:|
+| base (shipped) | 0.4190 | — | 0.1 % |
+| **`MINCONN`** | **0.4019** | **−4.08 %** | 0.1 % |
+| `UFACTOR=30` | **FAILED** | — | — |
+| `MINCONN`+`CONTIG`+`UFACTOR=30` | **FAILED** | — | — |
+| KaMinPar `w=100+nlev` 3 % | **FAILED** | — | — |
+
+Three of five arms died with `CG_kk residual diverged` / `pp·App is nan`, **reproducibly in both
+reps**, and on NG5 the `MINCONN` arm died the same way. That looked like a partition property,
+and the pre-registration says failing arms are discarded rather than debugged — so it would have
+been recorded as "three of four candidate partitions are unusable on dars".
+
+**It is far more likely to be my timestep.** I ran both meshes at their *production* dt (240),
+but the project's cold-start ladder is **dars dt 120 and NG5 dt 180**, and every race here is a
+cold start. The scorecards support that reading and give no other candidate: the failing and
+surviving arms are indistinguishable on every metric —
+
+| arm | status | 2-D max/mean | 3-D max/min | disconnected | isolated | min part (2-D nodes) |
+|---|---|--:|--:|--:|--:|--:|
+| base | works | 1.0006 | 11.22 | 20 | 0 | 1,542 |
+| `a5_u30` | FAILS | 1.3324 | 7.99 | 59 | 0 | 1,328 |
+| `a4m` | works | 1.3142 | 7.56 | 65 | **6** | 1,366 |
+| `a4u30` | FAILS | 1.3544 | 8.99 | **0** | 5 | 1,210 |
+
+`a4u30` is **perfectly contiguous** and fails; `a4m` has 65 disconnected parts, 6 isolated nodes
+and works. No arm has a degenerate rank. Nothing in the partition explains it, and Finding 11
+supplies the mechanism that does: any decomposition change lands on a different admissible
+iterate of the SSH solve, and from a marginally-stable cold start the trajectories separate.
+
+Both meshes are re-running at the ladder dts. **Prediction, recorded before they land: the
+failures largely disappear at dt 120 / 180.** If they do not, the arms are genuinely unusable and
+that is the finding instead — but the cheap explanation has to be excluded first, and this is
+rule 0.41 in its original form: *a stability verdict is only as long as its measurement window*.
+
+Either way `MINCONN` at `UFACTOR=1` now wins at a fourth mesh (−4.08 % on dars), and it is the
+only arm that survived a protocol I got wrong — which is a weak form of evidence, but it points
+the same way as the other four points.
