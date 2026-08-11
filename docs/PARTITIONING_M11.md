@@ -1794,3 +1794,46 @@ Two routes exist and both are now buildable:
 
 ⚠️ Not measured: dars at 32 and 64 GPUs died with `task Killed` on both attempts while NG5 —
 five times larger — ran fine at 64. That is unexplained and recorded as such.
+
+## ⭐⭐ Finding 26 — the max halo is NOT reachable by any partitioner knob we have
+
+Three attempts, all measured on fArc at 16 parts (the GPU point where the halo spreads 2.89× and
+the busy time 1.30×). Target: the **maximum** halo per rank, 876 nodes on the shipped partition,
+because the GPU step waits for the slowest rank.
+
+| attempt | mean halo | **max halo** | verdict |
+|---|--:|--:|---|
+| shipped (reference) | 609 | **876** | — |
+| `w=100+nlev`, 3 % slack (the CPU winner) | 462 | 887 | mean −24 %, max +1 % |
+| Mt-KaHyPar `w=100+nlev` | 439 | 810 | mean −28 %, max −7.5 % |
+| **`MINCONN=1 CONTIG=1`** | 543 | **891** | max **+2 %**, and 3-D balance 1.02 → 4.56 |
+| **tpwgts loop, from the CPU winner** | 462→394 | 887 → 835 → 954 → 919 → 941 | **diverges** |
+| **tpwgts loop, from a balanced start, damping 0.25** | 609→596 | 876 → 885 → 923 → **1033** → 957 → 994 | **monotonically worse** |
+
+**Every route makes the maximum worse or leaves it alone**, while several cut the mean by a
+quarter. The reason is structural and it is the same one Finding 25 named: partitioners minimise
+a **sum** (total cut, total communication volume) and offer no objective on the **maximum**
+boundary. `MINCONN` minimises the maximum number of *neighbouring subdomains*, which is a
+different quantity and does not follow.
+
+The compensation route deserves its own note because it failed for two different reasons and I
+got the first one wrong. Started from the CPU winner, the cost model sees that arm's deliberate
+owned-work imbalance (3-D max/min 4–7) as the thing to correct and drives the target shares to
+0.016…0.216 against a uniform 0.0625 — it was correcting the wrong imbalance. Restarted from a
+balanced partition with a quarter of the damping, so that the halo is the only imbalance left,
+it still degrades monotonically: **an unequal target share does not make a subdomain rounder**,
+it just moves the boundary, and unequal shares make shapes more irregular in general. The
+hypothesis that shrinking a part shrinks its boundary as √area is true for a disc and false for
+what METIS produces under a share constraint.
+
+⇒ **Within the space of partitioner weights and constraints, the GPU max-halo imbalance is not
+solvable.** Two routes remain, both outside that space:
+
+1. a custom **min-max boundary refinement** — a local pass that moves nodes to shrink the worst
+   part's boundary, which is an objective no library here exposes;
+2. attack the **cost** instead of the balance — the ice kernels are ~20 % of the CORE2 GPU step
+   with ~95 % of that spent on ice-free water (Finding 25), which is a much larger and much
+   better-understood target than the ~5 % the halo imbalance is worth.
+
+Recommendation: stop spending GPU node-hours on repartitioning. The lever is CPU-side, it is
+worth 4–8 % there, and it is available from METIS alone.
