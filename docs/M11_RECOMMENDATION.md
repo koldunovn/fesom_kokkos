@@ -1,6 +1,6 @@
 # M11 — what to change, and what it is worth
 
-One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–36); the per-race table is
+One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–37); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
 ## The short version
@@ -79,7 +79,7 @@ then, **without exception**:
 
 ### Two things that do NOT work as gates
 
-- **The scorecard.** It is a design tool for ranking candidates. On NG5 it failed on four arms to
+- **The scorecard.** It is a design aid, never a gate (Findings 18, 34, 37). On NG5 it failed on four arms to
   identify a partition that destroys the run — every column put a dying arm on the *better* side
   of a surviving one.
 - **A short smoke run.** The NG5 partition that blows up at step 71 passes a 5-step smoke and
