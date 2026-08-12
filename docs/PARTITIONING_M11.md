@@ -2549,3 +2549,32 @@ sibling at another rank count is the most violently unstable partition in the ca
 cancelled to free the 16-node GPU slot for it: re-confirming a −9.96 % at a different dt is worth
 less than finding out whether the campaign's largest number survives two model months.
 ⇒ Job 26895261 screens `dars/a4m_seedb`, the seed re-roll, to test whether the NG5 remedy transfers.
+
+---
+
+## ⭐⭐ Finding 40 — the NG5 baseline is FINE at its ladder dt: the margin worry of Finding 36 was about the partitions, not the mesh
+
+Job 26893909, NG5 2048 CPU, dt 180, **3,000 steps, clean**: `uv=2.56e+00 eta=1.93e+00
+T[−2.14, 30.47]`, s/step 1.2199.
+
+Finding 36 raised this as a possible rule-0.41 item for **every** track that runs NG5 — if a
+repartitioning can cross the stability edge at dt 180, the margin might be thinner than anyone had
+measured. It is not. The NG5 cold-start ladder dt survives two model months on the shipped
+partition, so the failures at that point belong to the partitions and nothing outside M11 needs to
+change. **Closed, negative — and worth the 16 node-hours it cost to close.**
+
+## dars CPU: `MINCONN`+`CONTIG` completes the screen
+
+Job 26894629 finished: `a4` ran the full **3,000 steps clean** (`uv=2.41e+00 eta=2.09e+00
+T[−2.09, 30.20]`, 0.4034 s/step) while its two siblings died. The dars CPU picture at 2048 ranks:
+
+| arm | knobs | screen |
+|---|---|---|
+| base | shipped | clean, 0.4139 |
+| **`a4`** | **`MINCONN`+`CONTIG`** | **clean, 0.4034** |
+| `a4m` | `MINCONN` | diverges past step 525 |
+| `a4u30` | `MINCONN`+`CONTIG`+`UFACTOR=30` | blowup at step 25 |
+
+The two 3,000-step numbers come from different jobs (26893944 and 26894629), so they are **not** a
+matched pair and the implied −2.5 % is not a campaign number. Job 26895271 races base vs `a4` vs
+slack vs KaMinPar properly, min-of-3 in one allocation.
