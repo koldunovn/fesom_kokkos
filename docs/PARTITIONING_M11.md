@@ -2946,3 +2946,29 @@ for the point remains KaMinPar `w=100+nlev` (−4.17 %, screen ✅ accuracy ✅)
 this envelope on temp/salt. The pattern across CPU points is now consistent: at dars and fArc the
 external engines are simultaneously the fastest arms and the best-behaved in the accuracy gate,
 while the `MINCONN` family pays for its GPU virtues at the accuracy edge.
+
+---
+
+## ⭐⭐⭐ dars 64 GPU: the 3,000-step screen PASSES — the campaign's largest number is real at length (job 26895260)
+
+All four arms clean through 3,000 steps at the ladder dt 120, one allocation, matching global
+diagnostics at step 3,000 (identical T/S ranges and stress across all legs; the uv/w norms print
+as 0.00 in EVERY leg including base — a CUDA print-path artifact at the PRINT_EVERY boundary,
+not physics):
+
+| arm | 150-step race (26893037) | 3,000-step screen | s/step |
+|---|--:|--:|--:|
+| base | — | clean | 0.1396 |
+| `MINCONN`+`CONTIG`+`UFACTOR=30` | −18.64 % | **−19.70 %** | 0.1121 |
+| `MINCONN` | −13.64 % | −14.26 % | 0.1197 |
+| `MINCONN`+`CONTIG` | −11.79 % | −12.39 % | 0.1223 |
+
+Ordering preserved, every arm slightly larger at length — the sixth point in the campaign where
+the short race under-reports rather than flatters (Finding 32's pattern). Notable in the light of
+Finding 39: the u30 arm's `dist_2048` sibling is the most violently unstable partition in the
+campaign (blowup at step 25 on CPU), while this `dist_64` — a different partition from the same
+knobs — is clean for two model months. Fragility is per-partition, never per-recipe, in both
+directions.
+
+**Stability column: ✅. Remaining for certification: the accuracy gate (job 26904578, three seed
+controls at `dist_64`), which fires after the NG5 re-race (26904577, now eligible).**
