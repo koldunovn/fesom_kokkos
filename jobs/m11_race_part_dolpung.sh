@@ -108,24 +108,31 @@ for r in $(seq 1 "$REPS"); do for a in $NAMES; do run "$a" "$r"; done; done
 
 echo
 echo "=== min-of-$REPS per arm (s/step), $NPES ranks ==="
-python3 - "$OUT" $NAMES <<'EOF'
-import sys, os
-out, names = sys.argv[1], sys.argv[2:]
-res = {}
-for a in names:
-    p = f"{out}/times_{a}.txt"
-    v = [float(x) for x in open(p).read().split() if x] if os.path.exists(p) else []
-    res[a] = (min(v), max(v)) if v else (None, None)
-b = res[names[0]][0]
-print(f"  {'arm':<16}{'min s/step':>12}{'spread':>10}{'vs ' + names[0]:>14}")
-for a in names:
-    t, mx = res[a]
-    if t is None:
-        print(f"  {a:<16}   FAILED"); continue
-    d = "" if (a == names[0] or not b) else f"{100*(t/b-1):+.2f} %"
-    print(f"  {a:<16}{t:>12.4f}{100*(mx/t-1):>9.1f}%{d:>14}")
-print("\n  spread = max/min over the reps of that arm; a delta smaller than the spread is noise.")
-print("  These s/step are GH200 numbers from a non-h17 build: compare arms to each other, never")
-print("  to an A100 figure elsewhere in this campaign.")
-EOF
+# awk, not python: dolpung nodes are aarch64 and this account's conda python3 is an x86 binary
+# that sits early in PATH, so `python3` dies with "cannot execute binary file". env_dolpung.sh
+# strips /sw/spack-levante/ but cannot know about every x86 tool a user has on PATH. awk is in
+# /usr/bin on the node and cannot have this problem.
+awk -v names="$NAMES" -v out="$OUT" '
+BEGIN {
+  n = split(names, a, " ")
+  printf "  %-16s%12s%10s%14s\n", "arm", "min s/step", "spread", "vs " a[1]
+  for (i = 1; i <= n; i++) {
+    f = out "/times_" a[i] ".txt"; mn = ""; mx = ""
+    while ((getline line < f) > 0) {
+      if (line == "") continue
+      v = line + 0
+      if (mn == "" || v < mn) mn = v
+      if (mx == "" || v > mx) mx = v
+    }
+    close(f)
+    if (mn == "") { printf "  %-16s   FAILED\n", a[i]; continue }
+    if (i == 1) base = mn
+    d = (i == 1 || base == 0) ? "" : sprintf("%+.2f %%", 100 * (mn / base - 1))
+    printf "  %-16s%12.4f%9.1f%%%14s\n", a[i], mn, 100 * (mx / mn - 1), d
+  }
+}'
+echo
+echo "  spread = max/min over the reps of that arm; a delta smaller than the spread is noise."
+echo "  These s/step are GH200 numbers from a non-h17 build: compare arms to each other, never"
+echo "  to an A100 figure elsewhere in this campaign."
 echo "=== done $(date '+%F %T') ==="
