@@ -2905,3 +2905,44 @@ The accuracy gate's operative statistic remains **field rms inside the spread of
 repartitionings**, at 20 steps and the mesh's ladder dt. Quantile columns stay in the reports as
 context, never as the verdict. This ratifies the CORE2 864 FAIL and is binding for every gate
 still to run (dars 64 GPU tonight, the dars-alternates re-gate, NG5 if raced to a winner).
+
+---
+
+## 🔴🔴 Finding 45 — a STOCK-RECIPE control blows up: the fragility was never a `MINCONN` property
+
+In the dars-alternates re-gate (job 26905507, 2048 ranks, ladder dt 120), the fifth control —
+`dars_seed660013`, a seed-only re-roll of the **shipped recipe** (PartGraphRecursive, dual
+weights, every knob at its historical default) — died with **`BLOWUP at step 14`**. The trace is
+exactly Finding 34's signature: a local runaway (salt max 41.15 → 44.62 → 48.94 → 57.20 over
+steps 11–14) while T stays bounded and global eta *decreases* — one spot going over the edge
+with the global solution intact.
+
+Findings 34/39 said "`MINCONN` sometimes produces numerically fragile partitions". Finding 45
+corrects the attribution: **repartitioning dars at this point sometimes produces fragile
+partitions, with any recipe — including the one FESOM ships.** Consequences:
+
+1. **The adoption procedure is universal, not a `MINCONN` tax.** Every new partition — any
+   engine, any knobs, a seed re-roll, a control — must pass the protocol-length screen before
+   anything runs on it. The shipped dars partition is itself one lucky seed from a class that
+   contains 14-step killers at the ladder dt.
+2. The failed-partition census is now: NG5 `MINCONN` (F34) · dars `MINCONN` (F39) · dars
+   `MINCONN`+`CONTIG`+u30 at 2048 (F39 cont.) · **dars stock-recipe seed 660013 (F45)** — two
+   recipes, one of them the stock one.
+3. `dars_seed660013/dist_2048` is retained as evidence and must never be promoted (its evidence
+   line can never carry `steps>=3000 rc=0`; `m11_promote` refuses it mechanically).
+4. For this gate the envelope is the four SURVIVING controls — which is above the ≥3 floor and
+   equal to the fArc precedent.
+
+### The alternates' verdict (four-control envelope, rms yardstick per the user's protocol decision)
+
+| var (rms) | `a4` `MINCONN`+`CONTIG` | slack u30 | envelope (4) | a4 | u30 |
+|---|--:|--:|--:|---|---|
+| temp | 8.120e-02 | 7.478e-02 | 6.701e-02 … 7.003e-02 | +16.0 % OUT | +6.8 % OUT |
+| salt | 1.677e-01 | 1.661e-01 | 1.449e-01 … 1.610e-01 | +4.2 % OUT | +3.2 % OUT |
+| ssh | 8.137e-03 | 6.274e-03 | 4.413e-03 … 7.086e-03 | +14.8 % OUT | in |
+
+🔴 **Both alternates are out of class — not recommended at dars 2048 CPU.** The certified setting
+for the point remains KaMinPar `w=100+nlev` (−4.17 %, screen ✅ accuracy ✅), which sits *below*
+this envelope on temp/salt. The pattern across CPU points is now consistent: at dars and fArc the
+external engines are simultaneously the fastest arms and the best-behaved in the accuracy gate,
+while the `MINCONN` family pays for its GPU virtues at the accuracy edge.
