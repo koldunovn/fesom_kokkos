@@ -2669,3 +2669,49 @@ Job 26900890 ran every model leg correctly and printed **no summary at all**: th
 Grace node. `env_dolpung.sh` documents exactly this class for `git` — but it strips
 `/sw/spack-levante/`, and cannot know about a user's own PATH entries. The summary now uses `awk`
 from `/usr/bin`, which cannot have the problem.
+
+---
+
+## ⭐⭐ Finding 43 — the gain tracks the fractional reduction in MAX partner count, and a pre-registered prediction for dars/GH200
+
+Measuring `nbr_max` (the largest number of communication partners any rank has) for the shipped
+partition and for the best arm at each raced GPU point:
+
+| point | base `nbr_max` | best arm | arm `nbr_max` | reduction | **A100 gain** |
+|---|--:|---|--:|--:|--:|
+| fArc 16 | 7 | `MINCONN`+`CONTIG` | 6 | **−14 %** | −3.59 % |
+| CORE2 4 | 3 | `MINCONN` | 2 | **−33 %** | −8.06 % |
+| dars 64 | 12 | `MINCONN`+`CONTIG`+u30 | 7 | **−42 %** | −18.64 % |
+
+The ordering is monotone and the spacing is roughly proportional. It is the **max**, not the mean,
+that does this: by `nbr_mean` the three points are −31 %, −33 % and −36 % — nearly identical, and
+useless for ordering the gains. That is physically the right way round, because the step waits for
+the slowest rank, and it is consistent with Finding 37's warning that `nbr_max` is a **threshold**
+statistic: here it is being used across points, where its coarseness stops mattering.
+
+### Why fArc came out flat on GH200 (job 26901892)
+
+| arm | vs base | base rep spread |
+|---|--:|--:|
+| `MINCONN`+`CONTIG` | +2.11 % | **3.9 %** |
+| `MINCONN` | +0.00 % | |
+| `CONTIG` | −1.84 % | |
+| `MINCONN`+`CONTIG`+u30 | −0.39 % | |
+
+Every delta is inside the baseline's own 3.9 % spread. With a −14 % partner reduction the expected
+effect is ~3.6 % (the A100 value) — i.e. **at or under dolpung's noise floor for min-of-2**. This
+is not "the lever is absent at fArc"; it is "min-of-2 cannot resolve it here". Job 26902142 re-runs
+at min-of-4.
+
+### 🔴 PRE-REGISTERED PREDICTION for job 26901899 (dars, 64 GPUs, GH200)
+
+dars carries the **largest** partner reduction of the three points (12 → 7, −42 %), and on CORE2
+the GH200 gain came out slightly *above* its A100 value (−8.88 % vs −8.06 %) because the staged
+halo makes messages dearer. Recorded before the job runs:
+
+**`MINCONN`+`CONTIG`+`UFACTOR=30` at dars/64 on GH200 should beat its A100 −18.64 %, and should be
+the largest partition gain measured anywhere in this campaign.**
+
+If it comes back materially smaller, the partner-count story needs revisiting — most plausibly
+because at 64 ranks over 16 nodes the traffic is inter-node (dc_mlx5) rather than the intra-node
+`cuda_ipc` path both other dolpung points used, and the two need not price messages alike.
