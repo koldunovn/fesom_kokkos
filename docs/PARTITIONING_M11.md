@@ -2220,3 +2220,62 @@ m11_promote --src <sandbox_meshdir> --name core2_v2 --evidence <file> dist_512 d
 * requires the source to be a sandbox mesh with a verified md5 manifest;
 * writes `MESH_PROVENANCE.md` (source, commit, evidence lines, source manifest) and its own
   manifest, and appends to `mesh_m11/.m11state/promotions.log`.
+
+---
+
+## ⭐⭐⭐ Finding 34 — the NG5 failure is ONE PARTITION, not the knob: a re-roll of the same seed fixes it
+
+Job 26893204 traced all four NG5 arms at 2048 ranks, dt 180, **printing every step**. That turns
+Finding 33's "it dies somewhere in steps 6–150" into a mechanism.
+
+### It is a local velocity blow-up, and the barotropic solution does not notice
+
+| step | base uv | `a4m` uv | `a4u30` uv | base eta | `a4m` eta | `a4u30` eta |
+|--:|--:|--:|--:|--:|--:|--:|
+| 10 | 6.69e−1 | 6.08e−1 | 6.78e−1 | 5.17e−1 | 5.42e−1 | 5.33e−1 |
+| 20 | 1.07e+0 | 1.08e+0 | 1.04e+0 | 8.33e−1 | 8.41e−1 | 8.56e−1 |
+| 30 | 1.24e+0 | 1.57e+0 | 1.51e+0 | 1.33e+0 | 1.35e+0 | 1.34e+0 |
+| 40 | 1.23e+0 | 2.04e+0 | 1.96e+0 | 1.28e+0 | **1.28e+0** | **1.28e+0** |
+| 50 | 1.59e+0 | 2.60e+0 | 2.33e+0 | 1.57e+0 | **1.57e+0** | **1.57e+0** |
+| 60 | 1.77e+0 | 2.71e+0 | 2.45e+0 | 1.73e+0 | **1.73e+0** | **1.73e+0** |
+| 63 | 1.76e+0 | — | **1.16e+2** | 1.75e+0 | — | 2.15e+2 |
+| 71 | 1.66e+0 | **5.67e+1** | — | 1.90e+0 | 8.87e+1 | — |
+
+The runaway starts around step 25 and takes ~40 steps to go superlinear. **Through step 60 the
+sea-surface height is identical to the baseline to three significant figures** while max|u| is
+already 1.5× larger. So the global solution is unchanged and a *local* velocity maximum is
+exploding — this is not the SSH solver, not the barotropic mode, and not a bad decomposition of
+the domain. Final states are `T[−21670, 16884]` and `T[−62144, 71609]`: an ordinary blow-up.
+
+### A second METIS seed of the SAME knobs runs clean
+
+`a4m_seedb` — identical arm definition, `FESOM_PART_SEED=424242` instead of the default — tracks
+the baseline the whole way (step 60: uv 1.76 vs base 1.77; step 112: uv 1.55, `T[−2.07, 30.…]`).
+It is genuinely a different partition (2,045 of 2,048 ranks have different owned counts) with
+statistically identical macro-properties (owned max/min 1.61 for both) and a slightly **worse**
+edgecut: 28,791,521 against `a4m`'s 28,694,317.
+
+⇒ **`MINCONN` on NG5 is not poisoned. One roll of the dice produced an unusable partition.**
+
+### No scorecard column separates the four arms
+
+| NG5 2048 | 2-D imb | 3-D max/min | nbr max | disconnected | isolated | halo mean | commvol |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| `a4m` **DIES** | 1.485 | 8.45 | 9 | 45 | **0** | 242.4 | 2.87e7 |
+| `a4u30` **DIES** | 1.475 | **14.72** | 8 | 0 | 2 | 231 | 2.74e7 |
+| `a5_u30` survives | 1.494 | 8.77 | 9 | 39 | 1 | 231.9 | 2.75e7 |
+| `a4` (5-step only) | 1.488 | 8.55 | 8 | 0 | 184 | 250 | 2.94e7 |
+
+Every column puts a dying arm on the *better* side of a surviving one: `a4m` dies with 3-D
+imbalance 8.45 where `a5_u30` survives at 8.77, dies with **zero** isolated nodes where the
+survivor has one, and dies with a lower edgecut than its own healthy re-roll.
+
+### What this changes
+
+1. **The knob survives.** `MINCONN` stays the campaign's headline lever — it is best or within a
+   point of best at seven of nine measured points.
+2. **The screen is mandatory and the remedy is cheap:** run the protocol-length stability screen
+   at the target rank count; if a partition fails it, **re-roll the seed** and screen again. That
+   is a two-line recipe, not a reason to drop the lever.
+3. **Do not trust the scorecard as a safety check.** It is a design tool for ranking candidates.
+   It has now failed, on four arms of one mesh, to identify a partition that destroys the run.
