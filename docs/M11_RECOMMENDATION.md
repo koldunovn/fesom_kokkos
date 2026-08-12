@@ -30,9 +30,11 @@ best or near-best arm at every GPU point measured, and the largest raced gain is
 the model step** (dars, 64 GPU — *not yet screened*; see the evidence table above). Switching
 the call to `PartGraphKway` is a few lines.
 
-The same knob also produces the campaign's two failed partitions (Findings 34, 39), which is
-not an argument against it — a `MINCONN` partition that passes the screen is as sound as any
-other — but it is why the adoption procedure below is not optional.
+The campaign has also seen four partitions fail at length (Findings 34, 39, 45) — three from
+`MINCONN`-family arms and one from **the stock shipped recipe itself** (a seed-only re-roll,
+Finding 45). The fragility is a property of repartitioning these meshes at these rank counts,
+not of any particular knob — which is why the adoption procedure below is not optional, for any
+recipe, including re-generating today's defaults with a new seed.
 
 To be fair to the original authors, this is a documented choice rather than an oversight:
 `fort_part.c:328-355` records that `PartGraphRecursive` "resulted in a far better partition than
