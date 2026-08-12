@@ -3000,3 +3000,34 @@ The alternates are dead at this point (no seed re-rolls: `a4m` is the winner and
 worth certifying). **Certification chain queued: 3,000-step screen of `a4m` (job 26908635) and
 the accuracy gate (26908636) against three fresh seed controls at `dist_64`** (`ng5_seed`
 424242 · 777001 · 990013, partgens 26908632–34).
+
+---
+
+## dars 64 GPU accuracy gate, first pass (job 26904578): ALL arms outside the 3-control envelope — verdict deferred to five controls
+
+Base + three arms + three seed controls at `dist_64`, 20 steps at the ladder dt 120, all legs
+rc=0, halo gate ok. Fields vs base, rms:
+
+| var (rms) | `a4u30` (−19.7 %) | `a4m` (−14.3 %) | `a4` (−12.4 %) | control envelope (3) |
+|---|--:|--:|--:|--:|
+| temp | 7.343e-02 (+17 %) | 6.395e-02 (+2 %) | 7.850e-02 (+26 %) | 4.870e-02 … 6.255e-02 |
+| salt | 1.788e-01 (+20 %) | 1.295e-01 (in) | 1.765e-01 (+18 %) | 7.150e-02 … 1.494e-01 |
+| ssh | 6.387e-03 (+16 %) | 6.199e-03 (+13 %) | 6.774e-03 (+23 %) | 2.970e-03 … 5.492e-03 |
+
+Context recorded with it:
+
+* **The SSH-stopping mechanism is visible again**: every arm converges the SSH solver faster than
+  every control (mean signed −0.70…−0.95 iterations vs −0.25…−0.50) — the relative-residual
+  stopping effect documented at CORE2 4 GPU inflates the ssh difference for precisely the
+  partitions that improve convergence. Context, not a pass (protocol decision above).
+* The per-leg maxima cluster at identical values across different partitions (ssh max 1.438e+00
+  in four separate legs; salt max ~2.73e+01 / ~2.01e+01 in two groups) — the extreme differences
+  live at specific base-side front points that every repartitioning displaces the same way.
+* CUDA legs are not bit-reproducible run-to-run, so single-rep rms values carry transport noise
+  on both sides of the comparison — arms and controls alike.
+
+Per the treatment CORE2 864 and dars 2048 CPU received, the verdict waits for a **five-control
+envelope**: `dist_64` for seeds 550007/660013 (partgens 26908838/39), re-gate job 26908840,
+chained behind the NG5 screen and gate. If the arms stay out at five controls, the campaign's
+largest speed result fails its accuracy gate under the ratified yardstick, and the page will say
+exactly that.
