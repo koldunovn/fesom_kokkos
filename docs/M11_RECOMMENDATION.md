@@ -25,8 +25,14 @@ three METIS options unavailable: `OBJTYPE=VOL`, `CONTIG` and `MINCONN`. `MINCONN
 maximum number of neighbouring sub-domains — is **never set anywhere in `fort_part.c`**, so no
 partition produced by stock FESOM has ever had it active.
 
-We measure `MINCONN` as the single most valuable partitioning knob available on GPU, worth up to
-**−18.6 % of the model step**. Switching the call to `PartGraphKway` is a few lines.
+We measure `MINCONN` as the single most valuable partitioning knob available on GPU: it is the
+best or near-best arm at every GPU point measured, and the largest raced gain is **−18.6 % of
+the model step** (dars, 64 GPU — *not yet screened*; see the evidence table above). Switching
+the call to `PartGraphKway` is a few lines.
+
+The same knob also produces the campaign's two failed partitions (Findings 34, 39), which is
+not an argument against it — a `MINCONN` partition that passes the screen is as sound as any
+other — but it is why the adoption procedure below is not optional.
 
 To be fair to the original authors, this is a documented choice rather than an oversight:
 `fort_part.c:328-355` records that `PartGraphRecursive` "resulted in a far better partition than
@@ -52,7 +58,9 @@ matters.
 | CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ accuracy + stability |
 | NG5 | CPU | 2048 | — | **null** | — |
 
-\* measured at production dt 240; re-race at the ladder dt 180 in flight.
+\* measured at production dt 240, not the NG5 ladder dt 180. The re-race was cancelled to
+free its 16-node GPU slot for the dars GPU screen (Finding 39), so this number stays
+provisional.
 
 ## The two rules that fall out of it
 
