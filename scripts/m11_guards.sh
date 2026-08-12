@@ -222,9 +222,10 @@ m11_check_sources() {
 
 # --- md5 manifests for sandbox meshes -------------------------------------
 
-# m11_md5_write <sandbox_meshdir>
-m11_md5_write() {
-    local d; d=$(m11_assert_sandbox "${1:?m11_md5_write needs a mesh dir}" "md5_write target") || exit 1
+# _m11_md5_write_dir <already-asserted dir> — no path assertion of its own, so every caller must
+# have run the assert appropriate to ITS root (sandbox or promote) first.
+_m11_md5_write_dir() {
+    local d=${1:?needs a dir}
     [ -d "$d" ] || m11_die "m11_md5_write: $d is not a directory"
     local f out=$d/MD5MANIFEST
     {
@@ -236,6 +237,12 @@ m11_md5_write() {
         done
     } > "$out"
     m11_ok "manifest $out ($(grep -c '^[0-9a-f]' "$out") files)"
+}
+
+# m11_md5_write <sandbox_meshdir>
+m11_md5_write() {
+    local d; d=$(m11_assert_sandbox "${1:?m11_md5_write needs a mesh dir}" "md5_write target") || exit 1
+    _m11_md5_write_dir "$d"
 }
 
 # m11_md5_check <meshdir> [--gate-only]
@@ -297,6 +304,153 @@ m11_sandbox_copy_mesh() {
     } > "$dst/MESH_PROVENANCE.md"
     m11_md5_write "$dst"
     m11_ok "sandbox mesh $dst ready"
+}
+
+# --- adoption packaging (Task 16) ------------------------------------------
+#
+# m11_promote is the ONE sanctioned way a partition leaves the campaign. It creates a NEW
+# directory and refuses to touch an existing one, so a promotion can never silently redefine a
+# mesh other runs are already pointing at.
+#
+# It also refuses to promote a dist_N that has no PASSING RUN RECORD at exactly N ranks, of at
+# least M11_MIN_PROMOTE_STEPS steps. That rule is the NG5 finding made mechanical, and the step
+# floor is the part that finding actually taught us.
+#
+# `a4m` (MINCONN) on NG5 is the campaign's best partition at 64 GPU ranks (-9.96 %) and dies at
+# 2048 CPU ranks with a NaN in the SSH solve. Nothing we can compute offline separates it from
+# the arm that survives: it is the CLEANER partition on every fragmentation metric, its
+# owned-node imbalance matches, no rank owns zero nodes, and the halo identity gate passes.
+# But it is not un-startable either — a FIVE-STEP smoke of that exact partition passes, and so
+# would a 20-step gate. It dies later in the run. So "smoke it first" is necessary and not
+# sufficient: the bar has to be the protocol-length stability screen (rule 0.41), which is the
+# only test that has actually separated a shippable partition from an unshippable one.
+#
+#   m11_promote --src <sandbox_meshdir> --name core2_v2 --evidence <file> dist_512 dist_4
+#
+# Evidence file: one line per dist, whitespace-separated key=value pairs. `run=<jobid>`,
+# `steps=<N>` and `rc=0` are mandatory; everything else is carried into MESH_PROVENANCE.md as
+# the audit trail.
+#
+#   dist_512  run=26886214 steps=3000 rc=0  race=26884270 delta=-3.83%  gate=26885353 in-class
+#
+M11_MIN_PROMOTE_STEPS=${M11_MIN_PROMOTE_STEPS:-3000}
+M11_PROMOTE_ROOT=${M11_PROMOTE_ROOT:-/work/ab0995/a270088/port2/mesh_m11_certified}
+
+# m11_assert_promote_root <path> [<what>] — same shape as m11_assert_sandbox, different root.
+m11_assert_promote_root() {
+    local raw=${1:-} what=${2:-path}
+    [ -n "$raw" ] || m11_die "$what: empty path passed to m11_assert_promote_root"
+    local root; root=$(m11_resolve "$M11_PROMOTE_ROOT")
+    case "$root" in
+        /work/ab0995/a270088/port2/mesh_m11_certified*) : ;;
+        *) m11_die "promote root $M11_PROMOTE_ROOT resolves to $root — refusing to trust it" ;;
+    esac
+    local p r; p=$(m11_resolve "$raw")
+    for r in "${M11_FORBIDDEN_ROOTS[@]}"; do
+        case "$p/" in "$r"*) m11_die "$what: $raw resolves to $p — inside protected tree $r" ;; esac
+    done
+    [ "$p" != "$root" ] || m11_die "$what: $raw is the promote root itself"
+    case "$p/" in "$root"/?*) : ;; *) m11_die "$what: $raw resolves to $p — outside $root" ;; esac
+    printf '%s\n' "$p"
+}
+
+# _m11_evidence_for <evidence_file> <dist_N> — prints the line, or nothing.
+_m11_evidence_for() {
+    sed -n "s/^[[:space:]]*$2[[:space:]]\+\(.*\)$/\1/p" "$1" | head -1
+}
+
+m11_promote() {
+    local src="" name="" evidence="" dists=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --src)      src=${2:?--src needs a value}; shift 2 ;;
+            --name)     name=${2:?--name needs a value}; shift 2 ;;
+            --evidence) evidence=${2:?--evidence needs a value}; shift 2 ;;
+            dist_*)     dists+=("$1"); shift ;;
+            *) m11_die "m11_promote: unexpected argument '$1'" ;;
+        esac
+    done
+    [ -n "$src" ]  || m11_die "m11_promote needs --src <sandbox mesh dir>"
+    [ -n "$name" ] || m11_die "m11_promote needs --name <new certified dir name>"
+    [ -n "$evidence" ] || m11_die "m11_promote needs --evidence <file>"
+    [ -f "$evidence" ] || m11_die "m11_promote: evidence file $evidence not found"
+    [ ${#dists[@]} -gt 0 ] || m11_die "m11_promote: name at least one dist_N to promote"
+
+    # The source must be a sandbox mesh: promotion publishes campaign output, never production
+    # data and never something from outside the guarded tree.
+    local s; s=$(m11_assert_sandbox "$src" "promote source") || exit 1
+    [ -d "$s" ] || m11_die "promote source $s is not a directory"
+    m11_md5_check "$s" >/dev/null || exit 1
+
+    local dst; dst=$(m11_assert_promote_root "$M11_PROMOTE_ROOT/$name" "promote target") || exit 1
+    [ -e "$dst" ] && m11_die "promote target $dst already exists — promotion never overwrites; \
+pick a new name (core2_v3, ...) so nothing already pointing at $name changes underneath it"
+
+    # Every dist must carry a passing smoke record AT ITS OWN RANK COUNT before it is copied.
+    local d line n bad=0
+    for d in "${dists[@]}"; do
+        n=${d#dist_}
+        [ -d "$s/$d" ] || { printf 'M11-GUARD: %s has no %s\n' "$s" "$d" >&2; bad=1; continue; }
+        line=$(_m11_evidence_for "$evidence" "$d")
+        if [ -z "$line" ]; then
+            printf 'M11-GUARD: no evidence line for %s in %s\n' "$d" "$evidence" >&2; bad=1; continue
+        fi
+        case " $line " in
+            *" rc=0 "*) : ;;
+            *) printf 'M11-GUARD: %s evidence has no rc=0: %s\n' "$d" "$line" >&2; bad=1; continue ;;
+        esac
+        case "$line" in
+            *run=*) : ;;
+            *) printf 'M11-GUARD: %s evidence has no run=<jobid> at %s ranks: %s\n' \
+                      "$d" "$n" "$line" >&2; bad=1; continue ;;
+        esac
+        local steps; steps=$(printf '%s\n' "$line" | sed -n 's/.*[[:space:]]steps=\([0-9]\+\).*/\1/p')
+        if [ -z "$steps" ]; then
+            printf 'M11-GUARD: %s evidence has no steps=<N>: %s\n' "$d" "$line" >&2; bad=1; continue
+        fi
+        if [ "$steps" -lt "$M11_MIN_PROMOTE_STEPS" ]; then
+            printf 'M11-GUARD: %s ran only %s steps, below the %s-step floor: %s\n' \
+                   "$d" "$steps" "$M11_MIN_PROMOTE_STEPS" "$line" >&2; bad=1; continue
+        fi
+        printf '  evidence ok  %-12s %s\n' "$d" "$line"
+    done
+    [ "$bad" = 0 ] || m11_die "promotion refused: $name is not fully evidenced (see above). \
+A dist_N without a passing run of >= $M11_MIN_PROMOTE_STEPS steps AT N RANKS is exactly the \
+NG5/MINCONN case: no offline metric caught it, and neither would a smoke run."
+
+    # Build under a .partial name and rename only when everything is in place: an interrupted
+    # promotion must never leave something that looks like a usable mesh directory.
+    local tmp=$dst.partial.$$
+    rm -rf "$tmp"
+    mkdir -p "$tmp" || m11_die "cannot create $tmp"
+    local f
+    for f in "${M11_GATE_FILES[@]}" "${M11_EDGE_FILES[@]}"; do
+        [ -f "$s/$f" ] && { cp -aL "$s/$f" "$tmp/$f" || m11_die "cp -aL failed for $f"; }
+    done
+    for d in "${dists[@]}"; do
+        cp -aL "$s/$d" "$tmp/" || m11_die "cp -aL failed for $d"
+    done
+    chmod -R u+w "$tmp" 2>/dev/null
+    m11_assert_no_symlinks "$tmp"
+    {
+        printf '# M11 CERTIFIED mesh — promoted %s\n\n' "$(date '+%F %T')"
+        printf 'source     : %s\n' "$s"
+        printf 'promoted-by: scripts/m11_guards.sh m11_promote\n'
+        printf 'commit     : %s\n' "$(git -C "${ROOT:-/home/a/a270088/port_kokkos_part}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        printf 'dists      : %s\n\n' "${dists[*]}"
+        printf '## evidence (one line per dist; smoke= is a model run at THAT rank count)\n'
+        for d in "${dists[@]}"; do printf '%-12s %s\n' "$d" "$(_m11_evidence_for "$evidence" "$d")"; done
+        printf '\n## source manifest at promotion time\n'
+        sed 's/^/    /' "$s/MD5MANIFEST"
+    } > "$tmp/MESH_PROVENANCE.md"
+    _m11_md5_write_dir "$tmp" >/dev/null
+    mv "$tmp" "$dst" || m11_die "could not rename $tmp to $dst"
+
+    # The exception is logged where the campaign can find it, not only in the job output.
+    mkdir -p "$M11_STATE_DIR"
+    printf '%s  promote %-16s <- %s  dists=%s\n' \
+        "$(date '+%F %T')" "$name" "$s" "${dists[*]}" >> "$M11_STATE_DIR/promotions.log"
+    m11_ok "promoted $dst (${#dists[@]} dist(s)); provenance + manifest written"
 }
 
 # ---------------------------------------------------------------------------
@@ -386,6 +540,39 @@ m11_selftest() {
     rm -f "$mdir/nlvls.out"
     _m11_expect_abort "manifest detects loss" m11_md5_check "$mdir"
     rm -rf "$mdir"
+
+    echo "[7] m11_promote — evidence must be a protocol-length run at the dist's own rank count"
+    local pdir=$M11_SANDBOX_ROOT/.selftest_promote
+    rm -rf "$pdir"; mkdir -p "$pdir/dist_4" "$pdir/dist_8" "$pdir/dist_16"
+    for f in "${M11_GATE_FILES[@]}" "${M11_EDGE_FILES[@]}"; do printf 'x %s\n' "$f" > "$pdir/$f"; done
+    printf 'rpart\n' > "$pdir/dist_4/rpart.out"; printf 'rpart\n' > "$pdir/dist_8/rpart.out"
+    printf 'rpart\n' > "$pdir/dist_16/rpart.out"
+    m11_md5_write "$pdir" >/dev/null
+    local ev=$scratch/evidence.txt
+    printf 'dist_4  run=111 steps=3000 rc=0 race=222 delta=-7.5%%\ndist_8  race=333 delta=-1.0%%\n' > "$ev"
+    local saveroot=$M11_PROMOTE_ROOT
+    M11_PROMOTE_ROOT=$scratch/../m11_guard_selftest.$$/promote_root
+    _m11_expect_abort "promote root outside the sanctioned tree" \
+        m11_promote --src "$pdir" --name t1 --evidence "$ev" dist_4
+    M11_PROMOTE_ROOT=$saveroot
+    _m11_expect_abort "dist_8 has no run= record" \
+        m11_promote --src "$pdir" --name .selftest_t2 --evidence "$ev" dist_4 dist_8
+    printf 'dist_8  run=444 steps=3000 rc=1 race=333\n' >> "$ev"
+    _m11_expect_abort "dist_8 run record is rc=1" \
+        m11_promote --src "$pdir" --name .selftest_t3 --evidence "$ev" dist_4 dist_8
+    # The NG5 case: a short run that passes. This is the one a smoke-only rule would have let
+    # through, so it must be refused on step count alone.
+    printf 'dist_16 run=555 steps=5 rc=0 race=666 delta=-9.96%%\n' >> "$ev"
+    _m11_expect_abort "dist_16 passed, but only 5 steps (the NG5 case)" \
+        m11_promote --src "$pdir" --name .selftest_t5 --evidence "$ev" dist_4 dist_16
+    _m11_expect_abort "promote source outside the sandbox" \
+        m11_promote --src /pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc --name .selftest_t4 \
+                    --evidence "$ev" dist_4
+    _m11_expect_pass  "promote dist_4 (evidenced)" \
+        m11_promote --src "$pdir" --name .selftest_ok --evidence "$ev" dist_4
+    _m11_expect_abort "promote refuses to overwrite" \
+        m11_promote --src "$pdir" --name .selftest_ok --evidence "$ev" dist_4
+    rm -rf "$pdir" "$M11_PROMOTE_ROOT/.selftest_ok"
 
     rm -rf "$scratch"
     echo

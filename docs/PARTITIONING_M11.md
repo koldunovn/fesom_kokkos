@@ -2078,3 +2078,145 @@ now becomes mandatory rather than a convenience.
 
 `MINCONN` is the best arm at five of eight points and within a point of best at two more. It
 fails at exactly one, and that failure is not predicted by any offline metric.
+
+---
+
+## ⭐⭐⭐ Finding 32 — the gates: every winner survives protocol length, and the gains do not decay
+
+Everything up to here measured **speed only**. Nothing in the partition family had been through
+the accuracy and stability gates the campaign pre-registered. This closes that gap at three
+points, one per (mesh, backend) combination we intend to recommend.
+
+### The stability re-proof (rule 0.41): 3,000 steps, every arm, no failures
+
+| point | job | dt | arms | outcome |
+|---|---|--:|---|---|
+| CORE2 512 CPU | 26886214 | 1800 | base, `MINCONN`, slack, renumber+engine | 4/4 rc=0 |
+| CORE2 4 GPU | 26892875 | 1800 | base, `MINCONN`, `MINCONN`+`CONTIG`(+u30) | 4/4 rc=0 |
+| fArc 2048 CPU | 26892880 | 900 | base, `MINCONN`, Mt-KaHyPar | 3/3 rc=0 |
+
+Eleven runs of 3,000 steps, zero NaN/blow-up/divergence lines, and at step 3,000 the arms agree
+with their baseline on the field ranges to the printed digits (CORE2 CPU `T[-2.03,31.48]`
+`S[4.45,41.08]` for base and both partition arms; the renumbered arm differs in the 3rd decimal,
+which is what a different mesh numbering is expected to do).
+
+### The gains do not decay at length — they grow slightly
+
+This is the part worth quoting. Every headline in this campaign was earned on 150–300-step
+min-of-3 races. Re-measured over 3,000 steps in a **fresh allocation on a different day**:
+
+| point / lever | short race | 3,000-step re-proof | drift |
+|---|--:|--:|--:|
+| CORE2 512 CPU, slack `UFACTOR=30` | −3.7 % | **−3.83 %** | −0.1 pp |
+| CORE2 512 CPU, renumber + engine | −5.54 % | **−5.83 %** | −0.3 pp |
+| CORE2 4 GPU, `MINCONN` | −7.5 % | **−8.06 %** | −0.6 pp |
+| fArc 2048 CPU, `MINCONN` | −4.8 % | **−5.49 %** | −0.7 pp |
+| fArc 2048 CPU, Mt-KaHyPar | −7.3 / −7.58 % | **−7.52 %** | ±0.2 pp |
+
+Five independent points, every one reproducing within 0.7 pp and every one in the same direction.
+The short-race protocol is therefore not flattering the lever, and if anything it *under*-reports
+it — plausibly because the fixed start-up cost is amortised over 10–20× more steps.
+
+### Accuracy: the arms sit inside the repartitioning class
+
+The yardstick is the project's standing one (L79): an arm is in class if it sits inside the
+spread of ordinary repartitioning CONTROLS of the same mesh. 20 steps, printing on.
+
+**CORE2 4 GPU (job 26892982), rms vs base:**
+
+| leg | temp | salt | ssh |
+|---|--:|--:|--:|
+| `MINCONN` (arm) | 2.92e−2 | 3.32e−2 | 4.02e−3 |
+| `MINCONN`+`CONTIG`+u30 (arm) | 2.31e−2 | 3.15e−2 | 4.05e−3 |
+| *control: seed change only* | 3.99e−2 | 3.57e−2 | 4.34e−3 |
+| *control: `MINCONN`+`CONTIG`* | 3.45e−2 | 3.20e−2 | 7.24e−3 |
+
+Both arms are **below both controls on all three variables**. PASS.
+
+**CORE2 512 CPU (job 26885353)** was already recorded: arms 5.78e−2 / 5.41e−2 temp against
+controls 4.82e−2 / 5.56e−2, ssh *below* both controls. PASS.
+
+**fArc 2048 CPU (job 26892879):** `MINCONN` in class on all three (4.19e−2 / 4.13e−2 / 3.94e−3
+against a control at 4.58e−2 / 4.44e−2 / 5.45e−3). The Mt-KaHyPar arm is in class on temp and
+ssh but its **salt rms is 8.91e−2, twice the control's 4.44e−2** — re-gated against a second,
+seed-only control (job 26893194) before that engine is recommended for fArc.
+
+🔴 **My first GPU gate used a control that was not one.** `core2_m11` (shipped) vs `core2_base`
+(settled) at 4 ranks differ by rms temp 5.9e−7 — at that rank count the two partitions coincide,
+so the "control" measured round-off and would have made any arm look out of class. A control has
+to be *demonstrated* to be a different partition, not assumed to be. Fixed by generating a
+seed-only re-roll (`core2_seed/dist_4`, job 26892943) and re-running.
+
+### Side finding: the SSH iteration count is partition-dependent, and that is most of the spread
+
+At CORE2 4 GPU the `MINCONN` and slack arms take **exactly** the baseline's CG iteration count at
+every one of 20 steps, while the `MINCONN`+`CONTIG` control takes **4.65 fewer on average**
+(max 6) — and it is also the leg with the largest ssh rms (7.24e−3 against ~4e−3 for everything
+else). The solver stops on a *relative* residual, so a partition that converges faster in the
+norm stops sooner and lands further from the reference. The accuracy spread of a partition arm is
+therefore partly a solver-tolerance effect and not a discretisation effect, which is another
+reason the control spread — not a guessed bound — has to be the yardstick.
+
+---
+
+## 🔴 Finding 33 — CORRECTS Finding 31: the NG5 partition is not un-startable, and the same dt error hit the GPU races
+
+### The NG5 `MINCONN` partition starts fine
+
+A 5-step smoke of all four NG5 arms at 2048 ranks, dt 180 (job 26892920): **4/4 rc=0**, including
+the `a4m` and `a4u30` arms that abort in the 150-step race.
+
+So my Finding 31 reading was wrong. `CG_kk abort at iter 1` names the first CG *iteration* of
+whichever step first carries a NaN, not the first step of the run. The race log confirms it in
+hindsight: with printing suppressed, step 1 printed **normal** values (`uv=8.92e-02
+eta=1.87e-01 T[-2.08,30.17]`) and the run died before the next print at step 150.
+
+⇒ NG5/`MINCONN` at 2048 ranks is a **run that diverges somewhere in steps 6–150**, not a
+decomposition the model cannot set up. Job 26893204 traces it step by step, alongside a
+second-seed re-roll of the same knobs (`a4m_seedb`, job 26892932) to tell a systematic property
+of `MINCONN` from one pathological part.
+
+**The adoption consequence changes with it.** "Smoke it at the target rank count" is necessary
+and **not sufficient** — a 5-step smoke passes this partition and so would a 20-step gate. The
+bar has to be the protocol-length stability screen. `m11_promote` (below) therefore requires a
+`steps=` field of at least 3,000 in the evidence line, not merely a passing run.
+
+### The same protocol error had also invalidated both GPU 64-rank races
+
+| job | mesh | dt used | ladder dt | outcome |
+|---|---|--:|--:|---|
+| 26884452 | dars, 64 GPU | 240 | **120** | **every arm died, including base** |
+| 26884451 | NG5, 64 GPU | 240 | **180** | `MINCONN`+`CONTIG` arms died; base and `MINCONN` ran |
+
+Both logs say `[fesom_port FATAL] CG_kk residual diverged` — the `srun: task N: Killed` lines
+underneath are just the teardown after `MPI_Abort`, which is why this first looked like a machine
+fault ("dars GPU keeps getting killed") rather than the third instance of one protocol error.
+Re-running at the ladder dt: dars 26893037, NG5 26893204.
+
+The NG5 GPU **−9.96 %** headline is a matched pair (base and arm both ran, same dt, same
+allocation) so it stands as measured — but it was measured at dt 240 and is being re-confirmed at
+the ladder dt 180.
+
+⇒ Rule, third time of asking: **every M11 job must assert the mesh's ladder dt**, because a
+partition campaign reads a blow-up as an arm result.
+
+---
+
+## Task 16 — `m11_promote`, the one sanctioned way a partition leaves the campaign
+
+`scripts/m11_guards.sh` gains `m11_promote`, with selftest section [7] (7 cases, all pass):
+
+```
+m11_promote --src <sandbox_meshdir> --name core2_v2 --evidence <file> dist_512 dist_4
+```
+
+* creates a **new** directory under `mesh_m11_certified/` and refuses to overwrite an existing
+  one, so a promotion can never redefine a mesh other runs already point at;
+* builds under `.partial.$$` and renames last — an interrupted promotion cannot leave something
+  that looks like a usable mesh directory (this was a real bug in the first version, caught by
+  the selftest);
+* refuses any `dist_N` whose evidence line lacks `run=<jobid> steps=>=3000 rc=0` **at N ranks**
+  — Finding 33 made mechanical;
+* requires the source to be a sandbox mesh with a verified md5 manifest;
+* writes `MESH_PROVENANCE.md` (source, commit, evidence lines, source manifest) and its own
+  manifest, and appends to `mesh_m11/.m11state/promotions.log`.

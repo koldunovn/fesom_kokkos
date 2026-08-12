@@ -22,7 +22,10 @@ source /sw/etc/profile.levante
 source "$ROOT/env.sh"
 ulimit -s 204800
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
-export FESOM_PRINT_EVERY=999
+# Timing runs print once at the start and once at the end — the per-step diagnostic print is
+# expensive enough to be a lever of its own (M9 P4b: 41 % of a farc GPU 2N step). Overridable,
+# because when an arm dies mid-run the step number is the whole finding.
+export FESOM_PRINT_EVERY=${FESOM_PRINT_EVERY:-999}
 
 BIN=${BIN:-/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_serial}
 BIN_MD5_EXPECT=5c3c90fc0ea3939df86cfbe275287c36

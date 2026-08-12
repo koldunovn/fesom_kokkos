@@ -489,9 +489,15 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 
 ### Task 16: Adoption packaging
 
-- [ ] `m11_promote` (added to `m11_guards.sh`): the sanctioned exception — creates a NEW
+- [x] `m11_promote` (added to `m11_guards.sh`): the sanctioned exception — creates a NEW
       certified mesh dir (`core2_v2` style) only, never writes into an existing one; copies only
-      certified dists; writes MESH_PROVENANCE + md5 manifest; logs the exception (review m18)
+      certified dists; writes MESH_PROVENANCE + md5 manifest; logs the exception (review m18).
+      **Built with one guard the plan did not anticipate:** it refuses any `dist_N` whose
+      evidence line lacks a passing smoke record at N ranks — the NG5/MINCONN failure (Finding
+      31) made mechanical, since no offline metric separates a shippable partition from an
+      un-startable one. Builds under `.partial.$$` and renames last, so an interrupted
+      promotion cannot leave something that looks like a usable mesh. Selftest section [7],
+      6 cases, all pass.
 - [ ] repoint run configs/job templates in this worktree; document the switch recipe for other
       worktrees (they repoint only after M11 merges)
 - [ ] if an ordering is adopted: re-baseline `REFERENCE_RUNS.md` floors on the renumbered mesh
