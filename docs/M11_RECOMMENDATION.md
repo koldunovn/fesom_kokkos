@@ -1,6 +1,6 @@
 # M11 — what to change, and what it is worth
 
-One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–37); the per-race table is
+One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–38); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
 ## The short version
@@ -28,7 +28,7 @@ matters.
 | dars | GPU | 64 | `MINCONN`+`CONTIG`+`UFACTOR=30` | **−18.6 %** | pending |
 | NG5 | GPU | 64 | `MINCONN` | −10.0 %* | pending |
 | CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
-| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −2.9 % | pending |
+| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −2.9 % | 🔴 **accuracy FLAGGED — not recommended** |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ accuracy (4 controls) + stability |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.8 %** | ✅ accuracy + stability |
 | dars | CPU | 2048 | `MINCONN` | −4.5 % | stability running |

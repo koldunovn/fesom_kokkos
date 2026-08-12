@@ -2431,3 +2431,35 @@ does not. Both are true; only the first is evidence about how to choose a partit
 threshold, then race the survivors. On CPU it cannot rank arms at all — race them. This is the
 third independent line of evidence (with Findings 18 and 34) that the scorecard is a design aid
 and never a gate.
+
+---
+
+## 🔴 Finding 38 — fArc 16 GPU is the one point where the accuracy gate does NOT pass
+
+Job 26893934, 20 steps, dt 900, **four controls** (three seed-only re-rolls + one engine), rms
+against base:
+
+| leg | temp | salt | ssh |
+|---|--:|--:|--:|
+| *ctl seed A* | 3.374e−2 | 1.158e−1 | 2.931e−3 |
+| *ctl seed B* | 3.036e−2 | 4.224e−2 | 2.837e−3 |
+| *ctl seed C* | 2.711e−2 | 2.966e−2 | 2.725e−3 |
+| *ctl Mt-KaHyPar* | 3.303e−2 | 5.597e−2 | 3.757e−3 |
+| **control envelope** | **[2.71, 3.37]e−2** | [2.97e−2, 1.158e−1] | **[2.73, 3.76]e−3** |
+| `MINCONN` (arm) | **3.988e−2** (+18 %) | 1.165e−1 (+0.6 %) | 3.425e−3 ✅ |
+| `MINCONN`+`CONTIG` (arm) | **4.499e−2** (+33 %) | 7.255e−2 ✅ | **6.318e−3 (+68 %)** |
+
+Both arms sit **above** the four-control temperature envelope, and `MINCONN`+`CONTIG` — the fArc
+GPU winner at −2.9 % — is 68 % above the ssh envelope. This is not the one-control artefact of
+Finding 32: widening from two controls to four *tightened* the temp envelope (1.24×) rather than
+widening it, and the engine control, which changes the objective just as the arms do, sits inside.
+
+⇒ **fArc 16 GPU is NOT recommended.** It is also the point with the smallest gain in the campaign
+(−2.9 %), so the cost of leaving it out is small and the case for shipping it on a flagged gate is
+weak. CORE2 4 GPU, by contrast, passed comfortably with both arms *below* both controls.
+
+**What would resolve it** (not run): the 20-step comparison is transient-dominated, and the
+protocol-length runs already exist for the arms. Re-running the same comparison from 3,000-step
+output — with control legs at 3,000 steps too — would say whether the excursion is a start-up
+artefact or a persistent bias. That is the honest next experiment, and until it is done this point
+stays flagged rather than failed.
