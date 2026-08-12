@@ -2846,3 +2846,25 @@ under-spanning fArc showed (×2.7 across four controls, Finding 38 context). Per
 a way to pass an arm — it is a way to estimate the class, accepting a tightened envelope if that
 is what comes back. Job 26904986 re-gates with **five** controls (added seeds 550007, 660013,
 partgens 26904984/85). Verdict deferred to that job.
+
+### CORE2 864 accuracy gate, second pass (job 26904986): FIVE controls, and the arm stays OUT — 🔴 FAILED on salt
+
+The two added controls (550007, 660013) landed at salt rms 8.501e-02 and 1.186e-01 — *inside* the
+previous three-control range — so the envelope top did not move (1.805e-01) and KaMinPar remains
+**24 % above it on salt rms** (2.239e-01) and 8 % above on ssh rms, with temp below every control
+and every quantile of every field in class. The KaMinPar rows are bit-identical between jobs
+26904852 and 26904986, confirming the serial backend's determinism (the legs are functions of the
+partition, not the allocation).
+
+Verdict, by the yardstick every previous gate used (rms inside the spread of repartitioning
+controls — the standard that failed fArc 16 GPU and passed Mt-KaHyPar at fArc 2048): 🔴 **out of
+class on salt. CORE2 864 KaMinPar is stability-clean and accuracy-flagged — not recommended.**
+Switching the yardstick to quantiles *after seeing that the quantiles would pass* is the exact
+move the campaign's own pre-registration discipline forbids, so the mixed character of the result
+is recorded here but does not soften the verdict. The distributional reading for the record: the
+arm's extreme values are no larger than the controls' (max inside the envelope), but it has more
+mass at large deviations (rms out, p99.99 in) — a fatter extreme tail, not a bigger one.
+
+The CPU picture at CORE2 therefore ends as: **512 ranks recommended** (slack −3.83 %, or Hilbert +
+engine −5.83 % where the renumbering disruption is acceptable), **864 not recommended** on
+accuracy despite a clean screen and −4.9 % at length.
