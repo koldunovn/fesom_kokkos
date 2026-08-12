@@ -2898,3 +2898,10 @@ CORE2 864 treatment they get a five-control envelope before a verdict (job 26905
   the best-behaved leg). Context for tonight's dars 64 GPU gate.
 * The control spread is itself mesh-dependent by an order of magnitude — a fixed rms threshold
   would be meaningless; the per-mesh control envelope is doing real work.
+
+### 🔴 Protocol decision (user, 2026-08-12): the rms yardstick STANDS
+
+The accuracy gate's operative statistic remains **field rms inside the spread of ≥3 seed-control
+repartitionings**, at 20 steps and the mesh's ladder dt. Quantile columns stay in the reports as
+context, never as the verdict. This ratifies the CORE2 864 FAIL and is binding for every gate
+still to run (dars 64 GPU tonight, the dars-alternates re-gate, NG5 if raced to a winner).
