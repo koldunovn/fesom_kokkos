@@ -3094,3 +3094,21 @@ the SSH solver 0.2–0.7 iterations faster than every control). Under the ratifi
 is still a FAIL (the rule is all three fields in class); adopting it at −14.3 % as a documented
 exception, or accepting only in-class arms and taking nothing at this point, is the user's
 call. What no longer looks defensible is shipping the u30 arm.
+
+## NG5 64 GPU accuracy verdict (job 26911630, FIVE controls): in class except ssh rms, +8.3 %
+
+The two added controls stretched the ssh envelope top from 2.582e-03 to 2.839e-03 and the temp
+top from 5.494e-02 to 5.620e-02. Final position of `a4m` (−9.8 % at 3,000 steps): temp
+5.290e-02 IN · salt 8.156e-02 IN · **ssh 3.076e-03 = +8.3 % above the top** (ssh p99 in, p99.99
+at the boundary +0.7 %, max in). Strict verdict under the ratified yardstick: **FAIL on ssh rms
+only** — the same shape as dars `MINCONN`, but WITHOUT the stopping-criterion explanation
+(iteration trace identical to controls, first pass).
+
+**The campaign-final pattern: at three of the four GPU points (fArc 16, dars 64, NG5 64) the
+winning `MINCONN`-family arm sits above the SSH control envelope while temperature and salinity
+are in or near class; only CORE2 4 passes everywhere (below every control).** Whatever the
+mechanism — solver stopping at dars, unexplained at NG5 — the SSH field is where repartitioning
+toward fewer communication partners is systematically distinguishable from a seed re-roll.
+
+Exception decisions now pending (user): dars 64 `MINCONN` −14.3 % (ssh +11.3 %) · NG5 64
+`MINCONN` −9.8 % (ssh +8.3 %). All other points are decided; no gates remain in the queue.
