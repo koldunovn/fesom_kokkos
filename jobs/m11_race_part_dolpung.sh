@@ -49,7 +49,7 @@ export FESOM_PRINT_EVERY=${FESOM_PRINT_EVERY:-999}
 BIN=${BIN:-$MAIN/build-dolpung-cuda/fesom_port}
 BIN_MD5_EXPECT=${BIN_MD5_EXPECT:-e3c0bb64813783926fd1216eac10553b}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
-DT=${DT:?DT required — use the mesh's cold-start ladder dt (core2 1800, farc 900, dars 120, ng5 180)}
+DT=${DT:?DT required — use the cold-start ladder dt of the mesh: core2 1800, farc 900, dars 120, ng5 180}
 NSTEPS=${NSTEPS:-300}; REPS=${REPS:-2}; YEAR=${YEAR:-1958}
 NPES=$SLURM_NTASKS
 ARMS=${ARMS:?ARMS="name=meshdir,..." required}
