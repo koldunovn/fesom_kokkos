@@ -3,6 +3,21 @@
 One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–39); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
+## 🔴 State of the evidence (read before quoting any number below)
+
+Finding 39 changed what this page can claim. A partition that races well over 150–300 steps can
+still diverge before step 3,000: the dars CPU winner did exactly that, and the short-race protocol
+that produced every headline here would have shipped it. So the table below is split by what has
+actually been proven, and **an un-screened gain is not a recommendation**:
+
+| status | points |
+|---|---|
+| **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU |
+| stability-clean, accuracy FAILED → do not ship | fArc 16 GPU |
+| **stability FAILED → withdrawn** | dars 2048 CPU |
+| raced only, never screened → **not yet a result** | dars 64 GPU (−18.6 %) · NG5 64 GPU · CORE2 864 CPU |
+| measured null | NG5 2048 CPU |
+
 ## The short version
 
 FESOM's mesh partitioner calls METIS through `METIS_PartGraphRecursive`, and that choice makes
