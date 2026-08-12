@@ -1,6 +1,6 @@
 # M11 — what to change, and what it is worth
 
-One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–40); the per-race table is
+One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–44); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
 ## 🔴 State of the evidence (read before quoting any number below)
@@ -84,6 +84,12 @@ Two caveats that Finding 37 established and that must travel with this claim:
 **2. There is no single recipe.** The best setting is mesh- and rank-dependent. What generalises
 is `MINCONN` on GPU (best or within a point of best at every GPU point measured) and *some* slack
 on CPU.
+
+**Cross-architecture status (GH200, Findings 42/44):** the GPU lever reproduces on GH200 at
+single-node scale (−8.9 % vs −8.1 % on A100, CORE2 4 GPU) — it is not an A100 artefact — but at
+4 and 16 GH200 nodes on a fabric without GPUDirect it is null-to-small, and a pre-registered
+prediction that dars/64 would exceed its A100 −18.6 % failed. Multi-node gains on other machines
+must be measured there, not extrapolated.
 
 ## Adoption procedure
 
