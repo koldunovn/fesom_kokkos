@@ -3039,3 +3039,21 @@ diagnostics at step 3,000 (eta 1.93, identical T/S ranges, same SSH iteration co
 uv/w=0.00 print artifact as in job 26895260). In-allocation: base 0.2398, `a4m` 0.2164 s/step —
 **−9.76 %**, confirming the race's −9.71 % at length. Stability column ✅; the accuracy gate
 (26908636) is the point's last requirement.
+
+## NG5 64 GPU accuracy gate, first pass (job 26908636): temp and salt IN CLASS, ssh 19 % above a 3-control envelope
+
+Base + `a4m` + three seed controls at `dist_64`, 20 steps at dt 180, all legs rc=0. Fields vs
+base, rms:
+
+| var | `a4m` | control envelope (3) | verdict |
+|---|--:|--:|---|
+| temp | 5.290e-02 | 4.838e-02 … 5.494e-02 | in class |
+| salt | 8.156e-02 | 7.580e-02 … 1.270e-01 | in class |
+| ssh | 3.076e-03 | 2.161e-03 … 2.582e-03 | **19 % above the top** |
+
+🔴 Unlike dars 64, the SSH-stopping mechanism does NOT explain this one: `a4m`'s SSH iteration
+trace is indistinguishable from the controls' (mean signed +0.60 vs controls +0.60/+0.55/0.00,
+max |Δ| = 1 for every leg). The excess is real or the 3-member ssh envelope (span ×1.19, the
+tightest in the campaign) under-covers. Per the standing treatment: **5-control re-gate queued**
+(job 26911630, new controls 550007/660013 via partgens 26911627/29), chained after the dars
+re-gate so one 16-node job runs at a time. Verdict deferred.
