@@ -2868,3 +2868,33 @@ mass at large deviations (rms out, p99.99 in) — a fatter extreme tail, not a b
 The CPU picture at CORE2 therefore ends as: **512 ranks recommended** (slack −3.83 %, or Hilbert +
 engine −5.83 % where the renumbering disruption is acceptable), **864 not recommended** on
 accuracy despite a clean screen and −4.9 % at length.
+
+## ⭐⭐ dars 2048 CPU: KaMinPar PASSES the accuracy gate — the point is fully certified (job 26904739)
+
+Base + three arms + three seed controls (424242/777001/990013, `rpart.out` verified pairwise
+distinct), 20 steps at the ladder dt 120, all legs rc=0, halo gate ok. SSH-iteration behaviour is
+indistinguishable across every leg (all converge 1–2 iterations faster than base, max |Δ| = 4 for
+arms and controls alike). Fields vs base, rms:
+
+| var | KaMinPar | `MINCONN`+`CONTIG` (`a4`) | slack u30 | control envelope (3) |
+|---|--:|--:|--:|--:|
+| temp | **6.699e-02** | 8.120e-02 | 7.478e-02 | 6.738e-02 … 7.003e-02 |
+| salt | **1.366e-01** | 1.677e-01 | 1.661e-01 | 1.449e-01 … 1.526e-01 |
+| ssh | **7.079e-03** | 8.137e-03 | 6.274e-03 | 6.054e-03 … 7.086e-03 |
+
+**KaMinPar sits below every control on temp and salt and inside on ssh — in class on all three,
+and the verdict is final regardless of later widening** (an envelope can only extend outward; an
+arm at or below it cannot leave it). With the 3,000-step screen already clean (job 26895520),
+**dars 2048 CPU = KaMinPar `w=100+nlev`, −4.17 %, screen ✅ accuracy ✅** — the fourth fully
+certified point.
+
+The alternates are out of a notably TIGHT envelope — controls span only 4–5 % on temp/salt here
+(vs ×3.9 at CORE2 864), and `a4` is 10–16 % above it, slack 7–9 % above on temp/salt. Per the
+CORE2 864 treatment they get a five-control envelope before a verdict (job 26905507, controls
+550007/660013 from partgens 26905505/06). Two observations either way:
+
+* The `MINCONN` family keeps landing at or past the edge of the accuracy class (fArc 16 GPU
+  failed on it; here both `MINCONN`-adjacent arms are the outliers while the external engine is
+  the best-behaved leg). Context for tonight's dars 64 GPU gate.
+* The control spread is itself mesh-dependent by an order of magnitude — a fixed rms threshold
+  would be meaningless; the per-mesh control envelope is doing real work.
