@@ -2478,3 +2478,45 @@ stays flagged rather than failed.
 The gain grows at length here too (−2.88 → −3.59 %), consistent with Finding 32 at the other four
 points. **This point is stability-clean and accuracy-flagged** (Finding 38); it stays out of the
 recommendation on the accuracy result, not on speed.
+
+---
+
+## 🔴🔴 Finding 39 — the dars CPU winner FAILS the protocol-length screen, and that is the screen earning its keep
+
+Job 26893944, dars 2048 CPU, dt 120 (the ladder dt), 3,000 steps:
+
+| arm | 150-step race (job 26885210) | 3,000-step screen |
+|---|--:|---|
+| base | 0.4148 | **0.4139, clean** |
+| `MINCONN` | **−4.53 %** | **`CG_kk residual diverged`** |
+
+The arm that this campaign has been calling the dars CPU winner since Finding 31 does not survive
+two model months. A 150-step race — the protocol every headline in this campaign was earned on —
+would have shipped it.
+
+This is the second instance of the same class after NG5 (Findings 34/36): **a partition that races
+well and then diverges somewhere between step 150 and step 3,000.** Two of the nine measured
+points now carry it, which promotes it from a curiosity to a property of the lever:
+
+* `MINCONN` produces partitions that are *sometimes* numerically fragile, and nothing offline
+  predicts which.
+* The 3,000-step evidence floor in `m11_promote` is not conservatism — it is the only thing
+  between this arm and a shipped mesh.
+
+### What is running
+
+1. **Where it dies** — job 26894629 re-runs `a4m` with per-25-step printing, alongside `a4u30`
+   (the dars **GPU** winner at −18.6 %, also never screened at length) and `a4`.
+2. **Whether the NG5 remedy transfers** — job 26894626 generates `dars/a4m_seedb`, the identical
+   arm on a second METIS seed. If it screens clean, "re-roll the seed" is a general remedy rather
+   than a one-off, and the dars CPU recommendation survives with a different partition.
+
+### The recommendation changes now, not after those land
+
+**dars 2048 CPU `MINCONN` is withdrawn** pending a partition that passes the screen. It is listed
+in `M11_RECOMMENDATION.md` as failed, not as pending, because the evidence to withdraw it exists
+and the evidence to restore it does not.
+
+🔴 And the campaign-wide caveat: **every number in this campaign that has not been through a
+3,000-step screen is now suspect, not merely ungated.** Five points have passed it (Finding 32);
+`dars` CPU has failed it; the rest are unproven. That is the honest state.
