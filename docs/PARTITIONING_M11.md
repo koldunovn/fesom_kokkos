@@ -3057,3 +3057,40 @@ max |Δ| = 1 for every leg). The excess is real or the 3-member ssh envelope (sp
 tightest in the campaign) under-covers. Per the standing treatment: **5-control re-gate queued**
 (job 26911630, new controls 550007/660013 via partgens 26911627/29), chained after the dars
 re-gate so one 16-node job runs at a time. Verdict deferred.
+
+---
+
+## 🔴 dars 64 GPU accuracy verdict (job 26908840, FIVE controls): the −19.7 % arm FAILS; `MINCONN` alone is in class everywhere except ssh rms
+
+Five-control envelope (seeds 424242/777001/990013/550007/660013, all legs rc=0): temp
+4.870e-02 … 6.489e-02 · salt 7.150e-02 … 1.940e-01 · ssh 2.970e-03 … 5.568e-03. The new
+550007 control stretched the salt top from 1.494e-01 to 1.940e-01, which brings every arm's
+salt INTO class — the widening was not cosmetic.
+
+| arm (gain at 3,000 steps) | temp rms | salt rms | ssh rms | verdict |
+|---|--:|--:|--:|---|
+| `MINCONN`+`CONTIG`+u30 (**−19.7 %**) | +13.2 % OUT | in | +14.7 % OUT | 🔴 **FAILED** |
+| `MINCONN` (**−14.3 %**) | in | in | **+11.3 % OUT** | out on ssh only |
+| `MINCONN`+`CONTIG` (−12.4 %) | +21.0 % OUT | in | +21.7 % OUT | 🔴 FAILED |
+
+**Two corrections to my own earlier statements, both material:**
+
+1. **The claim "every quantile including the max is in class" was WRONG for the u30 arm.** I
+   carried it over from the CORE2 864 gate without re-checking the dars numbers. At five
+   controls the u30 arm's temperature maximum is **1.624e+01 vs a control range of
+   6.402–8.838** — its extreme temperature deviations are ×1.8–2.5 the class, on top of the rms
+   excess. Its failure is substantive, not a tail-statistics technicality, and the documented
+   exception path (protocol decision, 2026-08-12) is correspondingly harder to defend for this
+   arm.
+2. **The CUDA gate legs ARE reproducible on Levante/A100**: every arm and control rms in job
+   26908840 equals its 26904578 value to all four printed digits, across different node sets.
+   The transport-noise caveat recorded on the first pass is retracted for this machine (it
+   remains true on dolpung, where it was measured).
+
+**`MINCONN` alone is the defensible dars GPU candidate**: −14.3 % at 3,000 steps, in class on
+temp and salt rms, on every quantile and every maximum, out only on ssh rms (+11.3 %) — and the
+ssh excess carries the identified stopping-criterion mechanism (first pass: the arms converge
+the SSH solver 0.2–0.7 iterations faster than every control). Under the ratified yardstick it
+is still a FAIL (the rule is all three fields in class); adopting it at −14.3 % as a documented
+exception, or accepting only in-class arms and taking nothing at this point, is the user's
+call. What no longer looks defensible is shipping the u30 arm.
