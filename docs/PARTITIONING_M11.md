@@ -2463,3 +2463,18 @@ protocol-length runs already exist for the arms. Re-running the same comparison 
 output — with control legs at 3,000 steps too — would say whether the excursion is a start-up
 artefact or a persistent bias. That is the honest next experiment, and until it is done this point
 stays flagged rather than failed.
+
+### fArc 16 GPU — protocol-length stability PASSES (job 26893928)
+
+3,000 steps at dt 900, all four arms rc=0, no NaN/blow-up, field ranges agreeing at step 3,000:
+
+| arm | s/step | vs base | 300-step race |
+|---|--:|--:|--:|
+| base | 0.1141 | — | — |
+| `MINCONN`+`CONTIG` | 0.1100 | **−3.59 %** | −2.88 % |
+| `MINCONN` | 0.1112 | −2.54 % | −2.30 % |
+| `CONTIG` | 0.1112 | −2.54 % | −1.96 % |
+
+The gain grows at length here too (−2.88 → −3.59 %), consistent with Finding 32 at the other four
+points. **This point is stability-clean and accuracy-flagged** (Finding 38); it stays out of the
+recommendation on the accuracy result, not on speed.
