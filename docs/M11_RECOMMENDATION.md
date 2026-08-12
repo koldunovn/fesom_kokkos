@@ -1,6 +1,6 @@
 # M11 — what to change, and what it is worth
 
-One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–44); the per-race table is
+One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–45); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
 ## 🔴 State of the evidence (read before quoting any number below)
@@ -27,9 +27,9 @@ maximum number of neighbouring sub-domains — is **never set anywhere in `fort_
 partition produced by stock FESOM has ever had it active.
 
 We measure `MINCONN` as the single most valuable partitioning knob available on GPU: it is the
-best or near-best arm at every GPU point measured, and the largest raced gain is **−18.6 % of
-the model step** (dars, 64 GPU — *not yet screened*; see the evidence table above). Switching
-the call to `PartGraphKway` is a few lines.
+best or near-best arm at every GPU point measured, and the largest gain is **−19.7 % of the
+model step** (dars, 64 GPU — clean at 3,000 steps; accuracy gate in progress; see the evidence
+table above). Switching the call to `PartGraphKway` is a few lines.
 
 The campaign has also seen four partitions fail at length (Findings 34, 39, 45) — three from
 `MINCONN`-family arms and one from **the stock shipped recipe itself** (a seed-only re-roll,
