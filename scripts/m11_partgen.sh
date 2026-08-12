@@ -91,6 +91,17 @@ for N in $RANKS; do
 
     echo; echo "--- $TAG n_part=$NP  (dist_$N)"
     LOG="$OUT/meshpart_${TAG}_$N.log"
+    # 🔴 The sandbox guards protect the read-only SOURCE meshes; nothing protected a sandbox
+    # mesh that is serving as a race BASELINE. A one-character slip in MESH= (dars_m11 instead
+    # of a new arm dir) silently replaces the partition every dars race has been measured
+    # against, and no later gate would notice: the mesh files are untouched, so the md5 manifest
+    # still verifies. Overwriting an existing dist_N therefore needs to be asked for explicitly.
+    if [ -d "$MESH/dist_$N" ] && [ "${OVERWRITE_DIST:-0}" != 1 ]; then
+        echo "    REFUSE: $MESH/dist_$N already exists."
+        echo "            Generate into a NEW arm directory, or set OVERWRITE_DIST=1 if you"
+        echo "            really mean to replace a partition other results were measured on."
+        rc_all=3; continue
+    fi
     rm -rf "$MESH/dist_$N"
     srun -l "$BIN" > "$LOG" 2>&1
     rc=$?
