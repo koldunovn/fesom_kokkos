@@ -2578,3 +2578,44 @@ T[−2.09, 30.20]`, 0.4034 s/step) while its two siblings died. The dars CPU pic
 The two 3,000-step numbers come from different jobs (26893944 and 26894629), so they are **not** a
 matched pair and the implied −2.5 % is not a campaign number. Job 26895271 races base vs `a4` vs
 slack vs KaMinPar properly, min-of-3 in one allocation.
+
+---
+
+## ⭐⭐⭐ Finding 41 — the seed re-roll is a GENERAL remedy: it rescues `MINCONN` on a second mesh
+
+Job 26895261, `dars/a4m_seedb` — the arm that diverges past step 525 on dars 2048 CPU, regenerated
+with `FESOM_PART_SEED=424242` and nothing else changed — **runs the full 3,000 steps clean**:
+`uv=2.43e+00 eta=2.09e+00 T[−2.08, 30.20]` against the baseline's `uv=2.30e+00 eta=2.09e+00
+T[−2.07, 30.19]`, at 0.4001 s/step.
+
+That is the second mesh on which the identical manoeuvre converts a fatal `MINCONN` partition into
+a sound one:
+
+| mesh, point | `MINCONN` default seed | same arm, second seed |
+|---|---|---|
+| NG5 2048 CPU | BLOWUP at step 71 | 150 steps clean (Finding 34) |
+| **dars 2048 CPU** | **diverges past step 525** | **3,000 steps clean** |
+
+⇒ The fragility is a property of **the individual partition**, not of the knob, on both meshes
+where we have looked. The adoption procedure — screen at protocol length, re-roll the seed on
+failure — is therefore a genuine remedy and not a euphemism for "give up on `MINCONN`".
+
+🔴 The one thing it is not is a *guarantee*: two re-rolls, two successes, is weak evidence for a
+success rate. What it does establish is that a failure is worth one cheap retry before the arm is
+abandoned.
+
+## dars 2048 CPU — the matched race, min-of-3 (job 26895271)
+
+| arm | s/step | vs base | spread | 3,000-step screen |
+|---|--:|--:|--:|---|
+| base | 0.4125 | — | 0.3 % | ✅ clean |
+| `MINCONN`+`CONTIG` | 0.4008 | −2.84 % | 0.2 % | ✅ clean |
+| `UFACTOR=30` | 0.3998 | −3.08 % | 0.4 % | running (26895520) |
+| **KaMinPar `w=100+nlev`** | **0.3953** | **−4.17 %** | 1.2 % | running (26895520) |
+
+The engine leads on speed, as it does at fArc 2048 and CORE2 864 — the third large-CPU point where
+an external partitioner beats every METIS arm. Its 1.2 % rep spread is the largest in the table
+and its lead over slack is 1.1 pp, so the ordering between those two is real but not comfortable.
+
+**None of this becomes a recommendation until the screens land.** The withdrawn `MINCONN` arm had
+a better raced number (−4.53 %) than any survivor here.
