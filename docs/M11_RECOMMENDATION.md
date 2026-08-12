@@ -92,6 +92,13 @@ it is **~94 % additive** with repartitioning (−5.8 % combined at CORE2 512). I
 anywhere else: fArc, FORCA20, dars and NG5 already ship at 88 % element-gather locality against
 CORE2's 27.6 % (Finding 17).
 
+**Weigh the disruption before taking it.** Renumbering changes the mesh files themselves, not just
+a `dist_N`, so every C↔Kokkos floor in `docs/REFERENCE_RUNS.md` has to be re-baselined on the new
+numbering, per scheme, and every other track pinning a CORE2 reference has to move with it. The
+lever is worth **+2.0 pp on top of repartitioning alone** at CORE2 512 (−5.8 % vs −3.8 %). Take
+the repartitioning first — it is a drop-in `dist_N` swap with no re-baselining — and treat the
+renumbering as a separate decision with its own cost.
+
 ## Upstream (FESOM/fesom2)
 
 1. `PartGraphRecursive` → `PartGraphKway` so `MINCONN`/`CONTIG`/`OBJ=vol` actually reach METIS.
