@@ -15,7 +15,8 @@ actually been proven, and **an un-screened gain is not a recommendation**:
 | **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU · **dars 2048 CPU (KaMinPar)** |
 | stability-clean, accuracy FAILED → do not ship | fArc 16 GPU · CORE2 864 CPU (Finding 44 follow-up, job 26904986) |
 | **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
-| raced only, never screened → **not yet a result** | dars 64 GPU (−18.6 %) · NG5 64 GPU |
+| **screened ✅, accuracy gate running** | dars 64 GPU (**−19.7 % at 3,000 steps**, job 26895260) |
+| raced only, never screened → **not yet a result** | NG5 64 GPU |
 | measured null | NG5 2048 CPU |
 
 ## The short version
@@ -48,7 +49,7 @@ matters.
 
 | mesh | backend | ranks | setting | gain | gated |
 |---|---|--:|---|--:|---|
-| dars | GPU | 64 | `MINCONN`+`CONTIG`+`UFACTOR=30` | **−18.6 %** | pending |
+| dars | GPU | 64 | `MINCONN`+`CONTIG`+`UFACTOR=30` | **−19.7 %** | stability ✅ (3,000 steps, grew from −18.6 %) · accuracy gate running |
 | NG5 | GPU | 64 | `MINCONN` | −10.0 %* | pending |
 | CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
