@@ -2972,3 +2972,31 @@ directions.
 
 **Stability column: ✅. Remaining for certification: the accuracy gate (job 26904578, three seed
 controls at `dist_64`), which fires after the NG5 re-race (26904577, now eligible).**
+
+---
+
+## ⭐⭐⭐ NG5 64 GPU re-race at the LADDER dt 180 (job 26904577): the winner REPRODUCES, and three of four alternates DIE
+
+| arm | reps (s/step) | vs base | outcome |
+|---|---|--:|---|
+| base | 0.2419 / 0.2421 | — | clean |
+| **`MINCONN` (`a4m`)** | **0.2184 / 0.2184** | **−9.71 %** | clean, spread 0.0 % |
+| `MINCONN`+`CONTIG` (`a4`) | — | — | **`CG_kk residual diverged`, both reps** |
+| `MINCONN`+`CONTIG`+u30 | — | — | **diverged, both reps** |
+| slack u30 (`a5_u30`) | — | — | **diverged, both reps** |
+
+Two results in one job:
+
+1. **The provisional −9.96 % was real.** At the correct cold-start ladder dt the `MINCONN` arm
+   comes back at −9.71 %, min-of-2 with zero spread. The dt-240 measurement was provisional for
+   protocol reasons; its number was honest.
+2. **Three `dist_64` partitions fail within 300 steps, deterministically** (both reps, same
+   abort). Together with Finding 34's `dist_2048` failures, NG5 is the campaign's most
+   partition-fragile mesh at every rank count tried — and again the failures strike arms, seeds
+   and knob combinations with no offline signature (the u30 arm that failed here is the same
+   recipe class that just passed 3,000 steps on dars `dist_64`).
+
+The alternates are dead at this point (no seed re-rolls: `a4m` is the winner and is the only arm
+worth certifying). **Certification chain queued: 3,000-step screen of `a4m` (job 26908635) and
+the accuracy gate (26908636) against three fresh seed controls at `dist_64`** (`ng5_seed`
+424242 · 777001 · 990013, partgens 26908632–34).
