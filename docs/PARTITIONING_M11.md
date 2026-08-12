@@ -2715,3 +2715,31 @@ the largest partition gain measured anywhere in this campaign.**
 If it comes back materially smaller, the partner-count story needs revisiting — most plausibly
 because at 64 ranks over 16 nodes the traffic is inter-node (dc_mlx5) rather than the intra-node
 `cuda_ipc` path both other dolpung points used, and the two need not price messages alike.
+
+### 🔴 Finding 43, correction — `min-of-N` is BIASED when the baseline is noisier than the arms
+
+The fArc/GH200 re-run at min-of-4 (job 26902142) made the arms look *worse*, not clearer:
+
+| arm | reps (s/step) | min | median | vs base by **min** | vs base by **median** |
+|---|---|--:|--:|--:|--:|
+| base | 0.0781 0.0758 0.0771 **0.0744** | 0.0744 | 0.0765 | — | — |
+| `CONTIG` | 0.0750 0.0772 0.0769 0.0765 | 0.0750 | 0.0767 | +0.81 % | **+0.33 %** |
+| `MINCONN`+`CONTIG`+u30 | 0.0766 0.0761 0.0778 0.0768 | 0.0761 | 0.0767 | +2.28 % | **+0.33 %** |
+| `MINCONN` | 0.0769 0.0753 0.0786 0.0769 | 0.0753 | 0.0769 | +1.21 % | **+0.59 %** |
+
+By median every arm is within **0.6 %** of base — a clean null. By min-of-4 they look 0.8–2.3 %
+*slower*, entirely because one lucky base rep (0.0744) set the reference.
+
+⇒ **`min-of-N` is only a fair estimator when every arm has comparable variance.** On dolpung the
+baseline is systematically the noisiest leg (its partition has the most communication partners, so
+it is the most exposed to a shared fabric), and min-of-N then rewards the noisiest arm. The
+campaign's standing protocol is min-of-N — that is right on Levante, where arm variances match,
+and it needs the median cross-check anywhere they do not. **Report both when the spreads differ.**
+
+### 🔴 And a mistake of mine that invalidates the fArc re-run
+
+I dropped `a4` (`MINCONN`+`CONTIG`) from the min-of-4 re-run as "clearly not a contender", on the
+strength of a min-of-2 result I had *in the same breath* called unresolvable. `a4` is the arm that
+wins −3.59 % on A100 — the entire fArc question. So job 26902142 tightened the statistics on three
+arms while omitting the one that matters, and the fArc/GH200 question is **still open**.
+Job 26903022 redoes it with `a4` in and min-of-5.
