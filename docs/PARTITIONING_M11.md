@@ -2379,3 +2379,55 @@ partner count — is the one that dominates on GPU (Finding 27).
 ⇒ **Upstream wording:** "`PartGraphRecursive` cannot use `OBJTYPE=VOL`, `CONTIG` or `MINCONN`;
 the last is never set in the code. On GPU `MINCONN` is worth up to −18.6 %, so the Recursive-vs-Kway
 comparison recorded in the comments is worth re-running on modern hardware." Not "silently ignores".
+
+---
+
+## ⭐⭐⭐ Finding 37 — the regression over ALL raced arms: the GPU claim reproduces at three points, the CPU claim does not survive as a scorecard rule
+
+`scripts/m11_scorecard_regression.py` joins every protocol race (`m11_races.csv`) to its scorecard
+row and computes Spearman ρ **within** each (mesh, backend, ranks) group of ≥3 arms — never
+across groups, because a cross-point fit would be dominated by mesh size rather than by the
+partition. Nine groups qualify, 88 per-group correlations.
+
+ρ > 0 means a larger metric goes with a slower step.
+
+| metric | CPU median ρ (5 groups) | CPU range | GPU median ρ (3 groups) | GPU range |
+|---|--:|---|--:|---|
+| **`nbr_max`** (partners) | −0.39 | [−0.60, +0.13] | **+0.87** | **[+0.87, +0.87]** |
+| `nbr_mean` | +0.21 | [−0.15, +0.32] | **+0.74** | [+0.50, +0.87] |
+| `n3d_maxmin` (owned work) | −0.19 | [−0.56, +0.40] | −0.44 | [−0.55, +0.50] |
+| `edgecut_unweighted` | −0.16 | [−0.40, +0.67] | **−0.78** | [−0.99, +1.00] |
+| `halo_nod_mean` | −0.16 | [−0.40, +0.67] | **−0.78** | [−0.99, +1.00] |
+| `commvol_max_rank` | +0.15 | [−1.00, +0.67] | −0.72 | [−0.78, +1.00] |
+| `elem_repl` | −0.15 | [−0.40, +0.67] | −0.78 | [−0.99, +1.00] |
+
+### What holds
+
+**On GPU the partner count is the only metric family with a consistent positive sign at every
+point, and every volume-like metric has a consistent NEGATIVE one** — arms that ship *more* data
+are *faster*. Finding 27 reported that inversion at a single point (fArc/16); it now reproduces
+independently at CORE2/4, fArc/16 and dars/64.
+
+🔴 **Do not quote the +0.87 as a constant.** It is identical at all three GPU points because
+`nbr_max` is a small integer that takes only two or three distinct values per group, so ρ is
+tie arithmetic, not a physical coefficient. At CORE2/4 it is a perfect *binary* split — every
+`nbr_max=2` arm lands at −7.5…−8.1 % and every `nbr_max=3` arm at +3.0…−2.5 % — and it says
+nothing about ordering *within* a level: at dars/64 the two `nbr_max=7` arms differ by 5 pp, and
+at fArc/16 the five `nbr_max=6` arms span 3.2 pp. **Partner count is a threshold, not a ranking.**
+
+### What does NOT hold, and a distinction I had been eliding
+
+**No scorecard column orders the arms on CPU.** Every metric's range straddles zero across the
+five CPU groups. In particular `n3d_maxmin` — the owned-3-D-work imbalance — has median ρ −0.19,
+range [−0.56, +0.40]: an arm with better global 3-D balance is *not* a faster arm.
+
+That is not a contradiction of Finding 24/29, but it does correct how I have been paraphrasing
+them. The measured r = 0.91 was between **per-rank busy time and per-rank owned 3-D nodes inside a
+single partition** — a statement about where the time goes during a run. It never implied that a
+partition with a better *global* imbalance statistic runs faster, and the regression shows that it
+does not. Both are true; only the first is evidence about how to choose a partition.
+
+⇒ **The scorecard's role, stated exactly:** on GPU, use `nbr_max` to reject candidates above the
+threshold, then race the survivors. On CPU it cannot rank arms at all — race them. This is the
+third independent line of evidence (with Findings 18 and 34) that the scorecard is a design aid
+and never a gate.
