@@ -17,7 +17,7 @@ actually been proven, and **an un-screened gain is not a recommendation**:
 | **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
 | stability ✅, accuracy **FAILED** (5 controls) → do not ship | dars 64 GPU `MINCONN`+`CONTIG`+u30 (−19.7 %): temp rms +13 %, temp max ×1.8–2.5 the class |
 | stability ✅, in class except ssh rms (+11 %, stopping mechanism) | dars 64 GPU **`MINCONN` alone (−14.3 %)** — exception decision pending (user) |
-| **screened ✅ (−9.8 % at 3,000 steps), accuracy gate running** | NG5 64 GPU (3 of 4 alternates diverge at the ladder dt — see adoption procedure) |
+| stability ✅, in class except ssh rms (+8 %) | NG5 64 GPU **`MINCONN` (−9.8 %)** — exception decision pending (user) |
 | measured null | NG5 2048 CPU |
 
 ## The short version
@@ -52,7 +52,7 @@ matters.
 |---|---|--:|---|--:|---|
 | ~~dars~~ | ~~GPU~~ | ~~64~~ | ~~`MINCONN`+`CONTIG`+u30~~ | ~~−19.7 %~~ | 🔴 **accuracy FAILED (5 controls; temp max ×1.8–2.5 class) — do not ship** |
 | dars | GPU | 64 | `MINCONN` alone | **−14.3 %** | stability ✅ · in class except ssh rms +11 % (stopping mechanism) — exception decision pending |
-| NG5 | GPU | 64 | `MINCONN` | **−9.7 %** | stability ✅ (−9.8 % at 3,000 steps) · accuracy gate running |
+| NG5 | GPU | 64 | `MINCONN` | **−9.8 %** | stability ✅ · in class except ssh rms +8 % (5 controls) — exception decision pending |
 | CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ accuracy (4 controls) + stability |
