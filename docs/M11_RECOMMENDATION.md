@@ -41,10 +41,21 @@ matters.
 ## The two rules that fall out of it
 
 **1. The backend wants opposite things, and the split holds at every scale.** On GPU the currency
-is the NUMBER of communication partners — `MINCONN` targets it directly, and partner count orders
-the GPU table perfectly (3.00 → 2.00 neighbours/rank = −7.5 %). On CPU the currency is owned 3-D
-work (busy-time vs owned 3-D nodes, r = 0.91), which `UFACTOR` slack buys. The same two extra
-knobs that **cost** a point on dars CPU **gain five** on dars GPU.
+is the NUMBER of communication partners — `MINCONN` targets it directly. Across all nine raced
+groups it is the only metric family with a consistent positive correlation to step time, while
+every volume-like metric (edge cut, halo size, element replication) correlates **negatively**:
+on GPU the arms that ship more data are faster. On CPU the picture is the mirror image, and the
+same two extra knobs that **cost** a point on dars CPU **gain five** on dars GPU.
+
+Two caveats that Finding 37 established and that must travel with this claim:
+
+* Partner count is a **threshold, not a ranking** — `nbr_max` is a small integer taking two or
+  three values per point, so it separates fast arms from slow ones but says nothing about
+  ordering within a level.
+* **No scorecard column orders CPU arms.** The r = 0.91 result often quoted for the CPU side is
+  per-rank busy time vs per-rank owned 3-D work *inside one partition* — a statement about where
+  time goes, not about which partition to pick. Arm-level 3-D imbalance does not predict arm
+  speed (median ρ −0.19, range straddling zero). On CPU you have to race.
 
 **2. There is no single recipe.** The best setting is mesh- and rank-dependent. What generalises
 is `MINCONN` on GPU (best or within a point of best at every GPU point measured) and *some* slack
