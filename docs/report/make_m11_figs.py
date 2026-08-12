@@ -30,8 +30,10 @@ L = common.MESH_LABEL
 # ---------------------------------------------------------------- fig 1: the board
 # (mesh, ranks, gain %, setting, status) — status: cert | pending | failed
 GPU = [
-    ("dars",  64,  19.7, "MINCONN+CONTIG+UFACTOR=30", "pending"),   # 26893037 race, 26895260 screen
-    ("ng5",   64,   9.8, "MINCONN",                   "pending"),   # 26904577 race, 26908635 screen
+    # dars: the -19.7 % three-option arm FAILED accuracy outright (26908840, 5 controls);
+    # MINCONN alone is the in-contention candidate, out on ssh rms only (+11 %)
+    ("dars",  64,  14.3, "MINCONN",                   "ssh"),       # 26895260 screen, 26908840 gate
+    ("ng5",   64,   9.8, "MINCONN",                   "ssh"),       # 26908635 screen, 26911630 gate (+8 %)
     ("core2",  4,   8.1, "MINCONN",                   "cert"),      # 26892875 + 3,000-step re-proof
     ("farc",  16,   3.6, "MINCONN+CONTIG",            "failed"),    # accuracy gate, 4 controls
 ]
@@ -44,8 +46,8 @@ CPU = [
     ("ng5",   2048, 0.0, "no candidate beat shipped", "null"),
 ]
 
-HATCH = {"cert": None, "pending": "//", "failed": "xx", "null": None}
-ALPHA = {"cert": 1.0, "pending": 0.55, "failed": 0.35, "null": 0.2}
+HATCH = {"cert": None, "ssh": "//", "failed": "xx", "null": None}
+ALPHA = {"cert": 1.0, "ssh": 0.55, "failed": 0.35, "null": 0.2}
 
 fig, axes = plt.subplots(1, 2, figsize=(8.6, 2.9), sharex=True)
 for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
@@ -57,7 +59,7 @@ for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
         ax.text(-0.35, yi + 0.13, label, ha="right", va="center", fontsize=8)
         ax.text(-0.35, yi - 0.22, setting, ha="right", va="center", fontsize=6.5, color="0.45")
         val = "null" if status == "null" else f"{gain:.1f} %"
-        note = {"cert": "", "pending": "accuracy pending", "failed": "accuracy failed",
+        note = {"cert": "", "ssh": "out on SSH rms only", "failed": "accuracy failed",
                 "null": ""}[status]
         if note:
             ax.text(max(gain, 0) + 0.35, yi + 0.13, val, ha="left", va="center", fontsize=8)
@@ -67,7 +69,7 @@ for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
             ax.text(max(gain, 0) + 0.35, yi, val, ha="left", va="center", fontsize=8)
     ax.set_yticks([])
     ax.set_title(title)
-    ax.set_xlim(0, 25.5)
+    ax.set_xlim(0, 17)
     ax.set_xlabel("% faster than the shipped partition")
     ax.grid(axis="y", visible=False)
     for s in ("left", "right", "top"):

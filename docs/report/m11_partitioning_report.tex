@@ -35,10 +35,13 @@ measurements on CPU and GPU, and a procedure for adopting a new partition}
 
 \subsection*{TL;DR}
 \begin{itemize}\itemsep1pt
-\item Repartitioning makes the GPU model step \textbf{8--20\,\% faster} (DARS on 64 GPUs:
-$-19.7\,\%$). Most of it comes from one METIS option, \minconn, which FESOM's
-\texttt{PartGraphRecursive} call silently ignores. Switching to \texttt{PartGraphKway} is a
-few lines.
+\item Repartitioning makes the GPU model step \textbf{8--14\,\% faster} (DARS on 64 GPUs:
+$-14.3\,\%$; a $-19.7\,\%$ arm exists there but failed the accuracy test). The gain comes
+from one METIS option, \minconn, which FESOM's \texttt{PartGraphRecursive} call silently
+ignores; switching to \texttt{PartGraphKway} is a few lines.
+\item At three of the four GPU points the winning partition is out of the accuracy class in
+exactly one statistic, the SSH rms (Section~6); adopting those gains is an explicit decision,
+not a test outcome.
 \item CPU runs gain \textbf{4--8\,\%}, from external engines (KaMinPar, Mt-KaHyPar) and
 load-balance slack instead; the two backends need different partitions of the same mesh.
 \item \textbf{Some new partitions crash the model} --- eight caught, one produced by the
@@ -57,10 +60,13 @@ partitions of four meshes with METIS under settings FESOM does not currently use
 external partitioning engines, and with two node renumberings, and timed them against the shipped
 partitions on both backends of the C++/Kokkos port.
 
-Three results carry the report. First, the shipped partitions cost the GPU backend 8--20\,\% of
-the model step, and most of that is recovered by a single METIS option, \minconn, which no FESOM
-partition has ever had active: the partitioner calls \texttt{METIS\_PartGraphRecursive}, which
-accepts and ignores it. Second, the CPU backend gains less (4--8\,\%) and gains it from different
+Three results carry the report. First, the shipped partitions cost the GPU backend up to
+20\,\% of the model step, and most of that is recovered by a single METIS option, \minconn,
+which no FESOM partition has ever had active: the partitioner calls
+\texttt{METIS\_PartGraphRecursive}, which accepts and ignores it. Of the measured speed,
+8--14\,\% stands after the accuracy tests, with the two largest gains (DARS $-14.3\,\%$, NG5
+$-9.8\,\%$) out of class in the SSH rms alone and therefore left as explicit adoption
+decisions. Second, the CPU backend gains less (4--8\,\%) and gains it from different
 settings, namely external engines and load-balance slack; the two backends are best served by
 different partitions of the same mesh. Third, and unexpectedly, a small fraction of newly
 generated partitions cause the model to diverge, regardless of which settings produced them.
@@ -139,8 +145,9 @@ timing runs are, if anything, conservative.
 \includegraphics[width=\textwidth]{fig_m11_board.pdf}
 \caption{\small Best candidate partition per mesh and rank count, as a percentage faster than
 the shipped partition. Gray text under each label is the setting that produced the candidate.
-Solid bars are certified (stability and accuracy both passed); single-hatched bars await their
-accuracy test; cross-hatched bars failed it. Mesh colors follow the project's figure
+Solid bars are certified (stability and accuracy both passed); single-hatched bars are in class
+on everything except the SSH rms, with adoption an open decision; cross-hatched bars failed the
+accuracy test. Mesh colors follow the project's figure
 conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \label{fig:board}
 \end{figure}
@@ -151,8 +158,8 @@ conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \toprule
 mesh & backend, ranks & gain & setting & stability & accuracy \\
 \midrule
-DARS  & GPU, 64   & $\mathbf{-19.7\,\%}$ & \minconn+\contig+\texttt{UFACTOR=30} & passed & pending$^{a}$ \\
-NG5   & GPU, 64   & $\mathbf{-9.8\,\%}$  & \minconn             & passed & pending$^{a}$ \\
+DARS  & GPU, 64   & $\mathbf{-14.3\,\%}$ & \minconn            & passed & ssh rms $+11\,\%$, rest in class$^{a}$ \\
+NG5   & GPU, 64   & $\mathbf{-9.8\,\%}$  & \minconn             & passed & ssh rms $+8\,\%$, rest in class$^{a}$ \\
 CORE2 & GPU, 4    & $\mathbf{-8.1\,\%}$  & \minconn             & passed & passed \\
 fArc  & GPU, 16   & $-3.6\,\%$           & \minconn+\contig     & passed & \textbf{failed}; not recommended \\
 \midrule
@@ -312,14 +319,13 @@ useless for accepting them; acceptance is the stability and accuracy tests.
 
 \section{Status}
 
-The DARS and NG5 GPU accuracy tests are in the queue. The first DARS pass fell just outside a
-three-control envelope on all fields and is being re-judged against five controls, with the
-solver-stopping effect of Section~6 recorded alongside. Should the $-19.7\,\%$ candidate remain
-outside the envelope, the alternatives are explicit: \minconn\ alone ($-14.3\,\%$ over 3{,}000
-steps, nearly inside the envelope on its first pass), or adoption as a documented exception,
-with the test verdict left as measured. Whether an interconnect with working GPU--direct
-communication prices messages like the A100 fabric or like the GH200 testbed is open, and
-JUPITER should answer it by measurement.
+Every gate has run; no measurement is pending. Two adoption decisions remain open, both of the
+same shape: \minconn\ at DARS 64 ($-14.3\,\%$) and at NG5 64 ($-9.8\,\%$) are outside the
+accuracy class in the SSH rms alone. Under the fixed criterion neither is certified; adopting
+either is a documented decision rather than a test outcome. The remaining steps are packaging
+the certified partitions and the upstream pull request. Whether an interconnect with working
+GPU--direct communication prices messages like the A100 fabric or like the GH200 testbed is
+open, and JUPITER should answer it by measurement.
 
 \vspace{4pt}
 \noindent\textit{Evidence trail: \path{docs/PARTITIONING_M11.md} (Findings 1--45, with job
