@@ -461,15 +461,24 @@ Full research digest (read first): `docs/PARTITIONING_M11_RESEARCH.md`.
 ### Task 14: Verdict assembly + finalist hardening
 
 - [ ] finalists re-raced on a second day (the two-pair-day adoption requirement)
-- [ ] METIS-seed noise: GENERATE 2–3 seed variants of finalist partition arms via
+- [x] METIS-seed noise: GENERATE 2–3 seed variants of finalist partition arms via
       `m11_partgen.sh`, gate them (md5 + scorecard + stability screen), then race; spread
-      recorded (review M8)
-- [ ] **protocol-length stability re-proof (rule 0.41)** for every adopted CORE2/fArc arm at the
-      standing protocol dt/length before it is called adopted (review M10)
+      recorded (review M8) — seed controls at CORE2/4, fArc/16, fArc/2048 (×3), dars/2048,
+      NG5/2048. Two findings came out of it: the seed re-roll rescues the NG5 blow-up
+      (Finding 34), and the control ENVELOPE is what the accuracy gate must be judged against,
+      never a single control (Findings 32, 38)
+- [x] **protocol-length stability re-proof (rule 0.41)** for every adopted CORE2/fArc arm at the
+      standing protocol dt/length before it is called adopted (review M10) — CORE2 512 CPU
+      (26886214), CORE2 4 GPU (26892875), fArc 2048 CPU (26892880), fArc 16 GPU (26893928),
+      dars 2048 CPU (26893944). Finding 32: the gains GROW at length, within 0.7 pp
 - [ ] adoption decisions per backend per mesh with the full evidence chain (scorecard row →
       gates → pairs → noise → protocol-length proof)
-- [ ] scorecard-vs-measured regression across ALL raced arms incl. anchors — the report's
-      headline figure data; lessons → `KOKKOS_PORTING_LESSONS.md`; memory + digest §5 updated
+- [x] scorecard-vs-measured regression across ALL raced arms incl. anchors — the report's
+      headline figure data (`scripts/m11_scorecard_regression.py`, Finding 37): Spearman WITHIN
+      each (mesh, backend, ranks) group, 9 groups, 88 correlations. GPU mechanism reproduces at
+      three independent points; CPU has no predictive column. Two self-corrections recorded (the
+      +0.87 is tie arithmetic; the r=0.91 is a within-partition per-rank statement).
+      Still owed: lessons → `KOKKOS_PORTING_LESSONS.md`; digest §5
 
 ### Task 15: DARS/NG5 confirmation wave (adopted levers only)
 
