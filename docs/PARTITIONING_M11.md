@@ -2279,3 +2279,43 @@ survivor has one, and dies with a lower edgecut than its own healthy re-roll.
    is a two-line recipe, not a reason to drop the lever.
 3. **Do not trust the scorecard as a safety check.** It is a design tool for ranking candidates.
    It has now failed, on four arms of one mesh, to identify a partition that destroys the run.
+
+---
+
+## ⭐⭐⭐ Finding 35 — dars on GPU: −18.6 %, the largest result in the campaign
+
+Job 26893037, dars 64 GPU ranks (16 nodes), **dt 120 = the dars cold-start ladder dt**, min-of-2,
+against the shipped partition. The three arms that "all died" in job 26884452 were dying of the
+production dt, not of their decompositions (Finding 33):
+
+| arm | s/step | vs base | rep spread |
+|---|--:|--:|--:|
+| base (shipped) | 0.1400 | — | 0.7 % |
+| `MINCONN`+`CONTIG` | 0.1235 | −11.79 % | 0.2 % |
+| `MINCONN` | 0.1209 | −13.64 % | 0.2 % |
+| **`MINCONN`+`CONTIG`+`UFACTOR=30`** | **0.1139** | **−18.64 %** | **0.0 %** |
+
+Every arm beats the shipped partition, and the best one by nearly a fifth of the step. This is
+consistent with the mechanism established in Finding 27: on GPU the currency is the **number of
+communication partners**, and `MINCONN` is the only METIS objective that targets it — a knob that
+`PartGraphRecursive` silently ignores, so it has never been active in any FESOM partition ever
+generated.
+
+Note the ordering flips against CPU: at dars 2048 CPU the winner is `MINCONN` alone (−4.53 %) and
+adding `CONTIG`+slack costs a point; on GPU adding them **gains** five points. The backend split
+holds all the way to the largest mesh points measured.
+
+## NG5 CPU 2048 is a null point for the partition lever
+
+With the trace job complete (26893204), the full NG5 CPU picture at the ladder dt 180:
+
+| arm | outcome |
+|---|---|
+| base | 1.2268 s/step |
+| `UFACTOR=30` | +0.87 % |
+| `MINCONN` re-rolled seed | +0.94 % (150 steps clean) |
+| `MINCONN` | **BLOWUP at step 71** (`uv=5.674e+01`) |
+| `MINCONN`+`CONTIG`+u30 | **BLOWUP at step 63** (`uv=1.161e+02`) |
+
+No arm wins, one arm re-rolls into a healthy but pointless partition, and two blow up. NG5 at 2048
+CPU ranks is where the lever has nothing to offer — recorded as a null, not as a gap.
