@@ -16,7 +16,7 @@ actually been proven, and **an un-screened gain is not a recommendation**:
 | stability-clean, accuracy FAILED → do not ship | fArc 16 GPU · CORE2 864 CPU (Finding 44 follow-up, job 26904986) |
 | **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
 | **screened ✅, accuracy gate running** | dars 64 GPU (**−19.7 % at 3,000 steps**, job 26895260) |
-| raced only, never screened → **not yet a result** | NG5 64 GPU |
+| re-raced at the ladder dt ✅ (−9.7 %), screen + accuracy gate running | NG5 64 GPU (3 of 4 alternates diverge there — see adoption procedure) |
 | measured null | NG5 2048 CPU |
 
 ## The short version
@@ -50,7 +50,7 @@ matters.
 | mesh | backend | ranks | setting | gain | gated |
 |---|---|--:|---|--:|---|
 | dars | GPU | 64 | `MINCONN`+`CONTIG`+`UFACTOR=30` | **−19.7 %** | stability ✅ (3,000 steps, grew from −18.6 %) · accuracy gate running |
-| NG5 | GPU | 64 | `MINCONN` | −10.0 %* | pending |
+| NG5 | GPU | 64 | `MINCONN` | **−9.7 %** | re-earned at ladder dt 180 (spread 0.0 %) · screen + accuracy gate running |
 | CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ accuracy (4 controls) + stability |
@@ -61,9 +61,10 @@ matters.
 | CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ accuracy + stability |
 | NG5 | CPU | 2048 | — | **null** | — |
 
-\* measured at production dt 240, not the NG5 ladder dt 180. The re-race was cancelled to
-free its 16-node GPU slot for the dars GPU screen (Finding 39), so this number stays
-provisional.
+At the NG5 re-race (ladder dt 180) the three alternate arms — `MINCONN`+`CONTIG`, +`UFACTOR=30`,
+and slack — all diverged within 300 steps in both reps while `MINCONN` ran clean at −9.7 %:
+NG5 is the most partition-fragile mesh in the campaign, and the adoption screen is doing exactly
+the work Finding 45 says it must.
 
 ## The two rules that fall out of it
 
