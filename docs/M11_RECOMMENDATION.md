@@ -15,7 +15,8 @@ actually been proven, and **an un-screened gain is not a recommendation**:
 | **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU · **dars 2048 CPU (KaMinPar)** |
 | stability-clean, accuracy FAILED → do not ship | fArc 16 GPU · CORE2 864 CPU (Finding 44 follow-up, job 26904986) |
 | **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
-| **screened ✅, accuracy gate running** | dars 64 GPU (**−19.7 % at 3,000 steps**, job 26895260) |
+| stability ✅, accuracy **FAILED** (5 controls) → do not ship | dars 64 GPU `MINCONN`+`CONTIG`+u30 (−19.7 %): temp rms +13 %, temp max ×1.8–2.5 the class |
+| stability ✅, in class except ssh rms (+11 %, stopping mechanism) | dars 64 GPU **`MINCONN` alone (−14.3 %)** — exception decision pending (user) |
 | **screened ✅ (−9.8 % at 3,000 steps), accuracy gate running** | NG5 64 GPU (3 of 4 alternates diverge at the ladder dt — see adoption procedure) |
 | measured null | NG5 2048 CPU |
 
@@ -27,9 +28,9 @@ maximum number of neighbouring sub-domains — is **never set anywhere in `fort_
 partition produced by stock FESOM has ever had it active.
 
 We measure `MINCONN` as the single most valuable partitioning knob available on GPU: it is the
-best or near-best arm at every GPU point measured, and the largest gain is **−19.7 % of the
-model step** (dars, 64 GPU — clean at 3,000 steps; accuracy gate in progress; see the evidence
-table above). Switching the call to `PartGraphKway` is a few lines.
+best or near-best arm at every GPU point measured. The largest *in-contention* gain is
+**−14.3 %** (dars 64 GPU, `MINCONN` alone; the −19.7 % three-knob arm failed its accuracy gate).
+Switching the call to `PartGraphKway` is a few lines.
 
 The campaign has also seen four partitions fail at length (Findings 34, 39, 45) — three from
 `MINCONN`-family arms and one from **the stock shipped recipe itself** (a seed-only re-roll,
@@ -49,7 +50,8 @@ matters.
 
 | mesh | backend | ranks | setting | gain | gated |
 |---|---|--:|---|--:|---|
-| dars | GPU | 64 | `MINCONN`+`CONTIG`+`UFACTOR=30` | **−19.7 %** | stability ✅ (3,000 steps, grew from −18.6 %) · accuracy gate running |
+| ~~dars~~ | ~~GPU~~ | ~~64~~ | ~~`MINCONN`+`CONTIG`+u30~~ | ~~−19.7 %~~ | 🔴 **accuracy FAILED (5 controls; temp max ×1.8–2.5 class) — do not ship** |
+| dars | GPU | 64 | `MINCONN` alone | **−14.3 %** | stability ✅ · in class except ssh rms +11 % (stopping mechanism) — exception decision pending |
 | NG5 | GPU | 64 | `MINCONN` | **−9.7 %** | stability ✅ (−9.8 % at 3,000 steps) · accuracy gate running |
 | CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
