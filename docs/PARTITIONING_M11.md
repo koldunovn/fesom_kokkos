@@ -2619,3 +2619,53 @@ and its lead over slack is 1.1 pp, so the ordering between those two is real but
 
 **None of this becomes a recommendation until the screens land.** The withdrawn `MINCONN` arm had
 a better raced number (−4.53 %) than any survivor here.
+
+---
+
+## ⭐⭐⭐ Finding 42 — the GPU lever TRANSFERS to GH200, and it is LARGER there
+
+Jobs 26900890 (min-of-2) and 26901093 (min-of-3) on **dolpung** (GH200, 1 node = 4 GPUs), CORE2 at
+dt 1800, 300 steps, `FESOM_SPEED=1` + `FESOM_HALO_STAGE=1`, GH200 build `e3c0bb64`. Both jobs
+8/8 and 12/12 legs rc=0.
+
+| arm | dolpung min-of-3 | dolpung min-of-2 | **A100 at protocol length** |
+|---|--:|--:|--:|
+| base | 0.0563 | 0.0569 | — |
+| `MINCONN` | **−8.88 %** | −9.49 % | −8.06 % |
+| `MINCONN`+`CONTIG`+`UFACTOR=30` | **−8.70 %** | −9.31 % | −7.91 % |
+| `MINCONN`+`CONTIG` | **−5.68 %** | −5.80 % | −2.54 % |
+
+The two independent jobs agree within 0.6 pp on every arm, so the ordering and the magnitudes are
+real.
+
+### This is the mechanism's prediction, on hardware it was not derived from
+
+Findings 27 and 37 established on **A100** that the GPU pays per communication **message**, not per
+byte. dolpung's fabric cannot register CUDA memory — there is no GPUDirect, and every halo travels
+device → pinned host → MPI → pinned host → device under `FESOM_HALO_STAGE=1`. That inserts a
+per-message staging cost the A100 path never pays, so a per-message lever should pay **more** on
+GH200. It does, and the clearest signal is `MINCONN`+`CONTIG`, which more than doubles from
+−2.54 % to −5.68 %.
+
+⇒ **The partition lever is not an A100 artefact.** It is a property of a distributed GPU ocean
+model, and it grows on a fabric with a worse per-message cost. For the JUPITER-class target that
+is the good direction.
+
+### Two caveats
+
+🔴 **The baseline is the noisy leg, not the arms.** Base rep spread is 3.7 % (min-of-2) and 4.6 %
+(min-of-3); every arm is 0.2–0.9 %. min-of-N takes the *lowest* base time, so a noisy base
+**understates** the gain — these numbers are conservative, not flattered. But it is a real
+asymmetry and worth a thought: the shipped partition has the most communication partners, which is
+exactly the quantity a shared fabric perturbs.
+
+🔴 **Not comparable in absolute terms.** The GH200 legs run a different binary on different
+silicon; only the arm-vs-arm ratios travel. The job prints that warning under its own table.
+
+### Trap banked: the x86 binary on an aarch64 node
+
+Job 26900890 ran every model leg correctly and printed **no summary at all**: this account's conda
+`python3` sits early in PATH and is x86, so it died with `cannot execute binary file` on the
+Grace node. `env_dolpung.sh` documents exactly this class for `git` — but it strips
+`/sw/spack-levante/`, and cannot know about a user's own PATH entries. The summary now uses `awk`
+from `/usr/bin`, which cannot have the problem.
