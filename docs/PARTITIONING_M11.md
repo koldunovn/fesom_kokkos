@@ -2319,3 +2319,38 @@ With the trace job complete (26893204), the full NG5 CPU picture at the ladder d
 
 No arm wins, one arm re-rolls into a healthy but pointless partition, and two blow up. NG5 at 2048
 CPU ranks is where the lever has nothing to offer — recorded as a null, not as a gap.
+
+---
+
+## ⭐⭐ Finding 36 — the NG5 blow-up is a STABILITY-MARGIN failure: halving dt saves the same partition
+
+Job 26893393, NG5 2048 CPU, the **same `a4m` partition that blew up at step 71**, run at dt 90 for
+300 steps — the identical span of model time (27,000 s):
+
+| | base | `a4m` |
+|---|--:|--:|
+| at dt 180, 150 steps | clean, uv 2.11 | **BLOWUP at step 71**, uv 5.67e+01 |
+| at dt 90, 300 steps | clean, uv 2.12 | **clean**, uv 2.71 |
+
+So the partition is not carrying a broken operator — the model integrates it happily with a
+smaller timestep over exactly the interval in which it exploded. It is a **stability-margin**
+failure: this decomposition sits close enough to the edge that the ladder dt tips it over.
+
+The honest caveat: `a4m`'s max|u| stays ~28 % above the baseline's throughout the dt-90 run
+(2.71 vs 2.12) while eta agrees to 3.5 %. A domain maximum is an extreme-value statistic and two
+valid solutions of a chaotic system may differ that much in it, so this is suggestive of a local
+hot spot rather than proof of one. What is not in doubt is the practical conclusion.
+
+### The open question this raises is not about the partition
+
+`base` at NG5/dt 180 has only ever been proven to **150 steps** in this campaign. If a
+repartitioning can cross the stability edge there, the margin at that mesh × dt is thinner than
+anyone has measured — which is a rule-0.41 question for **every** track that runs NG5, not only
+M11. Job 26893909 runs the NG5 baseline for 3,000 steps at dt 180 to settle it.
+
+### Consolidated NG5 remedy
+
+Three independent routes now restore the arm: **re-roll the METIS seed** (Finding 34, free),
+**halve the timestep** (this finding, costly), or **accept the null** (NG5 CPU has no winning arm
+anyway). For the GPU point, where NG5/`MINCONN` is worth −9.96 %, the seed re-roll is the route
+and job 26893649 re-races all arms at the ladder dt 180.
