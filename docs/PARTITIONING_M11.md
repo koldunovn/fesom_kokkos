@@ -3031,3 +3031,11 @@ envelope**: `dist_64` for seeds 550007/660013 (partgens 26908838/39), re-gate jo
 chained behind the NG5 screen and gate. If the arms stay out at five controls, the campaign's
 largest speed result fails its accuracy gate under the ratified yardstick, and the page will say
 exactly that.
+
+## NG5 64 GPU: the `a4m` screen PASSES (job 26908635)
+
+Base and `MINCONN` both clean through 3,000 steps at the ladder dt 180, matching global
+diagnostics at step 3,000 (eta 1.93, identical T/S ranges, same SSH iteration count 65; the
+uv/w=0.00 print artifact as in job 26895260). In-allocation: base 0.2398, `a4m` 0.2164 s/step —
+**−9.76 %**, confirming the race's −9.71 % at length. Stability column ✅; the accuracy gate
+(26908636) is the point's last requirement.
