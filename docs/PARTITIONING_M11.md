@@ -2520,3 +2520,32 @@ and the evidence to restore it does not.
 🔴 And the campaign-wide caveat: **every number in this campaign that has not been through a
 3,000-step screen is now suspect, not merely ungated.** Five points have passed it (Finding 32);
 `dars` CPU has failed it; the rest are unproven. That is the honest state.
+
+### Finding 39, continued — three of four dars CPU arms fail the screen, and the failure is PER RANK COUNT
+
+Job 26894629, dars 2048 CPU, dt 120, printing every 25 steps:
+
+| arm | knobs | outcome at 3,000 steps |
+|---|---|---|
+| base | shipped | clean (job 26893944) |
+| `a4m` | `MINCONN` | **diverges just after step 525** |
+| `a4u30` | `MINCONN`+`CONTIG`+`UFACTOR=30` | **BLOWUP at step 25** |
+| `a4` | `MINCONN`+`CONTIG` | **clean past step 2,200** (running) |
+
+Two things follow, and the second is the one that matters most.
+
+**1. `MINCONN`+`CONTIG` is the surviving dars CPU arm — and it was never raced there.** The
+150-step dars CPU race (job 26885210) carried base, `MINCONN`, slack, `MINCONN`+`CONTIG`+slack and
+KaMinPar; the one combination that survives protocol length was not among them. The campaign
+raced four arms at this point and screened a different four.
+
+**2. The fragility is a property of (arm, rank count), not of the arm.** `a4u30` is the **dars GPU
+winner at −18.64 %**, measured on its `dist_64`. Its `dist_2048` blows up at step 25. Those are
+different partitions produced by the same knobs, so the GPU number is not refuted by this — but
+it does mean the −18.6 % headline rests on a partition that has never been screened, and its
+sibling at another rank count is the most violently unstable partition in the campaign.
+
+⇒ Job 26895260 screens the dars **GPU** arms at 3,000 steps. The queued NG5 GPU re-race was
+cancelled to free the 16-node GPU slot for it: re-confirming a −9.96 % at a different dt is worth
+less than finding out whether the campaign's largest number survives two model months.
+⇒ Job 26895261 screens `dars/a4m_seedb`, the seed re-roll, to test whether the NG5 remedy transfers.
