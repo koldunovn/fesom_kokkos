@@ -5,13 +5,21 @@ One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–36); the per-ra
 
 ## The short version
 
-FESOM's mesh partitioner calls METIS through `PartGraphRecursive`, which **silently ignores three
-of the options the code sets**. One of them, `MINCONN` — minimise the maximum number of
-neighbouring sub-domains — turns out to be the single most valuable partitioning knob we have on
-GPU, worth up to **−18.6 % of the model step**. It has never been active in any FESOM partition
-ever generated.
+FESOM's mesh partitioner calls METIS through `METIS_PartGraphRecursive`, and that choice makes
+three METIS options unavailable: `OBJTYPE=VOL`, `CONTIG` and `MINCONN`. `MINCONN` — minimise the
+maximum number of neighbouring sub-domains — is **never set anywhere in `fort_part.c`**, so no
+partition produced by stock FESOM has ever had it active.
 
-Switching the call to `PartGraphKway` is a few lines. Everything below follows from that.
+We measure `MINCONN` as the single most valuable partitioning knob available on GPU, worth up to
+**−18.6 % of the model step**. Switching the call to `PartGraphKway` is a few lines.
+
+To be fair to the original authors, this is a documented choice rather than an oversight:
+`fort_part.c:328-355` records that `PartGraphRecursive` "resulted in a far better partition than
+Kway" on one test mesh (`mesh_aguv`, `wgt_type=2`), notes that "there is no rule which one works
+best", and carries explicit comments that `CONTIG` is "ignored by METIS_PartGraphRecursive" and
+that "`_VOL` only works with `METIS_PartGraphKway`". What has changed since is the hardware: the
+comparison predates GPU backends, and on GPU the objective those options serve is the one that
+matters.
 
 ## Measured gains (min-of-N, matched same-day pairs, each mesh at its cold-start ladder dt)
 

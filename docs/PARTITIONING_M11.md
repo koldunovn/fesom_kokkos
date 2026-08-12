@@ -2354,3 +2354,28 @@ Three independent routes now restore the arm: **re-roll the METIS seed** (Findin
 **halve the timestep** (this finding, costly), or **accept the null** (NG5 CPU has no winning arm
 anyway). For the GPU point, where NG5/`MINCONN` is worth −9.96 %, the seed re-roll is the route
 and job 26893649 re-races all arms at the ladder dt 180.
+
+---
+
+## 🔴 Correction — how the `MINCONN` claim must be worded upstream
+
+Three places above say `MINCONN` "has never been active in any FESOM partition ever generated,
+because `PartGraphRecursive` silently ignores it" (lines ~1865, ~1971, ~2301). The conclusion is
+right; the word **silently** is not, and it would not survive review on the upstream PR.
+
+Read `fort_part.c:326-355` verbatim:
+
+* `MINCONN` is **never set at all** — not set-and-ignored. So "no stock-FESOM partition has ever
+  had it active" is true, and true for a simpler reason than we wrote.
+* `CONTIG` **is** set, to `0`, with the comment `/* Ignored by METIS_PartGraphRecursive */`.
+* `OBJTYPE` is set to `CUT`, with the comment `/* But: _VOL only works with METIS_PartGraphKway*/`.
+* The choice of Recursive is documented and reasoned: it "resulted in a far better partition than
+  Kway" on `mesh_aguv` with `wgt_type=2`, and "there is no rule which one works best".
+
+So the authors knew exactly which options their call gives up and wrote it down. What has changed
+is the hardware: that comparison predates GPU backends, and the objective those options serve —
+partner count — is the one that dominates on GPU (Finding 27).
+
+⇒ **Upstream wording:** "`PartGraphRecursive` cannot use `OBJTYPE=VOL`, `CONTIG` or `MINCONN`;
+the last is never set in the code. On GPU `MINCONN` is worth up to −18.6 %, so the Recursive-vs-Kway
+comparison recorded in the comments is worth re-running on modern hardware." Not "silently ignores".
