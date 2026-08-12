@@ -28,13 +28,34 @@ SUMROW = re.compile(r"^\s{2}(\S+)\s+([\d.]+)\s+([\d.]+)%\s*([-+][\d.]+ %)?\s*$")
 FAILROW = re.compile(r"^\s{2}(\S+)\s+FAILED\s*$")
 REPROW = re.compile(r"^\s{2}(\S+)\s+rep(\d+)\s+rc=(\d+)\s+s/step=(\S+)")
 
-# The sandbox directory name identifies the mesh; the zoo path carries it one level deeper.
-MESHNAME = re.compile(r"/mesh_m11/(?:zoo/)?([a-z0-9]+?)(?:_m11|_base|_seed\d*|_hil|_rcm)?(?:/|$)")
+# The sandbox directory name identifies the mesh; the zoo path carries it one level deeper. A few
+# session-2 arms point at the PRIVATE mesh tree (/port2/mesh/...) rather than the M11 sandbox, so
+# match that too and flag it — an arm whose mesh files come from a different tree is not covered
+# by the race job's "only the partition differs" md5 check.
+MESHNAME = re.compile(
+    r"/(mesh_m11|mesh)/(?:zoo/)?([a-z0-9]+?)(?:_m11|_base|_seed\d*|_hil|_rcm|_wgt\d*)?(?:/|$)")
 
 
-def mesh_of(path):
+def mesh_and_tree(path):
     m = MESHNAME.search(path)
-    return m.group(1) if m else "?"
+    if not m:
+        return "?", "?"
+    return m.group(2), ("sandbox" if m.group(1) == "mesh_m11" else "private")
+
+
+# The cold-start ladder timestep per mesh. A race at any other dt is not a protocol run: three of
+# this campaign's "failures" were a production dt applied to a cold start, and one of them cost
+# the baseline itself (Finding 33). Rows at the wrong dt are kept but flagged, never silently
+# folded into a verdict.
+LADDER_DT = {"core2": 1800, "farc": 900, "dars": 120, "ng5": 180}
+
+
+def base_mesh(name):
+    """core2hil and core2 share a ladder; the suffix marks the numbering, not the mesh."""
+    for k in LADDER_DT:
+        if name.startswith(k):
+            return k
+    return name
 
 
 def parse(path):
@@ -92,7 +113,8 @@ def parse(path):
             continue
         t, st = rows[a]
         d = 100 * (t / b - 1) if (t == t and b == b and b) else float("nan")
-        out.append(dict(job=job, backend=backend, mesh=mesh_of(meshes.get(a, "")), ranks=h["ranks"],
+        mname, tree = mesh_and_tree(meshes.get(a, ""))
+        out.append(dict(job=job, backend=backend, mesh=mname, tree=tree, ranks=h["ranks"],
                         nodes=h["nodes"], dt=h["dt"], steps=h["steps"], reps=h["reps"],
                         arm=a, is_base=(a == base), s_step=t, delta_pct=d, status=st,
                         meshdir=meshes.get(a, "")))
@@ -106,6 +128,8 @@ def main():
     ap.add_argument("--mesh")
     ap.add_argument("--backend", choices=["cpu", "gpu"])
     ap.add_argument("--min-steps", type=int, default=0)
+    ap.add_argument("--best", action="store_true",
+                    help="per (mesh, backend, ranks): the best arm among PROTOCOL runs only")
     a = ap.parse_args()
 
     rows = []
@@ -119,6 +143,33 @@ def main():
         rows = [r for r in rows if r["steps"] >= a.min_steps]
     if not rows:
         sys.exit("no race rows matched")
+
+    for r in rows:
+        r["ladder_dt"] = LADDER_DT.get(base_mesh(r["mesh"]))
+        r["protocol"] = (r["ladder_dt"] is None or r["dt"] == r["ladder_dt"])
+
+    if a.best:
+        pts, off = {}, 0
+        for r in rows:
+            if not r["protocol"]:
+                off += 1
+                continue
+            if r["is_base"] or r["status"] != "ok":
+                continue
+            k = (base_mesh(r["mesh"]), r["backend"], r["ranks"])
+            if k not in pts or r["delta_pct"] < pts[k]["delta_pct"]:
+                pts[k] = r
+        print(f"  {'mesh':<8}{'backend':<9}{'ranks':>7}  {'best arm':<20}{'gain':>9}{'steps':>7}  job")
+        for k in sorted(pts, key=lambda k: (k[1], k[0], k[2])):
+            r = pts[k]
+            num = "" if r["mesh"] == k[0] else f"  [{r['mesh']}]"
+            if r["tree"] != "sandbox":
+                num += f"  !! mesh files from the {r['tree']} tree"
+            print(f"  {k[0]:<8}{k[1]:<9}{k[2]:>7}  {r['arm']:<20}{r['delta_pct']:>8.2f}%"
+                  f"{r['steps']:>7}  {r['job']}{num}")
+        print(f"\n  {off} row(s) excluded: raced at a dt other than the mesh's cold-start ladder dt "
+              f"({', '.join(f'{m}={d}' for m, d in LADDER_DT.items())}).")
+        return 0
 
     key = lambda r: (r["mesh"], r["backend"], r["ranks"], r["job"], not r["is_base"])
     rows.sort(key=key)
