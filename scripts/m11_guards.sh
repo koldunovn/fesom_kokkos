@@ -360,37 +360,61 @@ _m11_evidence_for() {
 }
 
 m11_promote() {
-    local src="" name="" evidence="" dists=()
+    # --src may be repeated: it applies to every dist_N named after it, until the next --src.
+    # The campaign's central result is that the best setting is rank-dependent, so the CPU winner
+    # at 512 ranks and the GPU winner at 4 ranks routinely come from DIFFERENT arms of the same
+    # mesh. A certified mesh has to be able to carry both.
+    local name="" evidence="" src="" dists=() srcs=()
     while [ $# -gt 0 ]; do
         case "$1" in
             --src)      src=${2:?--src needs a value}; shift 2 ;;
             --name)     name=${2:?--name needs a value}; shift 2 ;;
             --evidence) evidence=${2:?--evidence needs a value}; shift 2 ;;
-            dist_*)     dists+=("$1"); shift ;;
+            dist_*)     [ -n "$src" ] || m11_die "m11_promote: $1 named before any --src"
+                        dists+=("$1"); srcs+=("$src"); shift ;;
             *) m11_die "m11_promote: unexpected argument '$1'" ;;
         esac
     done
-    [ -n "$src" ]  || m11_die "m11_promote needs --src <sandbox mesh dir>"
     [ -n "$name" ] || m11_die "m11_promote needs --name <new certified dir name>"
     [ -n "$evidence" ] || m11_die "m11_promote needs --evidence <file>"
     [ -f "$evidence" ] || m11_die "m11_promote: evidence file $evidence not found"
     [ ${#dists[@]} -gt 0 ] || m11_die "m11_promote: name at least one dist_N to promote"
 
-    # The source must be a sandbox mesh: promotion publishes campaign output, never production
-    # data and never something from outside the guarded tree.
-    local s; s=$(m11_assert_sandbox "$src" "promote source") || exit 1
-    [ -d "$s" ] || m11_die "promote source $s is not a directory"
-    m11_md5_check "$s" >/dev/null || exit 1
+    # Every source must be a sandbox mesh with a verified manifest — promotion publishes campaign
+    # output, never production data and never anything from outside the guarded tree.
+    local i s resolved=() first=""
+    for i in "${!dists[@]}"; do
+        s=$(m11_assert_sandbox "${srcs[$i]}" "promote source") || exit 1
+        [ -d "$s" ] || m11_die "promote source $s is not a directory"
+        m11_md5_check "$s" >/dev/null || exit 1
+        resolved[$i]=$s
+        [ -n "$first" ] || first=$s
+    done
+
+    # ...and every source must be the SAME mesh, or the promoted directory would carry mesh files
+    # from one arm and partitions built for another's numbering.
+    local f h0 hi
+    for f in "${M11_GATE_FILES[@]}"; do
+        h0=$(md5sum "$first/$f" | cut -d' ' -f1)
+        for i in "${!resolved[@]}"; do
+            hi=$(md5sum "${resolved[$i]}/$f" 2>/dev/null | cut -d' ' -f1)
+            [ "$hi" = "$h0" ] || m11_die "promote sources disagree on $f: \
+${resolved[$i]} vs $first — these are different meshes, not different partitions of one mesh"
+        done
+    done
+    s=$first
 
     local dst; dst=$(m11_assert_promote_root "$M11_PROMOTE_ROOT/$name" "promote target") || exit 1
     [ -e "$dst" ] && m11_die "promote target $dst already exists — promotion never overwrites; \
 pick a new name (core2_v3, ...) so nothing already pointing at $name changes underneath it"
 
     # Every dist must carry a passing smoke record AT ITS OWN RANK COUNT before it is copied.
-    local d line n bad=0
-    for d in "${dists[@]}"; do
+    local d line n bad=0 idx
+    for idx in "${!dists[@]}"; do
+        d=${dists[$idx]}
         n=${d#dist_}
-        [ -d "$s/$d" ] || { printf 'M11-GUARD: %s has no %s\n' "$s" "$d" >&2; bad=1; continue; }
+        [ -d "${resolved[$idx]}/$d" ] || {
+            printf 'M11-GUARD: %s has no %s\n' "${resolved[$idx]}" "$d" >&2; bad=1; continue; }
         line=$(_m11_evidence_for "$evidence" "$d")
         if [ -z "$line" ]; then
             printf 'M11-GUARD: no evidence line for %s in %s\n' "$d" "$evidence" >&2; bad=1; continue
@@ -412,7 +436,7 @@ pick a new name (core2_v3, ...) so nothing already pointing at $name changes und
             printf 'M11-GUARD: %s ran only %s steps, below the %s-step floor: %s\n' \
                    "$d" "$steps" "$M11_MIN_PROMOTE_STEPS" "$line" >&2; bad=1; continue
         fi
-        printf '  evidence ok  %-12s %s\n' "$d" "$line"
+        printf '  evidence ok  %-12s %-38s <- %s\n' "$d" "$line" "$(basename "${resolved[$idx]}")"
     done
     [ "$bad" = 0 ] || m11_die "promotion refused: $name is not fully evidenced (see above). \
 A dist_N without a passing run of >= $M11_MIN_PROMOTE_STEPS steps AT N RANKS is exactly the \
@@ -427,14 +451,17 @@ NG5/MINCONN case: no offline metric caught it, and neither would a smoke run."
     for f in "${M11_GATE_FILES[@]}" "${M11_EDGE_FILES[@]}"; do
         [ -f "$s/$f" ] && { cp -aL "$s/$f" "$tmp/$f" || m11_die "cp -aL failed for $f"; }
     done
-    for d in "${dists[@]}"; do
-        cp -aL "$s/$d" "$tmp/" || m11_die "cp -aL failed for $d"
+    for idx in "${!dists[@]}"; do
+        cp -aL "${resolved[$idx]}/${dists[$idx]}" "$tmp/" || m11_die "cp -aL failed for ${dists[$idx]}"
     done
     chmod -R u+w "$tmp" 2>/dev/null
     m11_assert_no_symlinks "$tmp"
     {
         printf '# M11 CERTIFIED mesh — promoted %s\n\n' "$(date '+%F %T')"
-        printf 'source     : %s\n' "$s"
+        printf 'mesh files : %s\n' "$s"
+        for idx in "${!dists[@]}"; do
+            printf 'partition  : %-12s <- %s\n' "${dists[$idx]}" "${resolved[$idx]}"
+        done
         printf 'promoted-by: scripts/m11_guards.sh m11_promote\n'
         printf 'commit     : %s\n' "$(git -C "${ROOT:-/home/a/a270088/port_kokkos_part}" rev-parse --short HEAD 2>/dev/null || echo unknown)"
         printf 'dists      : %s\n\n' "${dists[*]}"
@@ -550,6 +577,17 @@ m11_selftest() {
     m11_md5_write "$pdir" >/dev/null
     local ev=$scratch/evidence.txt
     printf 'dist_4  run=111 steps=3000 rc=0 race=222 delta=-7.5%%\ndist_8  race=333 delta=-1.0%%\n' > "$ev"
+    # A second arm dir of the SAME mesh, and a third that is a different mesh entirely.
+    local pdir2=$M11_SANDBOX_ROOT/.selftest_promote2
+    rm -rf "$pdir2"; mkdir -p "$pdir2/dist_32"
+    for f in "${M11_GATE_FILES[@]}" "${M11_EDGE_FILES[@]}"; do cp "$pdir/$f" "$pdir2/$f"; done
+    printf 'rpart\n' > "$pdir2/dist_32/rpart.out"
+    m11_md5_write "$pdir2" >/dev/null
+    local pdir3=$M11_SANDBOX_ROOT/.selftest_promote3
+    rm -rf "$pdir3"; mkdir -p "$pdir3/dist_64"
+    for f in "${M11_GATE_FILES[@]}" "${M11_EDGE_FILES[@]}"; do printf 'DIFFERENT %s\n' "$f" > "$pdir3/$f"; done
+    printf 'rpart\n' > "$pdir3/dist_64/rpart.out"
+    m11_md5_write "$pdir3" >/dev/null
     local saveroot=$M11_PROMOTE_ROOT
     M11_PROMOTE_ROOT=$scratch/../m11_guard_selftest.$$/promote_root
     _m11_expect_abort "promote root outside the sanctioned tree" \
@@ -568,11 +606,22 @@ m11_selftest() {
     _m11_expect_abort "promote source outside the sandbox" \
         m11_promote --src /pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc --name .selftest_t4 \
                     --evidence "$ev" dist_4
+    printf 'dist_32 run=777 steps=3000 rc=0 race=888 delta=-3.8%%\n' >> "$ev"
+    printf 'dist_64 run=999 steps=3000 rc=0\n' >> "$ev"
+    _m11_expect_abort "two --src that are different MESHES" \
+        m11_promote --name .selftest_t6 --evidence "$ev" \
+                    --src "$pdir" dist_4 --src "$pdir3" dist_64
+    _m11_expect_abort "dist_ named before any --src" \
+        m11_promote --name .selftest_t7 --evidence "$ev" dist_4 --src "$pdir"
     _m11_expect_pass  "promote dist_4 (evidenced)" \
         m11_promote --src "$pdir" --name .selftest_ok --evidence "$ev" dist_4
+    # The campaign's actual shape: rank-dependent winners from DIFFERENT arms of one mesh.
+    _m11_expect_pass  "promote dist_4 + dist_32 from two arms" \
+        m11_promote --name .selftest_multi --evidence "$ev" \
+                    --src "$pdir" dist_4 --src "$pdir2" dist_32
     _m11_expect_abort "promote refuses to overwrite" \
         m11_promote --src "$pdir" --name .selftest_ok --evidence "$ev" dist_4
-    rm -rf "$pdir" "$M11_PROMOTE_ROOT/.selftest_ok"
+    rm -rf "$pdir" "$pdir2" "$pdir3" "$M11_PROMOTE_ROOT/.selftest_ok" "$M11_PROMOTE_ROOT/.selftest_multi"
 
     rm -rf "$scratch"
     echo
