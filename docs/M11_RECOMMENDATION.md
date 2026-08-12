@@ -12,9 +12,9 @@ actually been proven, and **an un-screened gain is not a recommendation**:
 
 | status | points |
 |---|---|
-| **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU |
+| **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU · **dars 2048 CPU (KaMinPar)** |
 | stability-clean, accuracy FAILED → do not ship | fArc 16 GPU · CORE2 864 CPU (Finding 44 follow-up, job 26904986) |
-| **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (survivors re-gating) |
+| **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
 | raced only, never screened → **not yet a result** | dars 64 GPU (−18.6 %) · NG5 64 GPU |
 | measured null | NG5 2048 CPU |
 
@@ -52,7 +52,7 @@ matters.
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ accuracy (4 controls) + stability |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.8 %** | ✅ accuracy + stability |
-| dars | CPU | 2048 | `MINCONN`+`CONTIG` | racing | screen ✅ — speed being re-raced |
+| dars | CPU | 2048 | **KaMinPar `w=100+nlev`** | **−4.2 %** | ✅ accuracy (below every control on temp/salt) + 3,000-step stability |
 | ~~dars~~ | ~~CPU~~ | ~~2048~~ | ~~`MINCONN`~~ | ~~−4.5 %~~ | 🔴 **FAILS the 3,000-step screen — withdrawn** |
 | CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | −4.1 % | stability ✅ (−4.9 % at length) · 🔴 **accuracy FAILED (salt, 5-control envelope) — not recommended** |
 | CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ accuracy + stability |
