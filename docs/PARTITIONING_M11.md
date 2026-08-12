@@ -2624,6 +2624,9 @@ a better raced number (−4.53 %) than any survivor here.
 
 ## ⭐⭐⭐ Finding 42 — the GPU lever TRANSFERS to GH200, and it is LARGER there
 
+> 🔴 **Narrowed by Finding 44** (same day): this holds at **single-node** scale. At 4 and 16
+> dolpung nodes the lever is null-to-small, and the pre-registered dars prediction failed.
+
 Jobs 26900890 (min-of-2) and 26901093 (min-of-3) on **dolpung** (GH200, 1 node = 4 GPUs), CORE2 at
 dt 1800, 300 steps, `FESOM_SPEED=1` + `FESOM_HALO_STAGE=1`, GH200 build `e3c0bb64`. Both jobs
 8/8 and 12/12 legs rc=0.
@@ -2743,3 +2746,75 @@ strength of a min-of-2 result I had *in the same breath* called unresolvable. `a
 wins −3.59 % on A100 — the entire fArc question. So job 26902142 tightened the statistics on three
 arms while omitting the one that matters, and the fArc/GH200 question is **still open**.
 Job 26903022 redoes it with `a4` in and min-of-5.
+
+---
+
+## 🔴🔴 Finding 44 — the dars/GH200 prediction FAILS, and the GH200 amplification is so far a SINGLE-NODE phenomenon
+
+Both dolpung jobs landed (2026-08-12 evening). Together they overturn the reading of Finding 42
+that most wanted to be true.
+
+### The pre-registered prediction is wrong
+
+Job 26901899 — dars, 64 ranks over **16 nodes**, dt 120 (ladder), 150 steps, min-of-2:
+
+| arm | reps (s/step) | min | median | vs base by min | vs base by median |
+|---|---|--:|--:|--:|--:|
+| base | 0.0618 0.0649 | 0.0618 | 0.0634 | — | — |
+| `MINCONN` | 0.0668 0.0575 | 0.0575 | 0.0622 | −6.96 % | −1.89 % |
+| `MINCONN`+`CONTIG`+u30 | 0.0622 0.0611 | 0.0611 | 0.0617 | **−1.13 %** | **−2.68 %** |
+
+The registered claim was: the u30 arm *"should beat its A100 −18.64 %, and should be the largest
+partition gain measured anywhere in this campaign."* It comes back at −1 to −3 % depending on the
+estimator. min-of-2 at these spreads (base 5.0 %, `MINCONN` 16.2 %) cannot resolve a few per cent
+— but it cannot hide eighteen. The prediction fails decisively, and per the rule this campaign set
+for itself, **the partner-count story does not transfer unqualified to GH200.**
+
+### fArc closes as a null, on clean statistics this time
+
+Job 26903022 — fArc, 16 ranks over 4 nodes, dt 900, 300 steps, **min-of-5 with `a4` present**
+(repairing the dropped-arm error recorded under Finding 43):
+
+| arm | min | median | vs base by min | vs base by median |
+|---|--:|--:|--:|--:|
+| base (spread 7.3 %) | 0.0744 | 0.0771 | — | — |
+| `a4` = `MINCONN`+`CONTIG`, the A100 winner | 0.0755 | 0.0765 | +1.48 % | **−0.78 %** |
+| `a4c` = `CONTIG` | 0.0760 | 0.0774 | +2.15 % | +0.39 % |
+
+By median — the honest estimator here, since the baseline is again the noisiest leg — every arm
+is within ±0.8 % of base. The expected ~3.6 % (the A100 value) is absent, not merely unresolved:
+five reps put the noise floor near 1 %, and nothing shows above it. **fArc/GH200 = null, closed.**
+(It changes no recommendation: fArc 16 GPU was already out on its A100 accuracy gate, Finding 38.)
+
+### What survives of Finding 42
+
+| dolpung point | nodes | traffic | result |
+|---|--:|---|--:|
+| CORE2 4 ranks | 1 | intra-node only | **−8.88 %**, > A100, twice reproduced |
+| fArc 16 ranks | 4 | mixed | null (±0.8 % by median, min-of-5) |
+| dars 64 ranks | 16 | overwhelmingly inter-node | −1…−3 %, vs −18.64 % on A100 |
+
+The amplification Finding 42 celebrated is real but **only demonstrated where every message stays
+inside one node** (`cuda_ipc` under the staged transport). The moment the halo rides `dc_mlx5`
+between nodes, the per-message premium mostly vanishes — which is exactly the fallback the
+pre-registration named, and is consistent with the staging picture: the device→pinned-host copy
+is per-message, but from pinned host outward an inter-node message costs what any CPU-side MPI
+message costs, and that fabric is built to swallow message counts.
+
+Consequences, in order of what they touch:
+
+1. **Finding 42's headline is hereby narrowed**: "the lever transfers to GH200 and grows there"
+   → "the lever transfers to GH200 **at single-node scale** and grows there; at 4 and 16 nodes it
+   is null-to-small on this fabric."
+2. **The A100 numbers are untouched** — dars 64 = −18.64 % (screen running tonight, 26895260)
+   was measured on the production machine at the production point, and the A100 fabric (GPUDirect
+   RDMA) is the one where the per-message cost lives in the GPU path.
+3. **For JUPITER the honest statement shrinks**: dolpung's multi-node fabric is exactly the part
+   of dolpung that is *unlike* JUPITER (no GPUDirect there, GPUDirect on JUPITER), so the
+   multi-node null does not condemn the lever on JUPITER — but the "and it grows on GH200" line
+   may no longer be quoted as evidence for it. What remains quotable: the lever is not an A100
+   artefact (it reproduces on different silicon, a different fabric, and a different transport at
+   1 node), and on A100 it grows with scale up to −18.6 % at 64 ranks.
+4. `nbr_max` (Finding 43) keeps its ordering role **within a machine**; across machines the
+   coefficient in front of it is fabric-dependent and can be ~0.
+
