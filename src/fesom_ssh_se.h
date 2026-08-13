@@ -36,6 +36,7 @@ struct fesom_partit;
 /* Cached knob reads (abort on unrecognised values). */
 int fesom_se_on(void);
 int fesom_se_m(void);
+int fesom_se_check_on(void);   /* FESOM_SE_CHECK diagnostic family (unset/0 = off) */
 
 /* Parse-time guards (zstar requirement, incompatible diagnostics). Call once,
  * right after fesom_ale_mode_init() — needs no mesh. */

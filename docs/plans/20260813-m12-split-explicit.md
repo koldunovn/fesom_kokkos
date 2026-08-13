@@ -64,9 +64,12 @@ follow-up phase, not to the SE payoff threshold.)
   No F modification, no double-counting against the 3-D biharmonic inside R̄, by construction.
 - **D4 first-order barotropic forcing:** F is at time n (notes accept this; "AB extrapolation can
   be tried" = future knob, not v1). Exception: the **Coriolis part of the r-term uses the same
-  AB2-weighted transport sum as the 3-D momentum RHS** (mirroring Zenodo `UVBT_4AB`,
-  oce_ale_vel_rhs.F90:175-191, incl. the first-step ab1=1.0 case — port twin
-  fesom_momentum.cpp:546) so the Coriolis cancellation is exact, not O(f·ΔŪ).
+  AB2 weights as the 3-D momentum RHS** — our port's weights (fesom_momentum.cpp:77-78,131):
+  old couplet ×−(0.5+ε), new ×+(1.5+ε), first step ×1.0. Implementation detail (refined at T2:
+  our `uv_rhsAB` mixes Coriolis with momentum advection, so the Zenodo `UVBT_4AB` mirror is not
+  directly available): Ū_AB2 = ab2·Σₖhⁿ·uv^{n−1/2} + ab1·`se_Ubt_prev`, where `se_Ubt_prev` is
+  last step's stored 2-D transport sum (Σₖh^{n−1}·uv^{n−3/2}). The h-lag on the old term makes
+  the cancellation second-order-exact (error ∝ Δh·Δu) at zero 3-D storage cost.
 - Bottom drag: **not implemented in v1** (the Zenodo snapshot ships it disabled too); tidal work
   adds the code and its knob together.
 
@@ -204,21 +207,23 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ### Task 2: Deterministic 2-D operators (div gather CSR, grad check, viscosity adjacency)
 **Files:** Modify `src/fesom_ssh_se.cpp` (+`.h`).
-- [ ] Host-side one-time assembly from `edges/edge_tri/edge_cross_dxdy`: per-node CSR of
-      (adjacent elem, cx, cy) with div_n = (1/A_n)Σ Ū_e·(cx,cy); fringe/boundary edges per the
-      fesom_mesh.h:36-41 warning; push to device Fields. A_n = `areasvol` at the surface level
-      (the SSH convention in fesom_ssh.cpp).
-- [ ] Verify the element P1 gradient convention (`gradient_sca` vertex ordering vs
-      `elem2D_nodes`) against the existing momentum-RHS usage (fesom_momentum.cpp:517-534).
-- [ ] elem→3-edges adjacency (owned elements; boundary-edge skip rule as in the state section).
-- [ ] **Write the host 2-D scatter reference** for the self-test (the existing scatter operators
-      are 3-D level-summed kernels — compute_hbar / vvel scatter — so a small host edge-loop
-      twin of the 2-D divergence is new code, ~30 lines).
-- [ ] **Self-test** (one-shot under `FESOM_SE_CHECK`, both backends): random element field →
-      CSR-gather divergence vs the host edge-scatter reference — require max|Δ| ≤ 1e-14·scale;
-      abort on violation. Run at 1r and 128r MPI (fringe coverage; operator test is
-      state-independent, so the 1r startup-sanity mutation is irrelevant here).
-- [ ] Build serial+cuda clean; self-test green Serial + CUDA + 128r.
+- [x] CSR assembly DONE: per-owned-node rows summed per (node,elem) pair, **sorted by GLOBAL
+      element id** (partition-invariant summation order — the T7 exact-0.0 enabler),
+      pre-divided by `areasvol[top]` so T = +∂η/∂t (hbar += T·dt exactly as compute_hbar);
+      cavity rows empty; myDim_edge2D iteration only (el<0 there = genuine boundary).
+- [x] Gradient convention VERIFIED (fesom_momentum.cpp:505-561): `gradient_sca` rows 0-2 =
+      ∂N/∂x, 3-5 = ∂N/∂y in `elem_nodes` vertex order; the area factors cancel in the
+      assembly, so the η term inside uv_rhs is exactly dt·(−g·Σgsᵢηᵢ) — the r-term
+      cancellation partner is exact. Bonus pin for D4: Coriolis AB2 weights are
+      old×−(0.5+ε), new×+(1.5+ε) (ff_step, =1.0 on step 1).
+- [x] elem→3-edges + 3-neighbours adjacency (owned elements, myDim+eDim edge inversion,
+      3-edges-found assert, nb=−1 boundary).
+- [x] Host 2-D scatter reference written (the compute_hbar edge loop with h=1, /areasvol).
+- [x] **Self-test PASS everywhere** (one-shot under `FESOM_SE_CHECK`; global-id-hashed test
+      field ⇒ partition/backend-independent): pi 1r max|Δ|=1.355e-20, pi 2r identical, pi CUDA
+      identical (device gather = host), CORE2 128r 8.132e-20 (job 26935186) — all ≈3e-16
+      relative = the reassociation floor, well under tol 1e-14·scale.
+- [x] Build serial+cuda clean; ctest unchanged.
 
 ### Task 3: Forcing assembly (R̄, H0_e, Ū_AB2, F)
 **Files:** Modify `src/fesom_ssh_se.cpp`.
