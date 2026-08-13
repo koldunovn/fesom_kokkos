@@ -1358,3 +1358,44 @@ this fix — the constant was hardwired precisely because the reference config n
 **Corollary for the inert case:** the bit-identical result is not worthless — it is the *null
 rung* of the ladder, proving the path is inert below threshold, which is a real requirement.
 Record it as that, and never as evidence the machinery works.
+
+## L110 (M12): max-reduction invariant checks are NaN-BLIND — a dead ocean prints "PASS 0.000"
+
+Every comparison with NaN is false, so `if (fabs(r) > dmax) dmax = fabs(r)` leaves `dmax`
+untouched when `r` is NaN, and a `Kokkos::Max` reduction over an all-NaN field returns its
+identity (−DBL_MAX). The first CORE2 split-explicit smoke died all-NaN by step ~300 while the
+per-step η-compatibility check kept printing `max|r|=0.000e+00` — the strongest-looking PASS
+in the log was the signature of total death. **The rule: every invariant check counts NaNs
+explicitly (`r != r`) and aborts loudly on the first one.** Corollary for reading logs: a
+diagnostic that suddenly prints an EXACT 0.0 after steps of 1e-17-class noise is a red flag,
+not a triumph.
+
+## L111 (M12): a function-local `static fesom::Field` outlives `Kokkos::finalize()` → abort at exit
+
+Function-local statics destruct at program exit, AFTER main() ran `Kokkos::finalize()`; the
+View deallocation then throws ("allocation ... deallocated after Kokkos::finalize"). Scratch
+Fields belong in the module-owned state struct released by the module's free hook in the
+pre-finalize block (fesom_main.cpp) — the same rule the halo/CG modules already follow. The
+trap is tempting precisely for check-path lazily-allocated scratch.
+
+## L112 (M12): "deterministic module" ≠ "deterministic coupled state" — name the isolation in a byte-gate
+
+The SE barotropic module has no atomics and no reductions, and a byte-determinism gate was
+pre-registered for it. Two identical CUDA runs still differ at step 10 — because the module's
+INPUT (Σh·uv_rhs) carries the 3-D model's certified D22 atomic-scatter nondeterminism. The
+gate as registered could never pass, and its failure said nothing about the module. What IS
+provable without a solo harness: (a) full-model SERIAL same-binary byte-identity (no atomics
+anywhere on Serial), and (b) the static SASS audit — `cuobjdump -sass` over the module's
+kernels showing 0 ATOM/RED instructions (the L109 technique, turned from launch-counting to
+determinism-proving). **Pre-register byte-gates against an isolation you can actually
+construct; otherwise register the measurable floor.**
+
+## L113 (M12): an explicit scheme's startup CFL guard must abort, and its bound wants an empirical confirmation
+
+The SE startup check (dtbt ≤ 0.5·res/√(gH), min over the mesh, one Allreduce) rejected
+M=30 at CORE2 dt1800 (M_min=35) — a configuration the notes' "M=30-50" range nominally
+allowed — and the farc probe run at forced M=50 (dtbt 18 s vs limit 11 s) went `inf` at
+step 1, confirming the bound is real, not conservative theater. Every explicit sub-stepping
+option needs this shape: derive the limit from the mesh at startup, print the admissible
+minimum, abort unless forced. The per-mesh M values it produced (CORE2 50 · farc 90 ·
+dars 20 · NG5 20) became the ladder protocol directly.

@@ -403,3 +403,16 @@ When you port substep *K* to a device `parallel_for`:
 5. **Scratch:** wrap *K*'s own scratch arrays in `Field` (deferred from M1 per the plan scope note).
 6. Update this file's row for *K* (drop `[H]`, record the actual calls) **in the same commit**, and
    keep the SYNCCHECK build green.
+
+## 10. M12 split-explicit SSH (`FESOM_SSH_MODE=se`) — the SE 2-D class
+
+Under `se`, substeps 6b-10 are replaced by the SE block (fesom_ssh_se.cpp). Its state
+(η ring ×4, Ū ring ×3, ⟨⟨Ū⟩⟩, R̄, F, CSR operators) is DEVICE-resident and module-owned;
+per substep it exchanges η (NOD2D scalar) and Ū (ELEM2D pair) through the device-halo
+brackets. The coherence contract at finalize: `hbar`/`hbar_old` are device-written and
+**host-SYNCED every step** — this is a CORRECTNESS requirement (L86 class), because the
+SHARED substep 11 derives `eta_n = hbar` on the HOST (and pushes it), the ice `ocean2ice`
+reads host/device `hbar`, and the two out-of-block SSHRAILS-gated pushes (step.cpp eta_n
+pre-substep-4; fesom_ice.cpp hbar pre-ocean2ice) are `!fesom_se_on()`-gated on top.
+`uv` is device-trimmed inside the SE block and takes the usual ELEM3D halo there
+(the substep-9 slot). SSHRAILS is force-resolved OFF under `se` (SI-block lever).
