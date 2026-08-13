@@ -135,6 +135,22 @@ lever is worth **+2.0 pp on top of repartitioning alone** at CORE2 512 (−5.8 %
 the repartitioning first — it is a drop-in `dist_N` swap with no re-baselining — and treat the
 renumbering as a separate decision with its own cost.
 
+## Certified deliverables (promoted 2026-08-13)
+
+The four certified points are packaged under `/work/ab0995/a270088/port2/mesh_m11_certified/`,
+each with a `MESH_PROVENANCE.md` (screen/gate job ids, source manifest) and its own md5 manifest;
+evidence files are committed under `docs/promotions/`:
+
+| certified mesh | dists | what | use |
+|---|---|---|---|
+| `core2_v1` | `dist_4` · `dist_512` | `MINCONN` (GPU −8.1 %) · `UFACTOR=30` (CPU −3.8 %) | **drop-in `MESH=` swap** |
+| `core2hil_v1` | `dist_512` | Hilbert renumbering + KaHIP `w=100+nlev` (−5.8 %) | ⚠️ renumbered mesh — separate adoption decision (re-baselines every C↔K floor) |
+| `farc_v1` | `dist_2048` | Mt-KaHyPar `w=100+nlev` (−7.5 %) | drop-in |
+| `dars_v1` | `dist_2048` | KaMinPar `w=100+nlev` (−4.2 %) | drop-in |
+
+The two GPU exception candidates (dars 64 · NG5 64 `MINCONN`) are **deliberately not promoted**:
+`m11_promote` packages certified evidence, and their accuracy verdicts are pending your decision.
+
 ## Upstream (FESOM/fesom2)
 
 1. `PartGraphRecursive` → `PartGraphKway` so `MINCONN`/`CONTIG`/`OBJ=vol` actually reach METIS.

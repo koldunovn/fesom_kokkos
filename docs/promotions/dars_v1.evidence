@@ -1,0 +1,6 @@
+# M11 promotion evidence — dars_v1
+# dist_2048 <- zoo/dars/b_kaminpar_a100  KaMinPar w=100+nlev: -4.17 % (race 26895271, min-of-3),
+# screen 26895520 clean at 3,000 steps dt 120, gate 26904739 BELOW every control on temp/salt,
+# inside on ssh — final under any widening. The raced-better MINCONN arm (-4.53 %) FAILED the
+# 3,000-step screen (Finding 39) and is withdrawn; KaMinPar is the survivor.
+dist_2048 run=26895520 steps=3000 rc=0 dt=120 ranks=2048cpu arm=b_kaminpar_a100 recipe=KAMINPAR_w100+nlev race=26895271 gate=26904739 accuracy=PASS gain_at3000=-4.17%
