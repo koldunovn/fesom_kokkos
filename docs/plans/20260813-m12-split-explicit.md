@@ -368,16 +368,38 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ### Task 9: G3 physics twins (SLURM campaign)
 **Files:** campaign scripts under `m12/` (pattern from m7/m11 campaigns); findings appended here.
-- [ ] Arms (CORE2 dt1800, zstar, 128r CPU class + one CUDA rep): SI control ×≥3 demonstrated-
-      distinct controls, SE{χ=0.1,M=50} HEADLINE, SE{χ=0.15,M=50}, SE{χ=0.1,M=30},
-      SE+wsplit compose arm. (χ=0.05 and visc=0 are documented-unstable on CORE2 — short
-      screens only, T6 ➕ block; γ₁ scan dropped — insensitive beyond χ=0.1.)
-- [ ] 20-step disturbance report vs seed-control spread (M11 graded-tier framework — tiers,
-      no binary verdicts) for the headline arm.
-- [ ] ≥3000-step stability screen, every arm (rule 0.41: verdicts only at protocol length; dt1800).
-- [ ] 1-year SE-vs-SI climate twin (headline arm): mean SSH/T/S/KE maps + the paper's
-      difference-class comparison; χ/M sensitivity summary.
-- [ ] Verdict block written here + `docs/` note; pick production defaults (χ, M, γ₀).
+- [x] **≥3000-step screens ALL PASS** (2026-08-14, jobs 26936374-79): SE headline
+      {χ=0.1,M=50} η@3000=1.89 · SE+wsplit compose 1.89 · SE χ=0.15 1.89 (dissipation
+      saturated — 0.1 stays default) · SI control 1.90 · SE CUDA 1.89. The M=30 arm was
+      CORRECTLY ABORTED by the CFL guard (M_min=35 at CORE2 dt1800 — the notes' 30-50 range
+      meets reality; guard validated).
+- [x] **1-year SE-vs-SI climate twin DONE** (17,520 steps dt1800, jobs 26936380/81, both
+      clean): endpoint state identical at print digits (η 1.88, uv 1.58, same T/S ranges);
+      **annual-mean SSH difference rms = 0.0002 m, max = 0.0029 m vs field std 0.661 m** —
+      the two formulations give the same annual-mean ocean to 0.03% relative rms. SE year =
+      61 min vs SI 59 min at 128r (990 verts/core — below the payoff regime, as the share
+      law predicts).
+- [ ] 20-step disturbance report vs seed-control spread (M11 graded framework) — the one
+      remaining formal G3 artifact; needs ≥3 demonstrated-distinct controls (deferred to the
+      daytime session; the 1-yr twin evidence already exceeds its information content).
+- [x] Production defaults PICKED (measured): χ=0.1, M=50 (CORE2; per-mesh M from the CFL
+      check: farc dt900 → 90, dars dt120 → 20, NG5 dt180 → 20), γ defaults unchanged.
+
+➕ **G4 FIRST BOARD (2026-08-14, frozen se0 bins — serial df959e90 / cuda d17fdf38 @29e443b;
+same-day pinned pairs, min-of-2 clean reps, FESOM_SPEED=1 on GPU arms (announcements verified),
+wsplit on farc/dars, 300 steps, per-mesh M from the CFL probes; jobs 26936699-26936725):**
+
+| point | SI s/step | SE s/step | Δ | second currency |
+|---|---|---|---|---|
+| CORE2 4N GPU (dt1800) | 0.0758 | 0.0704 | **−7.1%** | the honest-risk point WINS |
+| CORE2 16N GPU (dt1800) | 0.0942 | 0.0839 | **−10.9%** | ssh comp 28.4→19.6 ms; ssh MPI 320→101/step |
+| farc 2048 CPU (dt900, M=90) | 0.0860 | 0.0738 | **−14.2%** | cg was WAIT-dominated (2.6 busy + 20.6 wait ms, 846 MPI/step) → bt 11.8 ms, 181 MPI/step; TOTAL MPI/step 1196→526 |
+| dars 2048 CPU (dt120, M=20) | 0.4196 | 0.4243 | +1.1% | low ssh share at dt120 — the M10 share law holds |
+
+**farc −14.2% BEATS the M10 best implicit-solver result (oati −13.28%) at the same point.**
+NG5 64-GPU pair queued (M=20 from probe M_min=17). ⚠️ absolute s/step here are LOOP-ONLY
+(no snapshots, phasestats reps separate) — NOT comparable to the M7 production board absolutes;
+the paired deltas are the deliverable. NG5/dars-GPU + report/docs close in the daytime session.
 
 ### Task 10: G4 perf ladder + docs + closure
 **Files:** `m12/` runs; `docs/SSH_SE_M12.md` (new); `docs/REFERENCE_RUNS.md`;

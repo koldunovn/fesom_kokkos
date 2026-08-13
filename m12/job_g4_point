@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/m12/g4_%x.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12/g4_%x.%j.err
+# M12 G4 ladder point — one arm, one rep. BIN is PINNED (frozen se0 by default).
+# env: TAG ARM(si|se) MESH DT NSTEPS(300) USE_CUDA KNOBS PHST(0|1)
+set -u
+ROOT=/home/a/a270088/port_kokkos
+source /sw/etc/profile.levante
+if [ "${USE_CUDA:-0}" = "1" ]; then
+  source "$ROOT/env_cuda.sh"
+  export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+  export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+  BIN=${BIN:-/work/ab0995/a270088/port2/m12/bin/fesom_port_cuda_se0}
+else
+  source "$ROOT/env.sh"
+  export OMPI_MCA_btl_vader_single_copy_mechanism=none
+  BIN=${BIN:-/work/ab0995/a270088/port2/m12/bin/fesom_port_serial_se0}
+fi
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port2/m12/g4_${TAG}_$SLURM_JOB_ID; mkdir -p "$OUT"
+export FESOM_ALE=zstar
+[ "${ARM}" = "se" ] && export FESOM_SSH_MODE=se
+if [ "${PHST:-0}" = "1" ]; then
+  export FESOM_SPEED_PHASESTATS=1
+  [ "${USE_CUDA:-0}" = "1" ] || export FESOM_SPEED_FORCE_SERIAL=1
+fi
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+sha256sum "$BIN"
+echo "=== TAG=$TAG ARM=$ARM MESH=$MESH DT=$DT NSTEPS=${NSTEPS:-300} PHST=${PHST:-0} ==="
+srun "$BIN" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+RC=$?
+echo "rc=$RC"
+grep -E "subcycling live|M_min" "$OUT/run.log" | head -2
+grep "loop timing" "$OUT/run.log"
+grep -A14 "phase busy/wait\|phasestats" "$OUT/run.log" | head -18
+exit $RC
