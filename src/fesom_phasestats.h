@@ -42,6 +42,7 @@ enum fesom_ps_phase {
     FESOM_PH_COUPL,       /* oce_fluxes_mom + shortwave penetration        */
     FESOM_PH_OCEAN,       /* fesom_timestep minus the CG solve             */
     FESOM_PH_CG,          /* fesom_ssh_solve_cg_kk (carved out of ocean)   */
+    FESOM_PH_BT,          /* M12: the SE barotropic subcycling block       */
     FESOM_PH_OTHER,       /* io streams / calendar / snapshots / loop tail */
     FESOM_PH_N
 };

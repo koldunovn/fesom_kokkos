@@ -18,6 +18,8 @@
 #include "fesom_ale.h"        /* fesom_ale_is_zstar(): the se=>zstar guard   */
 #include "fesom_constants.h"  /* FESOM_G, FESOM_PHASE1_DT                    */
 #include "fesom_field.hpp"
+#include "fesom_halo.h"
+#include "fesom_halo_device.hpp"   /* fesom_halo_field: the per-substep 2-D exchanges */
 
 #include <mpi.h>
 #include <cmath>
@@ -90,6 +92,54 @@ static int fesom_se_m_force(void)
     return cached;
 }
 
+/* SM2005 dissipation χ (default 0.05; notes: 0.05-0.1, G3 scans it). */
+double fesom_se_chi(void)
+{
+    static double cached = -1.0;
+    if (cached < 0.0) {
+        const char *e = getenv("FESOM_SE_CHI");
+        if (!e || !e[0]) {
+            cached = 0.05;
+        } else {
+            char *end = NULL;
+            const double v = strtod(e, &end);
+            if (end == e || (end && *end) || !(v > 0.0) || !(v < 0.5)) {
+                fprintf(stderr, "FESOM_SE_CHI=%s not supported (need a number in (0,0.5); "
+                                "notes suggest 0.05-0.1; default 0.05)\n", e);
+                exit(1);
+            }
+            cached = v;
+        }
+    }
+    return cached;
+}
+
+static int fesom_se_visc_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_VISC");
+        if (!e || !e[0] || strcmp(e, "1") == 0)      cached = 1;
+        else if (strcmp(e, "0") == 0)                cached = 0;
+        else { fprintf(stderr, "FESOM_SE_VISC=%s not supported (0|1)\n", e); exit(1); }
+    }
+    return cached;
+}
+
+static double se_visc_gamma(const char *envname, double deflt)
+{
+    const char *e = getenv(envname);
+    if (!e || !e[0]) return deflt;
+    char *end = NULL;
+    const double v = strtod(e, &end);
+    if (end == e || (end && *end) || v < 0.0) {
+        fprintf(stderr, "%s=%s not supported (need a number >= 0; Zenodo SE default %g)\n",
+                envname, e, deflt);
+        exit(1);
+    }
+    return v;
+}
+
 void fesom_se_mode_init(void)
 {
     if (!fesom_se_on()) return;
@@ -130,9 +180,12 @@ void fesom_se_mode_init(void)
 
 struct fesom_se_state {
     int M = 0;              /* substeps per baroclinic step (validated knob)  */
-    /* Rings: slot 0 = current level m, 1 = m-1, 2 = m-2. Rotation is a host-
-     * side Field-handle swap; kernels capture raw pointers per substep (L109). */
-    fesom::Field eta[3];        /* η ring                      [Nn]           */
+    /* Rings: slot 0 = current level m, 1 = m-1, 2 = m-2 (η also keeps slot 3
+     * as the write target for m+1 — AM4 reads FOUR levels simultaneously, so
+     * the η ring is size 4; AB3 reads three, so Ū stays 3 and the new level
+     * overwrites the retiring m-2 buffer after AB3 consumed it). Rotation is
+     * a host-side Field-handle swap; kernels capture raw pointers (L109). */
+    fesom::Field eta[4];        /* η ring                      [Nn]           */
     fesom::Field Ubt[3];        /* Ū ring, interleaved (u,v)   [2*Ne]         */
     fesom::Field Ubt_mean;      /* ⟨⟨Ū⟩⟩ accumulator           [2*Ne]         */
     fesom::Field Rbar;          /* Σ_k helem·uv_rhs / τ        [2*Ne]         */
@@ -158,6 +211,10 @@ struct fesom_se_state {
     fesom::IntField div_off;    /* [myDim_nod2D + 1]                          */
     fesom::IntField div_elem;   /* [nnz]  local element index                 */
     fesom::Field    div_c;      /* [2*nnz] (cx, cy) interleaved               */
+
+    fesom::Field Tchk;          /* FESOM_SE_CHECK scratch: T(⟨⟨Ū⟩⟩) [Nown] —
+                                 * module-owned so it dies BEFORE Kokkos::finalize
+                                 * (a function-local static Field aborts at exit). */
 
     /* Owned-element -> 3 edges + 3 edge-neighbour elements (T4 live harmonic
      * viscosity gather; nb = -1 on genuine boundary edges). Assembled from
@@ -240,6 +297,7 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
     s_se.eta[0].alloc("se.eta.m0",  Nn);
     s_se.eta[1].alloc("se.eta.m1",  Nn);
     s_se.eta[2].alloc("se.eta.m2",  Nn);
+    s_se.eta[3].alloc("se.eta.new", Nn);
     s_se.Ubt[0].alloc("se.Ubt.m0",  2 * Ne);
     s_se.Ubt[1].alloc("se.Ubt.m1",  2 * Ne);
     s_se.Ubt[2].alloc("se.Ubt.m2",  2 * Ne);
@@ -614,26 +672,361 @@ static void se_check_forcing(int step_n, const struct fesom_mesh *mesh,
                         "|F-Rbar|(=|r|)=%.4e m2/s2\n", step_n, glob[0], glob[1], glob[2]);
 }
 
-void fesom_se_step_stub(int step_n, const struct fesom_mesh *mesh,
-                        struct fesom_dyn *dyn,
-                        const struct fesom_forcing *forcing,
-                        struct fesom_partit *p)
+/*===========================================================================
+ * T4 — the SM2005 AB3-AM4 subcycle loop (subcycling.tex eq. 4_7/4_8/4_12).
+ *
+ * Per substep m -> m+1: TWO kernels + TWO tiny 2-D exchanges.
+ *   k1 (owned+eDim elems): Ū^{AB3} = (3/2+β)Ūᵐ −(1/2+2β)Ū^{m−1} +βŪ^{m−2};
+ *                          ⟨⟨Ū⟩⟩ += Ū^{AB3}/M.   (local — history halo-valid)
+ *   k2 (OWNED nodes):      η^{m+1} = ηᵐ + (τ/M)(T(Ū^{AB3}) − W), T = the
+ *                          deterministic div-gather CSR (T2); cavity frozen.
+ *   exchange η^{m+1} (NOD2D scalar).
+ *   k3 (OWNED elems):      Ū^{m+1} = Ūᵐ + (τ/M)(−f e_z×Ū^{AB3}
+ *                          − g·H^{AM4}∇η^{AM4} + F + visc);
+ *                          η^{AM4} = δη^{m+1} +(1−δ−γ−ζ)ηᵐ +γη^{m−1} +ζη^{m−2}
+ *                          inline at the 3 vertices; H^{AM4} = H0e + mean(η^{AM4});
+ *                          visc = V[Ūᵐ] − V[Ūⁿ] live two-term (plan D3, Zenodo
+ *                          closure, coefficients from each term's own state).
+ *   exchange Ū^{m+1} (ELEM2D pair, one fused message — the mEVP pattern).
+ * Ring rotation is a host-side Field-handle swap; kernels capture raw
+ * pointers per substep (L109). No reductions anywhere in the loop.
+ *
+ * Finalize: η^{n+1}=η^M; BOTH rings carry to the next step (flat-ring reset is
+ * cold-start only); hbar_old := hbar, hbar := η^{n+1} (full extent — η is
+ * halo-valid) + the MANDATORY host sync of {hbar, hbar_old} (the L86 coherence
+ * contract: substep 11 derives eta_n = hbar on host, the :614/ice:646 pushes
+ * become identity copies). ⟨⟨Ū⟩⟩ needs no exchange (consumed owned-only by
+ * the T5 trim). Returns M (the "iteration count" for the driver).
+ *===========================================================================*/
+
+int fesom_se_step(int step_n, struct fesom_mesh *mesh,
+                  struct fesom_dyn *dyn,
+                  const struct fesom_forcing *forcing,
+                  struct fesom_partit *p)
 {
-    (void)forcing;
+    const int    Nown = mesh->myDim_nod2D;
+    const int    Ne   = mesh->myDim_elem2D + mesh->eDim_elem2D;
+    const int    Eown = mesh->myDim_elem2D;
+    const int    M    = s_se.M;
+    const real_t tau  = (real_t)FESOM_PHASE1_DT;
+    const real_t tauM = tau / (real_t)M;
+    const real_t g    = (real_t)FESOM_G;
+
+    /* SM2005 weights (subcycling.tex eq. 4_7): the χ-family. */
+    const double chi   = fesom_se_chi();
+    const real_t wbeta = 0.281105;
+    const real_t wzeta = (real_t)(0.00976186 - 0.13451357 * chi);
+    const real_t wgam  = (real_t)(0.083445   - 0.513584   * chi);
+    const real_t wdelt = (real_t)(0.5 + 2.0 * (double)wzeta + (double)wgam + 2.0 * chi);
+    /* AB3: a0·Ūᵐ + a1·Ū^{m−1} + a2·Ū^{m−2} */
+    const real_t a0 = (real_t)(1.5 + (double)wbeta);
+    const real_t a1 = (real_t)(-(0.5 + 2.0 * (double)wbeta));
+    const real_t a2 = wbeta;
+    /* AM4: d3·η^{m+1} + d0·ηᵐ + d1·η^{m−1} + d2·η^{m−2} */
+    const real_t d3 = wdelt;
+    const real_t d0 = (real_t)(1.0 - (double)wdelt - (double)wgam - (double)wzeta);
+    const real_t d1 = wgam;
+    const real_t d2 = wzeta;
+
+    const int    visc_on = fesom_se_visc_on();
+    const real_t vg0 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA0", 10.0);
+    const real_t vg1 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA1", 2750.0);
+
     static int announced = 0;
     if (!announced) {
         announced = 1;
         if (p->mype == 0)
-            fprintf(stderr, "[ssh_se] STUB active (step %d): forcing assembly runs (T3), but "
-                            "the barotropic state stays FROZEN (hbar/eta_n/uv unchanged) — "
-                            "the subcycling lands in T4-T5. Not a model.\n", step_n);
+            fprintf(stderr, "[ssh_se] subcycling live: M=%d chi=%.3f (beta=%.6f zeta=%.6f "
+                            "gamma=%.6f delta=%.6f) visc=%d (g0=%.3g g1=%.3g)\n",
+                    M, chi, (double)wbeta, (double)wzeta, (double)wgam, (double)wdelt,
+                    visc_on, (double)vg0, (double)vg1);
     }
-    /* T3: exercise the forcing assembly every step. */
+
+    /* Once per step: forcing (T3) + the m=0 viscosity anchor + zero the mean. */
     se_forcing(step_n, mesh, dyn);
     if (fesom_se_check_on())
         se_check_forcing(step_n, mesh, p);
-    /* History carry (moves into the real finalize in T4). */
+    Kokkos::deep_copy(s_se.Ubt_n.d(), s_se.Ubt[0].d());   /* Ūⁿ, halo-valid */
+    s_se.Ubt_n.modify_device();
+    Kokkos::deep_copy(s_se.Ubt_mean.d(), 0.0);
+    s_se.Ubt_mean.modify_device();
+
+    /* Mesh/forcing pointers reused across substeps (L109 lean captures). */
+    const int    *ulev_n = mesh->ulevels_nod2D_fld.d().data();
+    const int    *doff   = s_se.div_off.d().data();
+    const int    *delem  = s_se.div_elem.d().data();
+    const real_t *dc     = s_se.div_c.d().data();
+    const real_t *wf     = forcing->water_flux_fld.d().data();
+    const int    *elnod  = mesh->elem_nodes_fld.d().data();
+    const real_t *gs     = mesh->gradient_sca_fld.d().data();
+    const real_t *fcor   = mesh->coriolis_fld.d().data();
+    const real_t *earea  = mesh->elem_area_fld.d().data();
+    const int    *enb    = s_se.elem_nb.d().data();
+    const real_t *F      = s_se.Fbt.d().data();
+    const real_t *H0e    = s_se.H0e.d().data();
+    const real_t *Un     = s_se.Ubt_n.d().data();
+    real_t       *Umean  = s_se.Ubt_mean.d().data();
+    real_t       *Uab3   = s_se.Ubt_ab2.d().data();   /* scratch: Ubt_ab2 was
+                                                       * consumed into F by
+                                                       * se_forcing — free now */
+
+    for (int m = 0; m < M; ++m) {
+        /* k1: AB3 extrapolation + mean accumulation (owned+eDim). */
+        {
+            const real_t *U0 = s_se.Ubt[0].d().data();
+            const real_t *U1 = s_se.Ubt[1].d().data();
+            const real_t *U2 = s_se.Ubt[2].d().data();
+            const real_t invM = 1.0 / (real_t)M;
+            Kokkos::parallel_for("se_ab3", Kokkos::RangePolicy<>(0, 2 * Ne),
+                KOKKOS_LAMBDA(const int i) {
+                    const real_t uab = a0 * U0[i] + a1 * U1[i] + a2 * U2[i];
+                    Uab3[i] = uab;
+                    Umean[i] += uab * invM;
+                });
+        }
+
+        /* k2: η^{m+1} on OWNED nodes into the free ring slot eta[3]. */
+        {
+            const real_t *e0 = s_se.eta[0].d().data();
+            real_t       *en = s_se.eta[3].d().data();
+            Kokkos::parallel_for("se_eta", Kokkos::RangePolicy<>(0, Nown),
+                KOKKOS_LAMBDA(const int n) {
+                    if (ulev_n[n] != 1) { en[n] = e0[n]; return; }   /* cavity frozen */
+                    real_t T = 0.0;
+                    for (int k = doff[n]; k < doff[n + 1]; ++k)
+                        T += dc[2*k + 0] * Uab3[2*delem[k] + 0]
+                           + dc[2*k + 1] * Uab3[2*delem[k] + 1];
+                    en[n] = e0[n] + tauM * (T - wf[n]);
+                });
+            s_se.eta[3].modify_device();
+        }
+
+        /* η ring rotate: (new, m, m−1, m−2) <- (eta3, eta0, eta1, eta2);
+         * then exchange the new current level (replace semantics fills halo). */
+        {
+            fesom::Field tmp = s_se.eta[3];
+            s_se.eta[3] = s_se.eta[2];
+            s_se.eta[2] = s_se.eta[1];
+            s_se.eta[1] = s_se.eta[0];
+            s_se.eta[0] = tmp;
+        }
+        fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+
+        /* k3: Ū^{m+1} on OWNED elems into the retiring Ū buffer (Ubt[2] — AB3
+         * already consumed it this substep). AM4 inline at the 3 vertices. */
+        {
+            const real_t *ep1 = s_se.eta[0].d().data();   /* η^{m+1} */
+            const real_t *em0 = s_se.eta[1].d().data();   /* ηᵐ      */
+            const real_t *em1 = s_se.eta[2].d().data();   /* η^{m−1} */
+            const real_t *em2 = s_se.eta[3].d().data();   /* η^{m−2} */
+            const real_t *U0  = s_se.Ubt[0].d().data();   /* Ūᵐ (halo-valid) */
+            real_t       *Unew = s_se.Ubt[2].d().data();
+            /* Viscosity scaling: the whole bracket below is multiplied by
+             * τ/M, so vi carries NO dt of its own — this reproduces the
+             * reference's per-substep increment BT_inv·(dt·√(…)·ΔŪ/A)
+             * exactly ((τ/M)·√(…)·ΔŪ/A). */
+            Kokkos::parallel_for("se_ubt", Kokkos::RangePolicy<>(0, Eown),
+                KOKKOS_LAMBDA(const int e) {
+                    const int n0 = elnod[3*e + 0];
+                    const int n1 = elnod[3*e + 1];
+                    const int n2 = elnod[3*e + 2];
+                    const real_t h0 = d3*ep1[n0] + d0*em0[n0] + d1*em1[n0] + d2*em2[n0];
+                    const real_t h1 = d3*ep1[n1] + d0*em0[n1] + d1*em1[n1] + d2*em2[n1];
+                    const real_t h2 = d3*ep1[n2] + d0*em0[n2] + d1*em1[n2] + d2*em2[n2];
+                    const real_t gx = gs[6*e+0]*h0 + gs[6*e+1]*h1 + gs[6*e+2]*h2;
+                    const real_t gy = gs[6*e+3]*h0 + gs[6*e+4]*h1 + gs[6*e+5]*h2;
+                    const real_t Ham = H0e[e] + (h0 + h1 + h2) / 3.0;
+                    const real_t f   = fcor[e];
+                    real_t vx = 0.0, vy = 0.0;
+                    if (visc_on) {
+                        /* live two-term harmonic viscosity, Zenodo closure:
+                         * V[Ūᵐ] − V[Ūⁿ], each coefficient from its own state. */
+                        const real_t He_e = H0e[e];   /* ≈ H at n (η part small) */
+                        for (int s = 0; s < 3; ++s) {
+                            const int nb = enb[3*e + s];
+                            if (nb < 0) continue;              /* boundary edge */
+                            const real_t len  = Kokkos::sqrt(earea[e] + earea[nb]);
+                            const real_t hh   = 0.5 * (He_e + H0e[nb]);
+                            const real_t ihh  = 1.0 / hh;
+                            /* term at Ūᵐ */
+                            real_t dux = (U0[2*e+0] - U0[2*nb+0]);
+                            real_t duy = (U0[2*e+1] - U0[2*nb+1]);
+                            real_t spd = Kokkos::sqrt(dux*dux + duy*duy) * ihh;
+                            real_t vi  = Kokkos::sqrt(
+                                             Kokkos::fmax(vg0, vg1 * spd) * len);
+                            vx -= dux * vi;  vy -= duy * vi;
+                            /* minus the frozen term at Ūⁿ */
+                            dux = (Un[2*e+0] - Un[2*nb+0]);
+                            duy = (Un[2*e+1] - Un[2*nb+1]);
+                            spd = Kokkos::sqrt(dux*dux + duy*duy) * ihh;
+                            vi  = Kokkos::sqrt(
+                                      Kokkos::fmax(vg0, vg1 * spd) * len);
+                            vx += dux * vi;  vy += duy * vi;
+                        }
+                        const real_t ia = 1.0 / earea[e];
+                        vx *= ia;  vy *= ia;
+                    }
+                    Unew[2*e + 0] = U0[2*e + 0] + tauM * (  f * Uab3[2*e + 1]
+                                     - g * Ham * gx + F[2*e + 0] + vx);
+                    Unew[2*e + 1] = U0[2*e + 1] + tauM * ( -f * Uab3[2*e + 0]
+                                     - g * Ham * gy + F[2*e + 1] + vy);
+                });
+            s_se.Ubt[2].modify_device();
+        }
+
+        /* Ū ring rotate, then exchange the new current level (fused pair). */
+        {
+            fesom::Field tmp = s_se.Ubt[2];
+            s_se.Ubt[2] = s_se.Ubt[1];
+            s_se.Ubt[1] = s_se.Ubt[0];
+            s_se.Ubt[0] = tmp;
+        }
+        fesom_halo_field(s_se.Ubt[0], FESOM_HALO_ELEM2D, 1, 2, p);
+    }
+
+    /* Finalize: hbar_old := hbar; hbar := η^{n+1} (full extent — η halo-valid,
+     * cavity values frozen equal by k2). Device write + the MANDATORY host sync. */
+    {
+        const int Nn = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        const real_t *ef  = s_se.eta[0].d().data();
+        real_t *hb  = mesh->hbar_fld.d().data();
+        real_t *hbo = mesh->hbar_old_fld.d().data();
+        Kokkos::parallel_for("se_hbar", Kokkos::RangePolicy<>(0, Nn),
+            KOKKOS_LAMBDA(const int n) {
+                hbo[n] = hb[n];
+                hb[n]  = ef[n];
+            });
+        mesh->hbar_fld.modify_device();     mesh->hbar_old_fld.modify_device();
+        mesh->hbar_fld.sync_host();         mesh->hbar_old_fld.sync_host();
+    }
+
+    /* T5 — corrector trim (subcycling.tex eq. 4_13, hⁿ weights per D1),
+     * replacing the SI update_vel: with hⁿ trim weights the correction is
+     * DEPTH-UNIFORM in velocity units,
+     *   corr = (Σₖ hₖ·(uv+uv_rhs)ₖ − ⟨⟨Ū⟩⟩) / Σₖhₖ,
+     *   uvₖ := (uv+uv_rhs)ₖ − corr,
+     * which makes Σₖ uvₖ·helemₖ = ⟨⟨Ū⟩⟩ exact to rounding (G1b) and keeps
+     * the tracer fluxes uv·helem consistent with the η update. Cavity
+     * columns get the plain predictor (no trim — the hbar pattern). OWNED
+     * elements; the ELEM3D halo below fills eDim (the substep-9 slot). */
+    {
+        const real_t *uvrhs = dyn->uv_rhs_fld.d().data();
+        const real_t *helem = mesh->helem_fld.d().data();
+        const int    *ulev  = mesh->ulevels_fld.d().data();
+        const int    *nlev  = mesh->nlevels_fld.d().data();
+        const real_t *Um    = s_se.Ubt_mean.d().data();
+        real_t       *uv    = dyn->uv_fld.d().data();
+        const int     nl    = mesh->nl;
+        Kokkos::parallel_for("se_trim", Kokkos::RangePolicy<>(0, Eown),
+            KOKKOS_LAMBDA(const int e) {
+                const int nzmin = ulev[e] - 1;
+                const int nzmax = nlev[e] - 1;
+                real_t sx = 0.0, sy = 0.0, He = 0.0;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    const real_t h = helem[FESOM_ELEM3D(e, nz, nl)];
+                    const size_t k = FESOM_ELEMVEC(e, nz, nl);
+                    sx += h * (uv[k + 0] + uvrhs[k + 0]);
+                    sy += h * (uv[k + 1] + uvrhs[k + 1]);
+                    He += h;
+                }
+                real_t cx = 0.0, cy = 0.0;
+                if (ulev[e] == 1 && He > 0.0) {
+                    cx = (sx - Um[2*e + 0]) / He;
+                    cy = (sy - Um[2*e + 1]) / He;
+                }
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    const size_t k = FESOM_ELEMVEC(e, nz, nl);
+                    uv[k + 0] = uv[k + 0] + uvrhs[k + 0] - cx;
+                    uv[k + 1] = uv[k + 1] + uvrhs[k + 1] - cy;
+                }
+            });
+        dyn->uv_fld.modify_device();
+    }
+    fesom_halo_field(dyn->uv_fld, FESOM_HALO_ELEM3D, mesh->nl, 2, p);
+
+    /* G1b (FESOM_SE_CHECK): ‖Σₖ uvₖ·helemₖ − ⟨⟨Ū⟩⟩‖∞ after the trim — exact
+     * to rounding by the trim algebra. Check-only reduction (the production
+     * path stays reduction-free). Provisional Serial abort 1e-9 m²/s. */
+    if (fesom_se_check_on()) {
+        const real_t *uvv   = dyn->uv_fld.d().data();
+        const real_t *helem = mesh->helem_fld.d().data();
+        const int    *ulev  = mesh->ulevels_fld.d().data();
+        const int    *nlev  = mesh->nlevels_fld.d().data();
+        const real_t *Um    = s_se.Ubt_mean.d().data();
+        const int     nl    = mesh->nl;
+        double dmax = 0.0;
+        Kokkos::parallel_reduce("se_g1b", Kokkos::RangePolicy<>(0, Eown),
+            KOKKOS_LAMBDA(const int e, double &mx) {
+                if (ulev[e] != 1) return;
+                const int nzmin = ulev[e] - 1;
+                const int nzmax = nlev[e] - 1;
+                real_t sx = 0.0, sy = 0.0;
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    const real_t h = helem[FESOM_ELEM3D(e, nz, nl)];
+                    const size_t k = FESOM_ELEMVEC(e, nz, nl);
+                    sx += h * uvv[k + 0];
+                    sy += h * uvv[k + 1];
+                }
+                const double rx = fabs((double)(sx - Um[2*e + 0]));
+                const double ry = fabs((double)(sy - Um[2*e + 1]));
+                if (rx > mx) mx = rx;
+                if (ry > mx) mx = ry;
+            }, Kokkos::Max<double>(dmax));
+        MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se] SE_CHECK step %d G1b trim-consistency max|r|=%.3e m2/s\n",
+                    step_n, dmax);
+        if (dmax > 1e-9
+            && strcmp(Kokkos::DefaultExecutionSpace::name(), "Serial") == 0) {
+            fprintf(stderr, "[ssh_se] SE_CHECK G1b FAIL on Serial (provisional 1e-9). "
+                            "Aborting.\n");
+            MPI_Barrier(p->MPI_COMM_FESOM);
+            abort();
+        }
+    }
+
+    /* D4 history carry. */
     std::swap(s_se.Ubt_prev, s_se.Ubt_now);
+
+    /* G1a (FESOM_SE_CHECK): the η-compatibility invariant
+     *   ‖η^{n+1} − ηⁿ − τ·(T(⟨⟨Ū⟩⟩) − W)‖∞  over owned non-cavity nodes.
+     * Machine-precision class by construction (linearity of T; only FP
+     * reassociation between the per-substep sum and the mean). Provisional
+     * abort threshold 1e-9 m on Serial until first measurements freeze it. */
+    if (fesom_se_check_on()) {
+        if (!s_se.Tchk.allocated())
+            s_se.Tchk.alloc("se.check.T", (size_t)(Nown ? Nown : 1));
+        fesom::Field &Tchk = s_se.Tchk;
+        se_div_gather_device(&s_se, s_se.Ubt_mean, Tchk, Nown);
+        Kokkos::fence();
+        Tchk.modify_device(); Tchk.sync_host();
+        /* const_cast precedent: fesom_step.cpp:702 (stress_surf push). water_flux
+         * host is current on the default rails; the sync is a no-op guard. */
+        const_cast<struct fesom_forcing *>(forcing)->water_flux_fld.sync_host();
+        const real_t *hb  = mesh->hbar_fld.h();      /* η^{n+1} (just synced) */
+        const real_t *hbo = mesh->hbar_old_fld.h();  /* ηⁿ                    */
+        const real_t *wfh = forcing->water_flux_fld.h();
+        double dmax = 0.0;
+        for (int n = 0; n < Nown; ++n) {
+            if (mesh->ulevels_nod2D[n] != 1) continue;
+            const double r = ((double)hb[n] - (double)hbo[n])
+                           - (double)tau * ((double)Tchk.h()[n] - (double)wfh[n]);
+            if (fabs(r) > dmax) dmax = fabs(r);
+        }
+        MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se] SE_CHECK step %d G1a eta-compat max|r|=%.3e m\n",
+                    step_n, dmax);
+        if (dmax > 1e-9
+            && strcmp(Kokkos::DefaultExecutionSpace::name(), "Serial") == 0) {
+            fprintf(stderr, "[ssh_se] SE_CHECK G1a FAIL on Serial (provisional 1e-9 m). "
+                            "Aborting.\n");
+            MPI_Barrier(p->MPI_COMM_FESOM);
+            abort();
+        }
+    }
+    (void)dyn;
+    return M;
 }
 
 void fesom_se_free(void)

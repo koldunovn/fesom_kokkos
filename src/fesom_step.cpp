@@ -852,8 +852,10 @@ int fesom_timestep(int                          step_n,
          * (:eta_n before substep 4, :hbar before ocean2ice) see current values —
          * identity copies, not clobbers (the L86 coherence contract).
          * Plan + gates: docs/plans/20260813-m12-split-explicit.md.
-         * TASK-1 STUB: barotropic state frozen; the real block lands in T3-T5. */
-        fesom_se_step_stub(step_n, mesh, dyn, forcing, p);
+         * T5 adds the corrector trim of uv (+ its ELEM3D halo) right after this. */
+        fesom_phasestats_mark(FESOM_PH_BT);   /* the SE solve is its own phase (G4 currency) */
+        cg_iters = fesom_se_step(step_n, mesh, dyn, forcing, p);
+        fesom_phasestats_mark(FESOM_PH_OCEAN);
     }
 
     /* M6.3 — dhe fill (oce_ale.F90:2298-2305): the NEXT step's cumulative stiffness increment,

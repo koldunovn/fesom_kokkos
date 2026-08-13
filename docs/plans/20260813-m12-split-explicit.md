@@ -249,21 +249,29 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 ### Task 4: The subcycle loop + finalize
 **Files:** Modify `src/fesom_ssh_se.cpp`, `src/fesom_step.cpp` (stub → real block),
 `src/fesom_phasestats.h/.cpp` (new phase).
-- [ ] SM weight struct (β,ζ,γ,δ from χ; FB slot documented in a comment, not implemented).
-- [ ] Kernels 1/2/4 per the scheme + the two per-substep exchanges + ring rotation; ⟨⟨Ū⟩⟩
-      accumulation; W term; M from knob; `se_Ubt_n` freeze at m=0; live V_h(Ūᵐ−Ūⁿ) inside
-      kernel 4 (`FESOM_SE_VISC=0` bypass).
-- [ ] Finalize: both-ring carry; hbar_old/hbar/eta_n writes (device) + the **mandatory** host
-      sync of {eta_n, hbar, hbar_old} (coherence requirement — see scheme section).
-- [ ] **Phasestats:** add `FESOM_PH_BT` marks around the SE block (the G4 currency; keep the
-      CG mark untouched so SI boards stay comparable).
-- [ ] **G1a:** `FESOM_SE_CHECK` per-step η-compatibility ‖η^{n+1}−ηⁿ+τ(div⟨⟨Ū⟩⟩+W)‖∞ —
-      machine-precision class expected; measure first, then freeze the threshold in code;
-      Serial abort on violation.
-- [ ] Build serial+cuda; 10-step CORE2 run: G1a passes, η evolves, no NaN. Note: until T5 lands,
-      `uv` never receives the step increment (7–11 skipped, trim absent) — the model state is
-      unphysical; G1a is internal to the subcycle and valid regardless. Read "no NaN" accordingly.
-- [ ] **Null re-check** (step.cpp touched): cheap unset-vs-unset diff_snap, Serial + CUDA.
+- [x] SM weights DONE (χ=0.05 → β=0.281105 ζ=0.003036 γ=0.057766 δ=0.663838, announced at
+      startup; FB slot documented). Ring correction found at design time: **AM4 reads FOUR η
+      levels simultaneously → the η ring is size 4** (Ū stays 3; the new Ū overwrites the
+      retiring m−2 buffer after AB3 consumed it).
+- [x] Subcycle loop DONE — **2 kernels + 2 exchanges per substep** (AB3+mean fused per-elem;
+      η via the T2 gather CSR per owned node, cavity-frozen; Ū update with inline 4-level AM4
+      at the vertices, H^{AM4}=H0e+mean(η^{AM4}), f×Ū^{AB3} per the notes); live two-term
+      viscosity V[Ūᵐ]−V[Ūⁿ] in the Ū kernel — τ-scaling verified against the Zenodo update
+      block (vi carries NO dt; their BT_inv·UVBT_rhs ≡ our tauM·F). NOTE for the Sergey
+      packet: the Zenodo FB variant uses SEMI-IMPLICIT Coriolis and ∇η at ηᵐ — we implement
+      the notes' SM prescription (AB3 Coriolis, η^{AM4}) instead.
+- [x] Finalize DONE: both rings carry; hbar_old:=hbar, hbar:=η^{n+1} full-extent device kernel
+      + the mandatory host sync of {hbar, hbar_old}; **eta_n via the SHARED substep 11** (the
+      α=1 map on the synced host hbar + its existing push — no new eta_n rail needed at all);
+      D4 history swap. Teardown lesson: a function-local `static fesom::Field` outlives
+      Kokkos::finalize and aborts at exit — check scratch moved into the module state.
+- [x] **Phasestats:** `FESOM_PH_BT` added (enum + "bt" report column); CG mark untouched.
+- [x] **G1a PASS at machine precision:** pi 10 steps — max|r| 6e-20 → 7e-18 m (1r); 2r and
+      CUDA the same class (5.9e-18 / 7.8e-18 m); η=1.20e-02 m IDENTICAL 1r/2r/CUDA at the
+      print digits; the r-term engages as Ū spins up (|F−R̄| 0 → 4.3e-4 m²/s²). Provisional
+      Serial abort 1e-9 m; frozen after CORE2 measurements (T7).
+- [x] **Null re-check** (step.cpp touched): serial byte gate + CUDA fidelity gate re-submitted —
+      jobs 26935426/26935427 (result recorded below before T5 starts).
 
 ### Task 5: Corrector trim + velocity writeback
 **Files:** Modify `src/fesom_ssh_se.cpp`, `src/fesom_step.cpp`.

@@ -77,7 +77,7 @@ void fesom_phasestats_report(int timed_steps, fesom_partit *p)
     if (me != 0) return;
 
     static const char *nm[FESOM_PH_N] = {"force", "ice", "icedyn", "iceadv",
-                                         "coupl", "ocean", "cg", "other"};
+                                         "coupl", "ocean", "cg", "bt", "other"};
     const double ms = 1e3 / (double)timed_steps;   /* s over window -> ms/step */
 
     printf("[phasestats] steps=%d ranks=%d  (ms/step; busy = wall - MPI-wait; @r = argmax rank)\n",

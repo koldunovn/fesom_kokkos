@@ -34,9 +34,10 @@ struct fesom_partit;
  */
 
 /* Cached knob reads (abort on unrecognised values). */
-int fesom_se_on(void);
-int fesom_se_m(void);
-int fesom_se_check_on(void);   /* FESOM_SE_CHECK diagnostic family (unset/0 = off) */
+int    fesom_se_on(void);
+int    fesom_se_m(void);
+double fesom_se_chi(void);
+int    fesom_se_check_on(void);   /* FESOM_SE_CHECK diagnostic family (unset/0 = off) */
 
 /* Parse-time guards (zstar requirement, incompatible diagnostics). Call once,
  * right after fesom_ale_mode_init() — needs no mesh. */
@@ -47,12 +48,15 @@ void fesom_se_mode_init(void);
  * only prints the L80 dead-knob note if FESOM_SE_* is set anyway). */
 void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *partit);
 
-/* TASK-1 STUB: placeholder for the SE block (subcycling lands in T3-T5).
- * Keeps hbar/eta_n frozen; prints one notice. */
-void fesom_se_step_stub(int step_n, const struct fesom_mesh *mesh,
-                        struct fesom_dyn *dyn,
-                        const struct fesom_forcing *forcing,
-                        struct fesom_partit *partit);
+/* The SE block: forcing assembly + M-substep SM2005 AB3-AM4 subcycling +
+ * finalize (hbar_old:=hbar, hbar:=η^{n+1}, host-synced — the coherence
+ * contract; substep 11 derives eta_n from hbar as under SI). Replaces
+ * substeps 6b-10. Returns M (the driver's "iteration count").
+ * T5 adds the corrector trim of uv after this call. */
+int fesom_se_step(int step_n, struct fesom_mesh *mesh,
+                  struct fesom_dyn *dyn,
+                  const struct fesom_forcing *forcing,
+                  struct fesom_partit *partit);
 
 /* Release the SE device Views. MUST be called before Kokkos::finalize()
  * (the fesom_ssh_cgpipe_free pattern). No-op when the knob never fired. */
