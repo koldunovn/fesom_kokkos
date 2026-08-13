@@ -63,6 +63,22 @@ matters.
 | CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ accuracy + stability |
 | NG5 | CPU | 2048 | — | **null** | — |
 
+### What the external engines buy over METIS knobs (the workflow-cost question)
+
+Adding KaMinPar/Mt-KaHyPar to the workflow is a real cost (a build, a graph export, an
+injection step — though all offline and once per mesh×N). What it buys, against the best
+METIS-knobs-only arm **at the same point and gate standard**:
+
+| point | best METIS-only arm | its gates | engine premium |
+|---|---|---|---|
+| CORE2 512 | `UFACTOR=30` −3.8 % | ✅ certified | ≈ 0 pp (KaHIP raced −4.0 %, inside noise) — **skip the engine** |
+| fArc 2048 | `MINCONN` −5.5 % at length | ✅ screen + accuracy (26892880/26892879) | **+2.0 pp** (−7.5 %) — adopter's choice |
+| dars 2048 | slack −3.1 % / `a4` −2.8 % | 🔴 both OUT of the accuracy class (F45 gate); `MINCONN` −4.5 % diverges at length | **engine is the only arm that passed both gates** |
+
+On GPU the engines never won a point — `MINCONN` (a plain METIS knob) is the whole GPU story —
+so the engine question is CPU-only. Pattern (Finding 45 block): at dars and fArc the engines are
+simultaneously the fastest arms and the best-behaved in the accuracy gate.
+
 At the NG5 re-race (ladder dt 180) the three alternate arms — `MINCONN`+`CONTIG`, +`UFACTOR=30`,
 and slack — all diverged within 300 steps in both reps while `MINCONN` ran clean at −9.7 %:
 NG5 is the most partition-fragile mesh in the campaign, and the adoption screen is doing exactly
