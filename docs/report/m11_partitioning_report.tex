@@ -292,7 +292,20 @@ what scale, and through what mechanism. The scale bar is the spread of seed-only
 the shipped recipe (Section~3) --- a disturbance no larger than that is one nobody would ever
 audit, since it is produced by regenerating today's partition with a different random seed.
 The controls themselves span a factor 1.05 on DARS and 3.9 on CORE2 at 864 ranks, so no fixed
-rms threshold could replace the per-mesh spread. Four grades occur in the campaign.
+rms threshold could replace the per-mesh spread. Figure~\ref{fig:dist} shows every surviving
+candidate's disturbance per field on that scale; four grades occur in the campaign.
+
+\begin{figure}[t]\centering
+\includegraphics[width=0.92\textwidth]{fig_m11_disturbance.pdf}
+\caption{\small Twenty-step rms difference from the reference for each candidate, by field,
+relative to the largest value among that point's seed-control repartitionings (dashed line;
+the shaded region is inside the spread). Filled markers exceed the spread. Every candidate
+shown passed the 3{,}000-step stability screen. The DARS 2{,}048-rank envelope uses the four
+surviving controls (the fifth is the step-14 blowup of Section~5); the Hilbert-renumbered
+CORE2 candidate is compared under its own numbering and is omitted. All values are read
+directly from the accuracy-run logs; job ids are recorded in the campaign log.}
+\label{fig:dist}
+\end{figure}
 
 \emph{Inside or below the spread.} Most recommended candidates: at CORE2, 4 GPU ranks, the
 winner lies below every control on all three fields; KaMinPar at DARS 2{,}048 lies below every

@@ -6,10 +6,12 @@ Every number is a vetted campaign value from docs/PARTITIONING_M11.md; the job i
 produced it is cited beside it. Gains are quoted as "% faster than the shipped partition"
 (positive = faster), the sign convention stated in each caption.
 
-  fig_m11_board.pdf      best candidate per point, GPU and CPU panels, gate status coded
-  fig_m11_mechanism.pdf  (a) GPU gain vs fractional nbr_max reduction  (b) 300-step race
-                         vs 3,000-step re-measurement, 8 matched pairs
-  fig_m11_gh200.pdf      A100 vs GH200 at the three cross-checked points
+  fig_m11_board.pdf       best candidate per point, GPU and CPU panels, disturbance coded
+  fig_m11_mechanism.pdf   (a) GPU gain vs fractional nbr_max reduction  (b) 300-step race
+                          vs 3,000-step re-measurement, 8 matched pairs
+  fig_m11_gh200.pdf       A100 vs GH200 at the three cross-checked points
+  fig_m11_disturbance.pdf per candidate and field: 20-step rms disturbance relative to the
+                          top of the seed-control spread (harvested from the gate job logs)
 """
 import os
 import sys
@@ -158,4 +160,83 @@ ax.legend(handles, ["A100 (Levante)", "GH200 (dolpung, staged halos)"], frameon=
 fig.savefig(f"{OUT}/fig_m11_gh200.pdf"); fig.savefig(f"{OUT}/fig_m11_gh200.png")
 plt.close(fig)
 
-print("wrote", ", ".join(f"fig_m11_{n}.pdf" for n in ("board", "mechanism", "gh200")))
+# ------------------------------------- fig 4: the disturbance, per candidate and field
+# Every rms below is copied from the gate job's own output (job id on the row); the
+# normaliser is the LARGEST rms among that gate's surviving controls (the top of the seed
+# spread), so 1.0 = the largest deviation an ordinary seed re-roll produced. dars 2048 uses
+# the 4 surviving controls of 26904739+26905507 (the fifth, seed 660013, is the Finding-45
+# step-14 blowup); the Hilbert-renumbered CORE2 arm is compared under its own numbering and
+# is not shown.
+DIST = [  # label, mesh, {var: (arm_rms, ctl_top_rms)}, note
+    ("DARS · 64 GPU\nMINCONN+CONTIG+u30", "dars",   # 26908840, 5 controls
+     {"temp": (7.343e-2, 6.489e-2), "salt": (1.788e-1, 1.940e-1), "ssh": (6.387e-3, 5.568e-3)},
+     "T max ×1.8–2.5 the class"),
+    ("DARS · 64 GPU\nMINCONN", "dars",              # 26908840
+     {"temp": (6.395e-2, 6.489e-2), "salt": (1.295e-1, 1.940e-1), "ssh": (6.199e-3, 5.568e-3)},
+     "solver stopping"),
+    ("NG5 · 64 GPU\nMINCONN", "ng5",                # 26911630, 5 controls
+     {"temp": (5.290e-2, 5.620e-2), "salt": (8.156e-2, 1.270e-1), "ssh": (3.076e-3, 2.839e-3)},
+     "unexplained"),
+    ("CORE2 · 4 GPU\nMINCONN", "core2",             # 26892982, 2 controls
+     {"temp": (2.923e-2, 3.988e-2), "salt": (3.323e-2, 3.573e-2), "ssh": (4.015e-3, 7.244e-3)},
+     ""),
+    ("fArc · 16 GPU\nMINCONN+CONTIG", "farc",       # 26893934, 4 controls
+     {"temp": (4.499e-2, 3.374e-2), "salt": (7.255e-2, 1.158e-1), "ssh": (6.318e-3, 3.757e-3)},
+     ""),
+    (None, None, None, None),                       # separator GPU | CPU
+    ("fArc · 2048 CPU\nMt-KaHyPar", "farc",         # 26893320, 4 controls
+     {"temp": (4.299e-2, 4.576e-2), "salt": (8.907e-2, 1.215e-1), "ssh": (4.354e-3, 5.445e-3)},
+     ""),
+    ("DARS · 2048 CPU\nKaMinPar", "dars",           # 26904739 + 26905507, 4 surviving controls
+     {"temp": (6.699e-2, 7.003e-2), "salt": (1.366e-1, 1.610e-1), "ssh": (7.079e-3, 7.086e-3)},
+     ""),
+    ("CORE2 · 512 CPU\nUFACTOR=30", "core2",        # 26885353, 2 controls
+     {"temp": (5.408e-2, 5.557e-2), "salt": (1.538e-1, 1.700e-1), "ssh": (6.404e-3, 6.421e-3)},
+     ""),
+    ("CORE2 · 864 CPU\nKaMinPar", "core2",          # 26904986, 5 controls
+     {"temp": (5.994e-2, 6.938e-2), "salt": (2.239e-1, 1.805e-1), "ssh": (7.047e-3, 6.514e-3)},
+     ""),
+]
+MARK = {"temp": ("o", "T"), "salt": ("s", "S"), "ssh": ("^", "SSH")}
+
+fig, ax = plt.subplots(figsize=(6.9, 3.9))
+rows = [r for r in DIST]
+y = np.arange(len(rows))[::-1]
+for yi, (label, mesh, vals, note) in zip(y, rows):
+    if label is None:
+        ax.axhline(yi, color="0.85", linewidth=0.8)
+        continue
+    xmax = 0.0
+    for var, (arm, top) in vals.items():
+        r = arm / top
+        xmax = max(xmax, r)
+        filled = r > 1.0
+        dy = {"temp": 0.17, "salt": 0.0, "ssh": -0.17}[var]
+        ax.plot(r, yi + dy, MARK[var][0], color=C[mesh], markersize=6.0,
+                markerfacecolor=C[mesh] if filled else "white",
+                markeredgecolor=C[mesh], markeredgewidth=1.2, zorder=3)
+    ax.text(0.02, yi, label.replace("\n", " — "), ha="left", va="center", fontsize=7.5,
+            zorder=4)
+    if note:
+        ax.text(xmax + 0.045, yi, note, ha="left", va="center", fontsize=6.5, color="0.45")
+ax.axvline(1.0, color="0.25", linewidth=1.0, linestyle="--", zorder=2)
+ax.axvspan(0, 1.0, color="0.93", zorder=0)
+ax.text(0.98, -0.62, "inside the seed spread", ha="right", va="bottom",
+        fontsize=7, color="0.35", style="italic")
+ax.text(1.02, -0.62, "top of the seed-control spread", ha="left", va="bottom",
+        fontsize=7, color="0.25", style="italic")
+ax.set_yticks([])
+ax.set_xlim(0, 1.85)
+ax.set_ylim(-0.7, len(rows) - 0.3)
+ax.set_xlabel("20-step rms difference from reference, relative to the largest seed-control value")
+handles = [plt.Line2D([], [], marker=MARK[v][0], linestyle="", color="0.3",
+                      markerfacecolor="white", markeredgewidth=1.2, label=MARK[v][1])
+           for v in ("temp", "salt", "ssh")]
+ax.legend(handles=handles, loc="lower right", frameon=False, fontsize=7.5, ncol=3)
+for s in ("left", "right", "top"):
+    ax.spines[s].set_visible(False)
+fig.subplots_adjust(left=0.02, right=0.99, bottom=0.13, top=0.99)
+fig.savefig(f"{OUT}/fig_m11_disturbance.pdf"); fig.savefig(f"{OUT}/fig_m11_disturbance.png")
+plt.close(fig)
+
+print("wrote", ", ".join(f"fig_m11_{n}.pdf" for n in ("board", "mechanism", "gh200", "disturbance")))
