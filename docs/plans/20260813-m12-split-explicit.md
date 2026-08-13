@@ -275,12 +275,18 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ### Task 5: Corrector trim + velocity writeback
 **Files:** Modify `src/fesom_ssh_se.cpp`, `src/fesom_step.cpp`.
-- [ ] Trim kernel (per owned-element column, hⁿ weights per D1); uv writeback; the
-      substep-9-slot ELEM3D uv exchange retained.
-- [ ] **G1b check:** ‖Σₖ uvₖ·helemₖ − ⟨⟨Ū⟩⟩‖∞ machine-precision class after trim (per step
-      under FESOM_SE_CHECK; measure→freeze threshold; Serial abort on violation).
-- [ ] Build serial+cuda; 10-step run: G1a+G1b green on both backends.
-- [ ] **Null re-check** (step.cpp touched): cheap unset-vs-unset diff_snap, Serial + CUDA.
+- [x] Trim kernel DONE (module-local — no further step.cpp change: with hⁿ weights the
+      correction is DEPTH-UNIFORM in velocity units, corr=(Σh(u+ur)−⟨⟨Ū⟩⟩)/H_e,
+      uvₖ:=(uv+uv_rhs)ₖ−corr; cavity columns get the plain predictor); uv modify_device +
+      the ELEM3D halo moved inside fesom_se_step (the substep-9 slot).
+- [x] **G1b PASS:** max|Σuv·helem−⟨⟨Ū⟩⟩| = 5-7e-15 m²/s (pi 20 steps, Serial+2r+CUDA) —
+      machine class. Provisional Serial abort 1e-9; frozen at T7.
+- [x] Build serial+cuda; 20-step pi runs green both backends — THE FULL SE MODEL IS COUPLED
+      (uv=1.46e-02 receives the trimmed increment, η=4.46e-02, w evolving; 1r/2r/CUDA
+      identical printed digits; G1a 3.2e-17 m alongside).
+- [x] **Null re-check**: T5 touched only fesom_ssh_se.cpp (module-local); the T4 gates
+      (serial byte 26935426 PASS, CUDA fidelity 26935427 PASS) stand as current null
+      evidence; G0-final re-runs at T6.
 
 ### Task 6: Full dispatch, coherence sites, ALE-tail integration, null gate
 **Files:** Modify `src/fesom_step.cpp`, `src/fesom_ice.cpp`, `src/fesom_ssh_se.cpp`,
