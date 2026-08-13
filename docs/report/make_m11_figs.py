@@ -28,26 +28,29 @@ C = common.MESH_COLOR
 L = common.MESH_LABEL
 
 # ---------------------------------------------------------------- fig 1: the board
-# (mesh, ranks, gain %, setting, status) — status: cert | pending | failed
+# (mesh, ranks, gain %, setting, status). All arms shown passed the 3,000-step stability
+# screen; status codes the 20-step DISTURBANCE vs the seed-control spread (user protocol
+# decision 2026-08-13 — graded reporting, not a pass/fail accuracy verdict):
+#   t1  = inside/below the seed spread     ssh = SSH-only excursion
+#   ts  = temperature/salinity excursion   null = no candidate beat shipped
 GPU = [
-    # dars: the -19.7 % three-option arm FAILED accuracy outright (26908840, 5 controls);
-    # MINCONN alone is the in-contention candidate, out on ssh rms only (+11 %)
-    ("dars",  64,  14.3, "MINCONN",                   "ssh"),       # 26895260 screen, 26908840 gate
-    ("ng5",   64,   9.8, "MINCONN",                   "ssh"),       # 26908635 screen, 26911630 gate (+8 %)
-    ("core2",  4,   8.1, "MINCONN",                   "cert"),      # 26892875 + 3,000-step re-proof
-    ("farc",  16,   3.6, "MINCONN+CONTIG",            "failed"),    # accuracy gate, 4 controls
+    ("dars",  64,  19.7, "MINCONN+CONTIG+u30",        "ts"),        # 26895260 screen; 26908840: T rms +13 %, T max x1.8-2.5
+    ("dars",  64,  14.3, "MINCONN",                   "ssh"),       # 26895260 screen, 26908840 gate (+11 %, stopping mech.)
+    ("ng5",   64,   9.8, "MINCONN",                   "ssh"),       # 26908635 screen, 26911630 gate (+8 %, unexplained)
+    ("core2",  4,   8.1, "MINCONN",                   "t1"),        # 26892875 + 3,000-step re-proof
+    ("farc",  16,   3.6, "MINCONN+CONTIG",            "ts"),        # 26893934: T rms +33 %, 4 controls
 ]
 CPU = [
-    ("farc",  2048, 7.5, "Mt-KaHyPar w=100+nlev",     "cert"),
-    ("core2",  512, 5.8, "Hilbert + engine",          "cert"),
-    ("core2",  864, 4.9, "KaMinPar",                  "failed"),    # 26904986, salt, 5 controls
-    ("dars",  2048, 4.2, "KaMinPar w=100+nlev",       "cert"),      # 26895271 race, 26904739 gate
-    ("core2",  512, 3.8, "UFACTOR=30 alone",          "cert"),
+    ("farc",  2048, 7.5, "Mt-KaHyPar w=100+nlev",     "t1"),
+    ("core2",  512, 5.8, "Hilbert + engine",          "t1"),
+    ("core2",  864, 4.9, "KaMinPar",                  "ts"),        # 26904986: salt rms +24 %, 5 controls
+    ("dars",  2048, 4.2, "KaMinPar w=100+nlev",       "t1"),        # 26895271 race, 26904739 gate
+    ("core2",  512, 3.8, "UFACTOR=30 alone",          "t1"),
     ("ng5",   2048, 0.0, "no candidate beat shipped", "null"),
 ]
 
-HATCH = {"cert": None, "ssh": "//", "failed": "xx", "null": None}
-ALPHA = {"cert": 1.0, "ssh": 0.55, "failed": 0.35, "null": 0.2}
+HATCH = {"t1": None, "ssh": "//", "ts": "xx", "null": None}
+ALPHA = {"t1": 1.0, "ssh": 0.55, "ts": 0.35, "null": 0.2}
 
 fig, axes = plt.subplots(1, 2, figsize=(8.6, 2.9), sharex=True)
 for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
@@ -59,7 +62,7 @@ for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
         ax.text(-0.35, yi + 0.13, label, ha="right", va="center", fontsize=8)
         ax.text(-0.35, yi - 0.22, setting, ha="right", va="center", fontsize=6.5, color="0.45")
         val = "null" if status == "null" else f"{gain:.1f} %"
-        note = {"cert": "", "ssh": "out on SSH rms only", "failed": "accuracy failed",
+        note = {"t1": "", "ssh": "SSH-only, above seed spread", "ts": "T/S above seed spread",
                 "null": ""}[status]
         if note:
             ax.text(max(gain, 0) + 0.35, yi + 0.13, val, ha="left", va="center", fontsize=8)
@@ -69,7 +72,7 @@ for ax, rows, title in ((axes[0], GPU, "GPU"), (axes[1], CPU, "CPU")):
             ax.text(max(gain, 0) + 0.35, yi, val, ha="left", va="center", fontsize=8)
     ax.set_yticks([])
     ax.set_title(title)
-    ax.set_xlim(0, 17)
+    ax.set_xlim(0, 22)
     ax.set_xlabel("% faster than the shipped partition")
     ax.grid(axis="y", visible=False)
     for s in ("left", "right", "top"):

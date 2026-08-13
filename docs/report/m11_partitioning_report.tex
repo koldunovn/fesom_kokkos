@@ -35,13 +35,16 @@ measurements on CPU and GPU, and a procedure for adopting a new partition}
 
 \subsection*{TL;DR}
 \begin{itemize}\itemsep1pt
-\item Repartitioning makes the GPU model step \textbf{8--14\,\% faster} (DARS on 64 GPUs:
-$-14.3\,\%$; a $-19.7\,\%$ arm exists there but failed the accuracy test). The gain comes
-from one METIS option, \minconn, which FESOM's \texttt{PartGraphRecursive} call silently
-ignores; switching to \texttt{PartGraphKway} is a few lines.
-\item At three of the four GPU points the winning partition is out of the accuracy class in
-exactly one statistic, the SSH rms (Section~6); adopting those gains is an explicit decision,
-not a test outcome.
+\item Repartitioning makes the GPU model step \textbf{8--20\,\% faster} (DARS on 64 GPUs:
+$-14.3\,\%$ with the disturbance confined to sea-surface height, $-19.7\,\%$ with the largest
+disturbance measured in the campaign). The gain comes from one METIS option, \minconn, which
+FESOM's \texttt{PartGraphRecursive} call silently ignores; switching to
+\texttt{PartGraphKway} is a few lines.
+\item Any repartitioning perturbs the solution; we report each candidate's perturbation
+against the spread of ordinary seed re-rolls of the stock recipe and interpret it
+(Section~6). Most winners sit inside or below that spread. At three of the four GPU points
+the winner exceeds it in exactly one statistic, the SSH rms --- at DARS traceably an
+artefact of the barotropic solver's stopping tolerance, not a physics bias.
 \item CPU runs gain \textbf{4--8\,\%}, from external engines (KaMinPar, Mt-KaHyPar) and
 load-balance slack instead; the two backends need different partitions of the same mesh.
 \item \textbf{Some new partitions crash the model} --- eight caught, one produced by the
@@ -63,10 +66,12 @@ partitions on both backends of the C++/Kokkos port.
 Three results carry the report. First, the shipped partitions cost the GPU backend up to
 20\,\% of the model step, and most of that is recovered by a single METIS option, \minconn,
 which no FESOM partition has ever had active: the partitioner calls
-\texttt{METIS\_PartGraphRecursive}, which accepts and ignores it. Of the measured speed,
-8--14\,\% stands after the accuracy tests, with the two largest gains (DARS $-14.3\,\%$, NG5
-$-9.8\,\%$) out of class in the SSH rms alone and therefore left as explicit adoption
-decisions. Second, the CPU backend gains less (4--8\,\%) and gains it from different
+\texttt{METIS\_PartGraphRecursive}, which accepts and ignores it. Each gain is reported
+together with the disturbance the new partition causes, measured against the spread of
+ordinary seed re-rolls of the shipped recipe: the two largest recommended gains (DARS
+$-14.3\,\%$, NG5 $-9.8\,\%$) exceed that spread in the SSH rms alone, and the largest measured
+gain ($-19.7\,\%$ on DARS) carries a temperature-field disturbance that should be checked with
+a long twin run before production (Section~6). Second, the CPU backend gains less (4--8\,\%) and gains it from different
 settings, namely external engines and load-balance slack; the two backends are best served by
 different partitions of the same mesh. Third, and unexpectedly, a small fraction of newly
 generated partitions cause the model to diverge, regardless of which settings produced them.
@@ -122,16 +127,18 @@ partition that had won its timing comparison by 4.5\,\% diverged between step 15
 
 \emph{Accuracy.} Any change of decomposition reorders floating-point reductions, and the
 resulting round-off differences grow chaotically at fronts, so a new partition cannot be
-required to reproduce the reference solution. It can be required to be indistinguishable from an
-ordinary repartitioning. We therefore regenerate the shipped recipe with three or more different
-random seeds (verifying that each is a genuinely different partition), run twenty steps with
-each, and demand that the candidate's temperature, salinity and sea-surface-height rms
-differences from the reference fall inside the range spanned by those control partitions. The
-rms envelope is the criterion throughout; quantiles of the difference fields are recorded as
-context but do not decide.
+required to reproduce the reference solution. What can be measured is whether it is
+\emph{distinguishable} from an ordinary repartitioning. We regenerate the shipped recipe with
+three or more different random seeds (verifying that each is a genuinely different partition),
+run twenty steps with each, and report the candidate's temperature, salinity and
+sea-surface-height rms differences from the reference against the range spanned by those
+control partitions. That spread is the scale bar for every disturbance quoted in Section~6;
+quantiles of the difference fields are recorded as context. These are twenty-step cold-start
+numbers: they measure the detectability of the partition change, not its climate impact
+(Section~6 discusses the distinction).
 
-Certified partitions are packaged by a tool that refuses any decomposition lacking a recorded
-clean 3{,}000-step run at its exact rank count.
+Recommended partitions are packaged by a tool that refuses any decomposition lacking a
+recorded clean 3{,}000-step run at its exact rank count.
 
 \section{Speed}
 
@@ -143,12 +150,13 @@ timing runs are, if anything, conservative.
 
 \begin{figure}[t]\centering
 \includegraphics[width=\textwidth]{fig_m11_board.pdf}
-\caption{\small Best candidate partition per mesh and rank count, as a percentage faster than
+\caption{\small Best candidate partitions per mesh and rank count, as a percentage faster than
 the shipped partition. Gray text under each label is the setting that produced the candidate.
-Solid bars are certified (stability and accuracy both passed); single-hatched bars are in class
-on everything except the SSH rms, with adoption an open decision; cross-hatched bars failed the
-accuracy test. Mesh colors follow the project's figure
-conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
+All bars passed the 3{,}000-step stability screen; the fill codes the twenty-step disturbance
+against the seed-control spread (Section~6): solid = inside or below the spread,
+single-hatched = above it in the SSH rms only, cross-hatched = above it in temperature or
+salinity (the grade that warrants a long twin run before production). Mesh colors follow the
+project's figure conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \label{fig:board}
 \end{figure}
 
@@ -156,25 +164,26 @@ conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \setlength{\tabcolsep}{3.4pt}
 \begin{tabular}{llrlll}
 \toprule
-mesh & backend, ranks & gain & setting & stability & accuracy \\
+mesh & backend, ranks & gain & setting & stability & disturbance vs seed spread \\
 \midrule
-DARS  & GPU, 64   & $\mathbf{-14.3\,\%}$ & \minconn            & passed & ssh rms $+11\,\%$, rest in class$^{a}$ \\
-NG5   & GPU, 64   & $\mathbf{-9.8\,\%}$  & \minconn             & passed & ssh rms $+8\,\%$, rest in class$^{a}$ \\
-CORE2 & GPU, 4    & $\mathbf{-8.1\,\%}$  & \minconn             & passed & passed \\
-fArc  & GPU, 16   & $-3.6\,\%$           & \minconn+\contig     & passed & \textbf{failed}; not recommended \\
+DARS  & GPU, 64   & $\mathbf{-19.7\,\%}$ & \minconn+\contig+u30 & passed & T rms $+13\,\%$, T max $\times$1.8--2.5 \\
+DARS  & GPU, 64   & $\mathbf{-14.3\,\%}$ & \minconn            & passed & ssh rms $+11\,\%$ only (solver stopping) \\
+NG5   & GPU, 64   & $\mathbf{-9.8\,\%}$  & \minconn             & passed & ssh rms $+8\,\%$ only (unexplained) \\
+CORE2 & GPU, 4    & $\mathbf{-8.1\,\%}$  & \minconn             & passed & below every control \\
+fArc  & GPU, 16   & $-3.6\,\%$           & \minconn+\contig     & passed & T rms $+33\,\%$, ssh $+68\,\%$ \\
 \midrule
-fArc  & CPU, 2048 & $\mathbf{-7.5\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & passed & passed (4 controls) \\
-CORE2 & CPU, 512  & $\mathbf{-5.8\,\%}$  & Hilbert renumbering + engine & passed & passed \\
-DARS  & CPU, 2048 & $\mathbf{-4.2\,\%}$  & KaMinPar $w{=}100{+}\mathrm{nlev}$ & passed & passed \\
-CORE2 & CPU, 864  & $-4.9\,\%$           & KaMinPar             & passed & \textbf{failed} (salinity); not recommended \\
-CORE2 & CPU, 512  & $-3.8\,\%$           & \texttt{UFACTOR=30} alone & passed & passed \\
+fArc  & CPU, 2048 & $\mathbf{-7.5\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & passed & inside the spread (4 controls) \\
+CORE2 & CPU, 512  & $\mathbf{-5.8\,\%}$  & Hilbert renumbering + engine & passed & inside the spread \\
+DARS  & CPU, 2048 & $\mathbf{-4.2\,\%}$  & KaMinPar $w{=}100{+}\mathrm{nlev}$ & passed & below every control (T, S) \\
+CORE2 & CPU, 864  & $-4.9\,\%$           & KaMinPar             & passed & salinity rms $+24\,\%$ \\
+CORE2 & CPU, 512  & $-3.8\,\%$           & \texttt{UFACTOR=30} alone & passed & inside the spread \\
 NG5   & CPU, 2048 & null                 & ---                  & --- & --- \\
 \bottomrule
 \end{tabular}
-\caption{\small Best candidate per mesh and rank count, relative to the shipped partition, at
-the time step given in Section~1. $^{a}$The DARS and NG5 GPU accuracy tests were still in the
-queue when this report was written; the first DARS pass fell just outside a three-control
-envelope and is being re-judged against five controls (Section~6).}
+\caption{\small Best candidates per mesh and rank count, relative to the shipped partition, at
+the time step given in Section~1. The last column is the twenty-step rms difference from the
+reference where it exceeds the spread of seed-control repartitionings, with the responsible
+field; Section~6 interprets each entry.}
 \label{tab:board}
 \end{table}
 
@@ -276,24 +285,46 @@ differ from the failures only in having been exercised. The practical conclusion
 stability test is a property of adopting \emph{any} new partition, not a surcharge on the new
 options.
 
-\section{Accuracy}
+\section{Accuracy: the size of the disturbance, and what it means}
 
-The control-envelope test of Section~3 discriminated in both directions. At CORE2, 4 GPU ranks,
-the winning candidates lie below every control on all three fields; at DARS, 2{,}048 CPU ranks,
-KaMinPar lies below every control on temperature and salinity. Both are certified. Conversely,
-the fArc GPU candidates lie above a four-control temperature envelope, and at CORE2, 864 ranks,
-KaMinPar's salinity rms is 24\,\% above a five-control envelope; both points are speed
-improvements that we nevertheless do not recommend. The controls themselves span a factor 1.05
-on DARS and 3.9 on CORE2 at 864 ranks, so no fixed rms threshold could replace the per-mesh
-envelope.
+Every change of decomposition perturbs the solution; the useful questions are by how much, on
+what scale, and through what mechanism. The scale bar is the spread of seed-only re-rolls of
+the shipped recipe (Section~3) --- a disturbance no larger than that is one nobody would ever
+audit, since it is produced by regenerating today's partition with a different random seed.
+The controls themselves span a factor 1.05 on DARS and 3.9 on CORE2 at 864 ranks, so no fixed
+rms threshold could replace the per-mesh spread. Four grades occur in the campaign.
 
-One systematic effect complicates the sea-surface-height comparison. The barotropic solver
-stops at a relative residual, so a partition on which it converges faster stops earlier and
-lands measurably further from the reference. Partitions that improve convergence --- which the
-\minconn\ family does --- are thereby penalised in exactly one field. The effect is visible at
-CORE2 (the candidate with the fewest solver iterations has the largest SSH difference) and again
-on DARS at 64 ranks, where all three candidates converge faster than all three controls. We
-record it as context; the envelope criterion stands.
+\emph{Inside or below the spread.} Most recommended candidates: at CORE2, 4 GPU ranks, the
+winner lies below every control on all three fields; KaMinPar at DARS 2{,}048 lies below every
+control on temperature and salinity; Mt-KaHyPar at fArc and both CORE2 512 settings sit inside.
+Nothing to decide.
+
+\emph{An SSH-only excursion with a mechanism.} The DARS 64-GPU winner exceeds the spread in
+the SSH rms alone ($+11\,\%$). The barotropic solver stops at a relative residual, so a
+partition on which it converges faster --- which the \minconn\ family produces --- stops
+earlier and lands measurably elsewhere \emph{within the same requested tolerance}: at DARS all
+three candidates converge faster than all three controls, and at CORE2 the candidate with the
+fewest iterations has the largest SSH difference. Both runs satisfy the tolerance asked of the
+solver; the difference lives inside the solver's own tolerance ball, and tightening the
+tolerance would shrink it. This is a numerics artefact, not a physics bias.
+
+\emph{An SSH-only excursion without one.} The NG5 64-GPU winner shows the same signature
+($+8\,\%$), but its solver iteration trace matches the controls exactly, ruling that mechanism
+out. Small and confined to one diagnostic field, but it stays labelled unexplained.
+
+\emph{Temperature or salinity excursions.} The $-19.7\,\%$ DARS arm has temperature rms
+$+13\,\%$ above the spread and a temperature \emph{maximum} 1.8--2.5 times the control class;
+the fArc GPU candidates exceed a four-control temperature envelope by 18--33\,\%; KaMinPar at
+CORE2 864 has salinity rms $+24\,\%$ (with temperature below every control). These are the
+disturbances that warrant attention: temperature and salinity carry the model's long-term
+state, and a local maximum excursion is the same signature family as the local runaways that
+destroy partitions outright (Section~5). For such a candidate the honest path to production is
+a long twin integration against the shipped partition, not a threshold argument.
+
+All numbers in this section are twenty-step cold-start divergences: they measure whether the
+partition change is \emph{detectable} against ordinary repartitioning noise, not its climate
+impact. The inexpensive next tier of evidence is an end-state comparison after 3{,}000 steps
+against three controls; the definitive one is a multi-year twin run.
 
 \section{Recommendations}
 
@@ -315,17 +346,20 @@ On the machines measured here, the settings to reach for are \minconn\ for GPU r
 (KaMinPar or Mt-KaHyPar, $w = 100 + \mathrm{nlev}$) or \texttt{UFACTOR=30} for CPU runs.
 Hilbert renumbering is worthwhile on CORE2-class meshes where re-establishing the references
 has been accepted. Offline partition quality metrics are useful for designing candidates and
-useless for accepting them; acceptance is the stability and accuracy tests.
+useless for accepting them; acceptance is the stability test plus the disturbance report of
+Section~6, with a long twin run for any candidate whose disturbance reaches the
+temperature--salinity grade.
 
 \section{Status}
 
-Every gate has run; no measurement is pending. Two adoption decisions remain open, both of the
-same shape: \minconn\ at DARS 64 ($-14.3\,\%$) and at NG5 64 ($-9.8\,\%$) are outside the
-accuracy class in the SSH rms alone. Under the fixed criterion neither is certified; adopting
-either is a documented decision rather than a test outcome. The certified partitions are
-packaged: four evidence-checked mesh directories under \path{mesh_m11_certified/} carry the
-CORE2, fArc and DARS winners with their run records. The upstream pull request is the remaining
-engineering step. Whether an interconnect with working
+Every measurement has run. The accuracy criterion was revised at campaign close: instead of a
+certified/not-certified verdict, each recommendation carries its measured disturbance and an
+interpretation (Section~6). Under that reporting the DARS and NG5 64-GPU winners ($-14.3$ and
+$-9.8\,\%$, SSH-only disturbances) are ordinary recommendations, while the $-19.7\,\%$ DARS
+arm and the fArc 16-GPU point carry temperature-grade disturbances and want a long twin run
+before production. Four winners are already packaged as evidence-checked mesh directories
+under \path{mesh_m11_certified/}; the upstream pull request is the remaining engineering
+step. Whether an interconnect with working
 GPU--direct communication prices messages like the A100 fabric or like the GH200 testbed is
 open, and JUPITER should answer it by measurement.
 

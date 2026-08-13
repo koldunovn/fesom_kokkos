@@ -5,20 +5,24 @@ One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–45); the per-ra
 
 ## 🔴 State of the evidence (read before quoting any number below)
 
-Finding 39 changed what this page can claim. A partition that races well over 150–300 steps can
-still diverge before step 3,000: the dars CPU winner did exactly that, and the short-race protocol
-that produced every headline here would have shipped it. So the table below is split by what has
-actually been proven, and **an un-screened gain is not a recommendation**:
+**Protocol decision (user, 2026-08-13, supersedes the binary yardstick of 2026-08-12):** there
+is no certified/not-certified accuracy verdict any more. Two tiers remain:
 
-| status | points |
-|---|---|
-| **screened + accuracy-gated → recommend** | CORE2 4 GPU · CORE2 512 CPU · fArc 2048 CPU · **dars 2048 CPU (KaMinPar)** |
-| stability-clean, accuracy FAILED → do not ship | fArc 16 GPU · CORE2 864 CPU (Finding 44 follow-up, job 26904986) |
-| **stability FAILED → withdrawn** | dars 2048 CPU `MINCONN` (the KaMinPar survivor is certified instead) |
-| stability ✅, accuracy **FAILED** (5 controls) → do not ship | dars 64 GPU `MINCONN`+`CONTIG`+u30 (−19.7 %): temp rms +13 %, temp max ×1.8–2.5 the class |
-| stability ✅, in class except ssh rms (+11 %, stopping mechanism) | dars 64 GPU **`MINCONN` alone (−14.3 %)** — exception decision pending (user) |
-| stability ✅, in class except ssh rms (+8 %) | NG5 64 GPU **`MINCONN` (−9.8 %)** — exception decision pending (user) |
-| measured null | NG5 2048 CPU |
+1. **Stability at length — hard pass/fail, unchanged.** A partition that makes the model
+   diverge or blow up (Findings 34/39/45; eight caught, one from the stock recipe) is not a
+   "disturbance", it is unusable. Nothing un-screened is a recommendation, and `m11_promote`
+   keeps enforcing ≥3,000 steps at the target rank count.
+2. **Accuracy — a graded disturbance report, not a gate.** Every surviving partition changes
+   the solution a bit; the question is how big the change is against the natural scale bar —
+   the spread of ordinary seed re-rolls of the stock recipe — and what it means. The
+   per-point numbers and their interpretation are in the disturbance column of the table
+   below and in the "how to read it" block after it.
+
+**Scope of the disturbance numbers, stated honestly:** they are 20-step cold-start divergences
+— a *detectability* statement ("can this partition be told apart from re-rolling the seed?"),
+not a climate measurement. Long-term climate impact was not measured in M11. The cheap next
+tier is comparing end states after 3,000 steps against 3 controls; the real answer is a long
+twin run (the M7 precedent: a 63-year hindcast separated port from reference at climate level).
 
 ## The short version
 
@@ -28,9 +32,10 @@ maximum number of neighbouring sub-domains — is **never set anywhere in `fort_
 partition produced by stock FESOM has ever had it active.
 
 We measure `MINCONN` as the single most valuable partitioning knob available on GPU: it is the
-best or near-best arm at every GPU point measured. The largest *in-contention* gain is
-**−14.3 %** (dars 64 GPU, `MINCONN` alone; the −19.7 % three-knob arm failed its accuracy gate).
-Switching the call to `PartGraphKway` is a few lines.
+best or near-best arm at every GPU point measured. The largest gain is **−19.7 %** (dars 64
+GPU, `MINCONN`+`CONTIG`+u30 — the arm with the campaign's largest disturbance, see below);
+`MINCONN` alone is **−14.3 %** there with a disturbance confined to SSH. Switching the call to
+`PartGraphKway` is a few lines.
 
 The campaign has also seen four partitions fail at length (Findings 34, 39, 45) — three from
 `MINCONN`-family arms and one from **the stock shipped recipe itself** (a seed-only re-roll,
@@ -48,20 +53,43 @@ matters.
 
 ## Measured gains (min-of-N, matched same-day pairs, each mesh at its cold-start ladder dt)
 
-| mesh | backend | ranks | setting | gain | gated |
-|---|---|--:|---|--:|---|
-| ~~dars~~ | ~~GPU~~ | ~~64~~ | ~~`MINCONN`+`CONTIG`+u30~~ | ~~−19.7 %~~ | 🔴 **accuracy FAILED (5 controls; temp max ×1.8–2.5 class) — do not ship** |
-| dars | GPU | 64 | `MINCONN` alone | **−14.3 %** | stability ✅ · in class except ssh rms +11 % (stopping mechanism) — exception decision pending |
-| NG5 | GPU | 64 | `MINCONN` | **−9.8 %** | stability ✅ · in class except ssh rms +8 % (5 controls) — exception decision pending |
-| CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ accuracy + 3,000-step stability |
-| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | stability ✅ · 🔴 **accuracy FLAGGED — not recommended** |
-| fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ accuracy (4 controls) + stability |
-| CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.8 %** | ✅ accuracy + stability |
-| dars | CPU | 2048 | **KaMinPar `w=100+nlev`** | **−4.2 %** | ✅ accuracy (below every control on temp/salt) + 3,000-step stability |
-| ~~dars~~ | ~~CPU~~ | ~~2048~~ | ~~`MINCONN`~~ | ~~−4.5 %~~ | 🔴 **FAILS the 3,000-step screen — withdrawn** |
-| CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | −4.1 % | stability ✅ (−4.9 % at length) · 🔴 **accuracy FAILED (salt, 5-control envelope) — not recommended** |
-| CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ accuracy + stability |
-| NG5 | CPU | 2048 | — | **null** | — |
+Stability = the 3,000-step screen at the target rank count (hard requirement). Disturbance =
+20-step rms deviation from base, quoted **relative to the spread of ≥3 seed-control re-rolls**
+of the stock recipe on the same mesh.
+
+| mesh | backend | ranks | setting | gain | stability | disturbance vs seed spread |
+|---|---|--:|---|--:|---|---|
+| dars | GPU | 64 | `MINCONN`+`CONTIG`+u30 | **−19.7 %** | ✅ | 🔴 **largest in campaign**: temp rms +13 %, temp max ×1.8–2.5 the class (tier 4 — long twin run before production) |
+| dars | GPU | 64 | `MINCONN` alone | **−14.3 %** | ✅ | ssh rms +11 % only; stopping mechanism (tier 2 — bounded by solver tolerance) |
+| NG5 | GPU | 64 | `MINCONN` | **−9.8 %** | ✅ | ssh rms +8 % only; mechanism ruled out (tier 3 — small, unexplained) |
+| CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ | below every control on all three fields (tier 1 — indistinguishable) |
+| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | ✅ | temp rms +33 %, ssh +68 % above a 4-control envelope (tier 4; also the smallest gain measured) |
+| fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ | in class on all three (4 controls) — tier 1 |
+| CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.8 %** | ✅ | in class — tier 1 |
+| dars | CPU | 2048 | **KaMinPar `w=100+nlev`** | **−4.2 %** | ✅ | below every control on temp/salt — tier 1 |
+| ~~dars~~ | ~~CPU~~ | ~~2048~~ | ~~`MINCONN`~~ | ~~−4.5 %~~ | 🔴 **diverges before step 3,000 — unusable** | — |
+| CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | −4.1 % | ✅ (−4.9 % at length) | salt rms +24 % above a 5-control envelope, temp below every control (tier 4, mixed) |
+| CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ | in class, ssh below both controls — tier 1 |
+| NG5 | CPU | 2048 | — | **null** | — | — |
+
+### How to read the disturbance column
+
+* **Tier 1 — inside (or below) the seed spread.** Adopting this partition disturbs the solution
+  no more than re-rolling the METIS seed of the stock recipe, which nobody audits. Nothing to
+  decide.
+* **Tier 2 — SSH-only excursion with the stopping mechanism.** The barotropic solver stops on a
+  *relative* residual; a partition on which it converges faster stops earlier and lands
+  measurably elsewhere *inside the same requested tolerance*. Both runs satisfy the tolerance;
+  the difference lives in the solver's own tolerance ball, and tightening the tolerance would
+  shrink it. This is a numerics artefact, not a physics bias.
+* **Tier 3 — SSH-only, unexplained.** Same signature as tier 2 but the iteration-count
+  mechanism is ruled out (NG5: the winner's CG trace matches the controls exactly). Small and
+  confined to one diagnostic field, but without a mechanism it stays labelled unexplained.
+* **Tier 4 — temperature/salinity excursions, especially in the max.** T and S carry the
+  model's long-term state, and a local *max* excursion (dars u30: temp max ×1.8–2.5 the class
+  at 20 steps) is the same signature family as the local runaways that killed partitions
+  outright (Findings 34/45 traces). These are the disturbances that earn a long twin run
+  before production use — the speed gain may well be worth it, but on evidence, not hope.
 
 ### What the external engines buy over METIS knobs (the workflow-cost question)
 
@@ -71,9 +99,9 @@ METIS-knobs-only arm **at the same point and gate standard**:
 
 | point | best METIS-only arm | its gates | engine premium |
 |---|---|---|---|
-| CORE2 512 | `UFACTOR=30` −3.8 % | ✅ certified | ≈ 0 pp (KaHIP raced −4.0 %, inside noise) — **skip the engine** |
+| CORE2 512 | `UFACTOR=30` −3.8 % | ✅ tier 1 | ≈ 0 pp (KaHIP raced −4.0 %, inside noise) — **skip the engine** |
 | fArc 2048 | `MINCONN` −5.5 % at length | ✅ screen + accuracy (26892880/26892879) | **+2.0 pp** (−7.5 %) — adopter's choice |
-| dars 2048 | slack −3.1 % / `a4` −2.8 % | 🔴 both OUT of the accuracy class (F45 gate); `MINCONN` −4.5 % diverges at length | **engine is the only arm that passed both gates** |
+| dars 2048 | slack −3.1 % / `a4` −2.8 % | 🔴 both tier 4 (temp/salt above the 4-control spread); `MINCONN` −4.5 % diverges at length | **engine is the only stable + tier-1 arm** |
 
 On GPU the engines never won a point — `MINCONN` (a plain METIS knob) is the whole GPU story —
 so the engine question is CPU-only. Pattern (Finding 45 block): at dars and fArc the engines are
@@ -164,8 +192,10 @@ evidence files are committed under `docs/promotions/`:
 | `farc_v1` | `dist_2048` | Mt-KaHyPar `w=100+nlev` (−7.5 %) | drop-in |
 | `dars_v1` | `dist_2048` | KaMinPar `w=100+nlev` (−4.2 %) | drop-in |
 
-The two GPU exception candidates (dars 64 · NG5 64 `MINCONN`) are **deliberately not promoted**:
-`m11_promote` packages certified evidence, and their accuracy verdicts are pending your decision.
+The dars 64 and NG5 64 `MINCONN` winners are not yet packaged. Under the 2026-08-13 reporting
+framework they are ordinary recommendations (stability ✅, disturbance tier 2/3, SSH-only) —
+say the word and they promote as `dars_gpu_v1` / `ng5_gpu_v1`; both already satisfy
+`m11_promote`'s stability requirement (screens 26895260 / 26908635).
 
 ## Upstream (FESOM/fesom2)
 

@@ -3112,3 +3112,49 @@ toward fewer communication partners is systematically distinguishable from a see
 
 Exception decisions now pending (user): dars 64 `MINCONN` −14.3 % (ssh +11.3 %) · NG5 64
 `MINCONN` −9.8 % (ssh +8.3 %). All other points are decided; no gates remain in the queue.
+
+---
+
+## 🔴 USER PROTOCOL DECISION (2026-08-13) — accuracy verdicts become a graded disturbance report
+
+The user reconsidered the certified/not-certified accuracy framework (which their 2026-08-12
+decision had ratified): *"we know that different partitioning change the result a bit, and I am
+not sure that the border of this 'a bit' should be large — we mostly worry about long term
+climate effects, which I hope are very small. So instead of this certified/not certified, I
+would go to reporting results with additional information on how big the disturbance is and
+what does it mean."*
+
+**What changes.** The binary accuracy verdict is retired. Every stability-surviving arm is now
+reported with (a) its 20-step rms disturbance relative to the seed-control spread and (b) an
+interpretation. Four disturbance grades cover the campaign (recommendation page has the full
+definitions): **tier 1** inside/below the spread (indistinguishable from a seed re-roll) ·
+**tier 2** SSH-only with the stopping mechanism (bounded by the solver's own requested
+tolerance — numerics, not physics) · **tier 3** SSH-only, mechanism ruled out (NG5 — small but
+unexplained) · **tier 4** temperature/salinity excursions, especially in the max (the same
+signature family as the local runaways of F34/45 — these earn a long twin run before
+production).
+
+**What does NOT change.** The stability screen stays a hard pass/fail — a partition that
+diverges at length (F34/39/45) is unusable, not "disturbed" — and `m11_promote` keeps refusing
+anything without ≥3,000 clean steps at rank count. The control-envelope *measurement* protocol
+also stays exactly as ratified (≥3 demonstrated-distinct seed controls, 20 steps, rms per
+field); only the verdict layer on top of it is replaced by reporting.
+
+**Consequences for the standing verdicts.** The two "exception decisions pending" dissolve:
+dars 64 `MINCONN` (−14.3 %, tier 2) and NG5 64 `MINCONN` (−9.8 %, tier 3) are ordinary
+recommendations with disclosure. The dars u30 arm (−19.7 %) is un-withdrawn as a *listing* but
+carries the campaign's largest disturbance (tier 4: temp rms +13 %, temp max ×1.8–2.5 the
+class) — recommended only after a long twin run. fArc 16 GPU and CORE2 864 likewise move from
+"failed — do not ship" to tier 4 with the same long-twin condition.
+
+**Honest scope, stated wherever the numbers appear:** all disturbance figures are 20-step
+cold-start divergences — a *detectability* statement against ordinary repartitioning noise,
+not a climate measurement. The cheap next evidence tier is end states at 3,000 steps vs 3
+controls; the definitive one is a multi-year twin run (M7's 63-year hindcast is the local
+precedent for that standard).
+
+Docs updated in this decision's wake: `M11_RECOMMENDATION.md` (state-of-evidence + measured
+gains rebuilt around stability/disturbance columns, tier definitions added),
+`docs/report/m11_partitioning_report.{tex,pdf}` (TL;DR, §1, §3, board table + figure, §6
+retitled "Accuracy: the size of the disturbance, and what it means", §7–8), board figure now
+shows all five GPU arms including u30 with disturbance-coded hatching.
