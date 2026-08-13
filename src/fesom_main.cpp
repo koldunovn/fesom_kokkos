@@ -30,6 +30,7 @@
 #include "fesom_phc.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
+#include "fesom_ssh_se.h"   /* M12: FESOM_SSH_MODE=se knob + startup + free */
 #include "fesom_step.h"
 #include "fesom_tracer_adv.h"
 #include "fesom_tracers.h"
@@ -345,6 +346,8 @@ int main(int argc, char **argv)
     fesom_mesh mesh;
     fesom_mesh_init(&mesh);
     fesom_ale_mode_init();   // M6.3: read FESOM_ALE once; must precede every ALE branch
+    fesom_se_mode_init();    // M12: read FESOM_SSH_MODE once; se=>zstar + incompat guards
+                             //      (needs fesom_ale_mode_init first)
     /* Rank 0 reads global mesh files; others fill via Bcast then extract
      * their slice using partit->myList_*. For npes==1 this is identity. */
     /* But we need partit->myDim_* etc set first. For npes>1 it's populated
@@ -418,6 +421,10 @@ int main(int argc, char **argv)
     /* M7-wsplit: warn once if a high-resolution mesh is running with the splitter
      * off (print-only; the knob itself is unchanged). */
     fesom_wsplit_mesh_notice(mesh.nod2D, mpi.mype);
+
+    /* M12: SE barotropic-CFL report + state alloc (no-op when FESOM_SSH_MODE!=se;
+     * needs mesh metrics — mesh_resolution/zbar — and the partition counts). */
+    fesom_se_startup(&mesh, &mpi);
 
     /* Phase 1 step 2: allocate the rest of the model state. All zeros until
        step 3 sets initial conditions. */
@@ -1547,6 +1554,7 @@ skip_rest_state:
     fesom_ice_maevp_free();     // M6.2: same — release the mEVP coastal-node mask View
     fesom_ssh_cgpipe_free();    // M7 E.CG1: same — CGPIPE comm lists/buffers/shipped CSR
     fesom_ssh_cgpoly_free();    // M7 E.CG2: same — CGPOLY R-ring lists/frozen-Ã/cheb scratch
+    fesom_se_free();            // M12: same — SE rings / (T2+) CSR Views
     Kokkos::finalize();
     fesom_mpi_finalize(&mpi);
     return 0;

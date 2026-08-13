@@ -183,21 +183,24 @@ without asking, binaries to `/work` + sha only (never committed), meshes = priva
 **Files:** Create `src/fesom_ssh_se.h`, `src/fesom_ssh_se.cpp`; Modify `CMakeLists.txt` (FESOM_SRC
 list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + free hook :1548),
 `src/fesom_step.cpp` (dispatch stub).
-- [ ] `fesom_se_on()` / knob parsing per the `fesom_wsplit_on` template (fesom_ale.cpp:263-324):
-      exact-match values, abort+reason on junk, announce once; `se`⇒zstar guard; interplay
-      enforcement (DIAG_SSHSLV/SPREAD + KK_VERIFY=ssh abort; SSHRAILS force-off notice).
-- [ ] `fesom_se_state` struct + alloc/free; cold-start ring init; wire free hook.
-- [ ] Startup barotropic-CFL report: min over nodes of resolution/√(gH) with
-      H = −zbar[nlevels_nod2D−1] (one startup Allreduce), derived minimum-safe M vs `FESOM_SE_M`,
-      print suggestion; abort-unless-forced when unstable.
-- [ ] Step-driver dispatch stub: under `se`, skip 6b/7–11 (dhe fill kept) and call a
-      clearly-marked `fesom_se_step_stub()` that keeps hbar/eta_n frozen (physics lands in
-      T3–T6) — compiles, runs.
-- [ ] Build serial+cuda clean; ctest green (Serial full set; CUDA `field`).
-- [ ] **G0a null gate:** knob-unset CORE2 128r short run, m12 binary vs pre-branch (f42c453)
-      binary — `scripts/diff_snap.py` rc=0, Serial + CUDA. Method note: G0 compares
-      *unset-vs-unset* against a pre-branch build; `si`-vs-unset equivalence is a separate
-      one-shot check of the parser, not the null gate.
+- [x] `fesom_se_on()` / knob parsing per the `fesom_wsplit_on` template: DONE. Smoke matrix on
+      pi (login, ob1 override): junk value aborts · se-without-zstar aborts · DIAG_SSHSLV combo
+      aborts · junk FESOM_SE_M aborts · dead-knob note prints when FESOM_SE_* set with mode off ·
+      SSHRAILS force-off early-out added inside `fesom_sshrails_on()` (before the speed resolve,
+      so FESOM_SPEED=1 master-on cannot trip the IOACC pairing abort).
+- [x] `fesom_se_state` struct + alloc/free (module-static, CGPIPE pattern); free hook wired at
+      fesom_main.cpp Kokkos-finalize block. Rings zero-init == cold-start flat rings.
+- [x] Startup barotropic-CFL report DONE (0.5·res/√(gH), H=−zbar[nlev−1], one Allreduce; abort
+      unless FESOM_SE_M_FORCE=1). pi check: dtbt=2.00 s vs limit 233.65 s, M_min=1.
+- [x] Step-driver dispatch stub DONE: `if (!fesom_se_on())` wraps substeps 6b–10 (un-reindented,
+      banner comments); cg_iters hoisted; the :752 SI self-containment pushes additionally
+      `!fesom_se_on()`-gated; dhe fill + substep 11 + dump_hbar stay shared.
+- [x] Build serial+cuda clean; ctest 4/4 (Serial full set).
+- [x] **G0a null gate PASS** — refined to the house convention (stronger than the pre-branch
+      plan): Serial knob-off byte gate vs the STANDING certified baseline `m6_baseline_serial`
+      (jobs/job_m7_gate_serial, job 26935040, diff_snap rc=0) + CUDA fidelity gate
+      (jobs/job_m7_gpu_gate, job 26935041, rc=0 — CUDA is never byte-gated: D22 atomic scatter).
+      `si`-vs-unset one-shot: bit-identical on pi 10 steps (diff_snap rc=0).
 
 ### Task 2: Deterministic 2-D operators (div gather CSR, grad check, viscosity adjacency)
 **Files:** Modify `src/fesom_ssh_se.cpp` (+`.h`).

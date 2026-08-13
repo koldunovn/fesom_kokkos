@@ -26,6 +26,7 @@
 #include "fesom_partit.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
+#include "fesom_ssh_se.h"   /* M12: the §5-SE dispatch (FESOM_SSH_MODE=se) */
 #include "fesom_tracer_adv.h"
 #include "fesom_tracer_diff.h"
 #include "fesom_tracers.h"
@@ -104,6 +105,21 @@ static void ocean_synccheck_roundtrip(struct fesom_dyn     *dyn,
  * ============================================================================================== */
 bool fesom_sshrails_on(void)
 {
+    /* M12: SSHRAILS is an SI-block lever (it gates the CG-block halos/pushes and the
+     * substep-11 device map). Under FESOM_SSH_MODE=se that block never runs, so the
+     * lever is force-resolved OFF — BEFORE the speed resolve, so FESOM_SPEED=1
+     * master-on cannot abort on the IOACC pairing check below. Announce once. */
+    if (fesom_se_on()) {
+        static bool s_se_notice = false;
+        if (!s_se_notice) {
+            s_se_notice = true;
+            if (getenv("FESOM_SPEED_SSHRAILS"))
+                fprintf(stderr, "[ssh_se] NOTE: FESOM_SPEED_SSHRAILS is IGNORED under "
+                                "FESOM_SSH_MODE=se (SI-block lever; the SE block owns "
+                                "its own rails).\n");
+        }
+        return false;
+    }
     static int c = -1;
     if (!fesom_speed_on("SSHRAILS", &c)) return false;   /* resolves + announces once, on rank 0 */
 
@@ -749,7 +765,10 @@ int fesom_timestep(int                          step_n,
     /* M7 H.9 SSHRAILS: the three IN-rail pushes die — the class is device-authoritative (d_eta
      * from last step's device halo, ssh_rhs_old/hbar from compute_hbar + device halos). Under the
      * knob the host mirrors are STALE, so these self-containment pushes would be Z7 clobbers. */
-    if (!fesom_sshrails_on()) {
+    if (!fesom_sshrails_on() && !fesom_se_on()) {   /* M12: SI-block self-containment pushes —
+                                                     * d_eta/ssh_rhs_old are SE-inert (never read),
+                                                     * hbar is host-current from the SE finalize;
+                                                     * skip the 3 H2D copies under se. */
         dyn->d_eta_fld.modify_host();       dyn->d_eta_fld.sync_device();
         dyn->ssh_rhs_old_fld.modify_host(); dyn->ssh_rhs_old_fld.sync_device();
         /* M5.13f: helem device-resident from last step's commit - no re-push; ssh_rhs/CG read it on device. */
@@ -757,6 +776,10 @@ int fesom_timestep(int                          step_n,
     }
 
     PMARK("6_ivisc");
+    int cg_iters = 0;   /* SI: CG iterations (returned at the end); SE: stays 0 (T6 revisits
+                         * the return/print semantics so campaign logs don't read "0 CG iters"). */
+    if (!fesom_se_on()) {
+    /* ================= SI path: substeps 6b-10 (the CG SSH block) ================= */
     /*  6b. M6.3 (zstar): the CUMULATIVE stiffness update from the PREVIOUS step's dhe, BEFORE
      *      the SSH RHS (Fortran gate oce_ale.F90:3914:
      *      `if (.not. trim(which_ale)=='linfs') call update_stiff_mat_ale`).
@@ -779,7 +802,7 @@ int fesom_timestep(int                          step_n,
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
     fesom_phasestats_mark(FESOM_PH_CG);      /* M7 E.IMB.0: the solve is its own phase */
-    int cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);
+    cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);   /* M12: decl hoisted above the SI/SE split */
     fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
@@ -819,6 +842,18 @@ int fesom_timestep(int                          step_n,
         mesh->hbar_old_fld.sync_host();
         fesom_exchange_nod2D(dyn->ssh_rhs_old_fld.h_checked(), p);   /* Fortran oce_ale.F90:2078 */
         fesom_exchange_nod2D(mesh->hbar_fld.h_checked(),       p);   /* Fortran oce_ale.F90:2102 */
+    }
+    /* ================= end SI path ================= */
+    } else {
+        /* M12 §5-SE: SM2005 AB3-AM4 barotropic subcycling replaces substeps 6b-10.
+         * Substep 11 (eta_n from hbar, α=1) and the dhe fill below stay SHARED: the SE
+         * finalize writes hbar=η^{n+1}, hbar_old=ηⁿ on DEVICE and syncs them to HOST,
+         * so the shared host code and the two out-of-block SSHRAILS-gated pushes
+         * (:eta_n before substep 4, :hbar before ocean2ice) see current values —
+         * identity copies, not clobbers (the L86 coherence contract).
+         * Plan + gates: docs/plans/20260813-m12-split-explicit.md.
+         * TASK-1 STUB: barotropic state frozen; the real block lands in T3-T5. */
+        fesom_se_step_stub(step_n, mesh, dyn, forcing, p);
     }
 
     /* M6.3 — dhe fill (oce_ale.F90:2298-2305): the NEXT step's cumulative stiffness increment,
