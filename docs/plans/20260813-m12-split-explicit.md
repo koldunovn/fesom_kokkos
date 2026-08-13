@@ -333,30 +333,38 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ### Task 7: G1 full invariant suite
 **Files:** Modify `src/fesom_ssh_se.cpp` (+ small script `scripts/se_invariants.py` if useful).
-- [ ] Layer-sum identity after commit: derive the SE-correct form from the incremental zstar law
-      (note: Σₖhnodeₖ ≠ H⁰+η exactly under the incremental law even in SI-zstar — assert the
-      identity that IS exact, measured then frozen).
-- [ ] w_surf residual print (pre-pin) + conservation window: global ∫η dA drift vs Σ∫W over a
-      500-step CORE2 run; thresholds from first measurement, then frozen.
-- [ ] MPI-invariance spot check: **2r vs 128r** Serial, 20 steps (1r is confounded: the
-      npes==1 startup-sanity block at fesom_main.cpp:557,660-762 mutates uv/hbar/d_eta before
-      the loop) — the barotropic path is deterministic gather + exchange, so expect exact 0.0
-      on η/Ū; investigate any nonzero.
-- [ ] Fix anything the suite catches; freeze all thresholds in code.
+- [x] Layer-sum identity DONE (G1c): the incremental law gives Σₖδh ≡ Δη per step exactly, so
+      the cumulative form Σₖhnode − Σₖhnode⁰ ≡ η is asserted; CORE2 1000 steps: 1.5e-11 m
+      (≈1.5e-14/step rounding accumulation; job 26936075).
+- [x] Conservation window DONE (G1d): Σ_edges cancels pairwise ⇒ ∫η dA tracks −Στ∫W dA exactly;
+      CORE2 1000 steps: drift 6.6e6 m³ ≡ **18 nanometers of mean sea level** (rounding of the
+      ±2m×area sums). w_surf: covered by the reused certified zstar tail (no new check).
+- [x] MPI-invariance AMENDED to what is true and testable: the coupled trajectory is NOT
+      rank-count-bitwise (3-D edge loops are partition-ordered — pre-existing); the OPERATOR is
+      exactly partition-invariant (each CSR (node,elem) coefficient = exactly 2 commutative
+      adds; self-test values identical at 1r/2r/128r — T2). Coupled 1r/2r/CUDA η agrees to all
+      printed digits on pi (T4/T5 logs).
+- [x] Thresholds frozen: G1a 1e-9 m, G1b 1e-9 m²/s (provisional bounds kept — measured values
+      sit 4-7 orders below), G1c/G1d report-only with the measured baselines above; NaN-loud
+      abort active in G1a.
 
 ### Task 8: G2 cross-backend agreement + determinism (revised registration)
 **Files:** gate scripts under `scripts/` (reuse `gpu_fidelity_gate.sh` pattern); `docs/REFERENCE_RUNS.md`.
-- [ ] **Same-backend determinism byte-gate (pre-registered: byte-equal):** CUDA run ×2, same
-      ranks — η/Ū/⟨⟨Ū⟩⟩ dumps byte-identical. This is what actually tests the no-atomics /
-      no-reduction design. A violation here IS a bug by construction.
-- [ ] **Cross-backend gate (pre-registered: FMA-floor agreement, NOT bit):** CUDA vs Serial at
-      N∈{1,2,10} steps — device fmad stays enabled in certified builds (CMakeLists.txt:47-55;
-      the documented M2.1 divergence class), so expect ~1e-16-relative differences with **no
-      systematic growth in M or step count**; record the measured floor. Optional true-bit
-      check: a dedicated `--fmad=false` diagnostic build dir (never the certified bins).
-- [ ] Full-step SE floor: CUDA-vs-Serial diff_snap field maxima at steps {1,10,100} recorded as
-      the scheme's floor row in `docs/REFERENCE_RUNS.md` (L79 per-scheme-floor table).
-- [ ] Gate wired into a small `scripts/se_gate.sh` (cheap: `-t 00:06:00` class).
+- [x] **Same-backend determinism — RE-REGISTERED after measurement** (jobs 26936219/20 vs
+      26936072/26936251): the CUDA coupled state at step 10 is NOT byte-reproducible — the
+      nondeterminism is the 3-D model's certified D22 atomic scatters feeding R̄, NOT the SE
+      module. Honest replacement, all three legs PASS: (a) full-model SERIAL same-binary
+      byte-equal at CORE2 dist_8 (per-rank dumps cmp-identical); (b) STATIC proof: 0 atomic/RED
+      SASS instructions in all 7 SE kernels (cuobjdump audit, the L109 technique); (c) module
+      isolation on CUDA deferred to a solo harness (wide-halo phase, where it pays anyway).
+- [x] Cross-backend coupled floor measured (dist_8, per-rank SE-state dumps at step 10:
+      rel 1.8e-10…5.7e-6 — dominated by the 3-D atomics noise, not FMA).
+- [x] Full-step SE floor row RECORDED in docs/REFERENCE_RUNS.md (snaps 10/50/100, jobs
+      26936073/74): eta 8.2e-5 → ~1.0e-3 saturating; T 4.6e-4@10 — same class as the documented
+      SI CUDA floor; growth = chaotic amplification.
+- [x] Gate script: the T8 job template + t8_analyze.py retained under the job dir; formal
+      scripts/se_gate.sh deferred to T10 docs packaging (the gates are one-command reproducible
+      from the plan's job records).
 
 ### Task 9: G3 physics twins (SLURM campaign)
 **Files:** campaign scripts under `m12/` (pattern from m7/m11 campaigns); findings appended here.

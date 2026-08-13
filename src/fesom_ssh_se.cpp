@@ -218,6 +218,12 @@ struct fesom_se_state {
     fesom::IntField div_elem;   /* [nnz]  local element index                 */
     fesom::Field    div_c;      /* [2*nnz] (cx, cy) interleaved               */
 
+    /* T7 check state (host-side, FESOM_SE_CHECK only). */
+    std::vector<double> sumh0;  /* Σₖ hnode at first SE step, per owned node  */
+    double eta_area0 = 0.0;     /* ∫η dA at first step (post-finalize)        */
+    double wf_area_acc = 0.0;   /* accumulated τ·∫W dA                        */
+    int    chk_started = 0;
+
     fesom::Field Tchk;          /* FESOM_SE_CHECK scratch: T(⟨⟨Ū⟩⟩) [Nown] —
                                  * module-owned so it dies BEFORE Kokkos::finalize
                                  * (a function-local static Field aborts at exit). */
@@ -1045,6 +1051,89 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             abort();
         }
     }
+    /* T7 (FESOM_SE_CHECK): (a) cumulative layer-sum identity — the incremental
+     * z* law gives Σₖδh = Δη exactly per step, so Σₖhnode − Σₖhnode⁰ ≡ η
+     * cumulatively; (b) volume conservation — Σ_edges cancels pairwise, so
+     * ∫η dA − ∫η⁰ dA ≡ −Σsteps τ·∫W dA at rounding. Host path, owned nodes.
+     * NOTE: checked at SE-block ENTRY next step (hnode commits in substep 14,
+     * AFTER this block) — hence the one-step offset bookkeeping below. */
+    if (fesom_se_check_on()) {
+        mesh->hnode_fld.sync_host();
+        const real_t *hn  = mesh->hnode_fld.h();
+        const real_t *hb  = mesh->hbar_fld.h();      /* η^{n+1}, synced above */
+        const real_t *hbo = mesh->hbar_old_fld.h();  /* ηⁿ                    */
+        const real_t *wfh = forcing->water_flux_fld.h();  /* synced in G1a    */
+        const int nl = mesh->nl;
+        if (!s_se.chk_started) {
+            s_se.chk_started = 1;
+            s_se.sumh0.assign((size_t)Nown, 0.0);
+            double ea = 0.0;
+            for (int n = 0; n < Nown; ++n) {
+                if (mesh->ulevels_nod2D[n] != 1) continue;
+                double sh = 0.0;
+                for (int k = mesh->ulevels_nod2D[n]-1; k < mesh->nlevels_nod2D[n]-1; ++k)
+                    sh += (double)hn[FESOM_NODE3D(n, k, nl)];
+                /* hnode is PRE-step here; hbar_old = ηⁿ of this first step */
+                s_se.sumh0[(size_t)n] = sh - (double)hbo[n];
+                ea += (double)hbo[n]
+                    * (double)mesh->areasvol[FESOM_NODE3D(n, mesh->ulevels_nod2D[n]-1, nl)];
+            }
+            MPI_Allreduce(MPI_IN_PLACE, &ea, 1, MPI_DOUBLE, MPI_SUM, p->MPI_COMM_FESOM);
+            s_se.eta_area0 = ea;
+        } else {
+            double dmax = 0.0;
+            for (int n = 0; n < Nown; ++n) {
+                if (mesh->ulevels_nod2D[n] != 1) continue;
+                double sh = 0.0;
+                for (int k = mesh->ulevels_nod2D[n]-1; k < mesh->nlevels_nod2D[n]-1; ++k)
+                    sh += (double)hn[FESOM_NODE3D(n, k, nl)];
+                /* hnode currently holds the LAST committed state = step n's
+                 * thicknesses; the matching elevation is hbar_old (ηⁿ). */
+                const double r = fabs(sh - s_se.sumh0[(size_t)n] - (double)hbo[n]);
+                if (r > dmax) dmax = r;
+            }
+            MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se] SE_CHECK step %d G1c layer-sum max|Σh-Σh0-eta|=%.3e m\n",
+                        step_n, dmax);
+        }
+        /* Volume window: compare ∫η^{n+1} dA against ∫η⁰ dA − Σ τ·∫W dA. */
+        double loc[2] = { 0.0, 0.0 };
+        for (int n = 0; n < Nown; ++n) {
+            if (mesh->ulevels_nod2D[n] != 1) continue;
+            const double A = (double)mesh->areasvol[FESOM_NODE3D(n, mesh->ulevels_nod2D[n]-1, nl)];
+            loc[0] += (double)hb[n] * A;
+            loc[1] += (double)wfh[n] * A;
+        }
+        MPI_Allreduce(MPI_IN_PLACE, loc, 2, MPI_DOUBLE, MPI_SUM, p->MPI_COMM_FESOM);
+        s_se.wf_area_acc += (double)tau * loc[1];
+        const double drift = (loc[0] - s_se.eta_area0) + s_se.wf_area_acc;
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se] SE_CHECK step %d G1d volume drift=%.4e m3 (eta-int %.4e, "
+                            "Wacc %.4e)\n", step_n, drift, loc[0] - s_se.eta_area0,
+                    s_se.wf_area_acc);
+    }
+
+    /* T8 (FESOM_SE_DUMP=<prefix>): per-rank raw dump of the barotropic state
+     * (η^{n+1} owned + Ū^{n+1} owned) every step, overwriting — byte-compare
+     * across runs/backends for the G2 determinism gates. Check-path only. */
+    {
+        static const char *dump = getenv("FESOM_SE_DUMP");
+        if (dump && dump[0]) {
+            s_se.eta[0].sync_host();
+            s_se.Ubt[0].sync_host();
+            char fn[512];
+            snprintf(fn, sizeof fn, "%s.r%04d.bin", dump, p->mype);
+            FILE *f = fopen(fn, "wb");
+            if (f) {
+                fwrite(&step_n, sizeof(int), 1, f);
+                fwrite(s_se.eta[0].h(), sizeof(real_t), (size_t)Nown, f);
+                fwrite(s_se.Ubt[0].h(), sizeof(real_t), 2 * (size_t)Eown, f);
+                fclose(f);
+            }
+        }
+    }
+
     (void)dyn;
     return M;
 }

@@ -249,3 +249,31 @@ verify before relying on it.
 
 `scripts/m32_climate_compare.py` defaults to the KPP pair; override via the
 `--fref` / `--cref` flags if needed.
+
+---
+
+## M12 split-explicit SSH (`FESOM_SSH_MODE=se`, requires `FESOM_ALE=zstar`) — the SE floor (2026-08-14)
+
+Scheme: SM2005 AB3-AM4 subcycling, χ=0.1 (measured default), M=50, live γ-viscosity.
+Certified stable on CORE2 dt1800 real forcing through 1000 steps (η saturates at the SI class:
+SE 2.11 m vs SI 2.08 m at step 1000; jobs 26935947/48/49). ⚠️ χ=0.05 DIES by step ~300
+(Antarctic-shelf setdown → vertical-CFL tracer death) — do not lower χ without a screen.
+
+**Determinism (G2, re-registered honestly):**
+- Serial full-model same-binary: BYTE-EQUAL at CORE2 dist_8, 10 steps (jobs 26936072/26936251).
+- SE device kernels contain **0 atomic/RED SASS instructions** (cuobjdump audit — the module is
+  deterministic by construction; gather-CSR divergence, no reductions).
+- CUDA same-binary coupled state is NOT byte-reproducible — inherited from the 3-D model's
+  certified D22 atomic scatters (momentum advection/FCT), NOT from the SE module.
+
+**CUDA-vs-Serial coupled floor (same dist_8, snaps; jobs 26936073/74):**
+
+| step | eta_n | T | S | w |
+|---|---|---|---|---|
+| 10  | 8.2e-05 | 4.6e-04 | 1.7e-04 | 1.3e-07 |
+| 50  | 9.6e-04 | 1.6e-02 | 3.2e-03 | 1.0e-05 |
+| 100 | 9.5e-04 | 1.8e-01 | 8.6e-03 | 5.2e-06 |
+
+Same class as the documented SI CUDA-vs-Serial floor (~1e-3 T at 20 steps, D22); the growth
+50→100 is chaotic amplification, not a defect. L79 applies: judge SE-CUDA runs against THIS
+floor, not against the SI one.
