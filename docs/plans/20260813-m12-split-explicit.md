@@ -140,7 +140,7 @@ helem/uv_rhs are never filled — do not iterate them).
 | `FESOM_SSH_MODE` | `si` | `si` = current CG path (byte-identical); `se` = this module. Requires `FESOM_ALE=zstar` under `se`. |
 | `FESOM_SE_M` | 50 | substeps per baroclinic step; startup CFL check prints the mesh-derived minimum-safe M (from `mesh_resolution` and column depth **−zbar[nlevels_nod2D−1]** — `mesh->depth` is input metadata only, fesom_mesh.h:79-80) and aborts if clearly unstable (override: `FESOM_SE_M_FORCE=1`). |
 | `FESOM_SE_CHI` | 0.05 | SM dissipation χ (notes: 0.05–0.1, experimental — G3 scans it). |
-| `FESOM_SE_VISC` | 1 | live harmonic barotropic viscosity V_h(Ūᵐ−Ūⁿ) per substep (D3). Coefficient: the Zenodo formula `vi=dt·sqrt(max(γ₀,…)·len)`, `len=sqrt(ΣA_e)`, with γ₁=γ₂=0 in v1 (constant-coefficient class); `FESOM_SE_VISC_GAMMA0` overrides γ₀ (default resolved against the Fortran at T3, calibrated in G3). `0` = off (a G3 arm). |
+| `FESOM_SE_VISC` | 1 | live harmonic barotropic viscosity per substep (D3), two-term structure V[Ūᵐ]−V[Ūⁿ]. Coefficient: the Zenodo formula `vi=dt·√(max(γ₀,γ₁·\|Δu\|)·len)` with the Zenodo SE defaults γ₀=10, γ₁=2750 (γ₂ fixed 0); `FESOM_SE_VISC_GAMMA0`/`FESOM_SE_VISC_GAMMA1` override; calibrated in G3. `0` = off (a G3 arm). |
 | `FESOM_SE_CHECK` | unset | G1 diagnostics: per-step invariant norms + one-shot operator self-test; Serial + nonzero ⇒ abort on violation (the `fesom_ale_verify_report_` pattern, fesom_ale.cpp:729). |
 
 Deliberately **not** knobs in v1 (L80/L102 dead-knob rule): trim-h choice (D1, hⁿ hardwired) and
@@ -227,15 +227,24 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ### Task 3: Forcing assembly (R̄, H0_e, Ū_AB2, F)
 **Files:** Modify `src/fesom_ssh_se.cpp`.
-- [ ] R̄ kernel (owned+eDim, per element column: Σₖ helem·uv_rhs/τ, lean captures).
-- [ ] H_e/H0_e kernel; Ū_AB2 kernel mirroring the 3-D Coriolis AB2 weights + first-step case
-      (resolve exact form from fesom_momentum.cpp:517-561; D4).
-- [ ] F kernel: R̄ + f×Ū_AB2 + g·H_e·∇ηⁿ (gradient_sca). No viscosity in F (D3).
-- [ ] Resolve the viscosity coefficient γ₀ default against the Zenodo formula
-      (oce_ale_ssh_splitexpl_subcycl.F90:969-977) — 15-minute read, done before T4 codes V_h.
-- [ ] **Check:** `FESOM_SE_CHECK` prints ‖R̄‖∞, ‖F‖∞ and the m=0 cancellation magnitudes
-      (F−R̄ vs f×Ū_AB2+gH∇ηⁿ) for sanity review.
-- [ ] Build serial+cuda clean; run a few steps with prints — values finite and physically sane.
+- [x] R̄ kernel DONE — one fused owned+eDim column kernel: R̄=Σₖhelem·uv_rhs/τ, Ubt_now=Σₖhelem·uv,
+      H_e=Σₖhelem, cavity guard, lean raw-pointer captures.
+- [x] Ū_AB2 DONE per D4 (wold=−(0.5+ε), wnew=+(1.5+ε), step-1 = (0, 1.0), ε=0.1;
+      `se_Ubt_prev` history swap at block end).
+- [x] F kernel DONE with the sign algebra verified in-code against the in-R̄ Coriolis
+      (+f·v couplets) and η-gradient (dt·(−g·Σgsᵢηᵢ)): F_x=R̄_x−f·V_AB2+g·H_e·∂xη,
+      F_y=R̄_y+f·U_AB2+g·H_e·∂yη. No viscosity in F.
+- [x] Viscosity closure RESOLVED (plan amendment): the Zenodo SE defaults are FLOW-DEPENDENT —
+      `se_visc_gamma0=10, gamma1=2750, gamma2=0` (MOD_DYN.F90:135-137); form
+      vi=dt·√(max(γ₀,γ₁|Δu|)·len), |Δu|=|ΔŪ|/hh, hh=½(H_e1+H_e2), len=√(A₁+A₂), net term
+      −Σ_edges(Ū_e−Ū_nb)·vi/A_e. v1 ships THIS closure and defaults (knobs
+      FESOM_SE_VISC_GAMMA0/GAMMA1; γ₂ fixed 0). With γ₁≠0 the single-form V(Ūᵐ−Ūⁿ) is NOT
+      equivalent — T4 implements the reference's two-term structure V[Ūᵐ]−V[Ūⁿ], each term's
+      coefficient from its own state (γ₀-only reduces to the single form exactly).
+- [x] **Check** DONE: per-step |R̄|∞,|F|∞,|F−R̄|(=|r|) prints; frozen-stub self-consistency
+      confirmed on pi Serial+CUDA (uv=0, η=0 ⇒ r≡0 exactly; |R̄|=9.87e-3 m²/s², identical
+      digits both backends).
+- [x] Build serial+cuda clean; runs green.
 
 ### Task 4: The subcycle loop + finalize
 **Files:** Modify `src/fesom_ssh_se.cpp`, `src/fesom_step.cpp` (stub → real block),

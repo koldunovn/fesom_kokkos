@@ -13,6 +13,8 @@
 #include "fesom_ssh_se.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_dyn.h"        /* uv / uv_rhs device Fields (T3 forcing)      */
+#include "fesom_forcing.h"    /* water_flux (T4 η subcycle)                  */
 #include "fesom_ale.h"        /* fesom_ale_is_zstar(): the se=>zstar guard   */
 #include "fesom_constants.h"  /* FESOM_G, FESOM_PHASE1_DT                    */
 #include "fesom_field.hpp"
@@ -137,6 +139,8 @@ struct fesom_se_state {
     fesom::Field Fbt;           /* constant subcycle forcing   [2*Ne]         */
     fesom::Field Ubt_n;         /* Ū at m=0 (live-viscosity anchor, plan D3) [2*Ne] */
     fesom::Field Ubt_ab2;       /* AB2 transport sum (exact f-cancel, plan D4) [2*Ne] */
+    fesom::Field Ubt_now;       /* Σₖ hⁿ·uv^{n−1/2} this step               [2*Ne] */
+    fesom::Field Ubt_prev;      /* last step's Ubt_now (the D4 old term)     [2*Ne] */
     fesom::Field H0e;           /* resting column depth at elements [Ne]      */
 
     /* T2 — deterministic 2-D operators.
@@ -244,6 +248,8 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
     s_se.Fbt     .alloc("se.Fbt",      2 * Ne);
     s_se.Ubt_n   .alloc("se.Ubt.n",    2 * Ne);
     s_se.Ubt_ab2 .alloc("se.Ubt.ab2",  2 * Ne);
+    s_se.Ubt_now .alloc("se.Ubt.now",  2 * Ne);
+    s_se.Ubt_prev.alloc("se.Ubt.prev", 2 * Ne);
     s_se.H0e     .alloc("se.H0e",      Ne);
     s_se.M       = M;
     s_se_alloc   = 1;
@@ -500,20 +506,134 @@ static void se_selftest(const struct fesom_mesh *mesh, struct fesom_partit *p)
     }
 }
 
+/*===========================================================================
+ * T3 — forcing assembly: R̄, H_e/H0_e, Ū_AB2, F. Runs once per baroclinic
+ * step at SE-block entry, on owned+eDim elements (uv_rhs/uv/helem/η are all
+ * eDim-valid there), no communication.
+ *
+ * F = R̄ − r,  r = −(f e_z×Ū_AB2 + g·H_e·∇ηⁿ):
+ *   F_x = R̄_x − f·V_AB2 + g·H_e·∂xηⁿ
+ *   F_y = R̄_y + f·U_AB2 + g·H_e·∂yηⁿ
+ * Exactness (verified against fesom_momentum.cpp:505-561): the Coriolis inside
+ * uv_rhs is +f·(ab1·v_old-couplet + ff_step·v_new) with ab1=−(0.5+ε),
+ * ff_step=+(1.5+ε) (1.0 at step 1), ε=0.1 — Ū_AB2 uses the SAME weights over
+ * the 2-D transport sums (h-lag on the old term = second-order, plan D4); and
+ * the η term inside uv_rhs is exactly dt·(−g·Σ gsᵢ·ηᵢ) (area factors cancel),
+ * so g·H_e·∇ηⁿ with H_e = Σₖhelemₖ and the SAME gradient_sca cancels it
+ * exactly. No viscosity here: it is live in the substep kernel (plan D3).
+ *===========================================================================*/
+
+static void se_forcing(int step_n, const struct fesom_mesh *mesh,
+                       const struct fesom_dyn *dyn)
+{
+    const int    Ne   = mesh->myDim_elem2D + mesh->eDim_elem2D;
+    const int    nl   = mesh->nl;
+    const real_t tau  = (real_t)FESOM_PHASE1_DT;
+    const real_t eps  = 0.1;                       /* fesom_momentum.cpp:76 */
+    const real_t wold = (step_n == 1) ? 0.0 : -(0.5 + eps);
+    const real_t wnew = (step_n == 1) ? 1.0 :  (1.5 + eps);
+    const real_t g    = (real_t)FESOM_G;
+
+    /* L109: raw pointers only. */
+    const real_t *uv     = dyn->uv_fld.d().data();
+    const real_t *uvrhs  = dyn->uv_rhs_fld.d().data();
+    const real_t *helem  = mesh->helem_fld.d().data();
+    const int    *ulev   = mesh->ulevels_fld.d().data();
+    const int    *nlev   = mesh->nlevels_fld.d().data();
+    const int    *elnod  = mesh->elem_nodes_fld.d().data();
+    const real_t *gs     = mesh->gradient_sca_fld.d().data();
+    const real_t *fcor   = mesh->coriolis_fld.d().data();
+    const real_t *eta0   = s_se.eta[0].d().data();       /* ηⁿ, eDim-valid  */
+    real_t *Rb   = s_se.Rbar.d().data();
+    real_t *Unow = s_se.Ubt_now.d().data();
+    real_t *Uprev= s_se.Ubt_prev.d().data();
+    real_t *Uab2 = s_se.Ubt_ab2.d().data();
+    real_t *F    = s_se.Fbt.d().data();
+    real_t *H0e  = s_se.H0e.d().data();
+
+    Kokkos::parallel_for("se_forcing", Kokkos::RangePolicy<>(0, Ne),
+        KOKKOS_LAMBDA(const int e) {
+            const int nzmin = ulev[e] - 1;
+            const int nzmax = nlev[e] - 1;
+            real_t rx = 0.0, ry = 0.0, ux = 0.0, uy = 0.0, He = 0.0;
+            if (ulev[e] == 1) {                       /* cavity guard (hbar pattern) */
+                for (int nz = nzmin; nz < nzmax; ++nz) {
+                    const real_t h = helem[FESOM_ELEM3D(e, nz, nl)];
+                    const size_t k = FESOM_ELEMVEC(e, nz, nl);
+                    rx += h * uvrhs[k + 0];
+                    ry += h * uvrhs[k + 1];
+                    ux += h * uv[k + 0];
+                    uy += h * uv[k + 1];
+                    He += h;
+                }
+            }
+            Rb[2*e + 0] = rx / tau;
+            Rb[2*e + 1] = ry / tau;
+            Unow[2*e + 0] = ux;
+            Unow[2*e + 1] = uy;
+            const real_t uab = wnew * ux + wold * Uprev[2*e + 0];
+            const real_t vab = wnew * uy + wold * Uprev[2*e + 1];
+            Uab2[2*e + 0] = uab;
+            Uab2[2*e + 1] = vab;
+
+            const int n0 = elnod[3*e + 0];
+            const int n1 = elnod[3*e + 1];
+            const int n2 = elnod[3*e + 2];
+            const real_t e0 = eta0[n0], e1 = eta0[n1], e2 = eta0[n2];
+            const real_t gx = gs[6*e+0]*e0 + gs[6*e+1]*e1 + gs[6*e+2]*e2;
+            const real_t gy = gs[6*e+3]*e0 + gs[6*e+4]*e1 + gs[6*e+5]*e2;
+            const real_t f  = fcor[e];
+            F[2*e + 0] = Rb[2*e + 0] - f * vab + g * He * gx;
+            F[2*e + 1] = Rb[2*e + 1] + f * uab + g * He * gy;
+            H0e[e] = He - (e0 + e1 + e2) / 3.0;
+        });
+    s_se.Rbar.modify_device();     s_se.Ubt_now.modify_device();
+    s_se.Ubt_ab2.modify_device();  s_se.Fbt.modify_device();
+    s_se.H0e.modify_device();
+}
+
+/* FESOM_SE_CHECK: per-step forcing norms (max over owned elements, global
+ * reduction). Diagnostic path — host copies of small 2-D fields are fine. */
+static void se_check_forcing(int step_n, const struct fesom_mesh *mesh,
+                             struct fesom_partit *p)
+{
+    const int Eown = mesh->myDim_elem2D;
+    s_se.Rbar.sync_host(); s_se.Fbt.sync_host(); s_se.Ubt_ab2.sync_host();
+    const real_t *Rb = s_se.Rbar.h();
+    const real_t *F  = s_se.Fbt.h();
+    double mR = 0.0, mF = 0.0, mr = 0.0;
+    for (int e = 0; e < 2 * Eown; ++e) {
+        if (fabs((double)Rb[e]) > mR) mR = fabs((double)Rb[e]);
+        if (fabs((double)F[e])  > mF) mF = fabs((double)F[e]);
+        if (fabs((double)(F[e] - Rb[e])) > mr) mr = fabs((double)(F[e] - Rb[e]));
+    }
+    double glob[3] = { mR, mF, mr };
+    MPI_Allreduce(MPI_IN_PLACE, glob, 3, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+    if (p->mype == 0)
+        fprintf(stderr, "[ssh_se] SE_CHECK step %d forcing: |Rbar|=%.4e |F|=%.4e "
+                        "|F-Rbar|(=|r|)=%.4e m2/s2\n", step_n, glob[0], glob[1], glob[2]);
+}
+
 void fesom_se_step_stub(int step_n, const struct fesom_mesh *mesh,
                         struct fesom_dyn *dyn,
                         const struct fesom_forcing *forcing,
                         struct fesom_partit *p)
 {
-    (void)mesh; (void)dyn; (void)forcing;
+    (void)forcing;
     static int announced = 0;
     if (!announced) {
         announced = 1;
         if (p->mype == 0)
-            fprintf(stderr, "[ssh_se] TASK-1 STUB active (step %d): barotropic state FROZEN "
-                            "(hbar/eta_n/uv unchanged by the SSH block) — the subcycling "
-                            "lands in T3-T5. Not a model.\n", step_n);
+            fprintf(stderr, "[ssh_se] STUB active (step %d): forcing assembly runs (T3), but "
+                            "the barotropic state stays FROZEN (hbar/eta_n/uv unchanged) — "
+                            "the subcycling lands in T4-T5. Not a model.\n", step_n);
     }
+    /* T3: exercise the forcing assembly every step. */
+    se_forcing(step_n, mesh, dyn);
+    if (fesom_se_check_on())
+        se_check_forcing(step_n, mesh, p);
+    /* History carry (moves into the real finalize in T4). */
+    std::swap(s_se.Ubt_prev, s_se.Ubt_now);
 }
 
 void fesom_se_free(void)
