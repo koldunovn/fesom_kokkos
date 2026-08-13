@@ -3158,3 +3158,25 @@ gains rebuilt around stability/disturbance columns, tier definitions added),
 `docs/report/m11_partitioning_report.{tex,pdf}` (TL;DR, §1, §3, board table + figure, §6
 retitled "Accuracy: the size of the disturbance, and what it means", §7–8), board figure now
 shows all five GPU arms including u30 with disturbance-coded hatching.
+
+---
+
+## 🔴 CORRECTION (2026-08-13) — "3,000 steps = two model months" is CORE2-only
+
+Found while de-jargoning the report (CTC rule: cut the padding, re-check the claim). The phrase
+"does not survive two model months" / "survives two model months" appears above in **dars**
+contexts (F39 at line ~2494, the 26895260 rationale ~2550, F45 area ~2970). It is wrong there:
+3,000 steps at the mesh's ladder dt is
+
+| mesh | dt | 3,000 steps |
+|---|--:|--:|
+| CORE2 | 1800 s | 62.5 days (≈2 months) |
+| fArc | 900 s | 31.3 days |
+| **dars** | **120 s** | **4.2 days** |
+| **NG5** | **180 s** | **6.3 days** |
+
+The screen is a fixed 3,000 STEPS, not a fixed model duration, and on the two big meshes it
+covers days, not months. Nothing about the verdicts changes — every screen was run and judged in
+steps — but the "two model months" gloss must not be repeated for dars/NG5, and the report now
+states the per-mesh spans explicitly and labels them a bound on the test rather than a
+statement about long integrations.

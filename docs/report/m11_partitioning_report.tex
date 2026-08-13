@@ -1,4 +1,4 @@
-% M11 partitioning & mesh-ordering campaign — report.
+% M11 partitioning & mesh-ordering report.
 % Build:  module load texlive/live2025-gcc-13.3.0 && pdflatex m11_partitioning_report.tex (x2)
 \documentclass[11pt,a4paper]{article}
 
@@ -26,8 +26,8 @@
 
 \title{\vspace{-12mm}\large\bfseries Mesh partitioning and node ordering for FESOM2/Kokkos:\\
 measurements on CPU and GPU, and a procedure for adopting a new partition}
-\author{\normalsize Campaign report}
-\date{\normalsize 12 August 2026 --- Levante (128-core CPU nodes, 4$\times$A100 GPU nodes; GH200 testbed)}
+\author{\normalsize Technical report}
+\date{\normalsize 13 August 2026 --- Levante (128-core CPU nodes, 4$\times$A100 GPU nodes; GH200 testbed)}
 
 \begin{document}
 \maketitle
@@ -35,76 +35,86 @@ measurements on CPU and GPU, and a procedure for adopting a new partition}
 
 \subsection*{TL;DR}
 \begin{itemize}\itemsep1pt
-\item Repartitioning makes the GPU model step \textbf{8--20\,\% faster} (DARS on 64 GPUs:
-$-14.3\,\%$ with the disturbance confined to sea-surface height, $-19.7\,\%$ with the largest
-disturbance measured in the campaign). The gain comes from one METIS option, \minconn, which
-FESOM's \texttt{PartGraphRecursive} call silently ignores; switching to
-\texttt{PartGraphKway} is a few lines.
-\item Any repartitioning perturbs the solution; we report each candidate's perturbation
-against the spread of ordinary seed re-rolls of the stock recipe and interpret it
-(Section~6). Most winners sit inside or below that spread. At three of the four GPU points
-the winner exceeds it in exactly one statistic, the SSH rms --- at DARS traceably an
-artefact of the barotropic solver's stopping tolerance, not a physics bias.
-\item CPU runs gain \textbf{4--8\,\%}, from external engines (KaMinPar, Mt-KaHyPar) and
-load-balance slack instead; the two backends need different partitions of the same mesh.
-\item \textbf{Some new partitions crash the model} --- eight caught, one produced by the
-unmodified stock recipe. Nothing computable from the partition predicts which. Every new
-partition must complete 3{,}000 steps at its target rank count before use; on failure,
-regenerate with a new random seed.
-\item Hilbert renumbering pays only on CORE2 ($-5.8\,\%$ combined with repartitioning).
+\item \textbf{GPU: a better mesh partition makes the model step 8--14\,\% faster} on three of
+the four meshes tested (3.6\,\% on the fourth), and up to $19.7\,\%$ on DARS if a larger
+change of the solution is accepted (Section~6). One factor dominates: the largest number of
+neighbour subdomains any process exchanges halo data with. METIS can minimise it (option
+\minconn), but FESOM calls METIS through \texttt{PartGraphRecursive}, which ignores that
+option; calling \texttt{PartGraphKway} instead is a few-line change.
+\item \textbf{CPU: 4--8\,\% faster}, from two different factors: allowing METIS a few percent
+of imbalance in subdomain size (\texttt{UFACTOR=30} instead of the current 1), and using
+newer partitioning programs (KaMinPar, Mt-KaHyPar) in place of METIS. The best CPU and GPU
+partitions of the same mesh differ.
+\item Partitions built with identical settings but different random seeds already give
+slightly different solutions. We use the size of that scatter as the yardstick for every
+recommended partition: most stay inside it; the exceptions are quantified in Section~6.
+\item \textbf{Some new partitions crash the model} after hundreds of steps --- eight cases
+here, one of them built with FESOM's current settings, and no property of the partition
+predicts them. A new partition must complete 3{,}000 steps at its target process count before
+use; if it fails, regenerate it with a different seed.
+\item Renumbering the mesh nodes along a Hilbert curve pays only on CORE2 ($-5.8\,\%$
+together with repartitioning); the other meshes are already well ordered.
 \end{itemize}
 \vspace{2pt}
 
 \section{Summary}
 
-FESOM2 reads its domain decomposition from files, so a better partition can be adopted without
-touching model code or affecting any other configuration. We generated several hundred candidate
-partitions of four meshes with METIS under settings FESOM does not currently use, with three
-external partitioning engines, and with two node renumberings, and timed them against the shipped
-partitions on both backends of the C++/Kokkos port.
+A FESOM2 run reads which mesh nodes belong to which process from the \texttt{dist\_N} files
+that ship with the mesh. Replacing those files changes nothing else --- no recompilation, no
+namelist change, no effect on any other configuration --- so a better partition is the
+cheapest speed-up available to an existing setup. It is also one that has never been tuned:
+the partitioner has called METIS with the same options since its METIS-5 interface was written
+in 2015, and one of the four meshes here ships partitions that our build still reproduces byte
+for byte.
 
-Three results carry the report. First, the shipped partitions cost the GPU backend up to
-20\,\% of the model step, and most of that is recovered by a single METIS option, \minconn,
-which no FESOM partition has ever had active: the partitioner calls
-\texttt{METIS\_PartGraphRecursive}, which accepts and ignores it. Each gain is reported
-together with the disturbance the new partition causes, measured against the spread of
-ordinary seed re-rolls of the shipped recipe: the two largest recommended gains (DARS
-$-14.3\,\%$, NG5 $-9.8\,\%$) exceed that spread in the SSH rms alone, and the largest measured
-gain ($-19.7\,\%$ on DARS) carries a temperature-field disturbance that should be checked with
-a long twin run before production (Section~6). Second, the CPU backend gains less (4--8\,\%) and gains it from different
-settings, namely external engines and load-balance slack; the two backends are best served by
-different partitions of the same mesh. Third, and unexpectedly, a small fraction of newly
-generated partitions cause the model to diverge, regardless of which settings produced them.
-Eight such partitions were caught during the campaign, one of them generated by the unmodified
-shipped recipe. Because no property computable from the partition itself identifies the
-dangerous ones, any partition intended for production must first complete a stability run at its
-target rank count; regenerating a failed partition with a different random seed has so far
-always produced a sound replacement.
+We generated several hundred partitions of four meshes --- with METIS under settings FESOM
+does not currently use, with three other partitioning programs, and after two renumberings of
+the mesh nodes --- and timed them against the shipped partitions on both backends of the
+C++/Kokkos port.
 
-Meshes: CORE2 (127k surface nodes), fArc (638k), DARS (3.16M), NG5 (7.40M). All experiments are
-cold starts under JRA55 (1958) forcing from PHC climatology, at the largest time step at which a
-cold start of the given mesh is known to be stable: 1800\,s on CORE2, 900\,s on fArc, 120\,s on
-DARS, 180\,s on NG5.
+The shipped partitions cost the GPU backend up to 20\,\% of the model step. Most of that is
+recovered by a single METIS option, \minconn, which minimises the largest number of
+neighbouring subdomains any process has and which no FESOM partition has ever had active,
+because \texttt{METIS\_PartGraphRecursive} accepts the option and ignores it. The CPU backend
+gains 4--8\,\%, from imbalance tolerance and from newer partitioning programs rather than from
+\minconn; the two backends are best served by different partitions of the same mesh.
+
+A partition change also perturbs the solution, and two properties of that perturbation
+matter. It is usually no larger than the difference between two partitions built with the same
+settings and different random seeds (Section~6). But in a minority of cases it is fatal: eight
+of the partitions generated here make the model diverge after tens to hundreds of steps, one
+of them built with FESOM's current settings, and no property computable from a partition
+identifies them in advance (Section~5). Every new partition therefore has to be run before it
+is trusted.
+
+Meshes: CORE2 (127k surface nodes, 1$^\circ$), fArc (638k), DARS (3.16M), NG5 (7.40M, $\approx$5\,km).
+All experiments are cold starts under JRA55 (1958) forcing from PHC climatology, at the largest
+time step at which a cold start of the given mesh is stable: 1800\,s on CORE2, 900\,s on fArc,
+120\,s on DARS, 180\,s on NG5.
 
 \section{Candidates}
 
 \textbf{METIS settings.} Switching the METIS call from \texttt{PartGraphRecursive} to
 \texttt{PartGraphKway} makes three previously ignored options effective: the
-communication-volume objective, contiguity of the parts (\contig), and \minconn, which
-minimises the largest number of neighbouring subdomains any part has. We swept these together
-with load-balance slack (\texttt{UFACTOR} of 10, 30 and 100), a family of vertical weights
-$w = a + \mathrm{nlev}$ with $a$ between 0 and 100, two-level hierarchical partitions, and the
-METIS random seed. The Recursive call is not an oversight in the original code:
-\texttt{fort\_part.c} documents that it produced the better partition on a test mesh, and notes
-which options it ignores. The comparison, however, predates the GPU backend.
+communication-volume objective, contiguity of the subdomains (\contig), and \minconn, which
+minimises the largest number of neighbouring subdomains any subdomain has. We swept these
+together with \texttt{UFACTOR}, which sets how much the subdomains may differ in size (values
+10, 30 and 100, i.e. 1, 3 and 10\,\%, against the 0.1\,\% FESOM uses now); with the node
+weight $w = a + \mathrm{nlev}$ for $a$ between 0 and 100, which trades balancing the number of
+surface nodes per process against balancing the number of wet layers; with two-level
+hierarchical partitions; and with the METIS random seed. The Recursive call is not an
+oversight: \texttt{fort\_part.c} documents that it produced the better partition on a test
+mesh, and lists which options it ignores. That comparison predates the GPU backend.
 
-\textbf{External engines.} KaHIP, KaMinPar and Mt-KaHyPar, each given the same node-weighted
-dual graph and the same weight sweep.
+\textbf{Other partitioning programs.} KaHIP, KaMinPar and Mt-KaHyPar, each given the same
+weighted graph and the same sweep over $a$. FESOM does not interface to them; we exported the
+graph METIS is given, partitioned it externally, and read the result back, so the comparison
+is between partitions of one and the same graph.
 
-\textbf{Node renumbering.} Reordering the mesh files themselves along a Hilbert space-filling
-curve, and alternatively by reverse Cuthill--McKee, to improve memory locality. Unlike a
-partition, a renumbering changes the mesh files, so every reference solution pinned to the old
-numbering must be re-established.
+\textbf{Node renumbering.} Renumbering the mesh nodes along a Hilbert space-filling curve, and
+alternatively by reverse Cuthill--McKee, so that nodes close in the mesh are close in memory.
+Unlike a partition, a renumbering changes the mesh files themselves, so every reference
+solution pinned to the old numbering must be re-established.
 
 \textbf{A second architecture.} The best GPU settings were re-timed on DKRZ's GH200 nodes
 (dolpung), whose interconnect cannot register GPU memory; halos there are staged through pinned
@@ -120,43 +130,46 @@ starts, so the candidates differ in the decomposition only.
 
 A timing result is accepted only after two further tests.
 
-\emph{Stability.} The candidate must complete 3{,}000 steps (roughly two model months) at the
-rank count at which it will be used. This test exists because it fails in practice: a DARS
-partition that had won its timing comparison by 4.5\,\% diverged between step 150 and step
-3{,}000 while the shipped partition ran cleanly.
+\emph{Stability.} The candidate must complete 3{,}000 steps at the process count at which it
+will be used. Because the time step is set by the mesh, that is two months of model time on
+CORE2, one on fArc, but only four to six days on DARS and NG5 --- a bound on the test, not a
+claim about long integrations. It exists because it fails in practice: a DARS partition that
+had won its timing comparison by 4.5\,\% diverged between step 150 and step 3{,}000 while the
+shipped partition ran cleanly.
 
-\emph{Accuracy.} Any change of decomposition reorders floating-point reductions, and the
-resulting round-off differences grow chaotically at fronts, so a new partition cannot be
-required to reproduce the reference solution. What can be measured is whether it is
-\emph{distinguishable} from an ordinary repartitioning. We regenerate the shipped recipe with
-three or more different random seeds (verifying that each is a genuinely different partition),
-run twenty steps with each, and report the candidate's temperature, salinity and
-sea-surface-height rms differences from the reference against the range spanned by those
-control partitions. That spread is the scale bar for every disturbance quoted in Section~6;
-quantiles of the difference fields are recorded as context. These are twenty-step cold-start
-numbers: they measure the detectability of the partition change, not its climate impact
-(Section~6 discusses the distinction).
+\emph{Size of the solution change.} A different partition sums the same terms in a different
+order, and the resulting round-off differences grow at fronts, so a new partition cannot be
+asked to reproduce the reference solution bit for bit. The question is how large its
+difference from the reference is compared with the difference any other partition would
+produce. We therefore rebuild the shipped partition with three or more different METIS random
+seeds --- checking in each case that the result really is a different partition --- run twenty
+steps with each, and compare the candidate's rms difference from the reference in temperature,
+salinity and sea-surface height with the range those seed partitions span. Section~6 reports
+each candidate on that scale. Quantiles and maxima of the difference fields are recorded as
+well.
 
-Recommended partitions are packaged by a tool that refuses any decomposition lacking a
-recorded clean 3{,}000-step run at its exact rank count.
+Twenty steps from a cold start measure whether a partition change is detectable at all; they
+say nothing about a multi-decade integration. Section~6 returns to this.
+
+Partitions we recommend are packaged by a tool that refuses any \texttt{dist\_N} without a
+recorded clean 3{,}000-step run at exactly $N$ processes.
 
 \section{Speed}
 
-Figure~\ref{fig:board} shows the best candidate at each mesh and rank count;
-Table~\ref{tab:board} records the settings and the state of the evidence behind each bar. Every
-gain that was re-measured over 3{,}000 steps came back equal to or larger than its 300-step
-value (Fig.~\ref{fig:mech}b; for example $-18.6$ to $-19.7\,\%$ on DARS GPU), so the short
-timing runs are, if anything, conservative.
+Figure~\ref{fig:board} and Table~\ref{tab:board} give the best candidate at each mesh and
+process count, with the setting that produced it. Every gain re-measured over 3{,}000 steps
+came back equal to or larger than its 300-step value (Fig.~\ref{fig:mech}b; $-18.6$ to
+$-19.7\,\%$ on DARS GPU is the largest change), so the short timing runs do not overstate the
+effect.
 
 \begin{figure}[t]\centering
 \includegraphics[width=\textwidth]{fig_m11_board.pdf}
-\caption{\small Best candidate partitions per mesh and rank count, as a percentage faster than
-the shipped partition. Gray text under each label is the setting that produced the candidate.
-All bars passed the 3{,}000-step stability screen; the fill codes the twenty-step disturbance
-against the seed-control spread (Section~6): solid = inside or below the spread,
-single-hatched = above it in the SSH rms only, cross-hatched = above it in temperature or
-salinity (the grade that warrants a long twin run before production). Mesh colors follow the
-project's figure conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
+\caption{\small Best candidate partitions per mesh and process count, as a percentage faster
+than the shipped partition. Gray text under each label is the setting that produced the
+candidate. All candidates shown completed the 3{,}000-step run. The fill codes the size of
+their solution change against the seed-partition scatter of Section~6: solid = within it,
+single-hatched = larger in sea-surface height only, cross-hatched = larger in temperature or
+salinity. Mesh colors recur in Figs.~\ref{fig:mech}, \ref{fig:gh200} and \ref{fig:dist}.}
 \label{fig:board}
 \end{figure}
 
@@ -164,84 +177,88 @@ project's figure conventions and recur in Figs.~\ref{fig:mech} and \ref{fig:gh20
 \setlength{\tabcolsep}{3.4pt}
 \begin{tabular}{llrlll}
 \toprule
-mesh & backend, ranks & gain & setting & stability & disturbance vs seed spread \\
+mesh & processes & gain & setting & 3{,}000 steps & solution change vs seed scatter \\
 \midrule
-DARS  & GPU, 64   & $\mathbf{-19.7\,\%}$ & \minconn+\contig+u30 & passed & T rms $+13\,\%$, T max $\times$1.8--2.5 \\
-DARS  & GPU, 64   & $\mathbf{-14.3\,\%}$ & \minconn            & passed & ssh rms $+11\,\%$ only (solver stopping) \\
-NG5   & GPU, 64   & $\mathbf{-9.8\,\%}$  & \minconn             & passed & ssh rms $+8\,\%$ only (unexplained) \\
-CORE2 & GPU, 4    & $\mathbf{-8.1\,\%}$  & \minconn             & passed & below every control \\
-fArc  & GPU, 16   & $-3.6\,\%$           & \minconn+\contig     & passed & T rms $+33\,\%$, ssh $+68\,\%$ \\
+DARS  & 64 GPU   & $\mathbf{-19.7\,\%}$ & \minconn+\contig+\texttt{UF=30} & clean & T rms $+13\,\%$, T max 16.2 vs 6.4--8.8 \\
+DARS  & 64 GPU   & $\mathbf{-14.3\,\%}$ & \minconn            & clean & ssh rms $+11\,\%$; T, S within \\
+NG5   & 64 GPU   & $\mathbf{-9.8\,\%}$  & \minconn             & clean & ssh rms $+8\,\%$; T, S within \\
+CORE2 & 4 GPU     & $\mathbf{-8.1\,\%}$  & \minconn             & clean & below every seed partition \\
+fArc  & 16 GPU   & $-3.6\,\%$           & \minconn+\contig     & clean & T rms $+33\,\%$, ssh $+68\,\%$ \\
 \midrule
-fArc  & CPU, 2048 & $\mathbf{-7.5\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & passed & inside the spread (4 controls) \\
-CORE2 & CPU, 512  & $\mathbf{-5.8\,\%}$  & Hilbert renumbering + engine & passed & inside the spread \\
-DARS  & CPU, 2048 & $\mathbf{-4.2\,\%}$  & KaMinPar $w{=}100{+}\mathrm{nlev}$ & passed & below every control (T, S) \\
-CORE2 & CPU, 864  & $-4.9\,\%$           & KaMinPar             & passed & salinity rms $+24\,\%$ \\
-CORE2 & CPU, 512  & $-3.8\,\%$           & \texttt{UFACTOR=30} alone & passed & inside the spread \\
-NG5   & CPU, 2048 & null                 & ---                  & --- & --- \\
+fArc  & 2048 CPU & $\mathbf{-7.5\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & clean & within (4 seeds) \\
+CORE2 & 512 CPU  & $\mathbf{-5.8\,\%}$  & Hilbert renumbering + KaHIP & clean & within \\
+DARS  & 2048 CPU & $\mathbf{-4.2\,\%}$  & KaMinPar $w{=}100{+}\mathrm{nlev}$ & clean & below every seed partition (T, S) \\
+CORE2 & 864 CPU  & $-4.9\,\%$           & KaMinPar             & clean & salinity rms $+24\,\%$ \\
+CORE2 & 512 CPU  & $-3.8\,\%$           & \texttt{UFACTOR=30} & clean & within \\
+NG5   & 2048 CPU & none                 & ---                  & --- & --- \\
 \bottomrule
 \end{tabular}
-\caption{\small Best candidates per mesh and rank count, relative to the shipped partition, at
-the time step given in Section~1. The last column is the twenty-step rms difference from the
-reference where it exceeds the spread of seed-control repartitionings, with the responsible
-field; Section~6 interprets each entry.}
+\caption{\small Best candidates per mesh and process count, relative to the shipped partition,
+at the time step given in Section~1. The last column gives the twenty-step rms difference from
+the reference where it exceeds what different METIS seeds produce, with the field responsible;
+Section~6 gives the numbers and what is known about their cause. On NG5 at 2{,}048 CPU
+processes no candidate was faster than the shipped partition.}
 \label{tab:board}
 \end{table}
 
 \subsection{What the two backends pay for}
 
-Across the nine groups of candidates that were timed, the number of communication partners per
-rank is the only precomputable quantity that correlates positively with GPU step time. Every
-volume-like quantity --- edge cut, halo bytes, replicated elements --- correlates negatively:
-on the GPU, candidates that ship more data are faster when they talk to fewer neighbours.
-\minconn\ is the METIS objective that acts on partner count, which is why it wins on the GPU
-and why the win remained invisible while the Recursive call ignored the option.
+Across the nine groups of timed candidates, the number of neighbour subdomains a process
+exchanges with is the only quantity computable from the partition that correlates positively
+with GPU step time. Every quantity measuring how much data is sent --- edge cut, halo size,
+replicated elements --- correlates negatively: on the GPU, candidates that send more data are
+faster if they send it to fewer neighbours. That is the behaviour of a machine paying per
+message rather than per byte, and \minconn\ is the METIS objective that reduces the number of
+messages.
 
-The size of the GPU gain across meshes follows the fractional reduction in the \emph{maximum}
-partner count (Fig.~\ref{fig:mech}a); the mean partner count is reduced by a similar fraction
-at all three points and therefore explains none of the ordering. That the maximum is the
-relevant statistic is expected, since each step waits for the slowest rank. The relation holds
-within one machine; Section~4.3 shows that its coefficient does not transfer across
-interconnects.
+Across meshes the GPU gain follows the reduction in the \emph{largest} neighbour count, not
+the mean (Fig.~\ref{fig:mech}a): the mean falls by a similar fraction at all three points and
+so cannot order them, while the maximum ranges from $-14\,\%$ (fArc, $-3.6\,\%$ gain) to
+$-42\,\%$ (DARS, $-18.6\,\%$). The maximum is the relevant statistic because each step waits
+for the slowest process. Section~4.3 shows that the coefficient of this relation is a property
+of the interconnect, not a constant.
 
 \begin{figure}[t]\centering
 \includegraphics[width=\textwidth]{fig_m11_mechanism.pdf}
-\caption{\small (a) GPU gain against the fractional reduction of the maximum per-rank
-communication-partner count, annotated with the counts themselves. (b) Gain measured in the
-300-step timing run against the same candidate's gain re-measured over 3{,}000 steps, for the
-eight candidates measured both ways; the line marks equality, circles are GPU points, squares
-CPU, and colors identify the mesh as in Fig.~\ref{fig:board}.}
+\caption{\small (a) GPU gain against the fractional reduction of the largest number of
+neighbour subdomains any process has, annotated with the counts before and after. (b) Gain
+measured over 300 steps against the same candidate's gain re-measured over 3{,}000 steps, for
+the eight candidates measured both ways; the line marks equality, circles are GPU points,
+squares CPU, and colors identify the mesh as in Fig.~\ref{fig:board}.}
 \label{fig:mech}
 \end{figure}
 
-On the CPU, no precomputed quantity orders the candidates: for load imbalance, edge cut and
-partner count alike, the rank correlation with step time straddles zero across the timed groups.
-CPU candidates therefore have to be timed. What does generalise is that an external engine won
-at every CPU point with 512 or more ranks, and that relative to \minconn\ alone, adding \contig\
-and slack gains five percentage points on DARS GPU and loses one to two on DARS CPU: the same
-options move the two backends in opposite directions.
+On the CPU no quantity computable from the partition orders the candidates: for imbalance,
+edge cut and neighbour count alike, the rank correlation with step time straddles zero across
+the timed groups, so CPU candidates have to be timed. Two regularities survive. An external
+program won at every CPU point with 512 or more processes. And the same two options that gain
+five percentage points on DARS GPU when added to \minconn\ --- \contig\ and \texttt{UFACTOR=30}
+--- lose one to two on DARS CPU.
 
 \subsection{Node renumbering pays only on CORE2}
 
-Hilbert renumbering is worth $-1.2$ to $-2.4\,\%$ on CPU and $-5.0\,\%$ on a single GPU node on
-CORE2, and combines almost additively with repartitioning ($-5.8\,\%$ at 512 ranks). The other
-meshes gain nothing, because their element-gather locality as shipped is already 88\,\%,
-against 27.6\,\% for CORE2. Since a renumbering forces all pinned references to be
-re-established (Section~2), we recommend it only where that cost has been accepted; the
-repartitioning gain requires no such decision.
+On CORE2, Hilbert renumbering is worth $-1.2$ to $-2.4\,\%$ on CPU and $-5.0\,\%$ on a single
+GPU node, and combines almost additively with repartitioning ($-5.8\,\%$ at 512 processes).
+The other meshes gain nothing: 88\,\% of the nodes an element gathers from are already
+adjacent in memory, against 27.6\,\% on CORE2. Since renumbering forces every reference
+solution to be re-established (Section~2), it is worth taking only where that cost is
+acceptable; repartitioning carries no such cost.
 
 \subsection{The second architecture}
 
-On a single GH200 node the CORE2 result reproduces slightly above its A100 value
-($-8.9$ against $-8.1\,\%$ with \minconn, two independent jobs agreeing within 0.6 percentage
-points), so the effect is not specific to A100 hardware. It did not, however, survive the move
-to several nodes (Fig.~\ref{fig:gh200}): a prediction, registered before the job ran, that DARS
-on 64 GH200 ranks would exceed its A100 gain of $-18.6\,\%$ failed, with the measured effect
-between $-1$ and $-3\,\%$, and fArc on 4 nodes shows no effect at all at five repetitions. On
-this machine the per-message cost that \minconn\ removes evidently resides in the staged
-intra-node path, not in the inter-node fabric. Multi-node gains should therefore be measured on
-each interconnect rather than transferred. The same experiments showed that quoting the best of
-$N$ repetitions is biased whenever the reference partition is noisier than the candidates, as
-it consistently was there; medians are reported alongside in that situation.
+On a single GH200 node the CORE2 gain reproduces at $-8.9\,\%$ against $-8.1\,\%$ on A100
+(two independent jobs, agreeing within 0.6 percentage points), so it is not specific to A100
+hardware. It does not survive the move to several nodes (Fig.~\ref{fig:gh200}). We registered
+a prediction before the job ran that DARS on 64 GH200 processes would exceed its A100 gain of
+$-18.6\,\%$; the measured effect is $-1$ to $-3\,\%$, and fArc on four nodes shows no effect
+at five repetitions. On this machine the per-message cost \minconn\ removes therefore sits in
+the intra-node path, where halos are staged through host buffers, and not in the inter-node
+fabric. Multi-node gains have to be measured on each interconnect.
+
+These jobs also showed that quoting the best of $N$ repetitions is biased when the reference
+partition is the noisiest configuration, as it was there: best-of-4 made every fArc candidate
+look 0.8--2.3\,\% slower than the reference while the medians put them within 0.6\,\%. Where
+the scatter differs between configurations we report medians as well.
 
 \begin{figure}[t]\centering
 \includegraphics[width=0.62\textwidth]{fig_m11_gh200.pdf}
@@ -255,130 +272,132 @@ measured noise level.}
 
 \section{Some repartitioned meshes crash the model}
 
-Eight of the partitions generated during this campaign cause the model to diverge: on NG5,
-\minconn-family candidates at both 2{,}048 and 64 ranks and a slack-only candidate at 64; on
-DARS, \minconn-family candidates at 2{,}048 ranks; and on DARS at 2{,}048 ranks one partition
-produced by the \emph{unmodified shipped recipe} with a different random seed, which diverged
-within fourteen steps. The failure is always local: one region runs away while the global
-diagnostics remain normal for tens of steps.
+Eight of the partitions generated here make the model diverge: on NG5, \minconn\ candidates at
+2{,}048 and at 64 processes and a \texttt{UFACTOR=30} candidate at 64; on DARS, \minconn\
+candidates at 2{,}048; and, also on DARS at 2{,}048, one partition built with FESOM's current
+settings and nothing changed but the METIS random seed, which diverged within fourteen steps.
+The failure is local in every case: salinity runs away at one location --- 41 to 57 over four
+steps in the seed case --- while the global diagnostics stay normal and the mean sea level even
+decreases.
 
-Three properties of these failures matter for practice.
+Three properties of these failures matter in practice.
 
-First, they carry no offline signature. In the NG5 group, the partitions that later diverged
-scored better than the survivors on every precomputed quantity we examined, including load
-imbalance, edge cut and the number of isolated nodes.
+They have no signature in the partition. In the NG5 group, the partitions that later diverged
+scored better than the survivors on every quantity we computed, including imbalance, edge cut,
+the number of disconnected pieces and the number of isolated nodes.
 
-Second, short tests do not find them. A five-step run passes on a partition that diverges at
-step 71, and the 150-step timing runs passed on a partition that diverged before step 3{,}000.
-The 3{,}000-step requirement of Section~3 caught every failure listed above; nothing shorter
-would have.
+Short tests do not find them. A five-step run passes on a partition that diverges at step 71,
+and the 150-step timing runs passed on a partition that diverged before step 3{,}000. The
+3{,}000-step run of Section~3 caught every failure listed above; nothing shorter would have.
 
-Third, the failure belongs to the individual partition, not to the settings that produced it.
-On both meshes where a winning candidate diverged, regenerating it with the same settings and a
-different METIS seed gave a partition that passed --- the full 3{,}000-step test on DARS, the
-150-step timing run on NG5 --- in one case with a worse edge cut than the partition that had
-failed. Conversely, the settings of the DARS GPU winner produce a sound partition at 64 ranks
-and a fatally unstable one at 2{,}048.
+The failure belongs to the individual partition, not to the settings. On both meshes where a
+winning candidate diverged, rebuilding it with the same settings and a different METIS seed
+gave a partition that ran --- the full 3{,}000 steps on DARS, the 150-step timing run on NG5
+--- in one case with a worse edge cut than the partition that had failed. Conversely, the
+settings of the fastest DARS GPU candidate give a sound partition at 64 processes and a fatally unstable
+one at 2{,}048.
 
-Since the shipped recipe itself produced one of the eight, the shipped partitions in production
-differ from the failures only in having been exercised. The practical conclusion is that the
-stability test is a property of adopting \emph{any} new partition, not a surcharge on the new
-options.
+Because FESOM's current settings produced one of the eight, the partitions now in production
+are not safer by construction; they have simply been run. The 3{,}000-step test is therefore
+the price of adopting \emph{any} new partition, not a surcharge on the options recommended
+here.
 
-\section{Accuracy: the size of the disturbance, and what it means}
+\section{How much the solution changes}
 
-Every change of decomposition perturbs the solution; the useful questions are by how much, on
-what scale, and through what mechanism. The scale bar is the spread of seed-only re-rolls of
-the shipped recipe (Section~3) --- a disturbance no larger than that is one nobody would ever
-audit, since it is produced by regenerating today's partition with a different random seed.
-The controls themselves span a factor 1.05 on DARS and 3.9 on CORE2 at 864 ranks, so no fixed
-rms threshold could replace the per-mesh spread. Figure~\ref{fig:dist} shows every surviving
-candidate's disturbance per field on that scale; four grades occur in the campaign.
+A new partition changes the solution. The question is how much, relative to what a user
+already accepts without knowing it: rebuilding the same partition with a different METIS seed
+changes the solution too. Figure~\ref{fig:dist} places every candidate on that scale, field by
+field. The scale is not transferable between meshes --- the seed partitions themselves span a
+factor 1.05 in salinity rms on DARS at 2{,}048 processes and a factor 3.9 on CORE2 at 864 ---
+so a fixed rms threshold would be meaningless. Four cases occur.
 
 \begin{figure}[t]\centering
 \includegraphics[width=0.92\textwidth]{fig_m11_disturbance.pdf}
 \caption{\small Twenty-step rms difference from the reference for each candidate, by field,
-relative to the largest value among that point's seed-control repartitionings (dashed line;
-the shaded region is inside the spread). Filled markers exceed the spread. Every candidate
-shown passed the 3{,}000-step stability screen. The DARS 2{,}048-rank envelope uses the four
-surviving controls (the fifth is the step-14 blowup of Section~5); the Hilbert-renumbered
-CORE2 candidate is compared under its own numbering and is omitted. All values are read
-directly from the accuracy-run logs; job ids are recorded in the campaign log.}
+divided by the largest difference the seed partitions of that same point produce (dashed line;
+shaded region below it). Filled markers exceed the seed scatter. Every candidate shown
+completed the 3{,}000-step run. At DARS 2{,}048 processes the scale uses the four seed
+partitions that ran, the fifth being the step-14 divergence of Section~5; the
+Hilbert-renumbered CORE2 candidate is compared under its own numbering and is not shown.}
 \label{fig:dist}
 \end{figure}
 
-\emph{Inside or below the spread.} Most recommended candidates: at CORE2, 4 GPU ranks, the
-winner lies below every control on all three fields; KaMinPar at DARS 2{,}048 lies below every
-control on temperature and salinity; Mt-KaHyPar at fArc and both CORE2 512 settings sit inside.
-Nothing to decide.
+\emph{Within the seed scatter.} Most recommended candidates. At CORE2 on 4 GPU processes the
+fastest candidate lies below every seed partition in all three fields; KaMinPar at DARS 2{,}048 lies
+below every seed partition in temperature and salinity; Mt-KaHyPar at fArc and both CORE2 512
+settings lie inside. These candidates are not distinguishable from the partition change a user
+makes by rebuilding with a new seed.
 
-\emph{An SSH-only excursion with a mechanism.} The DARS 64-GPU winner exceeds the spread in
-the SSH rms alone ($+11\,\%$). The barotropic solver stops at a relative residual, so a
-partition on which it converges faster --- which the \minconn\ family produces --- stops
-earlier and lands measurably elsewhere \emph{within the same requested tolerance}: at DARS all
-three candidates converge faster than all three controls, and at CORE2 the candidate with the
-fewest iterations has the largest SSH difference. Both runs satisfy the tolerance asked of the
-solver; the difference lives inside the solver's own tolerance ball, and tightening the
-tolerance would shrink it. This is a numerics artefact, not a physics bias.
+\emph{Sea-surface height only, with a known cause.} The fastest DARS 64-GPU candidate ($-14.3\,\%$)
+exceeds the seed scatter in sea-surface height alone, by 11\,\%. The barotropic solver stops
+when the residual has fallen by a fixed factor, so a partition on which it converges faster
+performs fewer iterations and stops at a different point inside the same tolerance. That is
+what happens here: at DARS all three candidates need fewer iterations than any of the seed
+partitions, and at CORE2 the candidate with the fewest iterations has the largest sea-surface
+height difference. Both runs meet the tolerance the solver was asked for, and a tighter
+tolerance would reduce the difference.
 
-\emph{An SSH-only excursion without one.} The NG5 64-GPU winner shows the same signature
-($+8\,\%$), but its solver iteration trace matches the controls exactly, ruling that mechanism
-out. Small and confined to one diagnostic field, but it stays labelled unexplained.
+\emph{Sea-surface height only, cause unknown.} The fastest NG5 64-GPU candidate ($-9.8\,\%$) exceeds the
+scatter by 8\,\% in sea-surface height, but its iteration counts match the seed partitions
+step for step, so the mechanism above does not apply. We have no explanation for it.
 
-\emph{Temperature or salinity excursions.} The $-19.7\,\%$ DARS arm has temperature rms
-$+13\,\%$ above the spread and a temperature \emph{maximum} 1.8--2.5 times the control class;
-the fArc GPU candidates exceed a four-control temperature envelope by 18--33\,\%; KaMinPar at
-CORE2 864 has salinity rms $+24\,\%$ (with temperature below every control). These are the
-disturbances that warrant attention: temperature and salinity carry the model's long-term
-state, and a local maximum excursion is the same signature family as the local runaways that
-destroy partitions outright (Section~5). For such a candidate the honest path to production is
-a long twin integration against the shipped partition, not a threshold argument.
+\emph{Temperature or salinity.} Three candidates differ from the reference by more than the
+seed partitions do in temperature or salinity: the $-19.7\,\%$ DARS candidate (temperature rms
+$+13\,\%$, and a temperature maximum of 16.2 against 6.4--8.8 for the seed partitions), the
+fArc GPU candidates (temperature rms $+18$ to $+33\,\%$), and KaMinPar at CORE2 864 (salinity
+rms $+24\,\%$, temperature below every seed partition). Temperature and salinity carry the
+model's long-term state, and an isolated maximum well outside the seed range is the same
+pattern as the local runaways of Section~5 at an earlier stage. Before using one of these in
+production, run it against the shipped partition for long enough to compare climatologies.
 
-All numbers in this section are twenty-step cold-start divergences: they measure whether the
-partition change is \emph{detectable} against ordinary repartitioning noise, not its climate
-impact. The inexpensive next tier of evidence is an end-state comparison after 3{,}000 steps
-against three controls; the definitive one is a multi-year twin run.
+All numbers here come from twenty steps of a cold start. They show whether a partition change
+is detectable against the change a new seed already makes; they say nothing about a
+multi-decade integration. The cheap next test is to compare the model state after the
+3{,}000-step run against the same seed partitions; the conclusive one is a multi-year pair of
+integrations.
 
 \section{Recommendations}
 
 For FESOM2 upstream, in order of value:
 \begin{enumerate}\itemsep2pt
 \item Call \texttt{METIS\_PartGraphKway} in \texttt{fort\_part.c}, so that \minconn, \contig\
-and the volume objective reach METIS, and expose the partitioner options as run-time switches
-rather than compile-time constants.
-\item Adopt the stability requirement together with the options: every newly generated
-partition, whatever produced it, runs 3{,}000 steps at its target rank count and the mesh's
-cold-start time step before production use, and a failure is answered by regenerating with a
-new seed.
-\item Rebuild the isolated-node repair in \texttt{check\_partitioning}, which currently
-considers a single neighbour as reassignment candidate, and update METIS to 5.2.1.
+and the communication-volume objective reach METIS, and make the partitioner options run-time
+switches instead of compile-time constants.
+\item Adopt the 3{,}000-step test together with the options: every new partition, whatever
+produced it, runs 3{,}000 steps at its target process count and the mesh's cold-start time
+step before production use; a failure is answered by rebuilding with a new seed.
+\item Rebuild the isolated-node repair in \texttt{check\_partitioning}, which currently takes
+a single neighbour as reassignment candidate, and update METIS to 5.2.1.
 \end{enumerate}
 
-On the machines measured here, the settings to reach for are \minconn\ for GPU runs, with
-\contig\ and slack decided per configuration by a timing run, and an external engine
-(KaMinPar or Mt-KaHyPar, $w = 100 + \mathrm{nlev}$) or \texttt{UFACTOR=30} for CPU runs.
-Hilbert renumbering is worthwhile on CORE2-class meshes where re-establishing the references
-has been accepted. Offline partition quality metrics are useful for designing candidates and
-useless for accepting them; acceptance is the stability test plus the disturbance report of
-Section~6, with a long twin run for any candidate whose disturbance reaches the
-temperature--salinity grade.
+For runs on the machines measured here: use \minconn\ on GPU, and decide \contig\ and
+\texttt{UFACTOR} by a timing run, since they help on some meshes and cost on others. On CPU
+use KaMinPar or Mt-KaHyPar with $w = 100 + \mathrm{nlev}$, or \texttt{UFACTOR=30} if adding a
+partitioning program to the workflow is not worth it (at CORE2 512 the two are equal; at DARS
+2{,}048 the program is 1.1 percentage points better and the only candidate that both ran
+3{,}000 steps and stayed inside the seed scatter). Hilbert renumbering is worth taking on
+CORE2-class meshes where re-establishing the reference solutions is acceptable. Quantities
+computed from a partition are useful for designing candidates and useless for accepting them:
+acceptance is the 3{,}000-step run plus the comparison of Section~6.
 
 \section{Status}
 
-Every measurement has run. The accuracy criterion was revised at campaign close: instead of a
-certified/not-certified verdict, each recommendation carries its measured disturbance and an
-interpretation (Section~6). Under that reporting the DARS and NG5 64-GPU winners ($-14.3$ and
-$-9.8\,\%$, SSH-only disturbances) are ordinary recommendations, while the $-19.7\,\%$ DARS
-arm and the fArc 16-GPU point carry temperature-grade disturbances and want a long twin run
-before production. Four winners are already packaged as evidence-checked mesh directories
-under \path{mesh_m11_certified/}; the upstream pull request is the remaining engineering
-step. Whether an interconnect with working
-GPU--direct communication prices messages like the A100 fabric or like the GH200 testbed is
-open, and JUPITER should answer it by measurement.
+All measurements are complete. Four partitions --- the CORE2 GPU and CPU winners, fArc 2{,}048
+and DARS 2{,}048 --- are packaged as mesh directories that carry their own run records; the
+DARS and NG5 64-GPU partitions can be packaged the same way. What remains is the upstream pull
+request.
+
+Two questions are open. Whether an interconnect with working GPU-direct communication prices
+messages like the A100 fabric or like the GH200 test system decides how much of the GPU gain
+transfers to JUPITER, and only a measurement there will settle it. And for the three
+candidates whose temperature or salinity difference exceeds the seed scatter --- among them the
+largest gain measured, $-19.7\,\%$ on DARS --- a long paired integration would show whether the
+difference matters at climate scale.
 
 \vspace{4pt}
-\noindent\textit{Evidence trail: \path{docs/PARTITIONING_M11.md} (Findings 1--45, with job
-ids for every number quoted here); operational summary: \path{docs/M11_RECOMMENDATION.md};
-full table of timing runs: \path{scripts/m11_harvest_races.py} \texttt{--best}.}
+\noindent\textit{Job ids for every number quoted here, and the full record of the experiments,
+are in \path{docs/PARTITIONING_M11.md}; the operational summary is
+\path{docs/M11_RECOMMENDATION.md} and the complete table of timing runs is produced by
+\path{scripts/m11_harvest_races.py} \texttt{--best}.}
 
 \end{document}
