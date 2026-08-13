@@ -627,7 +627,9 @@ int fesom_timestep(int                          step_n,
      * the device copy with the stale host mirror (the Z7/BULKTAIL-IC signature). The :814 comment
      * already proved this push redundant even under legacy (the host loop is eta_n's only per-step
      * writer, and substep 11 re-pushes); under the knob it is the clobber itself. Gated. */
-    if (!fesom_sshrails_on()) {
+    if (!fesom_sshrails_on() && !fesom_se_on()) {   /* M12: under se this push is an identity
+                                                     * copy (substep 11 wrote host eta_n and
+                                                     * pushed) — skip the redundant H2D. */
         dyn->eta_n_fld.modify_host();    dyn->eta_n_fld.sync_device();
     }
     /* M5.13e: w_e device-resident with its halo (12d fesom_halo_field) - no re-push; compute_vel_rhs reads it on device. */

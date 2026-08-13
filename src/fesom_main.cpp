@@ -1256,7 +1256,8 @@ skip_rest_state:
             TP_END(tp_ocean);
             fesom_phasestats_mark(FESOM_PH_OTHER);   /* io/calendar/snapshot tail of the step */
             if (mpi.mype == 0) {
-                fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
+                fprintf(stderr, "[step %d] done — %d %s\n", n, iters,
+                        fesom_se_on() ? "BT substeps" : "CG iters");   /* M12 */
             }
 
             /* Drive output streams + advance calendar. Per-step cost is

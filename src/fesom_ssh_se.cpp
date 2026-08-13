@@ -92,20 +92,26 @@ static int fesom_se_m_force(void)
     return cached;
 }
 
-/* SM2005 dissipation χ (default 0.05; notes: 0.05-0.1, G3 scans it). */
+/* SM2005 dissipation χ. Default 0.1 — MEASURED, not guessed: χ=0.05 is
+ * UNSTABLE on CORE2 dt1800 real forcing (Antarctic-shelf coastal setdown
+ * grows ~2%/step, vertical CFL blows, all-NaN by step ~300; jobs 26935549,
+ * 26935626-31), while χ=0.1 saturates at the SI η class (~2.1 m) through
+ * 1000 steps (jobs 26935806/07; 4×γ₁ adds nothing beyond χ=0.1). The notes'
+ * suggested range was 0.05-0.1 "to be determined experimentally" — this is
+ * that experiment's answer for the reference mesh. */
 double fesom_se_chi(void)
 {
     static double cached = -1.0;
     if (cached < 0.0) {
         const char *e = getenv("FESOM_SE_CHI");
         if (!e || !e[0]) {
-            cached = 0.05;
+            cached = 0.1;
         } else {
             char *end = NULL;
             const double v = strtod(e, &end);
             if (end == e || (end && *end) || !(v > 0.0) || !(v < 0.5)) {
                 fprintf(stderr, "FESOM_SE_CHI=%s not supported (need a number in (0,0.5); "
-                                "notes suggest 0.05-0.1; default 0.05)\n", e);
+                                "notes suggest 0.05-0.1; default 0.1)\n", e);
                 exit(1);
             }
             cached = v;
@@ -1007,16 +1013,30 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
         const real_t *hbo = mesh->hbar_old_fld.h();  /* ηⁿ                    */
         const real_t *wfh = forcing->water_flux_fld.h();
         double dmax = 0.0;
+        long   nan_n = 0;                    /* NaN-LOUD: max-reductions are NaN-blind
+                                              * (comparisons with NaN are false) — count
+                                              * NaNs explicitly (t6 lesson: the CORE2 smoke
+                                              * died all-NaN under a '0.000 PASS' banner). */
         for (int n = 0; n < Nown; ++n) {
             if (mesh->ulevels_nod2D[n] != 1) continue;
             const double r = ((double)hb[n] - (double)hbo[n])
                            - (double)tau * ((double)Tchk.h()[n] - (double)wfh[n]);
+            if (r != r || hb[n] != hb[n]) { ++nan_n; continue; }
             if (fabs(r) > dmax) dmax = fabs(r);
         }
-        MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        double glob2[2] = { dmax, (double)nan_n };
+        MPI_Allreduce(MPI_IN_PLACE, glob2, 2, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        dmax = glob2[0];
         if (p->mype == 0)
-            fprintf(stderr, "[ssh_se] SE_CHECK step %d G1a eta-compat max|r|=%.3e m\n",
-                    step_n, dmax);
+            fprintf(stderr, "[ssh_se] SE_CHECK step %d G1a eta-compat max|r|=%.3e m%s\n",
+                    step_n, dmax, glob2[1] > 0.0 ? "  *** NaN IN ETA ***" : "");
+        if (glob2[1] > 0.0) {
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se] SE_CHECK step %d: NaN detected in the barotropic "
+                                "state — aborting loudly instead of running dead.\n", step_n);
+            MPI_Barrier(p->MPI_COMM_FESOM);
+            abort();
+        }
         if (dmax > 1e-9
             && strcmp(Kokkos::DefaultExecutionSpace::name(), "Serial") == 0) {
             fprintf(stderr, "[ssh_se] SE_CHECK G1a FAIL on Serial (provisional 1e-9 m). "

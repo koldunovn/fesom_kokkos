@@ -139,7 +139,7 @@ helem/uv_rhs are never filled — do not iterate them).
 |---|---|---|
 | `FESOM_SSH_MODE` | `si` | `si` = current CG path (byte-identical); `se` = this module. Requires `FESOM_ALE=zstar` under `se`. |
 | `FESOM_SE_M` | 50 | substeps per baroclinic step; startup CFL check prints the mesh-derived minimum-safe M (from `mesh_resolution` and column depth **−zbar[nlevels_nod2D−1]** — `mesh->depth` is input metadata only, fesom_mesh.h:79-80) and aborts if clearly unstable (override: `FESOM_SE_M_FORCE=1`). |
-| `FESOM_SE_CHI` | 0.05 | SM dissipation χ (notes: 0.05–0.1, experimental — G3 scans it). |
+| `FESOM_SE_CHI` | **0.1 (measured)** | SM dissipation χ. 0.05 is UNSTABLE on CORE2 dt1800 real forcing (death by step ~300); 0.1 saturates at the SI η class through 1000 steps — see the T6 ➕ block. |
 | `FESOM_SE_VISC` | 1 | live harmonic barotropic viscosity per substep (D3), two-term structure V[Ūᵐ]−V[Ūⁿ]. Coefficient: the Zenodo formula `vi=dt·√(max(γ₀,γ₁·\|Δu\|)·len)` with the Zenodo SE defaults γ₀=10, γ₁=2750 (γ₂ fixed 0); `FESOM_SE_VISC_GAMMA0`/`FESOM_SE_VISC_GAMMA1` override; calibrated in G3. `0` = off (a G3 arm). |
 | `FESOM_SE_CHECK` | unset | G1 diagnostics: per-step invariant norms + one-shot operator self-test; Serial + nonzero ⇒ abort on violation (the `fesom_ale_verify_report_` pattern, fesom_ale.cpp:729). |
 
@@ -291,27 +291,45 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 ### Task 6: Full dispatch, coherence sites, ALE-tail integration, null gate
 **Files:** Modify `src/fesom_step.cpp`, `src/fesom_ice.cpp`, `src/fesom_ssh_se.cpp`,
 `src/fesom_main.cpp`.
-- [ ] **Neutralize the two out-of-block SSHRAILS-gated pushes under `se`**: add
-      `&& !fesom_se_on()` at `fesom_step.cpp:614-616` (eta_n pre-substep-4 push) and
-      `fesom_ice.cpp:646-648` (hbar pre-ocean2ice push). These + the finalize sync are the
-      coherence contract (L86: no Serial gate catches this class — CUDA run required).
-- [ ] Verify-and-wire: 12b vert_vel (divergence-w from trimmed uv) + `vert_vel_zstar_kk` reading
-      SE's hbar/hbar_old; substep 14 zstar commit; dhe fill kept; w halos unchanged
-      (step.cpp:1055-1065); `fesom_ale_dump_hbar` fires, `fesom_ale_dump_sshsolve` skipped.
-- [ ] IO coherence: `ssh` stream resolves eta_n — host default reads the synced host value,
-      IOACC device path reads the Field (fesom_io.cpp:962, table :1025); main-loop eta_max print
-      (fesom_main.cpp:1271-1281) reads the synced value.
-- [ ] Ice coherence: `ocean2ice` reads mesh->hbar (host :71 / device :170). Ice runs BEFORE the
-      ocean step each iteration (fesom_main.cpp:1170→1247), so ice sees the previous step's η —
-      the same class as SI (whose hbar also updates later, in substep 10); confirm and document.
-- [ ] `fesom_timestep` return/print under `se`: return M (or 0) with the main-loop print adjusted
-      so campaign logs don't read "0 CG iters" (fesom_main.cpp:1252).
-- [ ] **G0 final:** unset-vs-unset vs pre-branch binary, CORE2 128r, Serial + CUDA →
-      diff_snap rc=0.
-- [ ] **SE-on smoke:** CORE2 128r zstar `se`, 500 steps Serial+CUDA: no NaN, G1 green, η field
-      visually sane (agshow map for Nikolay). This is also the first live test of the coherence
-      contract on CUDA.
-- [ ] Build serial+cuda clean; ctest green.
+- [x] The two out-of-block SSHRAILS-gated pushes `!fesom_se_on()`-gated (step.cpp eta_n
+      pre-substep-4; fesom_ice.cpp hbar pre-ocean2ice) — under se they were identity copies
+      by the coherence contract; now structurally skipped.
+- [x] Verify-and-wire DONE: the reused zstar tail consumed SE's hbar/hbar_old through 1000-step
+      runs (w evolving, hnode/helem committing); dhe fill kept; dump_hbar fires, dump_sshsolve
+      sits in the skipped SI branch.
+- [x] IO coherence VERIFIED: ssh/u/v monthly streams written in the SE runs; eta_max print live.
+- [x] Ice coherence CONFIRMED + documented: ice sees the previous step's η under both SI and se
+      (hbar updates late in the ocean step in both) — same lag class.
+- [x] Driver print: "done — N BT substeps" under se (fesom_main.cpp).
+- [x] **G0 final PASS:** serial byte gate 26935547 rc=0 + CUDA fidelity 26935548 rc=0.
+- [x] **SE-on smoke → the T6 ➕ stability investigation below** (the first 500-step smokes
+      died; root-caused; χ default remeasured to 0.1). FINAL EVIDENCE at the new default:
+      1000-step CORE2 128r serial (26935947, η settles 2.11 m ≈ SI twin 26935948's 2.08 m;
+      max|uv| 1.45 vs 1.44) + 1000-step CUDA (26935949, η 2.11, no NaN); SE-vs-SI maps at
+      steps 200/1000 agshow'n (SE = hotter transient, same equilibrium).
+- [x] Build serial+cuda clean; ctest green (4/4).
+
+➕ **T6 STABILITY INVESTIGATION (2026-08-13/14, the first real-forcing finding):**
+- The first CORE2 dt1800 500-step smokes DIED all-NaN between steps 200-300 (serial 128r
+  26935549 + CUDA 4r 26935550, identical) — while G1a stayed machine-clean to the end: the
+  subcycling was exact, the COUPLED system diverged. Lesson: the G1a/G1b max-reductions were
+  NaN-BLIND ("0.000 PASS" over a dead ocean) — fixed, NaN now aborts loudly.
+- 6-arm scan (150 steps, 8r; 26935626-31): SI control η@150=1.90 m; SE χ=0.05 2.84;
+  SE visc=0 **4.48**; SE χ=0.1 **2.59**; SE M=100 3.04 (⇒ NOT a barotropic-CFL issue);
+  SE γ₀-only 3.73. Dissipation acts monotonically; all knobs proven fired (announce lines).
+- Maps (death run snaps): the growth is a SMOOTH COASTAL SETDOWN on the Antarctic shelf
+  (Ross coast 165°E/78°S at step 100 → Bellingshausen 75°W/72.5°S at 200), NOT grid-scale
+  noise — the physical winter coastal response that θ=1 SI heavily damps and SE resolves;
+  SE runs ~40% hotter from step 1 (0.50 vs 0.35 m) — the documented SI-damping difference.
+- Death mechanism: max w = 4.3 cm/s at step 100 ⇒ vertical CFL ≈ 7.7 at dt=1800 — TRACERS
+  die first (T/S NaN at 200-300 while η still finite; snapshot order confirms). The certified
+  cure for that consequence is FESOM_WSPLIT=1 (CORE2 normally runs it off because SI keeps
+  CFLz ≤ 0.82).
+- **Resolution: χ=0.1 saturates.** 1000-step probes (26935806 χ=0.1: η 3.00@200 → 2.11@1000;
+  26935807 χ=0.1+4×γ₁: same to ~0.1 m — γ₁ beyond default adds nothing once χ=0.1).
+  **Default changed: FESOM_SE_CHI=0.1** (measured, not guessed — the notes' "to be determined
+  experimentally"). G3 arms updated accordingly; χ=0.05 stays as a documented-unstable
+  short-screen arm only.
 
 ### Task 7: G1 full invariant suite
 **Files:** Modify `src/fesom_ssh_se.cpp` (+ small script `scripts/se_invariants.py` if useful).
@@ -343,8 +361,9 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 ### Task 9: G3 physics twins (SLURM campaign)
 **Files:** campaign scripts under `m12/` (pattern from m7/m11 campaigns); findings appended here.
 - [ ] Arms (CORE2 dt1800, zstar, 128r CPU class + one CUDA rep): SI control ×≥3 demonstrated-
-      distinct controls, SE{χ=0.05,M=50}, SE{χ=0.1,M=50}, SE{χ=0.05,M=30}, SE{visc=0},
-      SE+wsplit compose arm.
+      distinct controls, SE{χ=0.1,M=50} HEADLINE, SE{χ=0.15,M=50}, SE{χ=0.1,M=30},
+      SE+wsplit compose arm. (χ=0.05 and visc=0 are documented-unstable on CORE2 — short
+      screens only, T6 ➕ block; γ₁ scan dropped — insensitive beyond χ=0.1.)
 - [ ] 20-step disturbance report vs seed-control spread (M11 graded-tier framework — tiers,
       no binary verdicts) for the headline arm.
 - [ ] ≥3000-step stability screen, every arm (rule 0.41: verdicts only at protocol length; dt1800).
@@ -371,9 +390,11 @@ list, :69-86), `src/fesom_main.cpp` (init after `fesom_ale_mode_init()` :347 + f
 
 ## Risks
 
-- **SM stability is the experiment** (Sergey: "it is hoped… will add some stability"): χ/M/visc
-  arms in G3; FB weights are the documented fallback slot; the live viscosity (D3) is the main
-  stability lever and is now correctly specified.
+- **SM stability is the experiment — FIRST ANSWER IN (T6 ➕ block):** χ=0.05 unstable on
+  CORE2 real forcing, χ=0.1 stable through 1000 steps at the SI η class; χ (not the
+  viscosity) is the effective lever. Remaining risk: longer windows (rule 0.41 — the 3000-step
+  screens + 1-yr twin), other meshes (per-mesh CFL/M + χ re-verified in G4 prep), and the
+  vertical-CFL consequence at the transient peak (wsplit compose arm).
 - 4N GPU: ~7 launches/substep with halo pack/unpack ≈ **350+/step at M=50** + 2M exchange
   latencies vs ~30 deterministic-cost CG iterations — SE may lose at low rank counts. Expected,
   measured, reported; wide-halo phase is the remedy if the ladder says so.

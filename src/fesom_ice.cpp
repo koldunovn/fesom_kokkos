@@ -1,4 +1,5 @@
 #include "fesom_ice.h"
+#include "fesom_ssh_se.h"   /* M12: fesom_se_on() gates the hbar pre-push */
 #include "fesom_profile.hpp"   // M5.6: per-phase ice-step timing (FESOM_STEP_PROFILE)
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -643,7 +644,10 @@ void fesom_ice_step(int                            step,
          * DEVICE-authoritative (device halo in the SSH block) and the host mirror is STALE — this
          * push would clobber the fresh device hbar that ocean2ice_kk is about to read (the
          * BULKTAIL-IC / Z7 signature, PROMPT §3.3 trap 1). Legacy: unchanged. */
-        if (!fesom_sshrails_on()) {
+        if (!fesom_sshrails_on() && !fesom_se_on()) {   /* M12: under se hbar is device-written
+                                                         * by the SE finalize and host-SYNCED
+                                                         * (the coherence contract) — this push
+                                                         * is an identity copy; skip it. */
             mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();   /* hbar IS host-authoritative (legacy) — keep */
         }
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
