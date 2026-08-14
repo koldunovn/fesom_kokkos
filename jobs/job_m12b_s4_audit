@@ -1,0 +1,76 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_audit
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/audit_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/audit_%j.err
+#
+# M12b s4 — gate the elem_nodes(-1) hygiene work (the s3 open item).
+#
+# What is new in the binary:
+#   * fesom_mesh.cpp   audit_elem_nodes_unmappable() — startup census of the
+#                      unmappable (-1) vertex refs by halo class, and a HARD
+#                      check of the containment invariant every unguarded
+#                      elem_nodes consumer relies on: no element reachable from
+#                      an OWNED node's nod_in_elem2D row may carry a -1 vertex.
+#   * fesom_forcing_analytical.cpp — the one unguarded full-extent read the
+#                      audit found (geo_coord_nod2D at a -1 vertex); now
+#                      averages the mappable vertices only.
+#   * fesom_ice_evpwide.cpp — comment only (the `n < myDim` filter admits -1).
+#
+# Legs (CORE2 unless stated):
+#   null   np8  50 steps, knobs off  — diff_snap vs base_np8 must be rc=0
+#   c128   np128 20 steps            — census + invariant at a bigger partition
+#   wfree  np128 25 steps WIDE free  — drift must still be 0.000000e+00/step
+#   farc128 / ng5_128  2 steps       — census on the other two mesh families
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+export FESOM_PRINT_EVERY=100
+
+run_leg () {   # $1 tag  $2 np  $3 mesh  $4 dt  $5 nsteps  $6 snap  rest env
+  local tag=$1 np=$2 msh=$3 dt=$4 nst=$5 snap=$6; shift 6
+  local OUT=$BASE/audit_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== LEG $tag np=$np ($*) ==================="
+  env "$@" srun -n "$np" -l "$BIN" "$msh" "$OUT" "$dt" "$nst" "$snap" "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h "elem_nodes(-1) census\|halo-element vertex refs" "$OUT/run.log" | head -4
+  grep -h " it=" "$OUT/run.log" | tail -1
+}
+
+# 1. byte-inertness of the audit code on the certified path
+run_leg null 8 "$MESH" 1800 50 25 FESOM_SE_H0E_XCHG=0
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/base_np8" "$BASE/audit_null_${SLURM_JOB_ID}"
+echo "diff_snap null rc=$?"
+
+# 2. census + invariant at np128
+run_leg c128 128 "$MESH" 1800 20 999999
+
+# 3. the rung still runs bitwise-free on the new binary
+run_leg wfree 128 "$MESH" 1800 25 999999 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+NZ=$(grep -h "wide-drift" "$BASE/audit_wfree_${SLURM_JOB_ID}/run.err" | grep -cv "= 0.000000e+00$" || true)
+echo "wfree nonzero-drift-steps=$NZ (must be 0)"
+
+# 4. census on the other mesh families (startup only)
+run_leg farc128 128 /pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc 900 2 999999
+run_leg ng5_128 128 /pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5  180 2 999999
+
+echo "=== s4 audit gate done ==="

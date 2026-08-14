@@ -24,12 +24,23 @@ void fesom_forcing_set_analytical(const struct fesom_mesh *mesh,
        physical (un-rotated) latitude — otherwise a rotated mesh would
        produce a wind pattern that doesn't align with the equator. */
     for (int e = 0; e < (mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D); ++e) {
-        int n0 = mesh->elem_nodes[3*e + 0];
-        int n1 = mesh->elem_nodes[3*e + 1];
-        int n2 = mesh->elem_nodes[3*e + 2];
-        real_t lat = (mesh->geo_coord_nod2D[2*n0 + 1]
-                    + mesh->geo_coord_nod2D[2*n1 + 1]
-                    + mesh->geo_coord_nod2D[2*n2 + 1]) / 3.0;
+        /* 🔴 This loop runs over the FULL element extent, so it reaches halo
+           elements whose vertex is not in the local node list — scatter_mesh
+           stores -1 there, for eDim edge-neighbours as well as the eXDim tail
+           (M12b s3; the same unguarded read made halo H0e eta-class wrong in
+           the SE module, docs/WIDEHALO_M12B.md §3). Average over the mappable
+           vertices only: owned elements always have all three (checked by the
+           scatter assert and the compute_metrics census), so the certified
+           path is byte-unchanged. */
+        real_t lat_sum = 0.0;
+        int    nvalid  = 0;
+        for (int k = 0; k < 3; ++k) {
+            const int v = mesh->elem_nodes[3*e + k];
+            if (v < 0) continue;
+            lat_sum += mesh->geo_coord_nod2D[2*v + 1];
+            ++nvalid;
+        }
+        real_t lat = (nvalid > 0) ? lat_sum / (real_t)nvalid : 0.0;
         forcing->stress_surf[2*e + 0] = -tau0 * cos(inv_period * lat);
         forcing->stress_surf[2*e + 1] = 0.0;
     }
