@@ -436,6 +436,23 @@ the paired deltas are the deliverable. NG5/dars-GPU + report/docs close in the d
 - CORE2 dt1800 ⇒ dtbt=36 s at M=50: comfortable; but dars dt120/NG5 dt180 ⇒ dtbt 2.4–3.6 s —
   M can likely SHRINK there (the CFL check will say); SE cost scales with M.
 
+➕ **SERGEY FEEDBACK (relayed 2026-08-14) + the large-CPU interim board:** Sergey: tune M per
+mesh (done — the CFL guard); on uniform meshes M=30 can work, "Patrick used 50, but that is
+already a lot" → M=40 arms submitted for CORE2 (guard minimum 35); wide halo: GPU = real
+advantages, CPU = just better scaling — matches the M12b GO-GPU-first scoping below.
+Interim large-CPU head-to-head (same-day, 4 arms/point, min-of-2):
+| point | SE vs SI(zstar) | M10 best vs SI(linfs) | zstar-vs-linfs offset |
+|---|---|---|---|
+| CORE2 2048 CPU | **−19.9%** | pcsi **−25.5%** (pcsi WINS the point) | −4.1% |
+| farc 2048 CPU | **−14.2%** | oati −13.5% (SE wins by 0.7pp, same day) | +1.8% |
+| dars 32N (4096r) | −1.3% | oati +0.3% | +3.5% |
+| dars 64N (8192r) | **−4.4%** | oati −2.4% (SE ahead, growing with ranks) | +1.2% |
+➕ **FINDING (NG5-CPU): the STOCK CG DIVERGES on NG5 /pool dist_4096 AND dist_8192**
+("CG_kk residual diverged" abort, both reps, both zstar and linfs) while **SE and oati both
+run clean on the same partitions** — consistent with M11's "NG5 = most partition-fragile
+mesh". The SI baseline is unavailable at NG5-CPU; the honest comparison there is SE-vs-oati
+head-to-head + the CG fragility recorded as a result in its own right.
+
 ## M12b decision — wide-halo subcycling (2026-08-14, on the first board's numbers)
 
 **GO, scoped.** The per-substep exchange LATENCY is now the dominant removable cost of the SE

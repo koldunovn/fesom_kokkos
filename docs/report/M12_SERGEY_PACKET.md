@@ -108,3 +108,14 @@ implement this, but any Fortran adoption of the SM variant will need it (your no
    sufficient?
 5. The coastal-setdown transient: SE "hotter than SI by physics" — do you want a dedicated
    comparison against tide-gauge-class observations before recommending SE for production?
+
+## Addendum — Sergey's first feedback (relayed 2026-08-14)
+
+"Надо отрегулировать число шагов, оно может быть разным на разных сетках… 30 может работать
+[на равномерных сетках]; Патрик использовал 50, но это уже много. На GPU переход на wide halo
+должен принести преимущества, а на CPU это просто лучшее скалирование."
+
+Actions taken: (a) per-mesh M is automated by the startup CFL guard (this packet §4) and the
+ladder already runs per-mesh M; (b) following "50 is already a lot", CORE2 M=40 arms (guard
+minimum 35) submitted at 4N/16N GPU + 2048 CPU; (c) the wide-halo phase (M12b) is scoped
+GPU-first, with the CPU variant framed as a scaling play — exactly this guidance.
