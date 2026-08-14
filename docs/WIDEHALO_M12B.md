@@ -1,10 +1,12 @@
 # M12b — wide halo for the SE barotropic subcycle (`FESOM_SE_WIDE`)
 
-**Status 2026-08-14 s3: the s2 instability is ROOT-CAUSED and FIXED (§3 — halo H0e was not the
-owner's bytes; one per-step exchange, `FESOM_SE_H0E_XCHG=1` default). The rung is exact through
-the first steps and its free-running drift plateaus at machine noise (§3e). Stability screens at
-np128/farc-2048 and the perf board are the s3 verification wave.** Plan + full gate record:
-`docs/plans/20260814-m12b-widehalo.md`. SE reference: `docs/SSH_SE_M12.md`.
+**Status 2026-08-14 s3 COMPLETE on CPU: the s2 instability is ROOT-CAUSED and FIXED by two
+coherence repairs (§3: per-step H0e exchange + owner-wins F over the multi-claimed elements). The
+free-running rung is BITWISE-exact (drift ≡ 0.0 — np8 ×25, np128 ×300, farc-2048 ×50), both
+3000-step screens are green (farc η=2.05, np128 η=1.89 = the SE references), W5b rc=0, and the W6
+CPU board reads farc −1.8 % / dars +0.4 % (§5) — the CPU latency share bounds the payoff, as
+Sergey predicted. GPU (W2 gate + W6 pairs) queued behind the maintenance window.** Plan + full
+gate record: `docs/plans/20260814-m12b-widehalo.md`. SE reference: `docs/SSH_SE_M12.md`.
 
 ## What it is
 
