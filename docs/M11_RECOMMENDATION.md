@@ -3,6 +3,36 @@
 One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–45); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
+## 🔴🔴 2026-08-14/15 — THE DISTURBANCE COLUMN BELOW IS SUPERSEDED; RE-RUN IN PROGRESS
+
+M13 found that the climatology hole-filler gives each decomposition a **different initial
+condition**, and the campaign is being re-measured with the deterministic fill
+(`FESOM_IC_EXTRAP=det`). Plan and status: `docs/plans/20260815-m11-det-rerun.md`; evidence:
+`PARTITIONING_M11.md` session 7.
+
+What that means for this page, stated in the order it matters:
+
+1. **The disturbance/tier column was largely measuring the hole-filler, not the partition.**
+   Measured directly: two partitions of CORE2 differ in their *initial* salinity by 27.4 PSU and
+   fArc by 26.0 PSU, against zero under det. Re-derived with det, the CORE2 864 field differences
+   shrink by five to six orders of magnitude and the `+24 %` salt excursion that removed that
+   point from the recommendation **disappears**. Do not quote a tier from the table below until
+   its row says det.
+2. **The stability column's failures are void, not confirmed.** Every "diverges / blows up"
+   verdict (Findings 34, 39, 45) was earned on a run whose initial state was an artefact of the
+   very partition being judged. Re-screens are running.
+3. **The gains appear to survive.** Re-raced under det so far: CORE2 512 slack −3.87 %
+   (was −3.83), CORE2 512 KaHIP −4.03 % (−4.03), CORE2 512 Hilbert+engine −5.08 % (−5.83),
+   CORE2 864 KaMinPar −4.25 % (−4.07/−4.92), fArc 2048 Mt-KaHyPar −7.37 % (−7.52), fArc 2048
+   `MINCONN` −5.07 % (−5.49). Ordering unchanged, magnitudes inside the usual spread.
+4. **The tier-2 "stopping mechanism" needs re-deriving rather than re-quoting.** Under det every
+   leg of the CORE2 864 and CORE2 512 gates — arms and controls — takes an *identical* CG
+   iteration path for all twenty steps. The differing iteration counts that the explanation rests
+   on followed from the legs starting in different states.
+5. The four promoted meshes under `mesh_m11_certified/` are unaffected **as artefacts** — a
+   `dist_N` file does not change. Their evidence lines were recorded under the legacy fill and
+   are being re-earned.
+
 ## 🔴 State of the evidence (read before quoting any number below)
 
 **Protocol decision (user, 2026-08-13, supersedes the binary yardstick of 2026-08-12):** there

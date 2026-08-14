@@ -66,7 +66,11 @@ for f in nod2d.out elem2d.out aux3d.out nlvls.out elvls.out; do
 done
 echo "    legs:$NAMES   (five mesh files md5-identical)"
 
-for mode in legacy det; do
+# MODES lets a re-run cover only the half that is missing. The det legs cost several minutes of
+# fill and relaxation each on dars/NG5, so a job sized for the legacy legs will not hold both.
+MODES=${MODES:-"legacy det"}
+echo "    modes: $MODES"
+for mode in $MODES; do
     for n in $NAMES; do
         o="$OUT/${mode}_$n"; mkdir -p "$o"
         FESOM_IC_EXTRAP=$mode srun "$BIN" "${MESH[$n]}" "$o" "$DT" 1 1 "$PHC" 1958 \
@@ -78,7 +82,7 @@ for mode in legacy det; do
 done
 
 REF=$(echo $NAMES | awk '{print $1}')
-for mode in legacy det; do
+for mode in $MODES; do
     for snap in snap_000000.nc snap_000001.nc; do
         echo
         echo "=== $mode / $snap — every leg vs $REF ($([ "$snap" = snap_000000.nc ] \
