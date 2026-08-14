@@ -90,6 +90,53 @@ for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
         r["ic"] = ic          # the clean leg's header is the authoritative one
 
 
+SWEEP = re.compile(r"det extrap: (\d+) fill sweeps \+ (\d+) relax sweeps")
+
+
+def fill_signature_check(root):
+    """⭐ The cheapest possible proof that the fleet's ICs really are partition-independent.
+
+    The deterministic fill iterates to a tolerance, so the number of sweeps it needs is a
+    property of the MESH and of nothing else. Two points on the same curve run different rank
+    counts; if they report different sweep counts, the fill is still seeing the decomposition
+    and the whole re-run is void. Under the legacy fill there is no such invariant to check --
+    which is exactly why the defect survived so long.
+
+    Returns True if every mesh has exactly one signature.
+    """
+    # ⚠️ The fill runs TWICE per model start -- once for temperature, once for salinity -- so a
+    # run emits two lines and they differ from each other. The invariant is over the PAIR.
+    sigs = {}
+    for log in glob.glob(os.path.join(root, "scd_*", "*", "run.1.log")) + \
+               glob.glob(os.path.join(root, "op6_*", "*", "run.1.log")):
+        tag = log.split(os.sep)[-3]
+        mesh = re.sub(r"^(scd_(?:gpu|cpu)|op6)_", "", tag)
+        mesh = re.sub(r"(_\d+n)?(_phst)?$", "", mesh)
+        try:
+            with open(log, errors="replace") as f:
+                found = [m.group(0) for m in (SWEEP.search(ln) for ln in f) if m]
+        except OSError:
+            continue
+        if found:
+            key = " | ".join(found)          # order is T then S, fixed by the loader
+            sigs.setdefault(mesh, {}).setdefault(key, set()).add(f"{tag}/{log.split(os.sep)[-2]}")
+    ok = True
+    print("=== deterministic-fill signature (one per mesh, or the ICs are not shared) ===")
+    for mesh in sorted(sigs):
+        variants = sigs[mesh]
+        n_runs = len(set().union(*variants.values()))
+        if len(variants) == 1:
+            print(f"  {mesh:<8} OK   {next(iter(variants))}   ({n_runs} runs)")
+        else:
+            ok = False
+            print(f"  {mesh:<8} !! {len(variants)} DIFFERENT signatures across {n_runs} runs:")
+            for s, tags in sorted(variants.items()):
+                print(f"           {s}   <- {', '.join(sorted(tags)[:4])}"
+                      f"{' …' if len(tags) > 4 else ''}")
+    print()
+    return ok
+
+
 def pct(new, old):
     return 100.0 * (new - old) / old
 
@@ -100,6 +147,8 @@ def verdict(d, ref="standard"):
         return {}
     return {k: pct(v, d[ref]) for k, v in d.items() if k != ref}
 
+
+fill_ok = fill_signature_check(args.root)
 
 rows, shifts = [], []
 for dtag in sorted(runs):
@@ -140,3 +189,5 @@ for s, dtag, cur, leg, a, b in shifts[:12]:
 flips = [x for x in shifts if x[4] * x[5] < 0]
 print(f"\n{len(rows)} paired points · {len(shifts)} verdicts compared · "
       f"{len(flips)} changed sign · max shift {shifts[0][0]:.2f} pp")
+if not fill_ok:
+    sys.exit("\n!! fill signatures disagree within a mesh — the det fleet does NOT share one IC")
