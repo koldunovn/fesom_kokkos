@@ -429,6 +429,54 @@ static void extrap_det_exchange_all(const struct fesom_mesh *mesh,
     free(layer);
 }
 
+/* Layer-local mean of a node's eligible non-dummy neighbours, accumulated in
+ * ascending-gid order (partition-independent FP sum). Returns count. */
+static int extrap_det_ring_mean(const struct fesom_mesh *mesh,
+                                struct fesom_partit *partit,
+                                const real_t *layer, int n, int nz,
+                                int N_alloc, real_t *out)
+{
+    int    ngid[64];
+    real_t nval[64];
+    int    cnt = 0;
+    int o0 = mesh->nod_in_elem2D_offsets[n];
+    int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+    for (int kk = o0; kk < o1; ++kk) {
+        int el = mesh->nod_in_elem2D[kk];
+        if (nz > mesh->nlevels[el] - 1) continue;
+        for (int j = 0; j < 3; ++j) {
+            int v = mesh->elem_nodes[3*el + j];
+            if (v < 0 || v >= N_alloc || v == n) continue;
+            if (layer[v] < 0.99 * PHC_DUMMY &&
+                mesh->nlevels_nod2D[v] - 1 > nz) {
+                FESOM_CHECK(cnt < 64, "extrap_det: ring overflow");
+                ngid[cnt] = partit->myList_nod2D ? partit->myList_nod2D[v] : v + 1;
+                nval[cnt] = layer[v];
+                ++cnt;
+            }
+        }
+    }
+    if (cnt == 0) return 0;
+    for (int a = 1; a < cnt; ++a) {           /* insertion sort by gid */
+        int    g = ngid[a]; real_t w = nval[a]; int b = a - 1;
+        while (b >= 0 && ngid[b] > g) {
+            ngid[b+1] = ngid[b]; nval[b+1] = nval[b]; --b;
+        }
+        ngid[b+1] = g; nval[b+1] = w;
+    }
+    real_t val = 0.0;
+    for (int a = 0; a < cnt; ++a) val += nval[a];
+    *out = val / (real_t)cnt;
+    return cnt;
+}
+
+static void extrap_det_exchange_layer(const struct fesom_mesh *mesh,
+                                      struct fesom_partit *partit, real_t *layer)
+{
+    if (!partit || partit->npes <= 1) return;
+    fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
+}
+
 static void extrap_nod3D_det(const struct fesom_mesh *mesh,
                              struct fesom_partit     *partit,
                              real_t                  *arr)
@@ -437,69 +485,93 @@ static void extrap_nod3D_det(const struct fesom_mesh *mesh,
     const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl      = mesh->nl;
 
-    real_t *prev = (real_t *)malloc((size_t)N_alloc * (size_t)nl * sizeof(real_t));
-    FESOM_CHECK(prev, "extrap_det: oom (prev)");
-
-    extrap_det_exchange_all(mesh, partit, arr);   /* halo current before ring 0 */
-
-    int sweeps = 0;
-    for (;;) {
-        ++sweeps;
-        FESOM_CHECK(sweeps < 100000, "extrap_det: sweep cap hit — should be unreachable");
-        memcpy(prev, arr, (size_t)N_alloc * (size_t)nl * sizeof(real_t));
-        int progress = 0;
-        for (int nz = 0; nz < nl - 1; ++nz) {
-            for (int n = 0; n < N; ++n) {
-                if (!(prev[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) ||
-                    !(mesh->nlevels_nod2D[n] - 1 > nz)) continue;
-                /* Gather (gid, value) of valid neighbours WITH multiplicity —
-                 * same stencil as legacy: vertices of the node's element ring. */
-                int    ngid[64];
-                real_t nval[64];
-                int    cnt = 0;
-                int o0 = mesh->nod_in_elem2D_offsets[n];
-                int o1 = mesh->nod_in_elem2D_offsets[n + 1];
-                for (int kk = o0; kk < o1; ++kk) {
-                    int el = mesh->nod_in_elem2D[kk];
-                    if (nz > mesh->nlevels[el] - 1) continue;
-                    for (int j = 0; j < 3; ++j) {
-                        int v = mesh->elem_nodes[3*el + j];
-                        if (v < 0 || v >= N_alloc) continue;
-                        if (prev[FESOM_NODE3D(v, nz, nl)] < 0.99 * PHC_DUMMY &&
-                            mesh->nlevels_nod2D[v] - 1 > nz) {
-                            FESOM_CHECK(cnt < 64, "extrap_det: ring overflow");
-                            ngid[cnt] = partit->myList_nod2D
-                                            ? partit->myList_nod2D[v] : v + 1;
-                            nval[cnt] = prev[FESOM_NODE3D(v, nz, nl)];
-                            ++cnt;
-                        }
-                    }
-                }
-                if (cnt == 0) continue;
-                /* Insertion sort by ascending gid (ties = identical values,
-                 * order irrelevant) → FP sum independent of the partition. */
-                for (int a = 1; a < cnt; ++a) {
-                    int    g = ngid[a]; real_t w = nval[a]; int b = a - 1;
-                    while (b >= 0 && ngid[b] > g) {
-                        ngid[b+1] = ngid[b]; nval[b+1] = nval[b]; --b;
-                    }
-                    ngid[b+1] = g; nval[b+1] = w;
-                }
-                real_t val = 0.0;
-                for (int a = 0; a < cnt; ++a) val += nval[a];
-                arr[FESOM_NODE3D(n, nz, nl)] = val / (real_t)cnt;
-                progress = 1;
-            }
-        }
-        if (partit && partit->npes > 1) {
-            MPI_Allreduce(MPI_IN_PLACE, &progress, 1, MPI_INT, MPI_MAX,
-                          partit->MPI_COMM_FESOM);
-        }
-        if (!progress) break;
-        extrap_det_exchange_all(mesh, partit, arr);
+    /* Relaxation tolerance: after the ring fill, filled nodes are relaxed
+     * (Jacobi mean over eligible neighbours; ORIGINAL valid nodes stay fixed
+     * as boundary data) until the global max per-sweep change < tol — this
+     * takes the fill to the smooth quasi-harmonic interior interpolation.
+     * Without it, ring filling from two water masses meets in an equidistant
+     * front of maximal contrast across ~one ring (measured on NG5: step-1
+     * |uv| 3.06 m/s and blow-up at step 9, partition-INdependent). */
+    static real_t s_tol = -1.0;
+    if (s_tol < 0.0) {
+        const char *e = getenv("FESOM_IC_EXTRAP_TOL");
+        s_tol = (e && e[0]) ? (real_t)atof(e) : (real_t)1e-3;
+        if (s_tol <= 0.0) s_tol = (real_t)1e-3;
     }
+
+    real_t *cur  = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
+    real_t *nxt  = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
+    char   *fill = (char *)malloc((size_t)N_alloc);
+    FESOM_CHECK(cur && nxt && fill, "extrap_det: oom (layer buffers)");
+
+    long tot_fill_sweeps = 0, tot_relax_sweeps = 0;
+    for (int nz = 0; nz < nl - 1; ++nz) {
+        for (int n = 0; n < N_alloc; ++n) cur[n] = arr[FESOM_NODE3D(n, nz, nl)];
+        extrap_det_exchange_layer(mesh, partit, cur);
+        for (int n = 0; n < N_alloc; ++n)
+            fill[n] = (cur[n] > 0.99 * PHC_DUMMY) ? 1 : 0;   /* dummy at entry */
+
+        /* Phase 1 — ring fill (Jacobi, validity frozen per sweep). */
+        for (;;) {
+            ++tot_fill_sweeps;
+            FESOM_CHECK(tot_fill_sweeps < 1000000, "extrap_det: fill sweep cap");
+            memcpy(nxt, cur, (size_t)N_alloc * sizeof(real_t));
+            int progress = 0;
+            for (int n = 0; n < N; ++n) {
+                if (!(cur[n] > 0.99 * PHC_DUMMY) ||
+                    !(mesh->nlevels_nod2D[n] - 1 > nz)) continue;
+                real_t v;
+                if (extrap_det_ring_mean(mesh, partit, cur, n, nz, N_alloc, &v)) {
+                    nxt[n] = v; progress = 1;
+                }
+            }
+            if (partit && partit->npes > 1)
+                MPI_Allreduce(MPI_IN_PLACE, &progress, 1, MPI_INT, MPI_MAX,
+                              partit->MPI_COMM_FESOM);
+            if (!progress) break;
+            memcpy(cur, nxt, (size_t)N_alloc * sizeof(real_t));
+            extrap_det_exchange_layer(mesh, partit, cur);
+        }
+
+        /* Phase 2 — relaxation of the FILLED nodes toward the harmonic
+         * interpolation of the fixed original data. Still-dummy nodes
+         * (no source at this layer) are left for the vertical fill. */
+        for (int n = 0; n < N; ++n)
+            if (cur[n] > 0.99 * PHC_DUMMY) fill[n] = 0;      /* unfillable */
+        long relax_cap = tot_relax_sweeps + 20000;
+        for (;;) {
+            real_t dmax = 0.0;
+            memcpy(nxt, cur, (size_t)N_alloc * sizeof(real_t));
+            for (int n = 0; n < N; ++n) {
+                if (!fill[n] || !(mesh->nlevels_nod2D[n] - 1 > nz)) continue;
+                real_t v;
+                if (extrap_det_ring_mean(mesh, partit, cur, n, nz, N_alloc, &v)) {
+                    nxt[n] = v;
+                    real_t d = fabs(v - cur[n]);
+                    if (d > dmax) dmax = d;
+                }
+            }
+            if (partit && partit->npes > 1)
+                MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX,
+                              partit->MPI_COMM_FESOM);
+            if (dmax <= s_tol) break;
+            ++tot_relax_sweeps;
+            if (tot_relax_sweeps >= relax_cap) {
+                if (!partit || partit->mype == 0)
+                    printf("[fesom_phc] det extrap: relax cap at nz=%d (dmax=%.3e) — proceeding\n",
+                           nz, (double)dmax);
+                break;
+            }
+            memcpy(cur, nxt, (size_t)N_alloc * sizeof(real_t));
+            extrap_det_exchange_layer(mesh, partit, cur);
+        }
+
+        for (int n = 0; n < N; ++n) arr[FESOM_NODE3D(n, nz, nl)] = cur[n];
+    }
+    free(cur); free(nxt); free(fill);
     if (!partit || partit->mype == 0) {
-        printf("[fesom_phc] det extrap converged in %d ring sweeps\n", sweeps);
+        printf("[fesom_phc] det extrap: %ld fill sweeps + %ld relax sweeps (tol %.1e)\n",
+               tot_fill_sweeps, tot_relax_sweeps, (double)s_tol);
     }
 
     /* Vertical fill — identical to legacy (order-independent). */
@@ -512,8 +584,6 @@ static void extrap_nod3D_det(const struct fesom_mesh *mesh,
         }
     }
     extrap_det_exchange_all(mesh, partit, arr);   /* final exchange */
-
-    free(prev);
 }
 
 /* FESOM_IC_EXTRAP knob: "det" = deterministic fill; unset/"legacy" = the
