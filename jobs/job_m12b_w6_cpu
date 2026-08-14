@@ -51,7 +51,12 @@ leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats
   local OUT=$BASE/w6c_${POINT}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
   rm -rf "$OUT"; mkdir -p "$OUT"
   if [ "$arm" = "on" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
-  if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1; else unset FESOM_SPEED_PHASESTATS; fi
+  # 🔴 On the Serial backend the FESOM_SPEED family resolves OFF unless
+  # FORCE_SERIAL is set (rule 0.24), so a bare PHASESTATS=1 produces NOTHING and
+  # says so. Phase attribution therefore rides its own legs; the timing legs stay
+  # lever-free so the CPU absolutes remain comparable to the M12 board.
+  if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1 FESOM_SPEED_FORCE_SERIAL=1
+  else unset FESOM_SPEED_PHASESTATS FESOM_SPEED_FORCE_SERIAL; fi
   # 🔴 snap_every=-1 is MANDATORY at >=4096 ranks (ibv_reg_mr gather trap) and
   # harmless below, so it is stated here rather than inherited.
   srun "$BIN" "$MESH" "$OUT" "$DT" 300 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"

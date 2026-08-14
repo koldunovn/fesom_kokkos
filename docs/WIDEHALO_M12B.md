@@ -133,6 +133,28 @@ the lever's footprint is a property of the transformation, not of the partition 
 M11 grading this is comfortably tier 1: the winner is not distinguishable from a seed re-roll,
 by three to five orders of magnitude.
 
+## 3c. First performance number — farc 2048 CPU (W6, job 26953153)
+
+Same binary, same allocation, knob off vs on, interleaved reps, 300 steps loop-only, dt900, M=90.
+
+| arm | reps (s/step) | min-of-2 |
+|---|---|---|
+| rung OFF | 0.0735 · 0.0723 · 0.0723 | 0.0723 |
+| rung ON | 0.0659 · 0.0659 · 0.0661 | **0.0659** |
+
+**−8.9 %**, with the wire confirming 180 → 90 exchanges/step and partners ×0.500. The on-arm reps
+agree to 0.3 %, so the result is not noise. Notable because this is the point where the rung pays
+its LARGEST arithmetic penalty on the board (+19.7 % ring-1 redundant compute at 311 verts/core):
+halving the messages still wins by nearly 9 %, which strengthens rather than weakens the GPU case.
+
+Against the M12 G4 board (SE 0.0738 vs SI 0.0860 at the same point), the rung would take the SE
+advantage over SI from −14.2 % to roughly −23 % — but that is a cross-day composition, not a
+measured pair, so the −8.9 % is the number of record.
+
+⚠️ `FESOM_SPEED_PHASESTATS` resolves **OFF on the Serial backend** without `FESOM_SPEED_FORCE_SERIAL=1`
+(rule 0.24; the guard announces it rather than producing an empty report), so phase attribution
+rides its own legs and the timing legs stay lever-free.
+
 ## 4. The extended-mesh contract (design of record; not built)
 
 The rule that makes deep K and higher-order advection share one layer: **extended entities are
