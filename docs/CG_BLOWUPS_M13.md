@@ -158,9 +158,15 @@ nodes np1-vs-np8); det is **bitwise identical across np** (0 differing nodes, al
    - det extrap cost on NG5: ~10k fill + 20–30k relax layer-sweeps ≈ tens of seconds of
      one-shot init.
 3. CORE2 128r det smoke (bc2det 26960191): **300/300 clean**.
-4. In flight at write time: dist_20480 (b160det), dist_16384 control (b128det), SE arm
-   (b8sedet), dist_32768 256N (b256det), NG5 dist_64 GPU CUDA leg (bg64det 26960226,
-   cuda bin d20ba293).
+4. **dist_20480 (b160det 26960170): 300/300 clean** (legacy SI died at 48) ·
+   **dist_16384 control (b128det 26960171): 300/300 clean** ·
+   **SE arm on dist_8192 (b8sedet 26960172): 300/300 clean, healthy**.
+   ★ Bonus: the step-300 state rows of dist_4096/8192/16384/20480 under det are IDENTICAL at
+   print precision (uv 3.27, eta 3.18, T[−2.07,30.23], S[5.66,41.19]) — under legacy fill even
+   the two healthy partitions differed visibly (3.34 vs 3.27 class). det restores
+   cross-partition comparability of NG5 cold starts.
+4b. In flight at write time: dist_32768 256N (b256det 26960238), NG5 dist_64 GPU CUDA leg
+   (bg64det 26960226, cuda bin d20ba293).
 5. Before any default-on adoption: the M10-class solver gates + a climate twin (det changes
    every cold-start trajectory on every mesh — a solver-class change under house rules), and
    the formal CUDA-vs-Serial fidelity comparison.
