@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_w2cu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --nodes=4
+#SBATCH --ntasks=16
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/w2cu_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/w2cu_%j.err
+#
+# M12b W2 — the CUDA gate for the s3-fixed rung, CORE2 4N GPU (16 ranks).
+#
+# The s3 induction (H0e exchanged + F owner-wins reconciled => every k3 input
+# single-valued => redundant copies bitwise-locked => ring-1 eta IS the owner's
+# bytes) does not care about the 3-D model's CUDA atomics: whatever
+# rank-inconsistency they put into Fbt, the reconcile makes it single-valued.
+# So the free-running drift is expected to read 0.0 on CUDA as well — that is
+# the gate. A byte A/B across runs stays impossible on CUDA (D22); the drift
+# metric compares INSIDE one run, which is exactly why it survives here.
+#
+# Arms:
+#   drift  WIDE=1 SELFCHECK=2, 50 steps  — 0.000000e+00 every step
+#   free   WIDE=1, 300 steps             — clean run, eta endpoint vs off
+#   off    WIDE=0, 300 steps             — same-binary control
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+export FESOM_PRINT_EVERY=100
+
+run_leg () {   # $1 tag  $2 nsteps  rest env
+  local tag=$1 nst=$2; shift 2
+  local OUT=$BASE/w2cu_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== ARM $tag ($*) ==================="
+  env "$@" srun -l "$BIN" "$MESH" "$OUT" 1800 "$nst" -1 "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h " it=" "$OUT/run.log" | tail -1
+}
+
+run_leg drift 50 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+grep -h "wide-drift" "$BASE/w2cu_drift_${SLURM_JOB_ID}/run.err" | tail -4
+NZ=$(grep -h "wide-drift" "$BASE/w2cu_drift_${SLURM_JOB_ID}/run.err" | grep -cv "= 0.000000e+00$" || true)
+echo "drift nonzero-steps=$NZ (gate: 0)"
+
+run_leg free 300 FESOM_SE_WIDE=1
+run_leg off  300
+echo "=== w2cuda done ==="

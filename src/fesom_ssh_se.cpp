@@ -688,13 +688,13 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
         const int m_wide = p->com_elem2D_full.rPEnum;
         const long d_base = (long)p->eDim_nod2D + 2L * p->eDim_elem2D;
         const long d_wide = 2L * (p->eDim_elem2D + p->eXDim_elem2D);
-        /* per STEP the rung also does ONE eta exchange to restore
-         * "halo == the owner's bytes" for the 3-D consumers, so it is M+1, not M.
-         * Quoting M here would overstate the saving. */
+        /* per STEP the rung also does the eta coherence exchange, the s3 H0e
+         * exchange and the s3 F-reconcile wave — M+3, not M. Quoting M here
+         * would overstate the saving. */
         fprintf(stderr, "[ssh_se-wire] rank0 exchanges/substep %d -> %d | doubles/substep "
                         "%ld -> %ld | per step (M=%d): %d -> %d exchanges (M subcycle + 1 "
-                        "coherence)\n",
-                2, 1, d_base, d_wide, M, 2 * M, M + 1);
+                        "eta coherence + 1 H0e + 1 F-reconcile)\n",
+                2, 1, d_base, d_wide, M, 2 * M, M + 3);
         fprintf(stderr, "[ssh_se-wire] rank0 partners: nod2D %d + elem2D %d = %d -> "
                         "elem2D_full %d  (messages/substep x%.3f)\n",
                 p->com_nod2D.rPEnum, p->com_elem2D.rPEnum, m_base, m_wide,
