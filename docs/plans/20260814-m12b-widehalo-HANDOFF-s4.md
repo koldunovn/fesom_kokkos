@@ -73,7 +73,15 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
   K=4). Predicted optimum at CORE2 16N GPU: K=2–4, ~1.5× the K=1 gain, saturating; at NG5/dars
   16N (zone ≤0.14 even at K=8) the optimum is deep, ~2×. The model's one unmeasured assumption
   is that bt wait tracks the message count — that is exactly what the queued M-sweep tests.
-- **Lessons L114–L117** in `docs/KOKKOS_PORTING_LESSONS.md` (the M12b track had none before).
+- **§8 — where the barotropic imbalance comes from, and the whole-step wait budget.** The bt
+  block's imbalance is an owned-**element** effect (corr +0.96 farc 2048 / +0.85 dars 8192) that
+  the node-balanced partition does not control: owned nodes are equal to 1 %, owned elements vary
+  by 47 % / 22 %. Worth ≈2.6 % of the step at farc 2048 — more than the wide halo's own −1.8 %.
+  Running the same decomposition on every phase gives the budget: at farc 2048, **70 % of the
+  28.9 ms MPI wait (27 % of the step) is imbalance absorption, only ~7.5 ms is a message floor**;
+  at dars 8192 it is ~45/55. Handed to M11 (multi-constraint partition: nodes AND elements) with
+  a mechanism test pre-registered — job 26961927, predictions P1–P3 in §8.
+- **Lessons L114–L119** in `docs/KOKKOS_PORTING_LESSONS.md` (the M12b track had none before).
 - **Sergey packet addendum 2** — the two s3 findings, the amplification measurement, the rim
   algebra, the CPU board, questions 6–8.
 
@@ -95,5 +103,5 @@ Code `src/fesom_ssh_se.cpp` (rung) · `src/fesom_mesh.cpp` (scatter note + s4 ce
 `src/fesom_forcing_analytical.cpp` (s4 fix) · jobs
 `jobs/job_m12b_{fixgate,fix128,fixfarc,seed4,w2cuda,w6_cpu,w6_gpu,screen,w5b_disturb,probe2,s4_audit,s4_census,partners}`
 · run dirs + evidence `/work/ab0995/a270088/port2/m12b/` (s4 jobs: audit 26961249, census
-26961257/58, partners 26961509) · disturbance analysis is PAIRED at one rank count
+26961257/58, partners 26961509, partition split 26961927) · disturbance analysis is PAIRED at one rank count
 (`scripts/m12b_disturbance.py --pair OFF ON`).
