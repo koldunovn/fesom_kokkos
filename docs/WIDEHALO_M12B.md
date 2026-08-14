@@ -189,7 +189,18 @@ barotropic interface amplifies whatever it is seeded with, exponentially per ste
 | W5 3000-step screen, rung ON free | farc 2048, M=90, wsplit | **clean; η=2.05/uv=2.01 ≈ control η=2.05/uv=2.00** | 26959982 |
 | W5 3000-step screen, rung ON free | CORE2 np128 | **clean; η=1.89 both arms (the SE reference), print-precision match** (s2: NaN by 500) | 26960088 |
 | W5b graded disturbance | np64/np128 | **rc=0 at BOTH rank counts; lever 2200-2400× below the rank-count spread** | 26960089 |
-| W2 CUDA drift gate | CORE2 4N GPU | in queue (partition drained) | 26960090 |
+| W2 CUDA drift gate | CORE2 4N GPU, 50 steps | **drift nonzero-steps = 0** — 0.000000e+00 at every step on CUDA | 26960090 |
+| W2 CUDA free run | CORE2 4N GPU, 300 steps | clean, **η=2.02** | 26960090 |
+| W2 CUDA same-binary control | CORE2 4N GPU, 300 steps | clean, **η=2.02 — identical to the rung arm at every printed digit** (T, S, stress, hf, wf, rs all match) | 26960090 |
+
+**s4: the CUDA gate passes.** The s3 induction does not care what the 3-D model's CUDA atomics do
+to `Fbt` — the reconcile makes it single-valued either way — and the measurement agrees: the
+first-ever CUDA run of the `ELEM2D_FULL` device-halo path and of the F-reconcile's per-step host
+round-trip has **zero free-running drift at every step**, and its 300-step endpoint η=2.02 equals
+both the same-binary control and the M12 CUDA SE reference (job 26936711). ⚠️ On CUDA the
+diagnostic line prints `uv=0.00e+00 w=0.00e+00 Kv=0 Av=0`: that is **pre-existing** (the M12 CUDA
+runs print it too) — device-resident fields the host-side print does not sync, not a dead ocean.
+η, T and S are live and match the CPU run digit for digit (η=3.88 at step 50 on both).
 
 **The rung is bitwise-exact free-running** (its trajectory ≡ the same binary's exchanged path with
 the reconcile active); knob-on vs knob-off is a rounding-class pair (the F-reconcile is rung-only
@@ -337,7 +348,7 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 |---|---|---|---|---|
 | farc 2048 CPU dt900 M=90 wsplit | 0.0731 | 0.0718 | **−1.8 %** | bt mpi/step 182→94 (halved, as designed), bt wait 5.2→4.7 ms; bt is only ~16 % of the 73 ms step here — the latency share bounds the CPU payoff (Sergey's "on CPU it is just better scaling", now as a number). Job 26960156, all four legs healthy (η=3.47, T sane), reps within 0.4 % |
 | dars 8192 CPU dt120 M=20 wsplit | 0.0976 | 0.0980 | **+0.4 % (wash)** | bt mpi/step 42→24, bt wait 3.1→2.8 ms — mechanism intact, but bt is ~6 % of a 98 ms step and the +28.2 % ring-1 redundant compute eats the rest, exactly as the census predicted. Job 26960157, legs healthy (η=4.08), off-rep spread 1.5 % > the delta |
-| CORE2 16N GPU / NG5 16N GPU | — | — | behind the drained gpu partition | the motivating points: CORE2 16N bt = 7.8 ms busy + **11.8 ms MPI wait** of an 84 ms step |
+| CORE2 16N GPU / NG5 16N GPU | — | — | queued (jobs 26962396 / 26962397, submitted once the CUDA gate passed) | the motivating points: CORE2 16N bt = 7.8 ms busy + **11.8 ms MPI wait** of an 84 ms step. §7's pre-registered band for CORE2: **−2.1 % … −6.6 %** |
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
 
