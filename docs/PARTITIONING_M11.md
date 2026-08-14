@@ -3180,3 +3180,79 @@ covers days, not months. Nothing about the verdicts changes — every screen was
 steps — but the "two model months" gloss must not be repeated for dars/NG5, and the report now
 states the per-mesh spans explicitly and labels them a bound on the test rather than a
 statement about long integrations.
+
+---
+
+# SESSION 7 (2026-08-14/15) — the campaign re-run under the deterministic initial condition
+
+M13 root-caused the "fragile partitions" to the climatology hole-filler producing a
+partition-dependent initial condition, and the user's decision is that every
+partition-exploration run now carries `FESOM_IC_EXTRAP=det`. Plan and scope:
+`docs/plans/20260815-m11-det-rerun.md`.
+
+## 🔴 The initial condition differed between partitions on EVERY mesh, not just NG5 and dars
+
+The M13 handoff expected NG5 and dars to be the contaminated meshes — they are the ones that
+resolve marginal seas, and both of this campaign's blow-up families were traced to the Sea of
+Marmara. That expectation is wrong, and it was worth measuring rather than assuming.
+
+`jobs/m11_ic_census.sh` measures the artefact with no integration at all: the step-0 snapshot IS
+the initial condition after the fill, so writing it for three partitions of one mesh under each
+fill and differencing them answers the question directly. Largest difference between two
+partitions of the same mesh at step 0:
+
+| mesh / ranks | fill | salinity | temperature | ice concentration | one step later (salt) | job |
+|---|---|--:|--:|--:|--:|---|
+| CORE2 512 | legacy | **27.4 PSU** | **7.0 °C** | 0.9 | 27.4 PSU | 26961259 |
+| CORE2 512 | det | 0 | 0 | 0 | 1.7e-13 PSU | 26961259 |
+| fArc 2048 | legacy | **26.0 PSU** | **9.0 °C** | 0.9 | 26.0 PSU | 26961260 |
+| fArc 2048 | det | 0 | 0 | 0 | 6.5e-13 PSU | 26961260 |
+
+CORE2 is the coarse mesh this project treats as having almost no dummy coverage, and its initial
+salinity still moved by 27 PSU between two decompositions. So the re-run is the whole board, both
+backends, five meshes — not a repair of two of them.
+
+Instrument caveat: `pgf_x`/`pgf_y` differ between partitions by the *same* amount under both
+fills, so the pressure-gradient field in a step-0 snapshot is written before it is computed and
+carries no information. Do not read it.
+
+## 🔴 The accuracy gates were measuring the hole-filler, not the decomposition
+
+CORE2 864 CPU, the same five seed controls under both fills (legacy 26904986 → det 26961426):
+
+| field | legacy arm rms | vs control top | det arm rms | vs control top | ratio |
+|---|--:|--:|--:|--:|--:|
+| temp | 5.99e-2 | −14 % | 3.86e-7 | −16 % | 155,000× |
+| salt | 2.24e-1 | **+24 %** | 1.43e-7 | −90 % | 1,571,000× |
+| ssh | 7.05e-3 | +8 % | 5.70e-8 | +12 % | 124,000× |
+
+Two consequences.
+
+**The tier-4 verdict on CORE2 864 dissolves.** The `+24 %` salt excursion that took the point out
+of the recommendation is gone; the KaMinPar arm now sits an order of magnitude *below* the
+control top. The legacy salt MAX for that arm was 27.25 PSU — the same 27.4 PSU the census
+measures in the initial condition, which is what the gate was grading.
+
+**The "stopping mechanism" behind the tier-2 SSH story needs re-deriving, not re-quoting.** Under
+det every leg in that gate, arms and controls alike, takes an identical CG iteration path at all
+twenty steps. The differing iteration counts that the tier-2 explanation rests on were themselves
+a consequence of the legs starting from different states. Whether the mechanism survives at the
+points where it was invoked (dars 64, NG5 64 GPU) is a measurement still to come.
+
+Same pattern at the other two CPU points gated so far:
+
+* **fArc 2048 (26961425)**: every arm inside the 3-control envelope on ssh and temp (Mt-KaHyPar
+  +0.8 % on temp, `a5_u30` +10 % on salt); absolute rms ~1e-6 against the legacy gate's ~1e-1.
+* **CORE2 512 (26961482)**: all four arms at or below every control on all three fields, with
+  identical CG paths throughout. Tier 1 for a defensible reason rather than a wide envelope.
+
+## Re-pinned binaries
+
+`/work/ab0995/a270088/port2/m11/bin/det1/` — Serial `07d982e0757e8e258a479485840d897c`, CUDA
+`1f16832befb6039b4f71f6b1b1785836`, both from this branch tip. Certified by
+`jobs/m11_det_bin_gate.sh` (26961161): knob off is bit-for-bit identical to the certified M6/M7
+Serial baseline, knob on demonstrably differs and announces itself. Leg A licenses "the only
+difference is the initial condition"; leg B is the dead-knob guard (L80). The four race/gate
+scripts default to these binaries and to det, print the setting, and flag any leg whose log
+lacks the announce line. `m11_harvest_races.py` now carries an `ic` column and `--best` groups by
+it, so a det row can never be silently compared against a legacy one.
