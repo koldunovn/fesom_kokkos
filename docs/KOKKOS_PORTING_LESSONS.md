@@ -1473,3 +1473,19 @@ communication lever, and the split is measurable from per-rank timers you alread
 Corollary from the same pair: the rung's +20…28 % ring-1 redundant compute cost **nothing** (bt
 busy unchanged to 0.3 %) because the exchange it removed took its pack/unpack out of `busy` with
 it — so a "redundant compute" census is an upper bound on the price, not the price.
+
+## L119 (M12b s4): when a phase's imbalance is the lever, find the entity the phase is proportional to — the partitioner may be balancing a different one
+
+Having measured that a quarter to a half of the barotropic block's MPI wait is its own imbalance
+(L118), the next question is what that imbalance is proportional to. Correlating each rank's bt
+busy against its `my_list` contents answers it in one pass: **r = +0.96 (farc 2048) and +0.85
+(dars 8192) against owned ELEMENTS, and +0.02 / +0.23 against owned NODES.** The partitioner
+balances nodes — owned node counts are equal to 1 % — while owned element counts vary by 47 %
+and 22 %, because the element-to-node ratio depends on where a subdomain sits (coastline, domain
+shape). The barotropic subcycle is per-element work (Ū, viscosity, the element pack); η is its
+only per-node half. At farc 2048 that costs ≈1.9 ms of a 73 ms step — **more than the wide halo
+this whole track was built for (−1.8 %)**. The same analysis shows the 3-D `ocean` phase is NOT
+explained by 2-D counts (R² 0.21; its 1.62× spread is bathymetry, cf. M10), so the phases want
+different constraints and the fix is a *multi-constraint* partition, not a re-weighting.
+**Before optimizing a phase's communication, regress its per-rank busy time on the per-rank entity
+counts you already have on disk — it costs nothing and it can redirect the whole lever.**

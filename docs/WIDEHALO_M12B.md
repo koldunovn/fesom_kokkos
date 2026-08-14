@@ -481,6 +481,42 @@ regime where the left-hand column is right and K=2–4 buys another ~40 % over K
 K=1 rung is where this line stops, and the remaining bt wait is an imbalance problem, i.e. M11's
 territory, not the halo's.
 
+## 8. Where the barotropic imbalance comes from (s4) — and why it is worth more than the halo on CPU
+
+§7 measured that a quarter to a half of the bt "wait" is the block's own imbalance. That part is
+not a communication problem, so the next question is what it *is* proportional to
+(`scripts/m12b_bt_imbalance.py`, the same per-rank phasestats against the partition files):
+
+| point | corr(bt busy, owned **nodes**) | corr(bt busy, owned **elements**) | owned nodes max/min | owned elements max/min | R² of the element fit |
+|---|---|---|---|---|---|
+| farc 2048 | **+0.015** | **+0.959** | 1.01 | **1.47** | 0.92 |
+| dars 8192 | +0.227 | **+0.849** | 1.03 | **1.22** | 0.72 |
+
+**The partitioner balances nodes; the barotropic subcycle costs elements.** Owned node counts are
+equal to 1 %, and bt busy is uncorrelated with them. Owned element counts vary by 47 % (farc) and
+22 % (dars) — the ratio of elements to nodes is a property of where a subdomain sits, coastline
+and boundary shape — and bt busy tracks *that*, at r = 0.96 / 0.85. Ū, the viscosity and the
+element-side pack are all per-element; η is the only per-node part and it is one of the two
+substep halves.
+
+For contrast, the 3-D `ocean` phase at the same point is only weakly explained by 2-D counts
+(r = +0.46, R² = 0.21) — its 1.62× imbalance is the bathymetry effect M10 found. So the two
+phases want **different** balance constraints, which is what makes this a multi-constraint
+partitioning question rather than a re-weighting.
+
+**Size of the prize.** At farc 2048 the bt wall is busy 6.7 + wait 5.2 = 11.9 ms of a 73 ms step.
+With elements balanced, the straggler's busy falls to the mean and the imbalance absorption goes
+with it, leaving ≈ 6.7 + 3.3 (the message floor) = 10.0 ms — **≈1.9 ms, or 2.6 % of the step.
+That is more than the wide halo's measured −1.8 % at the same point**, and the two are
+independent: the halo removes messages, the partition removes the imbalance the messages absorb.
+
+🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
+(balance owned nodes **and** owned elements) rather than the single node constraint in use. M11
+has Mt-KaHyPar in its toolbox, which supports multi-constraint partitioning directly; its earlier
+dual-weighting experiment weighted by 3-D work and lost to a +40 % halo, which is a different
+question from adding an element constraint at equal halo. Not attempted here — the finding is
+handed over with its mechanism and its measured size.
+
 ## Open items (s4)
 
 W2 CUDA drift gate (26960090) + W6 GPU pairs — still queued behind the account's 5-GPU-job
