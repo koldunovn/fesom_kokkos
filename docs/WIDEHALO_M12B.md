@@ -106,6 +106,20 @@ elements are assert-mapped at scatter, so the certified owned rows are untouched
 `Fbt` halo copies are garbage-class (uninitialized `uv_rhs` reads) — **dead state**, k3 reads F
 at owned elements only; documented, deliberately not exchanged.
 
+**Fix part 2 (`FESOM_SE_WIDE_RECON`, default 1, rung-only): owner-wins F over the multi-claimed
+elements.** The H0e fix alone is NOT sufficient, and the reason is the deepest measurement of the
+track: with the seed cut by nine orders (5.2e-17 at step 2 instead of 3.0e-8), the free-running
+drift still grew **exponentially — ×5.35 per STEP at farc 2048 (M=90), ×1.056 per step at CORE2
+np128 (M=50)** — reaching 49 m by step 30 at farc (jobs 26959819/26959818). The free-running
+interface iteration is linearly unstable: *any* rank-inconsistency near the interface is
+integrated by the barotropic dynamics, so the seed must be exactly zero, not merely small. The
+only remaining inconsistency channel (probe-verified, job 26959826) is `Fbt` at the multi-claimed
+elements — the 3-D model's own last-bit redundancy (one element, one ulp, first at step 4). One
+tiny per-step wave (tag 2303; discovery = one GE-byte claim-count allreduce + an allgatherv of the
+~0.55 % lists at startup) makes F single-valued; with H0e AND F owner-coherent every k3 input is
+single-valued, the redundant Ū copies stay **bitwise-locked by induction**, and the locally
+computed ring-1 η IS the owner's bytes — the free rung has nothing to amplify, at any rank count.
+
 **What survives of the s2 finding:** `myDim_elem2D` is still not a partition (1341 of 244659
 CORE2 dist_8 elements multi-claimed, unreconciled) — but the redundancy was the *site* where the
 incoherence became observable, not its origin. With owner-coherent inputs the redundant copies
@@ -129,38 +143,50 @@ except the one array no probe compared halo-vs-owner):
 was this seed's growth under the per-substep exchange. It is obsolete: the fixed module's residual
 is §3e's ulp plateau, ~9 orders smaller.)*
 
-### 3e. What remains after the fix: a 3-D-born ulp, and the ladder consequence
+### 3e. The intermediate state (H0e only): a 3-D ulp seed, and the exponential that forced part 2
 
-With the fix, the rung is **EXACT — 0.0, not a tolerance — through step 3** (np8 selfcheck AND
-free-running, job 26959760). At step 4 a fresh seed enters from OUTSIDE the SE module: `Fbt`
-differs across holders of ONE multi-claimed element by 2.2e-19/4.3e-19 (x/y — one ulp of the 3-D
-vertically-integrated RHS) **before any SE state has diverged** (job 26959826). The 3-D model's
-own per-element redundancy is rank-inconsistent at the last bit; SE inherits it through F. Within
-a step it grows roughly linearly (Unew-y 1.4e-17 → 5.9e-17 over 4 substeps), and the free-running
-drift **plateaus at the rounding floor instead of amplifying**:
+With H0e fixed and F NOT yet reconciled, the rung was exact — 0.0 — through step 3 everywhere,
+and at step 4 a fresh seed entered from OUTSIDE the SE module: `Fbt` differing across holders of
+ONE multi-claimed element by 2.2e-19/4.3e-19 (x/y — one ulp of the 3-D vertically-integrated RHS)
+**before any SE state had diverged** (job 26959826). What the free rung then did with that ulp is
+the decisive measurement of the whole track:
 
-| free-running max\|local − owner\| (np8, M=50) | steps 1-3 | 4 | 10 | 25 |
-|---|---|---|---|---|
-| fixed (job 26959760) | **0.000000** | 1.7e-17 | 1.1e-15 | **1.2e-15, flat** |
-| unfixed s2 farc reference (M=90) | 0 → 3.0e-8 | — | 3.2e-6 | 115 m @30 → NaN |
+| free-running max\|local − owner\| | steps 1-3 | 10 | 25/30 | 300 | growth law |
+|---|---|---|---|---|---|
+| np8, M=50 (26959760) | 0.0 | 1.1e-15 | 1.2e-15 | — | flat (plateau) |
+| np128, M=50 (26959818) | 0.0-ulp | ~1e-15 | ~2e-15 | **1.7e-10** | **×1.056/step** |
+| farc 2048, M=90 (26959819) | 0.0 → 5.2e-17 | 6.1e-13 | **49 m @30 → NaN** | all-NaN | **×5.35/step** |
 
-The plateau ≈ seed × 1.2^M (1e-19 × 9e3 at M=50): the scheme's per-substep interface
-amplification is still present but now acts on a ulp seed refreshed at rounding class, not on an
-η-class error re-injected every step — it saturates at machine noise, indistinguishable from the
-model's own rank-count perturbation class.
-
-Consequence for the ladder: **W1 byte identity is resurrected as "exact through the first steps
-and whenever the 3-D state is rank-consistent"**; the operational gates are the SELFCHECK=2 drift
-plateau (must stay rounding-class, no growth), the 3000-step screens, and the graded disturbance
-report. `FESOM_SE_WIDE_SELFCHECK=1`'s 0.0-abort remains the ring-math proof instrument but
-necessarily trips on the 3-D ulp from step ~4 — use `=2` for anything longer.
+Nine orders of seed reduction moved the farc NaN by ~15 steps: the growth is a property of the
+scheme (rank-dependent η near the interface, integrated by the barotropic dynamics; rate rises
+with the interface fraction), so **no seed reduction suffices — the seed must be exactly zero.**
+That is what fix part 2 (§3) delivers, and why the s2 estimate "1.2×/substep" is superseded: the
+true per-substep factor is 5.35^(1/90) ≈ 1.019 at farc, and what matters is the per-STEP compound.
 
 *For Sergey: two findings worth reporting independently of M12b — (a) halo `H0e` in the SE module
-was locally recomputed from unmappable vertices (fixed by the per-step exchange, which his
-reference avoids by construction only when M runs the full exchange); (b) the 3-D model's
-`myDim_elem2D` redundancy leaves per-element fields (uv_rhs-derived) different at the last bit
-across claimants — harmless, but it bounds ANY compute-instead-of-communicate transformation to
-rounding-class beyond the first steps.*
+was locally recomputed from unmappable vertices (an out-of-bounds `eta0[-1]` read, η-class wrong;
+fixed by the per-step owner exchange); (b) the 3-D model's `myDim_elem2D` redundancy leaves
+per-element fields (uv_rhs-derived) different at the last bit across claimants — harmless in the
+exchanged path, but it seeds ANY compute-instead-of-communicate transformation, and the free
+barotropic interface amplifies whatever it is seeded with, exponentially per step.*
+
+### 3f. s3 verification board — the complete fix (H0e + F-reconcile), bin `90c5c12d`
+
+| gate | point | result | job |
+|---|---|---|---|
+| inertness null (knobs off, XCHG=0) | np8, 50 steps vs `base_np8` | **diff_snap rc=0** | 26959981 |
+| M12 G1 invariants, fixed certified path | np64, 100 steps | G1a 1.6e-14 m · G1b 4.5e-13 m²/s | 26959981 |
+| legacy arm (both halves off) | np8 | reproduces the break (abort @2) | 26959980 |
+| W1 selfcheck=1, 0.0-abort armed | np8, 25 steps | **EXACT 0.0, every substep** | 26959980 |
+| free-running drift | np8 ×25 · np128 ×300 · farc 2048 ×50 | **0.000000e+00 at every step** | 26959980/81/82 |
+| W5 3000-step screen, rung ON free | farc 2048, M=90, wsplit | **clean; η=2.05/uv=2.01 ≈ control η=2.05/uv=2.00** | 26959982 |
+| W5 3000-step screen | CORE2 np128 | in queue | 26960088 |
+| W5b graded disturbance | np64/np128 | in queue | 26960089 |
+| W2 CUDA drift gate | CORE2 4N GPU | in queue (partition drained) | 26960090 |
+
+**The rung is bitwise-exact free-running** (its trajectory ≡ the same binary's exchanged path with
+the reconcile active); knob-on vs knob-off is a rounding-class pair (the F-reconcile is rung-only
+by design, so the certified path stays byte-frozen vs its own history under `XCHG=0`).
 
 ## 3b. Disturbance report — the lever against the model's own rank-dependence (W5b, PASS)
 
@@ -298,9 +324,12 @@ Build by BFS at scatter time (`fesom_evpwide_mesh_hook` precedent). SE would tak
 operator rows + a window scheduler; higher-order advection takes ring values + geometry + vertex
 maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate onto this.
 
-## Open items
+## Open items (s3)
 
-GPU board (CORE2 16N + NG5 16N, jobs 26953010/26953012) and the CUDA exactness gate (26953032) —
-queued behind the 2026-08-14 GPU maintenance window · CPU board (farc 2048, dars 8192;
-26953153/26953154) · 3000-step screen (26952979) · disturbance report (26953179) · deep-K decision,
-on those numbers.
+W6 CPU pairs on the fixed bin `90c5c12d` — farc 2048 (26960156) + dars 8192 (26960157), in queue ·
+CORE2 np128 3000-step screen (26960088) + W5b disturbance (26960089), in queue · W2 CUDA drift
+gate (26960090) + W6 GPU pairs — behind the drained GPU partition · per-step wire is now M+3
+(subcycle + η coherence + H0e + F-reconcile) vs the certified 2M · deep-K decision on the W6
+numbers — note the s3 induction transfers to deep K only if ring-K inputs are owner-coherent the
+same way (H0e over the K-ring extent, F still reconciled; the §4 extended-mesh layer ships owner
+bytes by construction, which is compatible).
