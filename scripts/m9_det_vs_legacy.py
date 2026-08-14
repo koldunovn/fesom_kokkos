@@ -137,6 +137,62 @@ def fill_signature_check(root):
     return ok
 
 
+STEP1 = re.compile(r"^\s+1\s+it=\s*(\d+)\s+uv=(\S+)\s+eta=(\S+)\s+w=(\S+)\s+\|\s+"
+                   r"T\[([^\]]*)\] S\[([^\]]*)\].*?hp=(\S+)\s+pgf=(\S+)\s+rho=(\S+)")
+
+
+def step1_spread(root, prefixes=("sc", "scd")):
+    """⭐⭐ The direct before/after test of the premise this whole re-run rests on.
+
+    Every point of a scaling curve runs a different partition. If the cold-start fill is
+    partition-dependent, the points do not start from the same ocean -- so compare the step-1
+    diagnostic row ACROSS node counts within one mesh and one backend. Every field on that row
+    is a global reduction, so under identical initial conditions it must be identical.
+
+    🔴 Pick the field carefully. The global T and S EXTREMES are useless here: the fill differs
+    in the marginal seas, whose values sit inside the global range, so T[] and S[] agree to the
+    printed precision across every partition even when the ICs differ. `pgf` -- the largest
+    pressure-gradient force -- is the sensitive one, because M13's mechanism IS a density front
+    across a single element, and `eta` is its immediate response.
+    """
+    rows = {}
+    for pfx in prefixes:
+        for d in sorted(glob.glob(os.path.join(root, f"{pfx}_gpu_*n", "standard")) +
+                        glob.glob(os.path.join(root, f"{pfx}_cpu_*n", "standard"))):
+            tag = d.split(os.sep)[-2]
+            if tag.endswith("_phst") or not re.match(rf"^{pfx}_(gpu|cpu)_\w+_\d+n$", tag):
+                continue
+            _, backend, mesh, nodes = tag.split("_")
+            try:
+                with open(os.path.join(d, "run.1.log"), errors="replace") as f:
+                    m = next((STEP1.match(ln) for ln in f if STEP1.match(ln)), None)
+            except OSError:
+                continue
+            if m:
+                rows.setdefault((pfx, backend, mesh), []).append(
+                    (int(nodes[:-1]), float(m.group(8)), float(m.group(3)), int(m.group(1))))
+
+    print("=== step-1 state across the node counts of one curve "
+          "(identical ICs => zero spread) ===")
+    print(f"  {'fleet':<5} {'backend':<4} {'mesh':<6} {'pts':>3}  "
+          f"{'max|pgf| spread':>16}  {'max eta spread':>15}  {'CG iters':>10}")
+    for key in sorted(rows):
+        pfx, backend, mesh = key
+        pts = sorted(rows[key])
+        if len(pts) < 2:
+            continue
+        pg = [p[1] for p in pts]
+        et = [p[2] for p in pts]
+        it = [p[3] for p in pts]
+        fac = max(pg) / min(pg) if min(pg) > 0 else float("inf")
+        efac = max(et) / min(et) if min(et) > 0 else float("inf")
+        flag = "" if fac < 1.001 else ("  <== PARTITION-DEPENDENT" if fac > 1.05 else "")
+        print(f"  {pfx:<5} {backend:<4} {mesh:<6} {len(pts):>3}  "
+              f"{min(pg):.2e}-{max(pg):.2e} ({fac:.2f}x)  "
+              f"{efac:>13.2f}x  {min(it)}-{max(it):<5}{flag}")
+    print()
+
+
 def pct(new, old):
     return 100.0 * (new - old) / old
 
@@ -149,6 +205,7 @@ def verdict(d, ref="standard"):
 
 
 fill_ok = fill_signature_check(args.root)
+step1_spread(args.root)
 
 rows, shifts = [], []
 for dtag in sorted(runs):
