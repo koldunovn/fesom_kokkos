@@ -214,4 +214,14 @@ whether we build the deeper-K layer at all.
    compute-instead-of-communicate transformation will meet it.
 8. For deep K on GPU, is K=8 with a K-ring extended mesh (owner bytes shipped once at startup,
    BFS ring order) the direction you would take, given that its node-zone cost at NG5/dars GPU
-   is 10–30 % of owned?
+   is 10–30 % of owned? **Our own answer is currently "no", and it is a measurement rather than
+   an opinion:** on the certified GPU runs the barotropic wait is 47 % / 56 % / 31 % load
+   imbalance (CORE2 4N / CORE2 16N / NG5 16N; a rank's wait correlates with its own busy at
+   −0.95…−0.99), and imbalance-driven wait is conserved under any communication lever. Working
+   that through, K=4 returns the *same* step time as K=1 at CORE2 even in the latency-bound
+   limit, because what the deeper halo saves in messages it pays back in ring compute while the
+   imbalance stays put. We are confirming the K=1 half of that arithmetic with a paired GPU run;
+   if it holds, the wide halo ends at K=1 and the remaining barotropic wait is a partitioning
+   question, not a halo one. **Does that match your expectation, or is there a configuration
+   (larger M, a mesh with a much better-balanced barotropic block) where you would expect deep K
+   to pay?**
