@@ -1,5 +1,13 @@
 # M12b wide halo — HANDOFF after session 2 (2026-08-14 evening)
 
+> 🔴 **SUPERSEDED (s3, same day): the §3 verdict and the §6 decision are RESOLVED.** The seed was
+> never the redundancy — it was halo `H0e` ≠ owner bytes (`eta0[-1]` OOB at −1 halo vertices) plus
+> a 3-D-born `Fbt` ulp, and the free interface iteration amplifies ANY inconsistency (×5.35/step at
+> farc 2048), so the seed had to be made exactly zero. Fixed by `FESOM_SE_H0E_XCHG=1` +
+> `FESOM_SE_WIDE_RECON=1`; the rung is now BITWISE-exact free-running and both 3000-step screens
+> are green. **Read `docs/WIDEHALO_M12B.md` §3/§3e/§3f + the plan's SESSION 3 ADDENDUM instead.**
+> This file remains as the record of the s2 measurements and traps.
+
 **You are a fresh session in the worktree `~/port_kokkos_wh`, branch `m12b-widehalo`.**
 🔴 Your auto-memory index is worktree-scoped — read the MAIN index first:
 `/home/a/a270088/.claude/projects/-home-a-a270088-port-kokkos/memory/MEMORY.md`, then

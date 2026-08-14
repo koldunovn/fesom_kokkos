@@ -338,9 +338,11 @@ The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest 
 
 ## Open items (s3)
 
-W6 CPU pairs on the fixed bin `90c5c12d` — farc 2048 (26960156) + dars 8192 (26960157), in queue ·
-CORE2 np128 3000-step screen (26960088) + W5b disturbance (26960089), in queue · W2 CUDA drift
-gate (26960090) + W6 GPU pairs — behind the drained GPU partition · per-step wire is now M+3
+W2 CUDA drift gate (26960090) + W6 GPU pairs — queued for the GPU partition's return (the
+motivating points) · hygiene: other 3-D consumers of `elem_nodes` at HALO elements were not
+audited for the −1 convention (the certified path is C-parity-validated and stable, so any such
+read is at worst benign-by-parity — but new code must guard, see the scatter_mesh note) ·
+per-step wire is now M+3
 (subcycle + η coherence + H0e + F-reconcile) vs the certified 2M · deep-K decision on the W6
 numbers — note the s3 induction transfers to deep K only if ring-K inputs are owner-coherent the
 same way (H0e over the K-ring extent, F still reconciled; the §4 extended-mesh layer ships owner
