@@ -76,7 +76,12 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
 - **§8 — where the barotropic imbalance comes from, and the whole-step wait budget.** The bt
   block's imbalance is an owned-**element** effect (corr +0.96 farc 2048 / +0.85 dars 8192) that
   the node-balanced partition does not control: owned nodes are equal to 1 %, owned elements vary
-  by 47 % / 22 %. Worth ≈2.6 % of the step at farc 2048 — more than the wide halo's own −1.8 %.
+  by 47 % / 22 %. A pre-registered test (job 26961927) confirmed the mechanism on compute and
+  **refuted the first size estimate**: on M11's `nlev`-weighted partition the bt busy imbalance
+  grew as predicted but the bt *wait* fell, because the wait is set by arrival skew from the 3-D
+  phase. The currency that works is the critical path (TOTAL busy max 62.9 → 56.0 ms); revised
+  prize for an element constraint ≈1.0–1.5 ms (1.5–2.2 %). **Side result worth having: the
+  M11-certified farc partition is −6.7 % under SE** (0.0728 → 0.0679, min-of-2, same binary).
   Running the same decomposition on every phase gives the budget: at farc 2048, **70 % of the
   28.9 ms MPI wait (27 % of the step) is imbalance absorption, only ~7.5 ms is a message floor**;
   at dars 8192 it is ~45/55. Handed to M11 (multi-constraint partition: nodes AND elements) with

@@ -512,94 +512,62 @@ For contrast, the 3-D `ocean` phase at the same point is only weakly explained b
 phases want **different** balance constraints, which is what makes this a multi-constraint
 partitioning question rather than a re-weighting.
 
-**Size of the prize.** At farc 2048 the bt wall is busy 6.7 + wait 5.2 = 11.9 ms of a 73 ms step.
-With elements balanced, the straggler's busy falls to the mean and the imbalance absorption goes
-with it, leaving ≈ 6.7 + 3.3 (the message floor) = 10.0 ms — **≈1.9 ms, or 2.6 % of the step.
-That is more than the wide halo's measured −1.8 % at the same point**, and the two are
-independent: the halo removes messages, the partition removes the imbalance the messages absorb.
+**Size of the prize — the first estimate was wrong, and the pre-registered test is what caught
+it.** The estimate here originally read "≈1.9 ms, 2.6 % of the step, more than the wide halo
+itself", derived from the mean-wait decomposition: remove the bt imbalance and the absorption goes
+with it. Job 26961927 falsified that reasoning, and the reason is worth more than the number.
 
-**Owned or halo?** Both — and they are collinear, so the split is indicative rather than
-identified. Fitting `bt busy ~ a·owned_elems + b·halo_elems + c` gives 10.66 µs and 5.00 µs at
-farc 2048 (R² 0.926; of the 3.60 ms measured busy spread, 2.43 ms is the owned term and 1.03 ms
-the halo term) and 4.17 / 0.74 µs at dars 8192 (R² 0.726; 0.68 vs 0.20 ms of a 0.90 ms spread).
-Owned and halo element counts correlate at +0.96 / +0.90 with each other, which is why the
-coefficients cannot be cleanly separated — and also why balancing one would largely balance the
-other.
+**Result of the pre-registered test** (farc 2048, SE, same binary, same allocation, same day;
+stock partition vs M11's `nlev`-weighted one, which has 2.3× the element imbalance):
 
-**What this predicts for the GPU points, before they run.** The same entity imbalance is readable
-from the partition files alone (`partition_only()` in the same script):
+| | stock | M11-certified | |
+|---|---|---|---|
+| s/step (min-of-2) | 0.0728 | **0.0679** | **−6.7 %** |
+| bt busy mean / **max** | 6.7 / **7.7** | 6.8 / **8.3** | P1 ✅ on compute |
+| bt busy max/mean | 1.144 | **1.226** | tracks the 2-D entity imbalance (1.042 → 1.222) |
+| corr(bt busy, owned elements) | +0.959 | **+0.909** | the §8 mechanism holds on a different partition |
+| bt **wait** | 5.3 | **4.3** | P1 ❌ on wait — it *fell* |
+| corr(bt busy, bt wait) | −0.605 | **−0.256** | the coupling that the estimate assumed, gone |
+| ocean busy mean / **max** | 26.6 / **43.1** | 27.8 / **36.7** | P2 ✅ |
+| ocean wait | 15.3 | **10.5** | |
+| TOTAL busy mean / **max** | 44.0 / **62.9** | 45.7 / **56.0** | |
+| TOTAL wait | 28.9 | **22.0** | |
 
-| point | ranks | owned nodes max/mean | owned **elements** max/mean | elements max/min |
-|---|---|---|---|---|
-| NG5 16N GPU | 64 | 1.005 | **1.008** | 1.02 |
-| dars 16N GPU | 64 | 1.005 | **1.014** | 1.04 |
-| farc 16N GPU | 64 | 1.000 | 1.026 | 1.10 |
-| CORE2 4N GPU | 16 | 1.000 | 1.040 | 1.11 |
-| CORE2 16N GPU | 64 | 1.001 | 1.052 | 1.18 |
-| farc 2048 CPU | 2048 | 1.004 | 1.062 | **1.47** |
-| dars 8192 CPU | 8192 | 1.011 | 1.057 | 1.22 |
+**P1 is confirmed on compute and refuted on wait.** The bt block's *busy* imbalance behaves exactly
+as §8 says — it grew with the element imbalance, on a partition built for an unrelated reason, and
+the element correlation survived at +0.91. But the bt *wait* went **down**, and its correlation
+with the block's own busy collapsed from −0.61 to −0.26: on this partition the bt wait is set by
+the skew the ranks *arrive* with from the 3-D phase, not by bt's own spread. Phase-local wait
+decompositions are therefore not additive across phases, and the "remove the imbalance, keep the
+absorbed wait" arithmetic that produced the 2.6 % does not hold.
 
-Node balance is within 1.1 % everywhere; the element imbalance is what varies, and it is **least
-at NG5 and dars 16N**. Those are also the two points with the smallest deep-K zone (§7). So the
-pre-registration is specific: **NG5 and dars at 16N are where φ should be smallest and the
-latency-bound column of §7 most nearly right**, and CORE2 16N — 1.052 element imbalance and the
-steepest zone — is where the rung has the most imbalance mixed into its "wait" and the least room
-for deep K.
+**The currency that does work is the critical path — TOTAL busy max.** It falls 62.9 → 56.0 ms
+while the mean rises 44.0 → 45.7, and the step follows the max, not the mean (72.9 → 67.7 ms
+predicted, 0.0728 → 0.0679 measured). In that currency the two effects are simply additive and
+have the right signs: the element imbalance **adds 0.6 ms** to the critical path (bt busy max
+7.7 → 8.3) and the 3-D rebalancing **removes 6.4 ms** (ocean busy max 43.1 → 36.7). So the honest
+revised prize for adding an element constraint is **the bt block's own max−mean, ~1.0–1.5 ms
+(1.5–2.2 % of the step)** — real, worth having, but *on top of* the −6.7 % the nlev weighting
+already delivers, and not larger than the wide halo as this section first claimed.
 
-**Testing the mechanism on a partition that already exists (job 26961927).** M11's certified farc
-partition is the same mesh **byte for byte** (md5 of `nod2d.out`/`elem2d.out` match /pool) with a
-different partition — Mt-KaHyPar weighted by `nlev`, i.e. balancing 3-D column work — and in the
-2-D currencies it is markedly worse:
+**P3 and a result worth having on its own** (job 26961990, the same pair under the implicit
+solver, same day, same allocation):
 
-| farc 2048 partition | owned nodes max/min | owned elements max/mean | owned elements max/min | halo elems mean |
-|---|---|---|---|---|
-| stock | 1.010 | 1.062 | 1.468 | 141.5 |
-| M11-certified (`MTKAHYPAR_w100+nlev`, −7.52 % CPU) | **1.857** | **1.233** | **2.275** | 137.5 |
+| farc 2048 CPU, min-of-2 | stock partition | M11-certified | partition effect |
+|---|---|---|---|
+| implicit (SI) | 0.0840 | 0.0778 | **−7.4 %** |
+| split-explicit (SE) | 0.0728 | 0.0679 | **−6.7 %** |
+| solver effect | **−13.3 %** | **−12.7 %** | |
 
-That is the nlev weighting doing exactly what it is for: nodes are deliberately unbalanced so the
-3-D work balances. It also makes the partition a ready-made test of §8, run at farc 2048 under SE
-with these predictions written down first:
+P3 said the partition would win by *less* under SE, because SE moves work out of the solver into
+bt. The sign is right — −6.7 % against −7.4 % — but the 0.7-point difference is the same size as
+the rep spread (1.2–1.5 % between reps of one arm), so **P3 is consistent, not resolved**; it
+would need more reps to call.
 
-* **P1** bt busy max/mean rises from the measured 1.146 toward ~1.23, and the bt *wait* rises with
-  it — the §8 mechanism, on a partition chosen for an unrelated reason. **A failure here falsifies
-  §8 and the handover with it.**
-* **P2** the 3-D `ocean` phase's busy imbalance falls (1.62 max/mean at stock) — what the weighting
-  buys, and why M11 measured −7.52 %.
-* **P3** net under SE the M11 partition still wins, but by *less* than under the implicit solver,
-  because SE moves work out of the solver (which the weighting helps) into bt (which it hurts).
-  🔴 M11's −7.52 % was measured on another day with another protocol, so P3 needs **both** solvers
-  measured here: job 26961927 runs the SE pair, 26961990 the SI pair, same allocation, same day.
-
-(The 2.6 % above is an **upper bound**: it assumes perfect element balance removes all of the
-imbalance absorption, and the element fit leaves 8 % of the busy spread unexplained.)
-
-**The whole-step wait budget, since the same decomposition runs on every phase.** farc 2048 CPU,
-certified path, 73 ms/step of which the phasestats TOTAL wait is 28.9 ms (40 %):
-
-| phase | busy mean (ms) | wait mean (ms) | corr(busy, wait) | imbalance part | message floor |
-|---|---|---|---|---|---|
-| ocean | 26.63 (9.0 … 43.1) | 15.18 | **−0.955** | **12.5 ms (82 %)** | 2.65 |
-| bt | 6.72 | 5.23 | −0.591 | 2.0 ms (37 %) | 3.28 |
-| icedyn | 5.03 (0.8 … 8.5) | 4.80 | −0.970 | 3.2 ms (68 %) | 1.56 |
-| force | 3.58 | 2.73 | −0.736 | 2.7 ms (~100 %) | ~0 |
-
-**About 20 of the 28.9 ms — 70 % of the MPI wait, 27 % of the whole step — is load imbalance being
-absorbed at an exchange, against ~7.5 ms that any communication lever could address at all.** The
-`ocean` phase alone contributes 12.5 ms of imbalance, with a busy spread of 9.0 → 43.1 ms across
-ranks (4.8×) — the bathymetry effect M10 identified, here in wait-milliseconds. This is the
-proportion to keep in mind for the whole SSH line: M10's "half the step is MPI wait" is true, and
-most of that wait is not communication. (Caveat: each phase's imbalance is measured against its
-own busiest rank, and skew propagates between phases — a rank late in `ocean` arrives late at
-`bt` — so the per-phase split is a good attribution for the large phases and rougher for the
-small ones, where `force`'s slightly-over-100 % shows the fit's edge.)
-
-The same budget at **dars 8192** (98 ms step, TOTAL wait 31.8 ms) splits differently: ocean 15.09
-ms wait but only 44 % imbalance (floor 8.37 ms — 65 exchanges/step at 8192 ranks is a real
-communication cost, ~129 µs each), icedyn 9.35 ms / 61 %, bt 3.09 ms / 24 %, force 2.40 ms / 45 %
-— about **14 ms imbalance against 16 ms floor**. So the mix is point-dependent and moves the way
-strong scaling predicts: **the imbalance share of the wait falls as the subdomains shrink**
-(farc 2048: ~70 % imbalance; dars 8192: ~45 %). Both are large; which lever pays depends on where
-on that curve the configuration sits, and the decomposition costs nothing to run.
+What is resolved is more useful: **the two levers are independent and compose.** SE is worth
+−13 % on either partition, the partition is worth −7 % under either solver, and together
+0.0840 → 0.0679 = **−19.2 %** at farc 2048 CPU. The M12 board's farc SE number was earned on the
+stock partition; it does not have to choose.
 
 🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
 (balance owned nodes **and** owned elements) rather than the single node constraint in use. M11

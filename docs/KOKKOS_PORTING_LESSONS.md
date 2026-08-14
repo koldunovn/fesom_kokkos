@@ -1488,8 +1488,15 @@ busy against its `my_list` contents answers it in one pass: **r = +0.96 (farc 20
 balances nodes — owned node counts are equal to 1 % — while owned element counts vary by 47 %
 and 22 %, because the element-to-node ratio depends on where a subdomain sits (coastline, domain
 shape). The barotropic subcycle is per-element work (Ū, viscosity, the element pack); η is its
-only per-node half. At farc 2048 that costs ≈1.9 ms of a 73 ms step — **more than the wide halo
-this whole track was built for (−1.8 %)**. The same analysis shows the 3-D `ocean` phase is NOT
+only per-node half. **Sizing it needs care, and the first attempt was wrong:** the estimate
+"remove the imbalance and its absorbed wait goes with it" gave 2.6 % of the step, and a
+pre-registered test on a partition with 2.3× the element imbalance refuted it — the bt busy
+imbalance grew as predicted, but the bt *wait* FELL, because on that partition the wait is set by
+the skew ranks arrive with from the 3-D phase (corr(busy, wait) collapsed −0.61 → −0.26).
+**Phase-local wait decompositions are not additive across phases; the currency that works is the
+critical path, TOTAL busy max**, in which the effects are additive with the right signs (element
+imbalance +0.6 ms, 3-D rebalancing −6.4 ms, step 72.9 → 67.7 ms as measured). Revised size:
+~1.0–1.5 ms, 1.5–2.2 %. The same analysis shows the 3-D `ocean` phase is NOT
 explained by 2-D counts (R² 0.21; its 1.62× spread is bathymetry, cf. M10), so the phases want
 different constraints and the fix is a *multi-constraint* partition, not a re-weighting.
 **Before optimizing a phase's communication, regress its per-rank busy time on the per-rank entity
