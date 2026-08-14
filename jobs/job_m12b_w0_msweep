@@ -1,0 +1,84 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_w0
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --nodes=16
+#SBATCH --ntasks=64
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/w0_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/w0_%j.err
+#
+# M12b Task 0 — does the SE barotropic MPI wait track the EXCHANGE COUNT or the
+# arrival skew?  The instrument first proposed (a bt-scoped barrier-vs-waitall
+# split) does not exist: fesom_halo_prof_* accumulate MODULE-GLOBAL scalars over
+# every exchange in the step, and fesom_phasestats attributes MPI time per phase
+# but not per call type.  This is the substitute that existing knobs support:
+#
+#   an M SWEEP at fixed dt.  Doubling M doubles the substeps, hence doubles the
+#   exchanges per step.  If FESOM_PH_BT *wait* scales with M, the cost is
+#   transport/latency and removing exchanges pays proportionally; if it saturates,
+#   the cost is arrival skew that will re-accumulate at whatever sync points
+#   remain, and the deep-K case weakens.
+#
+# CONFOUND, to be stated with the result: busy work doubles too, so this bounds
+# rather than isolates.  The unconfounded version is the K=1 rung itself at fixed
+# M (plan Task 6) — this run exists to shape that expectation, not to replace it.
+#
+# Both legs run in ONE allocation (same hardware, same day — house rule).
+#
+# Submit:
+#   sbatch --export=ALL,POINT=core2 jobs/job_m12b_w0_msweep
+#   sbatch --export=ALL,POINT=ng5   jobs/job_m12b_w0_msweep
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+POINT=${POINT:-core2}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+# 🔴 BIN PINNED (multi-srun re-execs at every srun): the frozen se0 CUDA binary,
+# i.e. the same build the M12 G4 board was measured with.
+BIN=${BIN:-/work/ab0995/a270088/port2/m12/bin/fesom_port_cuda_se0}
+BASE=/work/ab0995/a270088/port2/m12b
+
+case "$POINT" in
+  core2) MESH=/work/ab0995/a270088/port2/mesh/core2   # private mesh, never /pool (L73)
+         DT=1800; MLIST="50 100"; EXTRA="" ;;
+  ng5)   MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+         DT=180;  MLIST="20 40";  EXTRA="wsplit" ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+
+export FESOM_ALE=zstar
+export FESOM_SSH_MODE=se
+export FESOM_SPEED=1
+export FESOM_SPEED_PHASESTATS=1
+export FESOM_PRINT_EVERY=500
+[ "$EXTRA" = "wsplit" ] && export FESOM_WSPLIT=1
+
+sha256sum "$BIN"
+echo "=== M12b W0 M-sweep: POINT=$POINT MESH=$MESH DT=$DT M in {$MLIST} "
+echo "    nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS on $SLURM_JOB_NODELIST ==="
+
+for M in $MLIST; do
+  export FESOM_SE_M=$M
+  OUT=$BASE/w0_${POINT}_M${M}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  # loop-only: no snapshots (snap_every=-1), 300 steps, 5 warmup excluded internally
+  srun "$BIN" "$MESH" "$OUT" "$DT" 300 -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+  rc=$?
+  echo "--- M=$M rc=$rc"
+  # provenance goes to STDERR under srun -l; grep both streams (M9 trap)
+  grep -h "ssh_se] subcycling live" "$OUT/run.log" | head -1
+  grep -h "loop timing" "$OUT/run.log" | tail -1
+  echo "    phasestats (bt row + totals):"
+  grep -hE "phasestat|PHASE|\bbt\b" "$OUT/run.log" | tail -20
+  echo "    halo mpi/step:"
+  grep -hE "halo-mpi-prof|mpi/step" "$OUT/run.log" | tail -5
+done
+echo "=== done ==="

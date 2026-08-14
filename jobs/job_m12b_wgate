@@ -1,0 +1,72 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_wgate
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=64
+#SBATCH --ntasks-per-node=64
+#SBATCH --time=00:15:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/wgate_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/wgate_%j.err
+#
+# M12b byte gates W0 (knob-off null) and W1 (knob-on exactness), Kokkos-Serial,
+# CORE2, np8 and np64, against the Task-1 baseline snapshots.
+#
+# Both arms must be diff_snap rc=0. The rung is an exact transformation, so this
+# is a BYTE gate, not a climate-close budget: a mismatch is a bug, never rounding.
+# np1 is deliberately absent — eDim==0 there makes the rung a structural no-op.
+#
+# Submit:  sbatch --export=ALL,WIDE=0 jobs/job_m12b_wgate     # W0
+#          sbatch --export=ALL,WIDE=1 jobs/job_m12b_wgate     # W1
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+ulimit -s 204800
+
+WIDE=${WIDE:-0}
+BIN=${BIN:-$ROOT/build-m7serial/fesom_port}             # 🔴 pinned
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=1800; NSTEPS=50; SNAP=25; YEAR=1958
+BASE=/work/ab0995/a270088/port2/m12b
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+if [ "$WIDE" = "1" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
+# SELFCHK=1 (W2): keep the exchange AND the local ring compute in the same run and
+# diff stash-vs-owner. Values are unchanged either way, so this leg is BOTH the
+# exactness proof and a byte gate.
+if [ "${SELFCHK:-0}" = "1" ]; then export FESOM_SE_WIDE_SELFCHECK=1; else unset FESOM_SE_WIDE_SELFCHECK; fi
+
+sha256sum "$BIN"
+echo "=== M12b gate: WIDE=$WIDE  bin=$BIN  git=$(cd $ROOT && git rev-parse --short HEAD) ==="
+RC_ALL=0
+for NP in 8 64; do
+  OUT=$BASE/w${WIDE}_np${NP}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  srun -n $NP -l "$BIN" "$MESH" "$OUT" $DT $NSTEPS $SNAP "$PHC" $YEAR \
+       > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "--- np=$NP exit=$?"
+  # provenance is on STDERR under srun -l (M9 trap). Under WIDE=1 the wire lines
+  # MUST appear; their absence means the knob resolved but never fired (L80).
+  grep -h "ssh_se" "$OUT/run.err" | grep -E "wide halo|ssh_se-wire|subcycling live" | head -4
+  if [ "$WIDE" = "1" ] && ! grep -qh "wide halo: K=1" "$OUT/run.err"; then
+      echo "!!! KNOB DID NOT FIRE (no '[ssh_se] wide halo' announce) — gate is vacuous"
+      RC_ALL=1
+  fi
+  if [ "${SELFCHK:-0}" = "1" ]; then
+      # every step must report exactly 0; the bar is 0.0, not a tolerance
+      NZ=$(grep -h "ssh_se-wide-chk" "$OUT/run.err" | grep -cv "= 0$" || true)
+      NL=$(grep -hc "ssh_se-wide-chk" "$OUT/run.err" || true)
+      echo "selfcheck lines=$NL nonzero=$NZ"
+      grep -h "ssh_se-wide-chk" "$OUT/run.err" | tail -2
+      if [ "$NL" -eq 0 ] || [ "$NZ" -ne 0 ]; then echo "!!! W2 FAIL"; RC_ALL=1; fi
+  fi
+  "$PY" "$ROOT/scripts/diff_snap.py" "$BASE/base_np${NP}" "$OUT"
+  rc=$?; echo "diff_snap np=$NP rc=$rc"
+  [ $rc -ne 0 ] && RC_ALL=1
+done
+echo "=== WIDE=$WIDE overall rc=$RC_ALL ==="
+exit $RC_ALL

@@ -28,6 +28,8 @@
 #include <cstring>
 #include <algorithm>
 #include <vector>
+#include <unordered_map>
+#include <climits>
 
 /*===========================================================================
  * Knobs (proper options: unrecognised values ABORT — the FESOM_ALE/wsplit
@@ -116,6 +118,63 @@ double fesom_se_chi(void)
             }
             cached = v;
         }
+    }
+    return cached;
+}
+
+/* M12b — FESOM_SE_WIDE=K (opt-in; the SE mode never implies it).
+ * K=1 is the implemented rung; K>=2 needs the extended-mesh layer that
+ * docs/plans/20260814-m12b-widehalo.md §D specifies and Task 8 decides on. */
+int fesom_se_wide(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_WIDE");
+        if (!e || !e[0] || strcmp(e, "0") == 0) {
+            cached = 0;
+        } else if (strcmp(e, "1") == 0) {
+            cached = 1;
+        } else {
+            char *end = NULL;
+            const long v = strtol(e, &end, 10);
+            if (end != e && end && !*end && v >= 2) {
+                fprintf(stderr, "FESOM_SE_WIDE=%ld not implemented: only K=1 exists (one "
+                                "exchange per substep). K>=2 needs the K-ring extended mesh "
+                                "(ring-ordered slots + shipped owner geometry) — see "
+                                "docs/plans/20260814-m12b-widehalo.md Technical Details D.\n", v);
+            } else {
+                fprintf(stderr, "FESOM_SE_WIDE=%s not supported (0|1)\n", e);
+            }
+            exit(1);
+        }
+    }
+    return cached;
+}
+
+/* M12b — FESOM_SE_WIDE_SELFCHECK=1: keep BOTH paths alive in the same run and
+ * diff them. The ring-1 η is computed locally, STASHED, and only then is the
+ * exchange performed on top of it; the diff is stash-vs-exchanged.
+ *
+ * 🔴 The stash is what makes the check mean anything. The exchange has REPLACE
+ * semantics — it overwrites exactly the ring-1 slots the local kernel just
+ * wrote — so diffing after it without stashing first would compare the owner's
+ * value with itself and report a guaranteed 0.0: a green gate over a broken
+ * transformation. (This module has been bitten by the general form before — see
+ * the "all-NaN under a 0.000 PASS banner" note in se_selftest.)
+ *
+ * This is also the gate that survives CUDA, where a byte A/B is impossible: the
+ * 3-D model's D22 atomic scatters make the coupled CUDA state non-reproducible
+ * run to run, so the comparison must happen INSIDE one run. */
+static int fesom_se_wide_selfcheck(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_WIDE_SELFCHECK");
+        if (!e || !e[0] || strcmp(e, "0") == 0)      cached = 0;
+        else if (strcmp(e, "1") == 0)                cached = 1;   /* abort on nonzero */
+        else if (strcmp(e, "2") == 0)                cached = 2;   /* report only      */
+        else { fprintf(stderr, "FESOM_SE_WIDE_SELFCHECK=%s not supported (0|1|2; "
+                               "2 = report without aborting, for growth curves)\n", e); exit(1); }
     }
     return cached;
 }
@@ -224,6 +283,12 @@ struct fesom_se_state {
     double wf_area_acc = 0.0;   /* accumulated τ·∫W dA                        */
     int    chk_started = 0;
 
+    /* M12b selfcheck scratch: the locally computed ring-1 η, stashed BEFORE the
+     * exchange overwrites it [eDim_nod2D]. Module-owned so it dies before
+     * Kokkos::finalize (the Tchk rule). */
+    fesom::Field wide_chk;
+    double       wide_chk_max = 0.0;
+
     fesom::Field Tchk;          /* FESOM_SE_CHECK scratch: T(⟨⟨Ū⟩⟩) [Nown] —
                                  * module-owned so it dies BEFORE Kokkos::finalize
                                  * (a function-local static Field aborts at exit). */
@@ -242,12 +307,14 @@ static int             s_se_alloc = 0;
 /* T2 (defined below, called from fesom_se_startup) */
 static void se_build_operators(const struct fesom_mesh *mesh, struct fesom_partit *p);
 static void se_selftest(const struct fesom_mesh *mesh, struct fesom_partit *p);
+static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *p);
 
 void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
 {
     if (!fesom_se_on()) {
         /* L80/L102 dead-knob note: a sub-knob set while the mode is off does nothing. */
-        if (p->mype == 0 && (getenv("FESOM_SE_M") || getenv("FESOM_SE_M_FORCE")))
+        if (p->mype == 0 && (getenv("FESOM_SE_M") || getenv("FESOM_SE_M_FORCE")
+                             || getenv("FESOM_SE_WIDE")))
             fprintf(stderr, "[ssh_se] NOTE: FESOM_SE_* is set but FESOM_SSH_MODE is not 'se' "
                             "— the knobs have no effect (the SE solver never runs).\n");
         return;
@@ -299,13 +366,20 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
         }
     }
 
-    /* State allocation. Element fields cover owned + eDim ONLY (the ELEM2D
-     * exchange fills eDim; eXDim slots of element fields are never filled —
-     * plan "owned+eDim" rule). Zero-init == the cold-start flat rings (η⁰=0,
-     * Ū⁰=0 — the port's IC memsets eta/uv to zero; a nonzero-η IC would need
-     * an explicit ring init here, notes p.95). */
+    /* State allocation. Element fields cover the FULL local extent
+     * myDim+eDim+eXDim (M12b): under FESOM_SE_WIDE=1 the Ū exchange is
+     * com_elem2D_full, which fills the eXDim tail (element ring 2) so that η can
+     * be computed on the ring-1 nodes. The extra slots are allocated
+     * UNCONDITIONALLY — zero-init, written by nothing when the knob is off, and
+     * the W0 byte-null gate is what proves them inert. Node fields keep
+     * owned+eDim: ring-1 η is COMPUTED into the existing halo slots, so the K=1
+     * rung needs no new node storage at all.
+     * Zero-init == the cold-start flat rings (η⁰=0, Ū⁰=0 — the port's IC memsets
+     * eta/uv to zero; a nonzero-η IC would need an explicit ring init here,
+     * notes p.95). */
     const size_t Nn = (size_t)(mesh->myDim_nod2D  + mesh->eDim_nod2D);
-    const size_t Ne = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D);
+    const size_t Ne = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D
+                               + mesh->eXDim_elem2D);
     s_se.eta[0].alloc("se.eta.m0",  Nn);
     s_se.eta[1].alloc("se.eta.m1",  Nn);
     s_se.eta[2].alloc("se.eta.m2",  Nn);
@@ -327,8 +401,168 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
     /* T2: the deterministic operators (div CSR + viscosity adjacency), then
      * the one-shot operator self-test under FESOM_SE_CHECK. */
     se_build_operators(mesh, p);
+    se_wide_startup(mesh, p);        /* M12b: guards + announce (no-op when off) */
     if (fesom_se_check_on())
         se_selftest(mesh, p);
+}
+
+/*===========================================================================
+ * M12b — wide-halo startup guards and the wire announce.
+ *
+ * Two things the K=1 rung assumes are TRUE ON EVERY PARTITION WE MEASURED and
+ * are therefore checked, not trusted, on the ones we did not (census over 11
+ * operating points, CORE2/farc/dars/NG5, 16-8192 ranks — 0 violations of each):
+ *
+ *   (1) an OWNED element's viscosity edge-neighbour never lands in the eXDim
+ *       tail. If one ever did, se_ubt would read H0e there — and H0e is filled
+ *       by se_forcing over owned+eDim only, so the tail holds 0.0 and the
+ *       viscosity would compute 1/(0.5*(He+0)): a FINITE WRONG number, not an
+ *       obvious garbage read. Remedy if it ever fires: exchange H0e over
+ *       ELEM2D_FULL per step (it is rebuilt every step under zstar, so a
+ *       one-shot startup exchange would NOT do).
+ *   (2) com_elem2D_full's rlist covers every tail slot [myDim, myDim+eDim+eXDim)
+ *       exactly once. The port never inspects this — it is a partition-file
+ *       convention (fesom_partit.cpp:205) — and an uncovered slot would keep a
+ *       stale Ū and make ring-1 η silently wrong.
+ *
+ * The announce also prints the wire arithmetic both ways: it is the observable
+ * for the A/B, because the rung's output is bit-identical BY DESIGN and the halo
+ * profiler counts Waitall calls rather than messages.
+ *===========================================================================*/
+static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
+{
+    if (!fesom_se_wide()) return;
+
+    const int Eown  = mesh->myDim_elem2D;
+    const int Ne    = mesh->myDim_elem2D + mesh->eDim_elem2D;
+    const int Nfull = Ne + mesh->eXDim_elem2D;
+
+    /* Announce BEFORE the guards: an abort below must be distinguishable from a
+     * knob that never resolved at all (the first run of this gate misread a
+     * guard abort as "the knob did not fire"). */
+    if (p->mype == 0) {
+        fprintf(stderr, "[ssh_se] wide halo: K=1 (ring-1 eta computed locally from the owner's "
+                        "div-CSR rows; Ubt exchanged over ELEM2D_FULL)\n");
+        if (p->npes <= 1)
+            fprintf(stderr, "[ssh_se]   NOTE npes=1: eDim=0, so the rung is a STRUCTURAL NO-OP "
+                            "here — a single-rank run can never be evidence that it works.\n");
+    }
+
+    /* FESOM_SE_WIDE_GEOCHK=1 — is a shared element's geometry rank-consistent?
+     *
+     * 0.55 % of elements (CORE2 dist_8: 1341 of 244659) are in the myDim range
+     * of more than one rank and are never reconciled by an exchange. If those
+     * ranks hold last-bit-different geometry, they compute last-bit-different Ū
+     * for the SAME element, and no local computation can reproduce the node
+     * owner's η. This probe answers it with a number instead of an argument:
+     * per global element, the min and max over all holders. */
+    if (getenv("FESOM_SE_WIDE_GEOCHK")) {
+        const long GE = (long)mesh->elem2D;
+        std::vector<double> lo((size_t)GE,  1e300), hi((size_t)GE, -1e300);
+        for (int e = 0; e < Eown; ++e) {
+            const long g = (long)p->myList_elem2D[e] - 1;
+            if (g < 0 || g >= GE) continue;
+            lo[(size_t)g] = hi[(size_t)g] = (double)mesh->elem_area[e];
+        }
+        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)GE, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)GE, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        long ndiff = 0; double worst = 0.0;
+        for (long g = 0; g < GE; ++g) {
+            if (lo[(size_t)g] > 1e299) continue;            /* held by nobody */
+            if (hi[(size_t)g] != lo[(size_t)g]) {
+                ++ndiff;
+                const double rel = (hi[(size_t)g] - lo[(size_t)g]) / hi[(size_t)g];
+                if (rel > worst) worst = rel;
+            }
+        }
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se-geochk] elem_area differs between holders for %ld of %ld "
+                            "elements; worst relative spread %.3e\n", ndiff, GE, worst);
+
+        /* Same question for the viscosity STENCIL: does every holder of an
+         * element find the same number of edge-neighbours? `elem_nb` is filled
+         * from edge_tri, which is -1 when the neighbouring element is not in the
+         * local map — and se_build_operators only asserts that three EDGES were
+         * found, never that three NEIGHBOURS were mapped. A holder that misses a
+         * neighbour silently drops that viscosity term. */
+        std::vector<double> nlo((size_t)GE,  1e300), nhi((size_t)GE, -1e300);
+        {
+            const int *en2 = s_se.elem_nb.h();
+            for (int e = 0; e < Eown; ++e) {
+                const long g = (long)p->myList_elem2D[e] - 1;
+                if (g < 0 || g >= GE) continue;
+                int have = 0;
+                for (int s = 0; s < 3; ++s) if (en2[3*e + s] >= 0) ++have;
+                nlo[(size_t)g] = nhi[(size_t)g] = (double)have;
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, nlo.data(), (int)GE, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, nhi.data(), (int)GE, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        long nstencil = 0;
+        for (long g = 0; g < GE; ++g)
+            if (nlo[(size_t)g] < 1e299 && nhi[(size_t)g] != nlo[(size_t)g]) ++nstencil;
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se-geochk] viscosity stencil SIZE differs between holders for "
+                            "%ld of %ld elements\n", nstencil, GE);
+    }
+
+    /* (1) viscosity neighbours in the eXDim tail */
+    long bad_nb = 0;
+    {
+        const int *en = s_se.elem_nb.h();
+        for (int i = 0; i < 3 * Eown; ++i)
+            if (en[i] >= Ne) ++bad_nb;
+    }
+
+    /* (2) rlist coverage of BOTH halo rings.
+     * com_elem2D_full does not merely extend com_elem2D's coverage — it REPLACES
+     * it: its rlist spans [myDim, myDim+eDim+eXDim), i.e. element rings 1 AND 2
+     * in one message (verified against the partition files: CORE2 dist_8 rank 0
+     * ships 589 unique slots for eDim+eXDim = 268+321). That is what makes the
+     * rung a message REPLACEMENT rather than an extra message. */
+    long bad_cover = 0;
+    if (p->npes > 1) {
+        const fesom_com_struct *cs = &p->com_elem2D_full;
+        const int nrecv = cs->rptr[cs->rPEnum] - cs->rptr[0];
+        std::vector<int> hits((size_t)(Nfull - Eown), 0);
+        for (int j = 0; j < nrecv; ++j) {
+            const int loc = cs->rlist[j] - 1;            /* 1-based on disk */
+            if (loc < Eown || loc >= Nfull) { ++bad_cover; continue; }
+            ++hits[(size_t)(loc - Eown)];
+        }
+        for (size_t i = 0; i < hits.size(); ++i)
+            if (hits[i] != 1) ++bad_cover;
+    }
+
+    long glob[2] = { bad_nb, bad_cover };
+    MPI_Allreduce(MPI_IN_PLACE, glob, 2, MPI_LONG, MPI_SUM, p->MPI_COMM_FESOM);
+    if (glob[0] || glob[1]) {
+        if (p->mype == 0)
+            fprintf(stderr,
+                    "[ssh_se] WIDE HALO ABORT: %ld owned-element viscosity neighbours land in "
+                    "the eXDim tail (>= myDim+eDim), %ld com_elem2D_full rlist coverage "
+                    "violations. Both are 0 on every partition of the M12b census; this one "
+                    "differs. See the remedies in fesom_ssh_se.cpp (se_wide_startup) — do NOT "
+                    "run the rung on this partition until they are addressed.\n",
+                    glob[0], glob[1]);
+        MPI_Barrier(p->MPI_COMM_FESOM);
+        MPI_Abort(p->MPI_COMM_FESOM, 13);
+    }
+
+    if (p->mype == 0) {
+        const int M = s_se.M;
+        const int m_base = p->com_nod2D.rPEnum + p->com_elem2D.rPEnum;
+        const int m_wide = p->com_elem2D_full.rPEnum;
+        const long d_base = (long)p->eDim_nod2D + 2L * p->eDim_elem2D;
+        const long d_wide = 2L * (p->eDim_elem2D + p->eXDim_elem2D);
+        fprintf(stderr, "[ssh_se-wire] rank0 exchanges/substep %d -> %d | doubles/substep "
+                        "%ld -> %ld | per step (M=%d): %d -> %d exchanges\n",
+                2, 1, d_base, d_wide, M, 2 * M, M);
+        fprintf(stderr, "[ssh_se-wire] rank0 partners: nod2D %d + elem2D %d = %d -> "
+                        "elem2D_full %d  (messages/substep x%.3f)\n",
+                p->com_nod2D.rPEnum, p->com_elem2D.rPEnum, m_base, m_wide,
+                m_base ? (double)m_wide / (double)m_base : 0.0);
+    }
 }
 
 /*===========================================================================
@@ -386,6 +620,188 @@ static void se_div_gather_device(const fesom_se_state *S,
         });
 }
 
+/*===========================================================================
+ * M12b — ship the OWNER's div-CSR rows onto the ring-1 (eDim) nodes.
+ *
+ * WHY SHIP AND NOT REBUILD: a ring-1 row cannot be assembled locally at ANY
+ * precision. Its stencil runs over the edges incident to that node, and 42.5 %
+ * (CORE2 dist_64) / 43.5 % (farc dist_2048) of those edges are absent from the
+ * local edge list — an edge joining two ring-1 nodes touches no owned node, so
+ * it is in neither myDim_edge2D nor eDim_edge2D. (Secondary reason: `add()`'s
+ * merge follows local edge order, which differs from the owner's.)
+ *
+ * WHAT IS SHIPPED: the final post-inv_a coefficients, in the owner's row order.
+ * That order is already partition-invariant — the owner sorts each row by GLOBAL
+ * element id — so the receiver reproduces the owner's accumulation order exactly
+ * by keeping what it is sent. Shipping post-inv_a also keeps bitwise identity
+ * from depending on areasvol agreeing at the halo node.
+ *
+ * TRANSPORT: the generic halo layer is real_t-only and fixed-stride, so it
+ * cannot carry variable-length (gid, coefficient) rows. This is a one-shot
+ * handshake over the com_nod2D partner structure, tags 2300-2302 (2000-2004 are
+ * the halo kinds, 2200-2206 are EVPWIDE — a silent tag collision here would be a
+ * cross-talk bug no gate in this ladder names).
+ *===========================================================================*/
+static void se_wide_ship_rows(const struct fesom_mesh *mesh, struct fesom_partit *p,
+                              const std::vector<int>    &h_off,
+                              const std::vector<int>    &h_elem,
+                              const std::vector<double> &h_c,
+                              std::vector<int>    &g_off,
+                              std::vector<int>    &g_elem,
+                              std::vector<double> &g_c)
+{
+    const fesom_com_struct *cs = &p->com_nod2D;
+    const int eDim  = mesh->eDim_nod2D;
+    const int Nown  = mesh->myDim_nod2D;
+    const int Nfull = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+
+    const int nsend = cs->sptr[cs->sPEnum] - cs->sptr[0];
+    const int nrecv = cs->rptr[cs->rPEnum] - cs->rptr[0];
+
+    /* --- 1. row lengths ------------------------------------------------- */
+    std::vector<int> slen((size_t)(nsend > 0 ? nsend : 1), 0);
+    std::vector<int> rlen((size_t)(nrecv > 0 ? nrecv : 1), 0);
+    for (int k = 0; k < cs->sPEnum; ++k) {
+        const int beg = cs->sptr[k] - cs->sptr[0];
+        const int seg = cs->sptr[k + 1] - cs->sptr[k];
+        for (int j = 0; j < seg; ++j) {
+            const int n = cs->slist[cs->sptr[k] - 1 + j] - 1;   /* 1-based -> 0 */
+            slen[(size_t)(beg + j)] = h_off[(size_t)n + 1] - h_off[(size_t)n];
+        }
+    }
+    {
+        std::vector<MPI_Request> req;
+        req.reserve((size_t)(cs->rPEnum + cs->sPEnum));
+        for (int k = 0; k < cs->rPEnum; ++k) {
+            const int beg = cs->rptr[k] - cs->rptr[0];
+            const int seg = cs->rptr[k + 1] - cs->rptr[k];
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Irecv(&rlen[(size_t)beg], seg, MPI_INT, cs->rPE[k], 2300,
+                      p->MPI_COMM_FESOM, &req.back());
+        }
+        for (int k = 0; k < cs->sPEnum; ++k) {
+            const int beg = cs->sptr[k] - cs->sptr[0];
+            const int seg = cs->sptr[k + 1] - cs->sptr[k];
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Isend(&slen[(size_t)beg], seg, MPI_INT, cs->sPE[k], 2300,
+                      p->MPI_COMM_FESOM, &req.back());
+        }
+        if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
+    }
+
+    /* --- 2. payload: (global elem id, cx, cy) per entry, owner order ----- */
+    std::vector<long> spay_off((size_t)cs->sPEnum + 1, 0), rpay_off((size_t)cs->rPEnum + 1, 0);
+    for (int k = 0; k < cs->sPEnum; ++k) {
+        long tot = 0;
+        const int beg = cs->sptr[k] - cs->sptr[0];
+        for (int j = 0; j < cs->sptr[k + 1] - cs->sptr[k]; ++j) tot += slen[(size_t)(beg + j)];
+        spay_off[(size_t)k + 1] = spay_off[(size_t)k] + tot;
+    }
+    for (int k = 0; k < cs->rPEnum; ++k) {
+        long tot = 0;
+        const int beg = cs->rptr[k] - cs->rptr[0];
+        for (int j = 0; j < cs->rptr[k + 1] - cs->rptr[k]; ++j) tot += rlen[(size_t)(beg + j)];
+        rpay_off[(size_t)k + 1] = rpay_off[(size_t)k] + tot;
+    }
+    const long stot = spay_off[(size_t)cs->sPEnum];
+    const long rtot = rpay_off[(size_t)cs->rPEnum];
+
+    std::vector<long>   sgid((size_t)(stot > 0 ? stot : 1), 0), rgid((size_t)(rtot > 0 ? rtot : 1), 0);
+    std::vector<double> scof((size_t)(stot > 0 ? 2*stot : 1), 0.0), rcof((size_t)(rtot > 0 ? 2*rtot : 1), 0.0);
+    {
+        long w = 0;
+        for (int k = 0; k < cs->sPEnum; ++k) {
+            const int seg = cs->sptr[k + 1] - cs->sptr[k];
+            for (int j = 0; j < seg; ++j) {
+                const int n = cs->slist[cs->sptr[k] - 1 + j] - 1;
+                for (int e = h_off[(size_t)n]; e < h_off[(size_t)n + 1]; ++e) {
+                    sgid[(size_t)w]        = (long)p->myList_elem2D[h_elem[(size_t)e]];
+                    scof[(size_t)(2*w)+0]  = h_c[(size_t)(2*e) + 0];
+                    scof[(size_t)(2*w)+1]  = h_c[(size_t)(2*e) + 1];
+                    ++w;
+                }
+            }
+        }
+    }
+    {
+        std::vector<MPI_Request> req;
+        req.reserve((size_t)(2 * (cs->rPEnum + cs->sPEnum)));
+        for (int k = 0; k < cs->rPEnum; ++k) {
+            const long n = rpay_off[(size_t)k + 1] - rpay_off[(size_t)k];
+            if (n <= 0) continue;
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Irecv(&rgid[(size_t)rpay_off[(size_t)k]], (int)n, MPI_LONG, cs->rPE[k], 2301,
+                      p->MPI_COMM_FESOM, &req.back());
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Irecv(&rcof[(size_t)(2*rpay_off[(size_t)k])], (int)(2*n), MPI_DOUBLE,
+                      cs->rPE[k], 2302, p->MPI_COMM_FESOM, &req.back());
+        }
+        for (int k = 0; k < cs->sPEnum; ++k) {
+            const long n = spay_off[(size_t)k + 1] - spay_off[(size_t)k];
+            if (n <= 0) continue;
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Isend(&sgid[(size_t)spay_off[(size_t)k]], (int)n, MPI_LONG, cs->sPE[k], 2301,
+                      p->MPI_COMM_FESOM, &req.back());
+            req.push_back(MPI_REQUEST_NULL);
+            MPI_Isend(&scof[(size_t)(2*spay_off[(size_t)k])], (int)(2*n), MPI_DOUBLE,
+                      cs->sPE[k], 2302, p->MPI_COMM_FESOM, &req.back());
+        }
+        if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
+    }
+
+    /* --- 3. map global element ids to local slots ------------------------ */
+    std::unordered_map<long, int> g2l;
+    g2l.reserve((size_t)Nfull * 2);
+    for (int e = 0; e < Nfull; ++e) g2l[(long)p->myList_elem2D[e]] = e;
+
+    /* Rows arrive in PARTNER order but must be stored in SLOT order, so index
+     * the arrival stream by halo slot first, then walk the slots. */
+    std::vector<long> arrival((size_t)(eDim > 0 ? eDim : 1), -1);
+    std::vector<int>  arrlen((size_t)(eDim > 0 ? eDim : 1), 0);
+    long unmapped = 0, acc = 0;
+    for (int k = 0; k < cs->rPEnum; ++k) {
+        const int beg = cs->rptr[k] - cs->rptr[0];
+        const int seg = cs->rptr[k + 1] - cs->rptr[k];
+        for (int j = 0; j < seg; ++j) {
+            const int slot = cs->rlist[cs->rptr[k] - 1 + j] - 1;   /* local node idx */
+            const int hj   = slot - Nown;                          /* halo row index */
+            const int L    = rlen[(size_t)(beg + j)];
+            if (hj >= 0 && hj < eDim) { arrival[(size_t)hj] = acc; arrlen[(size_t)hj] = L; }
+            else                      { ++unmapped; }
+            acc += L;
+        }
+    }
+
+    g_off.assign((size_t)eDim + 1, 0);
+    g_elem.clear(); g_elem.reserve((size_t)(rtot > 0 ? rtot : 1));
+    g_c.clear();    g_c.reserve((size_t)(rtot > 0 ? 2*rtot : 1));
+    for (int hj = 0; hj < eDim; ++hj) {
+        const long st = arrival[(size_t)hj];
+        const int  L  = (st < 0) ? 0 : arrlen[(size_t)hj];
+        for (int e = 0; e < L; ++e) {
+            auto it = g2l.find(rgid[(size_t)(st + e)]);
+            if (it == g2l.end()) { ++unmapped; continue; }
+            g_elem.push_back(it->second);
+            g_c.push_back(rcof[(size_t)(2*(st + e)) + 0]);
+            g_c.push_back(rcof[(size_t)(2*(st + e)) + 1]);
+        }
+        g_off[(size_t)hj + 1] = (int)g_elem.size();
+    }
+
+    long glob = unmapped;
+    MPI_Allreduce(MPI_IN_PLACE, &glob, 1, MPI_LONG, MPI_SUM, p->MPI_COMM_FESOM);
+    if (glob) {
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se] WIDE HALO ABORT: %ld shipped div-CSR entries name a global "
+                            "element that is NOT in the local element list. Containment is 0 "
+                            "missing on every partition of the M12b census (11 points, "
+                            "CORE2/farc/dars/NG5, 16-8192 ranks); this partition differs, so the "
+                            "K=1 rung is not valid here.\n", glob);
+        MPI_Barrier(p->MPI_COMM_FESOM);
+        MPI_Abort(p->MPI_COMM_FESOM, 14);
+    }
+}
+
 /* One-time host assembly of the div CSR + the owned-elem edge/neighbour
  * adjacency; pushed to the device once. Mirrors the SI edge scatter over
  * myDim_edge2D (cross-rank edges are replicated into both owners' myDim
@@ -432,25 +848,55 @@ static void se_build_operators(const struct fesom_mesh *mesh,
         nnz += rows[(size_t)n].size();
     }
 
-    s_se.div_off .alloc("se.div.off",  (size_t)Nown + 1);
-    s_se.div_elem.alloc("se.div.elem", nnz ? nnz : 1);
-    s_se.div_c   .alloc("se.div.c",    2 * (nnz ? nnz : 1));
-    int    *off = s_se.div_off.h();
-    int    *elv = s_se.div_elem.h();
-    real_t *cv  = s_se.div_c.h();
-    size_t k = 0;
+    /* Flatten the OWNED rows on the host first: the ring-1 ship (M12b) sends the
+     * final post-inv_a coefficients, so that bitwise identity does not
+     * additionally depend on areasvol agreeing at the halo node. */
+    std::vector<int>    h_off((size_t)Nown + 1, 0);
+    std::vector<int>    h_elem; h_elem.reserve(nnz);
+    std::vector<double> h_c;    h_c.reserve(2 * nnz);
     for (int n = 0; n < Nown; ++n) {
-        off[n] = (int)k;
+        h_off[(size_t)n] = (int)h_elem.size();
         const double inv_a = rows[(size_t)n].empty() ? 0.0
             : 1.0 / (double)mesh->areasvol[FESOM_NODE3D(n, mesh->ulevels_nod2D[n] - 1, nl)];
         for (const auto &e : rows[(size_t)n]) {
-            elv[k]      = e.el;
-            cv[2*k + 0] = (real_t)(e.cx * inv_a);   /* pre-divided: T = +∂η/∂t */
-            cv[2*k + 1] = (real_t)(e.cy * inv_a);
-            ++k;
+            h_elem.push_back(e.el);
+            h_c.push_back(e.cx * inv_a);            /* pre-divided: T = +∂η/∂t */
+            h_c.push_back(e.cy * inv_a);
         }
     }
-    off[Nown] = (int)k;
+    h_off[(size_t)Nown] = (int)h_elem.size();
+
+    /* M12b K=1: append the OWNER's rows for the ring-1 (eDim) nodes. */
+    const int  eDim  = mesh->eDim_nod2D;
+    const int  Nrows = Nown + ((fesom_se_wide() && p->npes > 1) ? eDim : 0);
+    std::vector<int>    g_off, g_elem;
+    std::vector<double> g_c;
+    if (Nrows > Nown)
+        se_wide_ship_rows(mesh, p, h_off, h_elem, h_c, g_off, g_elem, g_c);
+
+    const size_t tot_nnz = h_elem.size() + g_elem.size();
+    s_se.div_off .alloc("se.div.off",  (size_t)Nrows + 1);
+    s_se.div_elem.alloc("se.div.elem", tot_nnz ? tot_nnz : 1);
+    s_se.div_c   .alloc("se.div.c",    2 * (tot_nnz ? tot_nnz : 1));
+    int    *off = s_se.div_off.h();
+    int    *elv = s_se.div_elem.h();
+    real_t *cv  = s_se.div_c.h();
+    for (int n = 0; n <= Nown; ++n) off[n] = h_off[(size_t)n];
+    for (size_t i = 0; i < h_elem.size(); ++i) {
+        elv[i]        = h_elem[i];
+        cv[2*i + 0]   = (real_t)h_c[2*i + 0];
+        cv[2*i + 1]   = (real_t)h_c[2*i + 1];
+    }
+    if (Nrows > Nown) {
+        const size_t base = h_elem.size();
+        for (int j = 0; j < eDim; ++j)
+            off[Nown + 1 + j] = (int)(base + (size_t)g_off[(size_t)j + 1]);
+        for (size_t i = 0; i < g_elem.size(); ++i) {
+            elv[base + i]      = g_elem[i];
+            cv[2*(base + i)+0] = (real_t)g_c[2*i + 0];
+            cv[2*(base + i)+1] = (real_t)g_c[2*i + 1];
+        }
+    }
     s_se.div_off .modify_host(); s_se.div_off .sync_device();
     s_se.div_elem.modify_host(); s_se.div_elem.sync_device();
     s_se.div_c   .modify_host(); s_se.div_c   .sync_device();
@@ -477,6 +923,34 @@ static void se_build_operators(const struct fesom_mesh *mesh,
             ++cnt[(size_t)el2];
         }
     }
+    /* M12b: canonicalise the neighbour order under the rung.
+     *
+     * The viscosity sums three neighbour contributions in the order the LOCAL
+     * edge scan happened to fill them — and local edge numbering is per-rank.
+     * 0.55 % of CORE2 dist_8 elements sit in the myDim range of more than one
+     * rank (1341 of 244659, measured), are computed redundantly, and are never
+     * reconciled by any exchange, so two ranks can hold last-bit-different Ū for
+     * the same element. That is invisible in the certified path (η is exchanged,
+     * so the node owner's value wins) but it is exactly what the rung has to
+     * reproduce locally. Sorting each triple by GLOBAL neighbour id makes every
+     * holder of an element accumulate in the same order.
+     *
+     * Knob-gated: this changes rounding, and the certified knob-off path must
+     * stay byte-identical (gate W0). */
+    if (fesom_se_wide()) {
+        for (int e = 0; e < Eown; ++e) {
+            struct NB { long gid; int ed, nb; } t[3];
+            for (int s = 0; s < 3; ++s) {
+                const int nb = en[3*e + s];
+                t[s].nb  = nb;
+                t[s].ed  = ee[3*e + s];
+                t[s].gid = (nb >= 0) ? (long)p->myList_elem2D[nb] : LONG_MAX;
+            }
+            std::sort(t, t + 3, [](const NB &a, const NB &b) { return a.gid < b.gid; });
+            for (int s = 0; s < 3; ++s) { en[3*e + s] = t[s].nb; ee[3*e + s] = t[s].ed; }
+        }
+    }
+
     int bad = 0;
     for (int e = 0; e < Eown; ++e) if (cnt[(size_t)e] != 3) ++bad;
     if (bad) {
@@ -717,7 +1191,13 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                   struct fesom_partit *p)
 {
     const int    Nown = mesh->myDim_nod2D;
-    const int    Ne   = mesh->myDim_elem2D + mesh->eDim_elem2D;
+    /* M12b: under the K=1 rung the AB3 map runs over element rings 0-2 (the Ū
+     * exchange is ELEM2D_FULL), because η on the ring-1 nodes gathers Ū^{AB3}
+     * over ALL elements incident to those nodes — measured to be exactly
+     * eDim+eXDim on every partition of the census. Knob-off keeps the certified
+     * owned+eDim range, so the M12 board stays reproducible with this binary. */
+    const int    Ne   = mesh->myDim_elem2D + mesh->eDim_elem2D
+                        + (fesom_se_wide() ? mesh->eXDim_elem2D : 0);
     const int    Eown = mesh->myDim_elem2D;
     const int    M    = s_se.M;
     const real_t tau  = (real_t)FESOM_PHASE1_DT;
@@ -740,7 +1220,13 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
     const real_t d1 = wgam;
     const real_t d2 = wzeta;
 
-    const int    visc_on = fesom_se_visc_on();
+    const int    wide     = fesom_se_wide();     /* M12b K=1 rung */
+    const int    wide_chk = wide && fesom_se_wide_selfcheck();
+    const int    eDim     = mesh->eDim_nod2D;
+    const int    Neta     = Nown + (wide ? eDim : 0);   /* k2 range: owned + ring 1 */
+    const int    visc_on  = fesom_se_visc_on();
+    if (wide_chk && eDim > 0 && !s_se.wide_chk.allocated())
+        s_se.wide_chk.alloc("se.wide.chk", (size_t)eDim);
     const real_t vg0 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA0", 10.0);
     const real_t vg1 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA1", 2750.0);
 
@@ -756,6 +1242,38 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
 
     /* Once per step: forcing (T3) + the m=0 viscosity anchor + zero the mean. */
     se_forcing(step_n, mesh, dyn);
+
+    /* FESOM_SE_WIDE_GEOCHK: is the per-step forcing rank-consistent on the
+     * elements that more than one rank claims? Geometry and stencil size are
+     * (measured 0 differences), so if the ring-1 mismatch has a seed it must be
+     * here — F and H0e are the only per-step, 3-D-derived inputs k3 reads. */
+    if (getenv("FESOM_SE_WIDE_GEOCHK") && step_n <= 3) {
+        s_se.Fbt.sync_host(); s_se.H0e.sync_host();
+        const real_t *Fh = s_se.Fbt.h();
+        const real_t *Hh = s_se.H0e.h();
+        const long GE = (long)mesh->elem2D;
+        std::vector<double> lo((size_t)(2*GE),  1e300), hi((size_t)(2*GE), -1e300);
+        for (int e = 0; e < Eown; ++e) {
+            const long g = (long)p->myList_elem2D[e] - 1;
+            if (g < 0 || g >= GE) continue;
+            lo[(size_t)g]      = hi[(size_t)g]      = (double)Fh[2*e];
+            lo[(size_t)(GE+g)] = hi[(size_t)(GE+g)] = (double)Hh[e];
+        }
+        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)(2*GE), MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)(2*GE), MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        long nF = 0, nH = 0; double wF = 0.0, wH = 0.0;
+        for (long g = 0; g < GE; ++g) {
+            if (lo[(size_t)g] < 1e299 && hi[(size_t)g] != lo[(size_t)g]) {
+                ++nF; const double d = hi[(size_t)g] - lo[(size_t)g]; if (d > wF) wF = d;
+            }
+            if (lo[(size_t)(GE+g)] < 1e299 && hi[(size_t)(GE+g)] != lo[(size_t)(GE+g)]) {
+                ++nH; const double d = hi[(size_t)(GE+g)] - lo[(size_t)(GE+g)]; if (d > wH) wH = d;
+            }
+        }
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se-geochk] step %d: Fbt differs between holders for %ld elements "
+                            "(max %.3e), H0e for %ld (max %.3e)\n", step_n, nF, wF, nH, wH);
+    }
     if (fesom_se_check_on())
         se_check_forcing(step_n, mesh, p);
     Kokkos::deep_copy(s_se.Ubt_n.d(), s_se.Ubt[0].d());   /* Ūⁿ, halo-valid */
@@ -797,11 +1315,16 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                 });
         }
 
-        /* k2: η^{m+1} on OWNED nodes into the free ring slot eta[3]. */
+        /* k2: η^{m+1} into the free ring slot eta[3].
+         * M12b: under the rung the range covers OWNED + ring 1 (the eDim halo
+         * slots), whose CSR rows were shipped by the owner at startup. Same
+         * kernel, same launch, wider bound — the M9 LEAN pattern: a ghost kernel
+         * would cost a launch per substep, which at these per-rank sizes is the
+         * dominant term (L109). */
         {
             const real_t *e0 = s_se.eta[0].d().data();
             real_t       *en = s_se.eta[3].d().data();
-            Kokkos::parallel_for("se_eta", Kokkos::RangePolicy<>(0, Nown),
+            Kokkos::parallel_for("se_eta", Kokkos::RangePolicy<>(0, Neta),
                 KOKKOS_LAMBDA(const int n) {
                     if (ulev_n[n] != 1) { en[n] = e0[n]; return; }   /* cavity frozen */
                     real_t T = 0.0;
@@ -814,7 +1337,11 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
         }
 
         /* η ring rotate: (new, m, m−1, m−2) <- (eta3, eta0, eta1, eta2);
-         * then exchange the new current level (replace semantics fills halo). */
+         * then exchange the new current level (replace semantics fills halo).
+         * M12b: under the rung there is NOTHING TO EXCHANGE — the ring-1 values
+         * k2 just wrote are bit-for-bit what the owner would have sent. eta[0]
+         * carries k2's modify_device() through the handle rotate, so the device
+         * authority contract holds without the exchange's own modify_device(). */
         {
             fesom::Field tmp = s_se.eta[3];
             s_se.eta[3] = s_se.eta[2];
@@ -822,7 +1349,45 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             s_se.eta[1] = s_se.eta[0];
             s_se.eta[0] = tmp;
         }
-        fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+        if (!wide) {
+            fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+        } else if (wide_chk && eDim > 0) {
+            /* stash the LOCAL ring-1 values, then let the exchange overwrite
+             * them, then diff: stash-vs-owner. Without the stash this compares
+             * the owner's value with itself and always reports 0.0. */
+            {
+                const real_t *e = s_se.eta[0].d().data();
+                real_t       *s = s_se.wide_chk.d().data();
+                Kokkos::parallel_for("se_wide_stash", Kokkos::RangePolicy<>(0, eDim),
+                    KOKKOS_LAMBDA(const int j) { s[j] = e[Nown + j]; });
+            }
+            fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+            {
+                const real_t *e = s_se.eta[0].d().data();
+                const real_t *s = s_se.wide_chk.d().data();
+                double mx = 0.0;
+                Kokkos::parallel_reduce("se_wide_chk", Kokkos::RangePolicy<>(0, eDim),
+                    KOKKOS_LAMBDA(const int j, double &acc) {
+                        const double d = (double)e[Nown + j] - (double)s[j];
+                        const double a = d < 0.0 ? -d : d;
+                        if (a > acc) acc = a;
+                    }, Kokkos::Max<double>(mx));
+                if (mx > s_se.wide_chk_max) s_se.wide_chk_max = mx;
+                /* Per-substep trace for the first two steps: a mismatch that is
+                 * SEEDED at one substep (constant magnitude) means an input
+                 * differs; one that GROWS substep by substep means a last-bit
+                 * seed being amplified by the barotropic dynamics. The two have
+                 * completely different fixes, and the per-step max cannot tell
+                 * them apart. */
+                if (step_n <= 2) {
+                    double g = mx;
+                    MPI_Allreduce(MPI_IN_PLACE, &g, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+                    if (p->mype == 0 && (m < 6 || m == M - 1))
+                        fprintf(stderr, "[ssh_se-wide-chk]   step %d substep %d max=%.17g\n",
+                                step_n, m, g);
+                }
+            }
+        }
 
         /* k3: Ū^{m+1} on OWNED elems into the retiring Ū buffer (Ubt[2] — AB3
          * already consumed it this substep). AM4 inline at the 3 vertices. */
@@ -886,14 +1451,65 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             s_se.Ubt[2].modify_device();
         }
 
-        /* Ū ring rotate, then exchange the new current level (fused pair). */
+        /* Ū ring rotate, then exchange the new current level (fused pair).
+         * M12b: ELEM2D_FULL under the rung — same partner ranks, ~2.2x the
+         * entities each, and it is the ONLY exchange left in the substep. */
         {
             fesom::Field tmp = s_se.Ubt[2];
             s_se.Ubt[2] = s_se.Ubt[1];
             s_se.Ubt[1] = s_se.Ubt[0];
             s_se.Ubt[0] = tmp;
         }
-        fesom_halo_field(s_se.Ubt[0], FESOM_HALO_ELEM2D, 1, 2, p);
+        fesom_halo_field(s_se.Ubt[0],
+                         wide ? FESOM_HALO_ELEM2D_FULL : FESOM_HALO_ELEM2D, 1, 2, p);
+    }
+
+    /* GEOCHK, end of step: is Ū itself rank-consistent on the elements that more
+     * than one rank claims? Geometry, stencil and forcing are (measured), so if
+     * Ū is not, the redundant computation itself is the seed — and no local
+     * recomputation can reproduce the node owner's η. */
+    if (getenv("FESOM_SE_WIDE_GEOCHK") && step_n <= 3) {
+        s_se.Ubt[0].sync_host();
+        const real_t *Uh = s_se.Ubt[0].h();
+        const long GE = (long)mesh->elem2D;
+        std::vector<double> lo((size_t)GE, 1e300), hi((size_t)GE, -1e300);
+        for (int e = 0; e < Eown; ++e) {
+            const long g = (long)p->myList_elem2D[e] - 1;
+            if (g < 0 || g >= GE) continue;
+            lo[(size_t)g] = hi[(size_t)g] = (double)Uh[2*e];
+        }
+        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)GE, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)GE, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        long nU = 0; double wU = 0.0;
+        for (long g = 0; g < GE; ++g)
+            if (lo[(size_t)g] < 1e299 && hi[(size_t)g] != lo[(size_t)g]) {
+                ++nU; const double d = hi[(size_t)g] - lo[(size_t)g]; if (d > wU) wU = d;
+            }
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se-geochk] step %d END: Ubt differs between holders for %ld "
+                            "elements (max %.3e)\n", step_n, nU, wU);
+    }
+
+    /* M12b selfcheck verdict, once per step (collective). The rung is EXACT by
+     * construction, so the bar is 0.0 — not a tolerance. A nonzero value means
+     * the shipped CSR row, its order, or its inputs differ from the owner's. */
+    if (wide_chk) {
+        double mx = s_se.wide_chk_max;
+        MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+        if (p->mype == 0)
+            fprintf(stderr, "[ssh_se-wide-chk] step %d max|local - owner| over ring-1 eta "
+                            "= %.17g\n", step_n, mx);
+        if (mx != 0.0 && fesom_se_wide_selfcheck() == 1) {
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se-wide-chk] ABORT: the K=1 rung is not exact on this "
+                                "configuration (bar is 0.0, exactly). Known cause: the two-term "
+                                "viscosity makes Ū rank-dependent on the ~0.5%% of elements more "
+                                "than one rank claims (measured); FESOM_SE_WIDE_SELFCHECK=2 "
+                                "reports without aborting.\n");
+            MPI_Barrier(p->MPI_COMM_FESOM);
+            MPI_Abort(p->MPI_COMM_FESOM, 15);
+        }
+        s_se.wide_chk_max = 0.0;
     }
 
     /* Finalize: hbar_old := hbar; hbar := η^{n+1} (full extent — η halo-valid,

@@ -1,0 +1,58 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_probe
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:08:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/probe_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/probe_%j.err
+#
+# M12b — localize the ring-1 selfcheck mismatch.
+#
+# Established: the locally computed ring-1 η equals the owner's EXACTLY through
+# all 50 substeps of step 1, and first differs at step 2 substep 2 (1.4e-12,
+# growing to 6e-10 by substep 49). So the shipped CSR row and its order are
+# right — an input that is bitwise rank-consistent at cold start stops being so
+# once the model is running (the Z7 shape).
+#
+# Arms, each 3 steps at np8 with the selfcheck trace:
+#   base   the reference (M=50, viscosity on)
+#   novisc FESOM_SE_VISC=0 — the viscosity gather is the term that reads
+#          NEIGHBOUR Ū and the geometry (earea, H0e); if the mismatch vanishes
+#          here, that gather is the carrier
+#   m1     FESOM_SE_M=1+FORCE — one substep per step: separates a step-BOUNDARY
+#          input (F, Ubt_prev, the 3-D state) from intra-step history
+#   nof    FESOM_SE_VISC=0 and M=1 together
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=1
+
+run_arm () {   # $1 tag, rest = extra env assignments
+  local tag=$1; shift
+  local OUT=$BASE/probe_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== ARM $tag  ($*) ==================="
+  env "$@" srun -n 8 -l "$BIN" "$MESH" "$OUT" 1800 3 999999 "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h "ssh_se-wide-chk" "$OUT/run.err" | head -14
+}
+
+run_arm base   FESOM_SE_M=50
+run_arm novisc FESOM_SE_M=50 FESOM_SE_VISC=0
+run_arm m1     FESOM_SE_M=1  FESOM_SE_M_FORCE=1
+run_arm nof    FESOM_SE_M=1  FESOM_SE_M_FORCE=1 FESOM_SE_VISC=0
+echo "=== probe done ==="
