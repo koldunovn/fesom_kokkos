@@ -26,7 +26,14 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
 
 ## 2. 🔴 FIRST ACTIONS (in order)
 
-1. **`squeue -u a270088` before anything.** If `26960090` (W2 CUDA gate) has run, harvest
+0. ✅ **DONE in s4 — the W2 CUDA gate PASSED** (26960090): drift nonzero-steps=0, free and off
+   arms both η=2.02 with identical prints, matching the M12 CUDA SE reference. The **W6 GPU pairs
+   are already submitted** on the gate's binary — `26962396` (core2), `26962397` (ng5). So the
+   first action is to **harvest those**: `loop timing` min-of-2 per arm, check the `it=` lines
+   (trap 6), then read the wait-anatomy and bt-imbalance blocks the job prints at the end, and
+   compare with §7's pre-registered band (**−2.1 % … −6.6 %** at CORE2 16N).
+
+1. *(superseded)* If for any reason `26960090` needs re-running, harvest
    `/work/ab0995/a270088/port2/m12b/w2cu_26960090.out`: gate = `drift nonzero-steps=0` and
    healthy `it=` lines on all three arms. It is the FIRST-EVER CUDA run of the `ELEM2D_FULL`
    device-halo path and of the F-reconcile's per-step host round-trip — a crash there is
