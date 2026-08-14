@@ -1993,6 +1993,24 @@ of the NG5 CPU section above ("solver-ordered survival … a marginal configurat
 by solver-dependent rounding, that is L99"). `pcsi` at 4096 and `oati`/`pcsi` at 8192 did not
 survive anything: they completed as NaN zombies. There was no solver ordering to explain.
 
+### How exposed is the rest of the board? — the step-1 |uv| fingerprint
+
+The artifact announces itself as an anomalous step-1 global |uv| (the constant strait force
+acts from the first step). Swept the baseline leg of every archived run:
+
+| mesh | typical step-1 |uv| | worst run |
+|---|--:|---|
+| CORE2 | 0.393 | 0.393 (uniform across all rungs) |
+| farc | 0.321–0.378 | 0.378 (`lad_farc_c32`) |
+| dars | 0.254–0.334 | 0.334 (`sharecpu_dars_c2n`) |
+| NG5 | 0.083–0.354 | **0.678** (`lad2_ng5_c8192`) |
+
+Only NG5 `dist_8192` stands out — and its 0.678 m/s is *exactly* the value M13 measured for
+that partition's Marmara element after step 1 (their §4 table), so the archived M10 log
+carries the fingerprint independently. It is also one of the voided runs. For reference the
+core2_wgt0 partition of the guard proof reads 3.53. The quoted rows are unremarkable on this
+marker, which is consistent with the det re-runs: use them to confirm, not to assume.
+
 ### The mechanism in this branch's code, and the fix
 
 `fesom_ssh.cpp` — the three variants gate their iteration loop on `if (resid >= rtol)`
