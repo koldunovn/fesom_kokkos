@@ -586,6 +586,14 @@ own busiest rank, and skew propagates between phases — a rank late in `ocean` 
 `bt` — so the per-phase split is a good attribution for the large phases and rougher for the
 small ones, where `force`'s slightly-over-100 % shows the fit's edge.)
 
+The same budget at **dars 8192** (98 ms step, TOTAL wait 31.8 ms) splits differently: ocean 15.09
+ms wait but only 44 % imbalance (floor 8.37 ms — 65 exchanges/step at 8192 ranks is a real
+communication cost, ~129 µs each), icedyn 9.35 ms / 61 %, bt 3.09 ms / 24 %, force 2.40 ms / 45 %
+— about **14 ms imbalance against 16 ms floor**. So the mix is point-dependent and moves the way
+strong scaling predicts: **the imbalance share of the wait falls as the subdomains shrink**
+(farc 2048: ~70 % imbalance; dars 8192: ~45 %). Both are large; which lever pays depends on where
+on that curve the configuration sits, and the decomposition costs nothing to run.
+
 🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
 (balance owned nodes **and** owned elements) rather than the single node constraint in use. M11
 has Mt-KaHyPar in its toolbox, which supports multi-constraint partitioning directly; its earlier
