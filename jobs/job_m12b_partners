@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_part
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=0
+#SBATCH --time=01:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/m12b/partners.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/partners.%j.err
+
+# M12b — partner-rank growth with the halo depth K, at every operating point of
+# the board. The deep-K decision input that the GPU queue does not gate: the K=1
+# rung halves the messages because com_elem2D_full reaches the SAME partner ranks;
+# whether that survives K>=2 is a property of the partition, so measure it.
+# Pure analysis of mesh + partition files; no model run.
+set -u
+mkdir -p /work/ab0995/a270088/port2/m12b
+cd /home/a/a270088/port_kokkos_wh || exit 1
+
+POOL=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1
+PRIV=/work/ab0995/a270088/port2/mesh
+PY=scripts/m12b_partner_growth.py
+export PARTNER_OUT=/work/ab0995/a270088/port2/m12b/partners_$SLURM_JOB_ID.txt
+
+# CORE2 = the private mesh (user rule: never /pool core2). GPU points 4N/16N.
+python3 $PY $PRIV/core2 $PRIV/core2/dist_16 $PRIV/core2/dist_64 --rings 9 --sample 8 --M 50
+
+# farc: the 16N GPU point and the 2048-rank CPU point of the W6 board.
+python3 $PY $POOL/farc $POOL/farc/dist_64 --rings 9 --sample 8 --M 90
+python3 $PY $POOL/farc $POOL/farc/dist_2048 --rings 9 --sample 8 --M 90
+
+# NG5: the 16N GPU point (the cheapest deep K by the rim algebra).
+python3 $PY $POOL/ng5 $POOL/ng5/dist_64 --rings 9 --sample 8 --M 20
+
+# dars: 16N GPU + the 8192-rank CPU point.
+python3 $PY $POOL/dars $POOL/dars/dist_64 --rings 9 --sample 8 --M 20
+python3 $PY $PRIV/dars_bigpart $PRIV/dars_bigpart/dist_8192 --rings 9 --sample 8 --M 20
+
+echo "=== partner growth done ==="

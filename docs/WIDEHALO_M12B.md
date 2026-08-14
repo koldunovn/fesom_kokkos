@@ -383,6 +383,67 @@ arithmetic is unchanged bit for bit, and the pi np2 gate (which runs analytical 
 adjacency build, whose `n < myDim` filter also admits `-1` and is safe only because its extent
 is owned-only. Bin `4cc9eda4`; lessons L114–L117.
 
+## 7. Deep K — the decision arithmetic (s4), and the one measurement it still needs
+
+Two curves decide deep K, and only one of them was known.
+
+**Curve 1 — messages/step. The K=1 halving rests on a partner-count claim, so the K≥2 version
+was measured too** (`scripts/m12b_partner_growth.py`, job 26961509: BFS rings from each sampled
+rank's owned set, counting the distinct other-rank owners of each cumulative zone — node owner
+from the owned block of `my_list`, element owner = lowest-ranked claimant, since `myDim_elem2D`
+is not a partition). The answer is the one the rung needed:
+
+| point | ranks | partners, ring 1 | ring 2 | ring 5 | ring 9 |
+|---|---|---|---|---|---|
+| CORE2 4N GPU | 16 | 3.4 | 3.4 | 3.5 | 3.5 |
+| CORE2 16N GPU | 64 | 4.5 | 4.5 | 4.6 | 4.9 |
+| farc 16N GPU | 64 | 5.9 | 5.9 | 5.9 | 6.0 |
+| NG5 16N GPU | 64 | 6.4 | 6.4 | 6.4 | 6.4 |
+| dars 16N GPU | 64 | 6.2 | 6.2 | 6.2 | 6.2 |
+| farc 2048 CPU | 2048 | 5.5 | 5.5 | 6.1 | 7.8 |
+| dars 8192 CPU | 8192 | 7.6 | 7.9 | 9.1 | 13.2 |
+
+**On GPU-sized subdomains the partner count is flat in K** — a rank's neighbours nine rings out
+are the same ranks as one ring out, because the subdomain is large compared with the ring. So
+messages/step fall almost as 1/K: at CORE2 16N, ×0.530 (K=1) → ×0.280 (K=2) → ×0.166 (K=4) →
+×0.104 (K=8) of the certified 2M. At big-CPU rank counts the zone reaches round the corner and
+the 1/K breaks: farc 2048 grows 5.5 → 7.8 partners by ring 9 (+42 %), and **dars 8192 grows
+7.6 → 13.2 (+74 %), enough that its messages/step stop falling — ×0.234 at K=4 and back up to
+×0.249 at K=8.** On the big-CPU points deep K therefore fails on *both* curves, not only on
+redundant compute.
+
+**Curve 2 — redundant compute** is the rim algebra of §2 (cumulative node zone / owned): CORE2
+64 → 0.06 / 0.14 / 0.30 / 0.67 at K=1/2/4/8; NG5 64 → 0.01 / 0.02 / 0.05 / 0.10; dars 64 →
+0.02 / 0.03 / 0.07 / 0.14; farc 2048 CPU → 0.20 / 0.46 / 1.04 / 2.49.
+
+**The model.** With `bt_wait(K) = bt_wait_cert × msg_ratio(K)` (i), `bt_busy(K) = bt_busy_cert ×
+(1 + zone_K)` (ii) and the rest of the step unchanged (iii), CORE2 16N GPU — the only point
+whose bt split we already know, 7.8 ms busy + 11.8 ms MPI wait of an 84 ms step — predicts:
+
+| K | msg ratio | zone | bt busy+wait (ms) | Δ step |
+|---|---|---|---|---|
+| certified | 1.000 | 0 | 7.8 + 11.8 = 19.6 | — |
+| 1 | 0.530 | 0.06 | 8.3 + 6.3 = 14.5 | **−6.1 %** |
+| 2 | 0.280 | 0.14 | 8.9 + 3.3 = 12.2 | **−8.8 %** |
+| 4 | 0.166 | 0.30 | 10.1 + 2.0 = 12.1 | **−8.9 %** |
+| 8 | 0.104 | 0.67 | 13.0 + 1.2 = 14.3 | −6.4 % |
+
+So at CORE2 the optimum is **K = 2–4 and it saturates there**, worth about 1.5× the K=1 gain;
+K=8 is back to K=1. Where the subdomain is large relative to the ring — NG5 and dars at 16N,
+zone ≤ 0.14 even at K=8 — the redundant term never bites and the optimum is deep: those points
+would take ~2× the K=1 gain. On the CPU points deep K is out on compute grounds alone (farc
+2048 at K=2 already pays +46 % redundant node work for a bt block that is 16 % of the step).
+
+🔴 **Assumption (i) is the measurement that is missing**, and it is the one the queued M-sweep
+(26952126/27) makes: does the baseline's bt MPI wait actually track the exchange count? Two
+things would break the model — the fabric being bandwidth- rather than latency-bound at these
+sizes (bytes/substep already grow ×1.34–1.49 at K=1, and more with the zone), and the GPU pack
+cost growing with the zone (on a fabric without GPUDirect the packed-halo staging is not free).
+**Decision rule, pre-registered:** build the §4 extended-mesh layer only if the W6 GPU pair
+confirms a real K=1 gain at CORE2/NG5 16N *and* the M-sweep confirms (i); then target K=4 at
+CORE2 and K=8 at NG5/dars. If the K=1 GPU gain is ≤1 %, deep K cannot rescue it — the model's
+own best case is ~1.5–2× K=1.
+
 ## Open items (s4)
 
 W2 CUDA drift gate (26960090) + W6 GPU pairs — still queued behind the account's 5-GPU-job
