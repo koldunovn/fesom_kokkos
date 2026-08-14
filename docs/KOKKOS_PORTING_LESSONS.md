@@ -1510,3 +1510,38 @@ badly-formed partition (elongated or fragmented subdomains). The mechanism is un
 *(Consistent with the standing user observation that some FESOM partitions simply do not work
 — L103 §5. The difference here is that the failure is not random: it tracks a measurable
 property of the partition, so it can be screened for in advance.)*
+
+### L106 — A GUARD THAT IS BLIND TO NaN TURNS A BROKEN RUN INTO A WIN. The failure mode is not a crash, it is a *fast* number. (M10/M13, 2026-08-14)
+
+The three M10 solver variants entered their iteration loop under `if (resid >= rtol)`.
+**`NaN >= rtol` is false**, so a solve entered with a non-finite state skipped the loop
+entirely and returned "converged, 0 iterations" — at zero cost. A run whose state had gone
+NaN therefore did not crash: it completed all 300 steps, printed a state row of `it=0`,
+`uv=0` and inverted ±1e30 T/S sentinels, and reported a *timing*.
+
+Measured, on the one partition where both behaviours could be produced side by side
+(`core2_wgt0/dist_128`, 1 node, job 26961492):
+
+| | s/step |
+|---|--:|
+| zombie (NaN state, campaign binary) | **0.1838** |
+| healthy run, same config, fixed IC | **0.2060** |
+
+**The zombie is 10.8 % faster** — indistinguishable in magnitude from the wins the campaign
+was measuring. Four of 77 archived A/B runs contained such legs (all already void for other
+reasons; no quoted row was affected, but that was luck, not process).
+
+Three transferable rules:
+
+1. **Every convergence/stall test must have an explicit non-finite branch.** A comparison
+   with NaN is false, so *any* `if (bad) fail;` guard silently passes NaN. Write the criterion
+   the way the reference implementation does — baseline `cg` here has always died on
+   `residual != residual || residual > 1e30`, which is exactly why stock CG was the only
+   scheme that failed loudly and why "SE and oati run clean" was an exit-code illusion.
+2. **A completed run is not a valid measurement.** The harness already refused to quote a leg
+   with `fallbacks>0`; it had no test for a leg that finished at zero cost. Terminal-state
+   sanity (finite `uv`, physical T/S range) belongs in the harvest, next to the fallback count.
+3. **The cheapest reproduction wins.** The zombie was first seen on NG5 at 64 nodes. The same
+   phenomenon lives on a 1-node CORE2 partition that the load-balance study had already flagged
+   as unusable — before/after in three minutes instead of an hour of 64-node time. When a
+   failure is a property of the *initial condition*, mesh size is not part of the mechanism.
