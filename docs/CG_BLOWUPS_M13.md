@@ -136,18 +136,34 @@ untouched with the knob off.
 nodes np1-vs-np8); det is **bitwise identical across np** (0 differing nodes, all pairs; same
 169 fill + 476 relax sweeps at every np). NG5 fill: 260 ring sweeps (phase 1).
 
-## 7. Acceptance ladder (in flight / to complete)
+## 7. Acceptance ladder — results
 
-1. Knob-off byte gate vs certified baseline (`jobs/job_m7_gate_serial`, job 26960066).
-2. Failing-partition flips under det: dist_8192 (26960049), dist_4096 (26960051),
-   dist_20480 (26960052), SI 300 steps; SE arm on dist_8192 (26960059).
-   Pre-registered: probe T/S at elem 8241930 bitwise-identical between dist_4096 and
-   dist_8192 under det; pgf ~1e−18; all runs 300 steps clean.
-3. Working-partition control under det: dist_16384 (26960058) stays clean.
-4. dist_32768 (256N) re-run under det — pending the above (16-node-cap-class courtesy:
-   big allocation, run once the small ones are green).
-5. CUDA fidelity gate before any default-on adoption (host-side init code, but the ladder is
-   the ladder).
+1. **Knob-off byte gate: PASS ×2** (jobs 26960066 pre-relaxation, 26960176 final build) —
+   bit-identical to the certified baseline with knobs unset.
+2. **Failing-partition flips under det (det1 = ring fill + relaxation):**
+   - dist_8192 (b8det 26960168): **300/300 clean**, healthy final state (uv 3.27,
+     T[−2.07,30.23], S[5.66,41.19]); legacy died at step 24.
+   - dist_4096 (b4det 26960169): **300/300 clean**; legacy died at step 200. Final state row
+     identical to b8det's at print precision — same IC, partition-rounding-class differences
+     only.
+   - **Cross-partition bitwise IC identity at scale**: the probe rho/T/S at elem 8241930 and
+     the full `elemprobe-ic` T/S columns are md5-identical between dist_4096 (4096 ranks) and
+     dist_8192 (8192 ranks). The Marmara fill is now a smooth ~0.1 PSU/element basin gradient;
+     pgf 1.07e−4 (legacy-d8: 5.5e−3); step-1 global |uv| max = 0.041 m/s in the Labrador Sea —
+     no strait artifact anywhere.
+   - **dars F45 fragile partition** (seed660013 dist_2048, 2048r dt120): legacy control
+     (f45leg 26960203) reproduces `BLOWUP at step 14` — and the uvmax trace shows it is
+     **the Marmara again** (27.47E 40.80N, +0.37 m/s per step): M11's F45 was this same IC
+     mechanism. det arm (f45det 26960206): **300/300 clean**, healthy final state.
+   - det extrap cost on NG5: ~10k fill + 20–30k relax layer-sweeps ≈ tens of seconds of
+     one-shot init.
+3. CORE2 128r det smoke (bc2det 26960191): **300/300 clean**.
+4. In flight at write time: dist_20480 (b160det), dist_16384 control (b128det), SE arm
+   (b8sedet), dist_32768 256N (b256det), NG5 dist_64 GPU CUDA leg (bg64det 26960226,
+   cuda bin d20ba293).
+5. Before any default-on adoption: the M10-class solver gates + a climate twin (det changes
+   every cold-start trajectory on every mesh — a solver-class change under house rules), and
+   the formal CUDA-vs-Serial fidelity comparison.
 
 ## 8. Consequences for the M12 board (flag to the M12 session)
 
