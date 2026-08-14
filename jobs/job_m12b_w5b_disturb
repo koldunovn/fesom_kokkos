@@ -60,5 +60,9 @@ echo "=== disturbance report ==="
 "$PY" "$ROOT/scripts/m12b_disturbance.py" \
       --ref "$BASE/ref_off_np64" \
       --controls "$BASE/ctl_off_np8" "$BASE/ctl_off_np16" "$BASE/ctl_off_np128" \
-      --arms "$BASE/arm_on_np64" "$BASE/arm_on_np128"
+      --pair "$BASE/ref_off_np64" "$BASE/arm_on_np64"
+"$PY" "$ROOT/scripts/m12b_disturbance.py" \
+      --ref "$BASE/ref_off_np64" \
+      --controls "$BASE/ctl_off_np8" "$BASE/ctl_off_np16" "$BASE/ctl_off_np128" \
+      --pair "$BASE/ctl_off_np128" "$BASE/arm_on_np128"
 echo "report rc=$?"
