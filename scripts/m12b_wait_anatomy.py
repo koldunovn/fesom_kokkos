@@ -77,7 +77,7 @@ for arg in argv:
         print(f"{label}: no per-rank phasestats in {log}");  continue
     rs = np.array(sorted(busy))
     b = np.array([busy[r] for r in rs]);  w = np.array([wait[r] for r in rs])
-    res[label] = dict(b=b, w=w, mpi=mpi)
+    res[label] = dict(b=b, w=w, mpi=mpi, floor=None)
 
     # self-check: the per-rank column must reproduce the summary's mean for this phase
     sb, sw, smpi = summary.get(phase, (None, None, None))
@@ -106,6 +106,7 @@ for arg in argv:
     print(f"  imbalance-explained share of the mean wait: "
           f"{100*slope*(bmax-b).mean()/w.mean():.1f} %  |  residual floor "
           f"{icept:.2f} ms = {100*icept/w.mean():.1f} %")
+    res[label]['floor'] = icept
 
 if len(res) == 2:
     (la, ra), (lb, rb) = list(res.items())
@@ -116,5 +117,10 @@ if len(res) == 2:
         print(f"  {lb}: {rb['mpi']:.0f} msg/step, wait {rb['w'].mean():.2f} ms")
         print(f"  dln(wait)/dln(msg) = {e:.3f}      "
               f"[1.0 = purely latency-bound, 0 = the messages are not what is waited on]")
+        if ra['floor'] and rb['floor'] and ra['floor'] > 0 and rb['floor'] > 0:
+            ef = np.log(rb['floor'] / ra['floor']) / np.log(rb['mpi'] / ra['mpi'])
+            print(f"  floor only: {ra['floor']:.2f} -> {rb['floor']:.2f} ms, "
+                  f"dln(floor)/dln(msg) = {ef:.3f}   "
+                  f"[the imbalance part is conserved; only this part is removable]")
         print(f"  busy: {ra['b'].mean():.2f} -> {rb['b'].mean():.2f} ms "
               f"({100*(rb['b'].mean()/ra['b'].mean()-1):+.1f} %)")
