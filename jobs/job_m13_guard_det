@@ -1,0 +1,80 @@
+#!/bin/bash
+#SBATCH --job-name=m13guard
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/ab/guard.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/ab/guard.%j.err
+#
+# M13 in the M10 worktree — TWO measurements in one 1-node job.
+#
+# The vehicle: /work/.../mesh/core2_wgt0/dist_128, the regenerated CORE2 partition that
+# the M10 load-balance study found "simply does not work" (L103 amendment). Its step-1
+# |uv| is 3.53 m/s where a healthy CORE2 cold start sits near 0.3 — the M13 IC-artifact
+# signature (partition-dependent extrap_nod3D fill), on ONE node instead of NG5's 64.
+#
+# 1. GUARD PROOF (legs B vs C). The variants' entry test is `resid >= rtol`, which is FALSE
+#    for NaN, so a solve entered with a non-finite state skipped the loop and reported
+#    "converged in 0 iterations" — the run completed as a zombie at zero solver cost and its
+#    timing looked like a win (measured in the M10 corpus: jobs 26738526/27/30/31). Leg C
+#    runs the OLD pinned bin and must reproduce the zombie; leg B runs the new bin and must
+#    instead announce a FALLBACK and die.
+# 2. DET RESCUE (legs D, E). Same partition under FESOM_IC_EXTRAP=det must complete 300
+#    steps with a healthy state and fallbacks=0.
+#
+# FESOM_PRINT_EVERY stays at the M10 A/B value (999) ON PURPOSE: the model's |uv|>5 BLOWUP
+# guard only executes at print cadence, so a lower cadence would abort the legacy legs
+# BEFORE the state reaches NaN and the zombie could never form.
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+export FESOM_SPEED_FORCE_SERIAL=1          # L104: without this every FESOM_SPEED lever is inert
+export FESOM_SSH_STATS=1
+
+MESH=/work/ab0995/a270088/port2/mesh/core2_wgt0
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NEW=/work/ab0995/a270088/port2/m10/bin/det1_serial          # m10 tip + M13 det + guard fix
+OLD=/work/ab0995/a270088/port2/m10/bin/stallknob_serial     # the campaign bin (no det, no fix)
+OUT=/work/ab0995/a270088/port2/m10/ab/guard_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
+NSTEPS=${NSTEPS:-300}
+
+echo "=== M13 guard + det proof — core2_wgt0/dist_128, $SLURM_NTASKS ranks, $NSTEPS steps ==="
+sha256sum "$NEW" "$OLD"
+
+run () {   # run <name> <bin> <ic> [solver]
+    local name=$1 bin=$2 ic=$3 solver=${4:-}
+    unset FESOM_SSH_SOLVER FESOM_IC_EXTRAP
+    export FESOM_SPEED=1
+    [ -n "$solver" ] && export FESOM_SSH_SOLVER="$solver"
+    [ "$ic" = det ] && export FESOM_IC_EXTRAP=det
+    echo "--- $name: bin=$(basename "$bin") ic=$ic solver=${solver:-cg} ---"
+    srun "$bin" "$MESH" "$OUT" 1800 "$NSTEPS" -1 "$PHC" 1958 \
+        > "$OUT/log_$name.txt" 2> "$OUT/err_$name.txt"
+    echo "    rc=$?"
+    grep -a "IC_EXTRAP=det" "$OUT/log_$name.txt" | head -1 | sed 's/^/    /'
+    grep -a "^ *[0-9]* *it=" "$OUT/log_$name.txt" | tail -1 | cut -c1-118 | sed 's/^/    /'
+    grep -a "FALLBACK on solve" "$OUT/err_$name.txt" | head -2 | sed 's/^/    /'
+    echo "    fallback announces: $(grep -ac 'FALLBACK on solve' "$OUT/err_$name.txt")"
+    grep -a 'loop timing' "$OUT/log_$name.txt" | tail -1 | sed 's/^/    /'
+}
+
+run A_legacy_cg_new   "$NEW" legacy
+run B_legacy_oati_new "$NEW" legacy oati
+run C_legacy_oati_old "$OLD" legacy oati
+run D_det_cg_new      "$NEW" det
+run E_det_oati_new    "$NEW" det    oati
+
+echo
+echo "=== EXPECTED ==="
+echo "  A dies (CG_kk residual diverged / BLOWUP)             — the artifact, loud"
+echo "  B dies AFTER announcing >=1 FALLBACK                  — the guard fix works"
+echo "  C completes 300 steps with it=0 and 1e+30 T sentinels — the zombie it replaces"
+echo "  D,E complete 300 steps, healthy state, 0 fallbacks    — det rescues the partition"
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true

@@ -1950,3 +1950,106 @@ the model asks for it; it simply is not sufficient here.
 **Also explains the "solver-ordered" survival** (`pcsi` cleared 300 steps at 4096; `oati` and
 `pcsi` at 8192): a marginal configuration tipped over by solver-dependent rounding. That is
 L99, and it was never evidence about the solvers.
+
+## 🔴 M13 det-IC rollout inside M10 (2026-08-14) — audit, guard fix, re-runs
+
+The M13 session root-caused the "CG blows up on specific partitions" family to
+**partition-dependent initial conditions** from the climatology hole fill (`extrap_nod3D`,
+a literal port of upstream `gen_support.F90:400-507`): first-fill-wins Gauss-Seidel run to
+local exhaustion between halo exchanges, so the fill depends on the decomposition. On unlucky
+partitions it lays a ~10 kg/m³ density front across one element in a marginal strait
+(Marmara, Gibraltar), giving a constant 5.5e-3 m/s² pressure-gradient force and a linear |uv|
+ramp from step 1 into CFL death. Fix: `FESOM_IC_EXTRAP=det` (ring fill + Jacobi relaxation,
+gid-ordered sums, default OFF). Evidence: `~/port_kokkos/docs/CG_BLOWUPS_M13.md`; rollout
+decisions and the per-track re-run plan: `docs/plans/20260815-m13-det-rollout.md` (main
+checkout). Cherry-picked here as `ddae127` + `e7ff7ae`.
+
+### What this can and cannot change on the M10 board
+
+A solver A/B runs its four legs back-to-back in ONE allocation on ONE partition, so all legs
+integrate the SAME initial condition — the published **ratios stay internally consistent** and
+no quoted row flips sign because the IC was wrong. What the artifact does change is (i) rows
+that could not be measured at all, and (ii) the SSH share and iteration count, which are the
+campaign's own explanatory variables. Note §5b of the M13 doc: under legacy fill **no NG5
+partition was ever clean** (even "working" dist_16384 crests |uv| 4.86 m/s at step 95), so
+every NG5 number in this ledger was measured on an artifact-driven transient.
+
+### ⚠️ The zombie audit — 4 of 77 A/B runs, none of them quoted
+
+The M13 rollout plan flags our stall guard as NaN-blind. Swept all 77 run directories under
+`m10/ab` for legs whose final state row is the all-NaN signature (`it=0`, `uv=0`,
+`T[1e+30,-1e+30]`):
+
+| run | leg | status |
+|---|---|---|
+| `lad2_ng5_c4096_26738530` | `pcsi` | ZOMBIE (legs 0-2 died at step 1) |
+| `lad2_ng5_c8192_26738531` | `oati`, `pcsi` | ZOMBIE (legs 0-1 died at step 1) |
+| `lad2_farc_c1024_26738526` | `pcsi` | ZOMBIE |
+| `lad2_farc_c2048_26738527` | `oati` | ZOMBIE |
+
+All four runs were already VOID for other reasons and **none of the 28 quoted configurations
+contains a zombie leg** — the board survives the audit. But this **RETRACTS** the closing note
+of the NG5 CPU section above ("solver-ordered survival … a marginal configuration tipped over
+by solver-dependent rounding, that is L99"). `pcsi` at 4096 and `oati`/`pcsi` at 8192 did not
+survive anything: they completed as NaN zombies. There was no solver ordering to explain.
+
+### The mechanism in this branch's code, and the fix
+
+`fesom_ssh.cpp` — the three variants gate their iteration loop on `if (resid >= rtol)`
+(cg2 :2834, pcsi :3540, oati :3764). **`NaN >= rtol` is false**, so a solve entered with a
+non-finite state skips the loop entirely and returns `fb = SSH_FB_NONE` with `iter = 0`: a
+"converged" solve at zero cost. Baseline `cg` has no such hole — it dies on
+`residual != residual || residual > 1e30` (:4215), which is why stock CG is the only scheme
+that fails loudly. Fixed by testing the same criterion at the variants' entry (all three),
+so a non-finite entry residual becomes `SSH_FB_NAN` → announce → fall back to `cg` → die.
+Byte-inert on finite residuals: **knob-off byte gate PASS, job 26961453** (bit-identical to
+the certified M6 baseline, `diff_snap rc=0`).
+
+### ⭐ Measured before/after — job 26961492 (1 node, 128 ranks, 300 steps)
+
+Vehicle: `/work/.../mesh/core2_wgt0/dist_128`, the regenerated CORE2 partition that the
+load-balance study called "simply does not work" (L103 amendment). Step-1 |uv| = 3.53 m/s
+where a healthy CORE2 cold start sits near 0.3 — the M13 signature, on ONE node instead of
+NG5's 64. `FESOM_PRINT_EVERY=999` throughout (the model's |uv|>5 guard only runs at print
+cadence; a lower cadence aborts before the state can reach NaN and the zombie cannot form).
+
+| leg | bin | IC | solver | outcome |
+|---|---|---|---|---|
+| A | det1 | legacy | `cg` | rc=1, dies loudly — the artifact |
+| B | det1 | legacy | `oati` | rc=1 **after announcing a FALLBACK** (`solve 6 after 0 iters, res=4.37e+46`) — the fix |
+| C | stallknob (campaign bin) | legacy | `oati` | rc=0, "300 steps", `it=0`, `T[1e+30,-1e+30]`, **0.1838 s/step** — the zombie |
+| D | det1 | det | `cg` | rc=0, 300 steps, healthy (uv 1.47, T[-2.04,30.63]), **0.2060 s/step** |
+| E | det1 | det | `oati` | rc=0, 300 steps, **0.2055 s/step**, 0 fallbacks, state row identical to D at print precision |
+
+⭐ **A zombie leg is 10.8 % FASTER than the healthy run** (0.1838 vs 0.2060 s/step) — the exact
+size of a plausible "win". This is why the guard fix had to land before any new bin was used
+for timing. ⭐⭐ **det rescues the partition**: leg D completes 300 clean steps on the
+decomposition that "does not work", which retires the L103-amendment reading for this case —
+the partition was never the problem, the fill was.
+
+### ❌ The farc stall plateau is NOT an IC artifact (26961498, 26961508)
+
+Pre-registered question: farc's `cg2`/`oati` false-positive stalls were blamed on a
+21-iteration residual plateau of unknown origin — an artifact-driven transient was a candidate.
+Measured: under `FESOM_IC_EXTRAP=det` at the DEFAULT stall window (20), farc `cg2` at 2048
+ranks still fires **18 fallbacks** (207.37 iters/solve, unchanged). The plateau is intrinsic
+to farc's convergence profile, so `FESOM_SSH_STALL_WINDOW=200` remains mandatory on farc
+under det, exactly as for the recovered legacy rows.
+
+### The re-run list (protocol: pinned `det1_serial`/`det1_cuda`, 4 legs × 2 reps, 300 steps)
+
+| job | configuration | why it is on the list |
+|---|---|---|
+| 26961553 | NG5 CPU 4096 r / 32 N | **new row** — every legacy attempt died or zombied |
+| 26961554 | NG5 CPU 8192 r / 64 N | **new row** — ditto; NG5 has no CPU point on the board |
+| 26961566 | farc CPU 2048 r / 16 N | best CPU result (−13.28 %), shared with the M12 re-board |
+| 26961567 | farc CPU 1024 r / 8 N | second farc rung |
+| 26961555 | dars CPU 6144 r / 48 N | in-range dars row; dars fills are the F45 mechanism |
+
+NG5 runs add `FESOM_WSPLIT=1` (production practice, and what the M13/M12 det board uses), so
+they REPLACE rather than extend the old NG5 GPU row. **Not re-run:** CORE2 CPU (user rule
+2026-08-14 — CPU scaling lives on farc/dars/NG5), and the in-range NG5 CPU rungs at 128–192
+nodes, which belong to the M12 det re-board rather than being duplicated from here.
+
+Frozen bins for this work (`/work/ab0995/a270088/port2/m10/bin/`):
+`det1_serial` sha256 `6450a8ac…`, `det1_cuda` sha256 `bef21c9e…` (m10 tip + det + guard fix).

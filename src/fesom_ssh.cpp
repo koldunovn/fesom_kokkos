@@ -2831,6 +2831,9 @@ static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     double best = resid;
     int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(20);
+    /* M13 — NaN-blind entry (see the pcsi guard): gamma/delta are already tested above, but
+     * a non-finite `resid` with finite reduced scalars would still skip the loop silently. */
+    if (fb == SSH_FB_NONE && (!(resid == resid) || resid > 1e30)) fb = SSH_FB_NAN;
     if (fb == SSH_FB_NONE && resid >= rtol)
     for (iter = 1; iter <= si->maxiter; ++iter) {
         const real_t al = (real_t)alpha, be = (real_t)beta;
@@ -3537,7 +3540,13 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     int fb = SSH_FB_NONE, iter = 0;
     double best = resid; int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(10);      /* in CHECK events, not iterations */
-    if (resid >= rtol)
+    /* M13 — NaN-BLIND ENTRY. `NaN >= rtol` is false, so a solve entered with a non-finite
+     * state used to skip the loop entirely and report "converged in 0 iterations": the run
+     * completed as a zombie at zero solver cost and its timings looked like a win (measured:
+     * jobs 26738526/27/30/31). Baseline cg dies on the same criterion (CG_kk, `residual !=
+     * residual || residual > 1e30`), so use it here too. Byte-inert on finite residuals. */
+    if (!(resid == resid) || resid > 1e30) fb = SSH_FB_NAN;
+    else if (resid >= rtol)
     for (iter = 1; iter <= maxit; ++iter) {
         omega = 1.0 / (gmm - c4 * omega);
         exch_r();
@@ -3761,7 +3770,10 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     double best = resid; int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(10);  /* in PAIRS */
 
-    if (resid >= rtol)
+    /* M13 — NaN-blind entry (see the pcsi guard above): a non-finite entry residual must
+     * fall back, not report a 0-iteration "convergence". Byte-inert on finite residuals. */
+    if (!(resid == resid) || resid > 1e30) fb = SSH_FB_NAN;
+    else if (resid >= rtol)
     while (iter < si->maxiter) {
         /* ---- even half: (α_j, β_j) from the reduced γ_j, δ_j ---- */
         double beta = 0.0, alpha = 0.0;
