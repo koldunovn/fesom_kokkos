@@ -500,8 +500,10 @@ static void build_nod_in_elem2D(fesom_mesh *m)
      * the Fortran does a multi-pass scheme with exchange_nod on global elem
      * IDs to fill nod_in_elem2D for halo nodes too. We do it directly: since
      * scatter_mesh now fills elem_nodes for myDim+eDim+eXDim with local node
-     * IDs (or -1 for outer-halo unmappable), we can just iterate every local
-     * element and build the adjacency.
+     * IDs (or -1 where the vertex is not in the local node list — which
+     * happens for eDim edge-neighbour elements too, not only eXDim; see the
+     * scatter_mesh note), we can just iterate every local element and build
+     * the adjacency.
      *
      * This is critical for the compute_areas pipeline: a partition-boundary
      * node's area is the sum of (1/3 * elem_area) over ALL surrounding
@@ -1206,9 +1208,13 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
                             "partition file inconsistency",
                             p->mype, i, gid + 1, g_node + 1);
             } else if (l_node < 0) {
-                /* Halo element vertex not in our node list — only happens for
-                 * eXDim elements 2+ rings out. SSH stiffness only reads first-
-                 * ring halo (eDim) elements; mark and skip. */
+                /* Halo element vertex not in our node list. 🔴 This happens for
+                 * eDim elements TOO, not only eXDim: com_elem2D's ring 1 is the
+                 * EDGE-neighbour halo, and an edge-neighbour's far vertex is
+                 * routinely a ring-2 node (measured, M12b s3 job 26959760 —
+                 * reading eta at a -1 vertex made halo H0e eta-class wrong).
+                 * Every consumer of elem_nodes at HALO elements must guard
+                 * v < 0 (nod_in_elem2D below skips them; fesom_ssh_se guards). */
                 ++halo_elem_unmappable;
             }
             new_elem_nodes[3*i + k] = l_node;        /* may be -1 for outer halo */

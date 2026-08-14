@@ -1222,10 +1222,20 @@ static void se_forcing(int step_n, const struct fesom_mesh *mesh,
             Uab2[2*e + 0] = uab;
             Uab2[2*e + 1] = vab;
 
+            /* Halo elements can carry elem_nodes == -1 (scatter leaves a halo
+             * vertex unmappable when it is not in the local node list — an
+             * EDGE-neighbour eDim element's far vertex is routinely ring 2).
+             * Guard the read: eta0[-1] is an out-of-bounds read that made the
+             * halo H0e eta-class wrong (measured, job 26959760 dHe=0/dmeta=all)
+             * — the s3 seed. The halo H0e/F values are provisional either way:
+             * H0e is overwritten by the per-step owner exchange, F at halo is
+             * never read. Owned elements are assert-mapped at scatter. */
             const int n0 = elnod[3*e + 0];
             const int n1 = elnod[3*e + 1];
             const int n2 = elnod[3*e + 2];
-            const real_t e0 = eta0[n0], e1 = eta0[n1], e2 = eta0[n2];
+            const real_t e0 = (n0 >= 0) ? eta0[n0] : (real_t)0.0;
+            const real_t e1 = (n1 >= 0) ? eta0[n1] : (real_t)0.0;
+            const real_t e2 = (n2 >= 0) ? eta0[n2] : (real_t)0.0;
             const real_t gx = gs[6*e+0]*e0 + gs[6*e+1]*e1 + gs[6*e+2]*e2;
             const real_t gy = gs[6*e+3]*e0 + gs[6*e+4]*e1 + gs[6*e+5]*e2;
             const real_t f  = fcor[e];
@@ -1414,8 +1424,10 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                 const int n2 = mesh->elem_nodes[3*e + 2];
                 const real_t *eh = s_se.eta[0].h();
                 Hep[(size_t)e]   = (real_t)He;
-                metap[(size_t)e] = (real_t)(((double)eh[n0] + (double)eh[n1]
-                                             + (double)eh[n2]) / 3.0);
+                /* -1 = unmappable halo vertex (the kernel's guard, mirrored) */
+                metap[(size_t)e] = (real_t)(((n0 >= 0 ? (double)eh[n0] : 0.0)
+                                           + (n1 >= 0 ? (double)eh[n1] : 0.0)
+                                           + (n2 >= 0 ? (double)eh[n2] : 0.0)) / 3.0);
             }
             se_gk_elem2("He",   step_n, -1, NeF, Eown, Hep.data(),   1, mesh, p);
             se_gk_elem2("meta", step_n, -1, NeF, Eown, metap.data(), 1, mesh, p);
