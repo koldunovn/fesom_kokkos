@@ -70,3 +70,21 @@ print(f"  busy spread max-min: {b.max()-b.min():.2f} ms; the part the fit explai
       f"{pred.max()-pred.min():.2f} ms")
 print(f"  2-D entity imbalance max/mean = {(on+oe).max()/(on+oe).mean():.3f}; "
       f"{phase} busy max/mean = {b.max()/b.mean():.3f}")
+
+
+def partition_only(dist):
+    """Entity imbalance from the partition files alone — no run needed.
+    Predicts the bt block's imbalance share at points we have not yet run."""
+    on, oe = [], []
+    for fn in os.listdir(dist):
+        if not fn.startswith('my_list'):
+            continue
+        t = np.fromfile(os.path.join(dist, fn), sep=' ', dtype=np.int64)
+        myn, edn = int(t[1]), int(t[2])
+        i = 3 + myn + edn
+        on.append(myn);  oe.append(int(t[i]))
+    on = np.array(on, float);  oe = np.array(oe, float)
+    return dict(ranks=len(on),
+                n_max_mean=on.max() / on.mean(), n_maxmin=on.max() / on.min(),
+                e_max_mean=oe.max() / oe.mean(), e_maxmin=oe.max() / oe.min(),
+                e_per_n=oe.mean() / on.mean())

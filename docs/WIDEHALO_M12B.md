@@ -510,6 +510,34 @@ with it, leaving ≈ 6.7 + 3.3 (the message floor) = 10.0 ms — **≈1.9 ms, or
 That is more than the wide halo's measured −1.8 % at the same point**, and the two are
 independent: the halo removes messages, the partition removes the imbalance the messages absorb.
 
+**Owned or halo?** Both — and they are collinear, so the split is indicative rather than
+identified. Fitting `bt busy ~ a·owned_elems + b·halo_elems + c` gives 10.66 µs and 5.00 µs at
+farc 2048 (R² 0.926; of the 3.60 ms measured busy spread, 2.43 ms is the owned term and 1.03 ms
+the halo term) and 4.17 / 0.74 µs at dars 8192 (R² 0.726; 0.68 vs 0.20 ms of a 0.90 ms spread).
+Owned and halo element counts correlate at +0.96 / +0.90 with each other, which is why the
+coefficients cannot be cleanly separated — and also why balancing one would largely balance the
+other.
+
+**What this predicts for the GPU points, before they run.** The same entity imbalance is readable
+from the partition files alone (`partition_only()` in the same script):
+
+| point | ranks | owned nodes max/mean | owned **elements** max/mean | elements max/min |
+|---|---|---|---|---|
+| NG5 16N GPU | 64 | 1.005 | **1.008** | 1.02 |
+| dars 16N GPU | 64 | 1.005 | **1.014** | 1.04 |
+| farc 16N GPU | 64 | 1.000 | 1.026 | 1.10 |
+| CORE2 4N GPU | 16 | 1.000 | 1.040 | 1.11 |
+| CORE2 16N GPU | 64 | 1.001 | 1.052 | 1.18 |
+| farc 2048 CPU | 2048 | 1.004 | 1.062 | **1.47** |
+| dars 8192 CPU | 8192 | 1.011 | 1.057 | 1.22 |
+
+Node balance is within 1.1 % everywhere; the element imbalance is what varies, and it is **least
+at NG5 and dars 16N**. Those are also the two points with the smallest deep-K zone (§7). So the
+pre-registration is specific: **NG5 and dars at 16N are where φ should be smallest and the
+latency-bound column of §7 most nearly right**, and CORE2 16N — 1.052 element imbalance and the
+steepest zone — is where the rung has the most imbalance mixed into its "wait" and the least room
+for deep K.
+
 🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
 (balance owned nodes **and** owned elements) rather than the single node constraint in use. M11
 has Mt-KaHyPar in its toolbox, which supports multi-constraint partitioning directly; its earlier
