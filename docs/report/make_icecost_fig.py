@@ -20,10 +20,16 @@ import matplotlib.pyplot as plt
 D = json.load(open("/work/ab0995/a270088/port2/m9/m9_results.json"))
 OUT = os.path.dirname(os.path.abspath(__file__))
 
-POINTS = [("p6_core2_phst", "CORE2, 127 k nodes\n1 node / 4 GPUs"),
-          ("p6_farc_phst",  "fArc, 638 k\n4 nodes / 16 GPUs"),
-          ("p6_dars_phst",  "DARS, 3.2 M\n8 nodes / 32 GPUs"),
-          ("p6_ng5_phst",   "NG5, 7.4 M\n16 nodes / 64 GPUs")]
+# Which fleet. op6_* ran under the deterministic cold-start hole fill (FESOM_IC_EXTRAP=det);
+# p6_* is the original, where the fill was partition-dependent so the four points below --
+# four different partitions -- did not start from the same ocean. The ratios plotted here are
+# within-run and were protected either way; the cross-mesh comparison was not.
+# See docs/plans/20260815-m9-det-rerun.md.
+PFX = (sys.argv[1] if len(sys.argv) > 1 else "op6").rstrip("_")
+POINTS = [(f"{PFX}_core2_phst", "CORE2, 127 k nodes\n1 node / 4 GPUs"),
+          (f"{PFX}_farc_phst",  "fArc, 638 k\n4 nodes / 16 GPUs"),
+          (f"{PFX}_dars_phst",  "DARS, 3.2 M\n8 nodes / 32 GPUs"),
+          (f"{PFX}_ng5_phst",   "NG5, 7.4 M\n16 nodes / 64 GPUs")]
 # Session 5: the same four schemes, but each wide-halo scheme now appears in BOTH writings --
 # ring kernels of their own (as measured through session 4) and the ring folded into the loops
 # that already exist (Danilov's structure). The pairs are the figure's whole point: the two bars

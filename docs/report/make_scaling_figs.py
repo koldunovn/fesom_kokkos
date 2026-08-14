@@ -32,6 +32,11 @@ import matplotlib.ticker
 ap = argparse.ArgumentParser()
 ap.add_argument("--root", default="/work/ab0995/a270088/port2/m9")
 ap.add_argument("--outdir", default=os.path.dirname(os.path.abspath(__file__)))
+# Which fleet to plot. scd_* ran under the deterministic cold-start hole fill
+# (FESOM_IC_EXTRAP=det), so every point on a curve starts from the SAME ocean; sc_* is the
+# original fleet, where the fill was partition-dependent and each point started from its own.
+# The report plots scd. See docs/plans/20260815-m9-det-rerun.md.
+ap.add_argument("--prefix", default="scd", choices=("scd", "sc"))
 args = ap.parse_args()
 
 HDR = re.compile(r"^=== M9 (?:CPU|GPU) A/B\s+TAG=(\S+)\s+mesh=(\S+)\s+nodes=(\d+)\s+ntasks=(\d+)"
@@ -40,7 +45,7 @@ LEG = re.compile(r"^LEG\s+(\S+)\s+min\s+([0-9.]+)\s+s/step")
 PHASE = re.compile(r"\[phasestats\]\s+(\w+)\s+\|\s+([0-9.]+)\s+/\s+([0-9.]+)\s+/\s+([0-9.]+)\s+@\d+\s+\|"
                    r"\s+([0-9.]+)\s+/\s+([0-9.]+)\s+/\s+([0-9.]+)\s+@\d+\s+\|\s+([0-9.]+)")
 ICE = ("ice", "icedyn", "iceadv")
-TAG = re.compile(r"^sc_(gpu|cpu)_(\w+?)_(\d+)n(_phst)?$")
+TAG = re.compile(rf"^{args.prefix}_(gpu|cpu)_(\w+?)_(\d+)n(_phst)?$")
 
 MESHES = [("core2", "CORE2, 127 k nodes"), ("farc", "fArc, 638 k"),
           ("dars", "DARS, 3.2 M"), ("ng5", "NG5, 7.4 M")]
