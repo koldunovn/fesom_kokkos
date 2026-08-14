@@ -80,7 +80,10 @@ deepest source level. With `ic_extrap_det=.true.` the two agree bit-for-bit.
 
 ---
 
-## Pre-push checklist
+## Status: OPENED 2026-08-14 as https://github.com/FESOM/fesom2/pull/979
+(commit c7283ee5 on koldunovn:ic-extrap-deterministic; full model compile-verified on Levante/Intel before push)
+
+## Pre-push checklist (executed)
 
 1. `cd /work/ab0995/a270088/port2/partm11/upstream_pr_ic`
    `git remote add fork https://github.com/koldunovn/fesom2.git` (if not present)
