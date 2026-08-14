@@ -252,6 +252,22 @@ static void se_gk_elem2(const char *tag, int step, int m, int scope_n, int Eown,
     }
 }
 
+/* s3 — FESOM_SE_WIDE_RECON (default 1 under the rung): owner-wins F over the
+ * multi-claimed elements, the second half of the s3 fix. 0 re-arms the 3-D ulp
+ * seed (diagnostic arms only — the free rung then amplifies it, x5.35/step at
+ * farc 2048). */
+static int fesom_se_wide_recon(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_WIDE_RECON");
+        if (!e || !e[0] || strcmp(e, "1") == 0)      cached = 1;
+        else if (strcmp(e, "0") == 0)                cached = 0;
+        else { fprintf(stderr, "FESOM_SE_WIDE_RECON=%s not supported (0|1)\n", e); exit(1); }
+    }
+    return cached;
+}
+
 static int fesom_se_visc_on(void)
 {
     static int cached = -1;
@@ -362,6 +378,18 @@ struct fesom_se_state {
     fesom::Field wide_chk;
     double       wide_chk_max = 0.0;
 
+    /* s3 F-reconcile pattern (owner-wins over the multi-claimed elements).
+     * The 3-D model's per-element redundancy leaves Fbt different at the last
+     * bit across claimants (first at step 4, measured); the free rung amplifies
+     * ANY interface inconsistency exponentially (x5.35/step at farc 2048), so
+     * the input must be made single-valued, not merely small. Owner = the
+     * lowest-numbered claimant; per step the owner sends its F pair to every
+     * other claimant. Grouped-by-partner flat lists; empty on ranks that hold
+     * no multi-claimed element. */
+    std::vector<int> rec_s_rank, rec_s_off, rec_s_slot;   /* my sends  */
+    std::vector<int> rec_r_rank, rec_r_off, rec_r_slot;   /* my recvs  */
+    long             rec_global = 0;                      /* announce  */
+
     fesom::Field Tchk;          /* FESOM_SE_CHECK scratch: T(⟨⟨Ū⟩⟩) [Nown] —
                                  * module-owned so it dies BEFORE Kokkos::finalize
                                  * (a function-local static Field aborts at exit). */
@@ -381,6 +409,8 @@ static int             s_se_alloc = 0;
 static void se_build_operators(const struct fesom_mesh *mesh, struct fesom_partit *p);
 static void se_selftest(const struct fesom_mesh *mesh, struct fesom_partit *p);
 static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *p);
+static void se_wide_reconcile_build(const struct fesom_mesh *mesh, struct fesom_partit *p);
+static void se_wide_reconcile_F(struct fesom_partit *p);
 
 void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
 {
@@ -646,6 +676,11 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
         MPI_Barrier(p->MPI_COMM_FESOM);
         MPI_Abort(p->MPI_COMM_FESOM, 13);
     }
+
+    /* s3: wire the owner-wins F pattern (build even when the knob is off — the
+     * per-step apply is what the knob gates; the build is one-time and cheap). */
+    if (p->npes > 1)
+        se_wide_reconcile_build(mesh, p);
 
     if (p->mype == 0) {
         const int M = s_se.M;
@@ -1064,6 +1099,157 @@ static void se_build_operators(const struct fesom_mesh *mesh,
     s_se.elem_nb   .modify_host(); s_se.elem_nb   .sync_device();
 }
 
+/*===========================================================================
+ * s3 — owner-wins F-reconciliation over the multi-claimed elements.
+ *
+ * WHY: `myDim_elem2D` is not a partition (0.55 % of CORE2 dist_8 elements are
+ * claimed by >1 rank). With halo H0e fixed, the ONLY channel through which the
+ * claimants' redundant computations can disagree is the per-step forcing F —
+ * the 3-D model's own last-bit rank-dependence reaches it (measured: one
+ * element, one ulp, step 4, job 26959826). The free-running rung amplifies any
+ * interface inconsistency exponentially (measured x5.35/step at farc 2048,
+ * x1.056/step at CORE2 np128 — jobs 26959819/26959818), so the seed must be
+ * exactly zero, i.e. F must be SINGLE-VALUED, not merely close.
+ *
+ * DISCOVERY (startup, once): a GE-byte claim-count allreduce finds the
+ * multi-claimed gids; a tiny allgatherv of each rank's multi-claimed list
+ * gives every claimant the full claimant sets. Owner = lowest-numbered
+ * claimant (deterministic, partition-file-independent).
+ *
+ * PER STEP: the owner sends its (Fx, Fy) pair to every other claimant, tag
+ * 2303 (2300-2302 = the CSR row ship; 2000-2004 halo kinds; 2200-2206
+ * EVPWIDE). Non-owners overwrite their copy: with every k3 input then
+ * owner-coherent, the redundant Ū copies stay bitwise-locked by induction and
+ * the locally computed ring-1 η IS the owner's bytes — nothing to amplify.
+ *===========================================================================*/
+static void se_wide_reconcile_build(const struct fesom_mesh *mesh,
+                                    struct fesom_partit *p)
+{
+    const long GE   = (long)mesh->elem2D;
+    const int  Eown = mesh->myDim_elem2D;
+
+    std::vector<unsigned char> cnt((size_t)GE, 0);
+    for (int e = 0; e < Eown; ++e) {
+        const long g = (long)p->myList_elem2D[e] - 1;
+        if (g >= 0 && g < GE) cnt[(size_t)g] = 1;
+    }
+    MPI_Allreduce(MPI_IN_PLACE, cnt.data(), (int)GE, MPI_UNSIGNED_CHAR, MPI_SUM,
+                  p->MPI_COMM_FESOM);
+
+    /* my multi-claimed gids (and their local slots) */
+    std::vector<long> mygid;
+    std::vector<int>  myslot;
+    for (int e = 0; e < Eown; ++e) {
+        const long g = (long)p->myList_elem2D[e] - 1;
+        if (g >= 0 && g < GE && cnt[(size_t)g] >= 2) { mygid.push_back(g); myslot.push_back(e); }
+    }
+
+    /* allgatherv of the tiny lists -> full claimant sets */
+    const int nloc = (int)mygid.size();
+    std::vector<int> counts((size_t)p->npes, 0), displs((size_t)p->npes + 1, 0);
+    MPI_Allgather(&nloc, 1, MPI_INT, counts.data(), 1, MPI_INT, p->MPI_COMM_FESOM);
+    for (int r = 0; r < p->npes; ++r) displs[(size_t)r + 1] = displs[(size_t)r] + counts[(size_t)r];
+    const long tot = displs[(size_t)p->npes];
+    std::vector<long> allgid((size_t)(tot > 0 ? tot : 1), -1);
+    MPI_Allgatherv(mygid.data(), nloc, MPI_LONG, allgid.data(), counts.data(),
+                   displs.data(), MPI_LONG, p->MPI_COMM_FESOM);
+
+    /* owner = min claimant rank; build my send/recv lists grouped by partner */
+    std::unordered_map<long, int> owner;    owner.reserve((size_t)tot * 2);
+    for (int r = 0; r < p->npes; ++r)
+        for (long i = displs[(size_t)r]; i < displs[(size_t)r + 1]; ++i) {
+            auto it = owner.find(allgid[(size_t)i]);
+            if (it == owner.end() || r < it->second) owner[allgid[(size_t)i]] = r;
+        }
+    /* Per-partner (gid, slot) lists; sends only if I am the owner, recvs
+     * otherwise. 🔴 Both endpoints of a pair MUST enumerate their common gids
+     * in the SAME order — the allgatherv order differs per rank — so each
+     * partner list is sorted by gid before flattening (canonical pairing). */
+    typedef std::pair<long, int> GS;
+    std::vector<std::vector<GS>> sends((size_t)p->npes), recvs((size_t)p->npes);
+    {
+        std::unordered_map<long, int> slot_of;  slot_of.reserve((size_t)nloc * 2);
+        for (int i = 0; i < nloc; ++i) slot_of[mygid[(size_t)i]] = myslot[(size_t)i];
+        for (int r = 0; r < p->npes; ++r) {
+            if (r == p->mype) continue;
+            for (long i = displs[(size_t)r]; i < displs[(size_t)r + 1]; ++i) {
+                const long g  = allgid[(size_t)i];
+                auto mine = slot_of.find(g);
+                if (mine == slot_of.end()) continue;        /* I don't claim g */
+                const int ow = owner[g];
+                if (ow == p->mype)      sends[(size_t)r].push_back(GS(g, mine->second));
+                else if (ow == r)       recvs[(size_t)r].push_back(GS(g, mine->second));
+                /* three-claimant case: non-owner pairs exchange nothing */
+            }
+        }
+    }
+    auto flatten = [&](std::vector<std::vector<GS>> &per,
+                       std::vector<int> &rk, std::vector<int> &off, std::vector<int> &sl) {
+        rk.clear(); off.clear(); sl.clear(); off.push_back(0);
+        for (int r = 0; r < p->npes; ++r) {
+            if (per[(size_t)r].empty()) continue;
+            std::sort(per[(size_t)r].begin(), per[(size_t)r].end());
+            rk.push_back(r);
+            for (const GS &gs : per[(size_t)r]) sl.push_back(gs.second);
+            off.push_back((int)sl.size());
+        }
+    };
+    flatten(sends, s_se.rec_s_rank, s_se.rec_s_off, s_se.rec_s_slot);
+    flatten(recvs, s_se.rec_r_rank, s_se.rec_r_off, s_se.rec_r_slot);
+
+    long nmc = 0;
+    for (long g = 0; g < GE; ++g) if (cnt[(size_t)g] >= 2) ++nmc;
+    s_se.rec_global = nmc;
+    if (p->mype == 0)
+        fprintf(stderr, "[ssh_se-wide] F-reconcile: %ld multi-claimed elements globally; "
+                        "owner-wins pairs wired (tag 2303, 1 tiny wave per step)\n", nmc);
+}
+
+/* Per step: owner's (Fx,Fy) overwrites every other claimant's copy. Host-side
+ * point-to-point over the tiny lists; F is then re-synced to the device. Ranks
+ * with no multi-claimed elements do nothing (no collective here). */
+static void se_wide_reconcile_F(struct fesom_partit *p)
+{
+    const size_t nS = s_se.rec_s_rank.size(), nR = s_se.rec_r_rank.size();
+    if (nS == 0 && nR == 0) return;
+    s_se.Fbt.sync_host();
+    real_t *F = s_se.Fbt.h();
+
+    std::vector<std::vector<double>> sbuf(nS), rbuf(nR);
+    std::vector<MPI_Request> req;
+    req.reserve(nS + nR);
+    for (size_t k = 0; k < nR; ++k) {
+        const int n = s_se.rec_r_off[k + 1] - s_se.rec_r_off[k];
+        rbuf[k].assign((size_t)(2 * n), 0.0);
+        req.push_back(MPI_REQUEST_NULL);
+        MPI_Irecv(rbuf[k].data(), 2 * n, MPI_DOUBLE, s_se.rec_r_rank[k], 2303,
+                  p->MPI_COMM_FESOM, &req.back());
+    }
+    for (size_t k = 0; k < nS; ++k) {
+        const int n = s_se.rec_s_off[k + 1] - s_se.rec_s_off[k];
+        sbuf[k].resize((size_t)(2 * n));
+        for (int j = 0; j < n; ++j) {
+            const int e = s_se.rec_s_slot[(size_t)(s_se.rec_s_off[k] + j)];
+            sbuf[k][(size_t)(2*j) + 0] = (double)F[2*e + 0];
+            sbuf[k][(size_t)(2*j) + 1] = (double)F[2*e + 1];
+        }
+        req.push_back(MPI_REQUEST_NULL);
+        MPI_Isend(sbuf[k].data(), 2 * n, MPI_DOUBLE, s_se.rec_s_rank[k], 2303,
+                  p->MPI_COMM_FESOM, &req.back());
+    }
+    if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
+    for (size_t k = 0; k < nR; ++k) {
+        const int n = s_se.rec_r_off[k + 1] - s_se.rec_r_off[k];
+        for (int j = 0; j < n; ++j) {
+            const int e = s_se.rec_r_slot[(size_t)(s_se.rec_r_off[k] + j)];
+            F[2*e + 0] = (real_t)rbuf[k][(size_t)(2*j) + 0];
+            F[2*e + 1] = (real_t)rbuf[k][(size_t)(2*j) + 1];
+        }
+    }
+    s_se.Fbt.modify_host();
+    s_se.Fbt.sync_device();
+}
+
 /* Integer hash -> [-1,1], a pure function of the GLOBAL element id: the test
  * field is partition-independent and backend-independent by construction. */
 static inline double se_hash11(unsigned long long x)
@@ -1393,6 +1579,15 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             fesom_halo_field(s_se.H0e, wide ? FESOM_HALO_ELEM2D_FULL : FESOM_HALO_ELEM2D,
                              1, 1, p);
     }
+
+    /* s3 second half — owner-wins F over the multi-claimed elements (see
+     * se_wide_reconcile_build). With H0e AND F owner-coherent, every k3 input
+     * is single-valued, the redundant Ū copies stay bitwise-locked by
+     * induction, and the free rung has no seed to amplify. Rung-only: the
+     * certified path is stabilised by its per-substep η exchange and stays
+     * byte-frozen. One tiny wave per STEP. */
+    if (wide && fesom_se_wide_recon() && p->npes > 1)
+        se_wide_reconcile_F(p);
 
     /* FESOM_SE_WIDE_GEOCHK: is the per-step forcing rank-consistent on the
      * elements that more than one rank claims? Geometry and stencil size are

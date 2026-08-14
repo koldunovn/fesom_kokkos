@@ -50,8 +50,8 @@ run_arm () {   # $1 tag, $2 nsteps, rest = extra env
   grep -h "wide-chk\] step\|wide-drift" "$OUT/run.err" | head -30
 }
 
-run_arm legacy  3  FESOM_SE_H0E_XCHG=0 FESOM_SE_WIDE_GEOCHK=2 FESOM_SE_WIDE_SELFCHECK=1
+run_arm legacy  3  FESOM_SE_H0E_XCHG=0 FESOM_SE_WIDE_RECON=0 FESOM_SE_WIDE_GEOCHK=2 FESOM_SE_WIDE_SELFCHECK=1
 run_arm fixgeo  3  FESOM_SE_WIDE_GEOCHK=2 FESOM_SE_WIDE_SELFCHECK=1
-run_arm fixsc   10 FESOM_SE_WIDE_SELFCHECK=1
+run_arm fixsc   25 FESOM_SE_WIDE_SELFCHECK=1
 run_arm fixfree 25 FESOM_SE_WIDE_SELFCHECK=2
 echo "=== fixgate done ==="
