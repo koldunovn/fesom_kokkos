@@ -101,20 +101,40 @@ The same algorithm runs upstream in Fortran (`gen_support.F90:400-507`): cold-st
 production runs on unlucky partitions inherit the same fragility (restarts are immune, which is
 why it is rarely seen). → Sergey packet material.
 
+## 5b. No NG5 partition was ever clean under legacy fill
+
+dist_16384 — a "working" partition — re-run with per-step diag and the guard raised
+(job 26959926): its global |uv| max is ALSO a Marmara ramp from step 1, cresting at
+**4.86 m/s at step 95** (just under the fatal range) before recovering. The working/failing
+split is only the accidental amplitude of the same IC artifact. Corollary: cross-partition
+comparisons of NG5 cold starts under legacy fill compare *different physical transients*.
+
 ## 6. The fix — `FESOM_IC_EXTRAP=det` (fesom_phc.cpp)
 
-Ring-Jacobi with gid-ordered sums: per sweep, validity is frozen to the previous sweep's state;
-each still-dummy node with ≥1 valid neighbour gets the multiplicity-weighted mean of those
-neighbours (same stencil and eligibility tests as legacy), the (gid,value) pairs sorted by
-ascending global id before summing so the FP sum is decomposition-independent; halo exchange
-after every sweep; termination on a global no-progress Allreduce; legacy vertical fill and
-cleanup unchanged. Default OFF (`legacy`); unknown values refuse loudly. On np=1 det ≠ legacy
-(Jacobi ≠ Gauss–Seidel), so certified byte baselines are untouched with the knob off.
+Two-phase, per layer, all constructed to be decomposition-independent (Jacobi with validity
+and values frozen per sweep; neighbour (gid,value) pairs sorted by ascending global id before
+summing so the FP sum is partition-independent; halo exchange every sweep; global Allreduce
+termination):
+
+1. **Ring fill** — every still-dummy node with ≥1 valid neighbour gets the
+   multiplicity-weighted mean of those neighbours (legacy stencil and eligibility tests).
+2. **Relaxation to quasi-harmonic** — the filled nodes (original valid data held fixed as
+   boundary values) are Jacobi-relaxed until the global max per-sweep change <
+   `FESOM_IC_EXTRAP_TOL` (default 1e-3, 20k sweeps/layer cap). ⚠️ Phase 1 alone is NOT enough
+   — measured (det0, jobs 26960049/51): ring filling from two water masses meets in an
+   equidistant front of maximal contrast across ~one ring; on NG5 that gave a
+   partition-INDEPENDENT step-1 |uv| of 3.06 m/s and death at step 9 on every partition.
+   The relaxation replaces meeting fronts with the smooth interior interpolation of the valid
+   boundary data (no internal extrema).
+
+Legacy vertical fill and cleanup unchanged. Default OFF (`legacy`); unknown values refuse
+loudly. On np=1 det ≠ legacy (Jacobi ≠ Gauss–Seidel), so certified byte baselines are
+untouched with the knob off.
 
 **pi-mesh proof** (login node, np ∈ {1,2,8}, PHC IC, surface T/S dumps via
 `FESOM_EVP_DUMP_DIR`): legacy differs across np at up to **1.33 °C/PSU** (147 of 3140 surface
-nodes np1-vs-np8); det is **bitwise identical across np** (0 differing nodes, all pairs).
-det converges in 7 ring sweeps on pi.
+nodes np1-vs-np8); det is **bitwise identical across np** (0 differing nodes, all pairs; same
+169 fill + 476 relax sweeps at every np). NG5 fill: 260 ring sweeps (phase 1).
 
 ## 7. Acceptance ladder (in flight / to complete)
 
