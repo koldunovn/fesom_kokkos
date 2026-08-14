@@ -1,5 +1,11 @@
 # CG blow-ups on specific partitions — HANDOFF for the fix session (2026-08-14)
 
+> **RESOLVED 2026-08-14 — see `docs/CG_BLOWUPS_M13.md` (branch `m13-cg-robustness`).**
+> Root cause: partition-dependent initial conditions from `extrap_nod3D` hole filling —
+> not the solver. §1's premise ("SE and oati run clean") was an exit-code illusion (both
+> zombie through the same blow-up on 3 of the 4 failing partitions); H1–H4 are superseded.
+> Fix: `FESOM_IC_EXTRAP=det`. This document is kept as the historical starting point.
+
 **You are a debugging session running IN THE MAIN CHECKOUT `~/port_kokkos`** (same folder as
 the M12 session — coordination protocol at the end). Your memory index is the normal one
 (no worktree gotcha). Task from Nikolay: **the stock CG SSH solver blows up on some mesh
