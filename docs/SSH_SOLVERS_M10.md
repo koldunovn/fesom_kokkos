@@ -2027,14 +2027,25 @@ for timing. ⭐⭐ **det rescues the partition**: leg D completes 300 clean step
 decomposition that "does not work", which retires the L103-amendment reading for this case —
 the partition was never the problem, the fill was.
 
+### ✅ The det path re-proved on THIS branch's binary (login node, free)
+
+M13's np-independence proof was run with their bin; `det1_serial` is a different build (m10
+tip + det + guard fix), so it was re-proved here: pi mesh, PHC IC, `FESOM_EVP_DUMP_DIR`
+surface T/S per gid, np ∈ {1, 2, 8}. **3140 of 3140 surface nodes bitwise identical at 17
+significant digits across all three decompositions** (np1-vs-np2 and np1-vs-np8, 0 differing).
+Under legacy fill the same comparison differs by up to 1.33 °C/PSU at 147 nodes.
+
 ### ❌ The farc stall plateau is NOT an IC artifact (26961498, 26961508)
 
 Pre-registered question: farc's `cg2`/`oati` false-positive stalls were blamed on a
 21-iteration residual plateau of unknown origin — an artifact-driven transient was a candidate.
-Measured: under `FESOM_IC_EXTRAP=det` at the DEFAULT stall window (20), farc `cg2` at 2048
-ranks still fires **18 fallbacks** (207.37 iters/solve, unchanged). The plateau is intrinsic
-to farc's convergence profile, so `FESOM_SSH_STALL_WINDOW=200` remains mandatory on farc
-under det, exactly as for the recovered legacy rows.
+Measured: under `FESOM_IC_EXTRAP=det` at the DEFAULT stall window (20), the guard fires in
+the same pattern as under legacy fill — 2048 ranks `cg2` **18**, `oati` **20**, `pcsi` **0**;
+1024 ranks `cg2` **19** — with iteration counts unchanged (207.4 vs the legacy 210.8 class).
+The plateau is intrinsic to farc's convergence profile, so `FESOM_SSH_STALL_WINDOW=200`
+remains mandatory on farc under det, exactly as for the recovered legacy rows. (These two
+default-window jobs, 26961498/26961508, are therefore NOT valid A/B points — they are the
+control that answers the question; the valid farc rows come from 26961566/67.)
 
 ### The re-run list (protocol: pinned `det1_serial`/`det1_cuda`, 4 legs × 2 reps, 300 steps)
 
