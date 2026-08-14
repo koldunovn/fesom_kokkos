@@ -436,6 +436,18 @@ the paired deltas are the deliverable. NG5/dars-GPU + report/docs close in the d
 - CORE2 dt1800 ⇒ dtbt=36 s at M=50: comfortable; but dars dt120/NG5 dt180 ⇒ dtbt 2.4–3.6 s —
   M can likely SHRINK there (the CFL check will say); SE cost scales with M.
 
+## M12b decision — wide-halo subcycling (2026-08-14, on the first board's numbers)
+
+**GO, scoped.** The per-substep exchange LATENCY is now the dominant removable cost of the SE
+block on GPU: at CORE2 16N the bt phase is 7.8 ms busy + **11.8 ms MPI wait (60% wait)** of an
+84 ms step — an upper bound of ~14 pp further gain if the wait were fully reclaimed; NG5 64
+GPU is 32% wait. Design: the mEVP ④L pattern (K-wide halo, exchange every K substeps, LEAN
+rim writing, K=8 start), GPU-first, gated at CORE2 16N + NG5 64 GPU with the house pair
+protocol. The CPU doubled-halo variant (Sergey: only <300 verts/core) is decided on the
+incoming large-CPU phasestats (dars 64N, NG5 128N reps). Prerequisite that pays twice: the
+solo subcycle harness (completes G2's CUDA module-isolation gate at the same time).
+Not started in this session — it is a fresh lever with its own gate ladder.
+
 ## Post-completion
 
 - Sergey review packet: deviations register D1–D4, χ/M/γ₀ G3 findings, the compatibility-invariant

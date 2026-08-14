@@ -19,7 +19,7 @@ else
 fi
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 OUT=/work/ab0995/a270088/port2/m12/g4_${TAG}_$SLURM_JOB_ID; mkdir -p "$OUT"
-export FESOM_ALE=zstar
+export FESOM_ALE=${ALE:-zstar}
 [ "${ARM}" = "se" ] && export FESOM_SSH_MODE=se
 if [ "${PHST:-0}" = "1" ]; then
   export FESOM_SPEED_PHASESTATS=1

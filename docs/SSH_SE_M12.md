@@ -68,7 +68,8 @@ Frozen bins: `/work/ab0995/a270088/port2/m12/bin/` `fesom_port_serial_se0` (df95
 
 ## Open items
 
-the formal M11-style 20-step disturbance report · wide-halo phase
-(M12b) decision on the board · Sergey review packet (deviations D1–D4; the reference's
-SI-Coriolis/∇ηᵐ vs the notes' AB3/η^AM4 — we implement the notes; H_e=Σhelem exactness note;
-the χ=0.1 stability measurement).
+Large-CPU head-to-head board (dars 32/64N, NG5 32/64/128N, farc/CORE2 2048 bake-offs vs the
+M10 solvers — in flight 2026-08-14) · the 20-step disturbance report (runs in flight) ·
+**M12b wide-halo: GO, scoped** (see the plan — CORE2 16N bt phase is 60% MPI wait; mEVP ④L
+pattern, GPU-first, K=8; solo harness prerequisite) · Sergey packet:
+`docs/report/M12_SERGEY_PACKET.md` (deviations, measured answers, 5 questions).
