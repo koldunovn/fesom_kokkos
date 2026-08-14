@@ -2082,3 +2082,40 @@ nodes, which belong to the M12 det re-board rather than being duplicated from he
 
 Frozen bins for this work (`/work/ab0995/a270088/port2/m10/bin/`):
 `det1_serial` sha256 `6450a8ac…`, `det1_cuda` sha256 `bef21c9e…` (m10 tip + det + guard fix).
+
+### ⭐⭐ RESULTS — the det re-runs, against their legacy counterparts
+
+All five rows `fallbacks=0` on every leg, four-leg complete, min-of-2, `det1_serial` pinned.
+Best variant per configuration (`oati` throughout):
+
+| configuration | legacy `d_total` | **det `d_total`** | legacy SSH% | det SSH% | iters legacy → det |
+|---|--:|--:|--:|--:|--:|
+| farc CPU 2048 r | −13.28 % (26741204) | **−12.90 %** (26961566) | 22.8 | 23.3 | 211.3 → 213.1 |
+| farc CPU 1024 r | −5.60 % (26741203) | **−5.29 %** (26961567) | 11.7 | 11.3 | 211.7 → 213.0 |
+| dars CPU 6144 r | −3.01 % (26741040) | **−1.69 %** (26961555) | 5.6 | 4.6 | 36.62 → 36.63 |
+| NG5 CPU 4096 r | *(unmeasurable)* | **−0.69 %** (26961553) | — | 1.9 | — → 76.7 |
+| NG5 CPU 8192 r | *(unmeasurable)* | **−1.93 %** (26961554) | — | 3.6 | — → 76.7 |
+
+**Nothing on the board is overturned.** The campaign's best CPU result reproduces at −12.90 %
+against −13.28 % — a 0.38 pp difference eight days apart, inside the inter-allocation noise
+band (never compare across weeks: the same-day rule exists for exactly this).
+
+**dars is the one row that moves, and it moves for the reason the campaign predicts.** The
+variants are unchanged (`oati` 5.41 → 5.52 ms, iterations 36.62 → 36.63, ms/iter 0.150 →
+0.151); what changed is the BASELINE solve, 7.44 → 6.00 ms/step, dropping the SSH share
+5.6 → 4.6 %. Less headroom, proportionally less payoff (share-scaled prediction −2.5 %,
+observed −1.7 %). The solver did not get worse under a clean IC — the baseline got better.
+
+**⭐ NG5 CPU: two rows where the board had none.** Every legacy attempt died or zombied
+(§ the audit above), so the campaign has never had a NG5 CPU point. Under det both rungs run
+300 clean steps with iteration parity (`cg` 77.6, `cg2` 76.2, `oati` 76.7, `pcsi` 87.4) and
+no fallbacks, and they land exactly where the SSH-share law puts them: shares of 1.9 % and
+3.6 % buy −0.69 % and −1.93 % of the step. NG5 CPU is a low-share, low-payoff regime — an
+honest negative for the solvers, and the first one measured rather than inferred.
+
+⚠️ **Read the NG5 phase split with care.** On both NG5 rungs the SSH-phase timer gets WORSE
+(`d_SSH` +84/+42/+36 % at 4096, +53/+34/+23 % at 8192) while the whole step gets faster. That
+is not a paradox and not a solver failure: ~90 % of the measured solve cost at scale IS MPI
+wait (see the phase-budget section), so at a 2–4 % share the phase timer is measuring where
+the wait sits, not how fast the solver is. Iteration counts — the wait-free quantity — show
+parity. Do not quote `d_SSH` from a low-share configuration.
