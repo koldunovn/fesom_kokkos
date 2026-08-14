@@ -329,7 +329,7 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 | point | off s/step | on s/step | Δ | mechanism (phasestats) |
 |---|---|---|---|---|
 | farc 2048 CPU dt900 M=90 wsplit | 0.0731 | 0.0718 | **−1.8 %** | bt mpi/step 182→94 (halved, as designed), bt wait 5.2→4.7 ms; bt is only ~16 % of the 73 ms step here — the latency share bounds the CPU payoff (Sergey's "on CPU it is just better scaling", now as a number). Job 26960156, all four legs healthy (η=3.47, T sane), reps within 0.4 % |
-| dars 8192 CPU dt120 M=20 wsplit | — | — | pending 26960157 | census predicts the worst ring-1 redundant compute (+28.2 %) |
+| dars 8192 CPU dt120 M=20 wsplit | 0.0976 | 0.0980 | **+0.4 % (wash)** | bt mpi/step 42→24, bt wait 3.1→2.8 ms — mechanism intact, but bt is ~6 % of a 98 ms step and the +28.2 % ring-1 redundant compute eats the rest, exactly as the census predicted. Job 26960157, legs healthy (η=4.08), off-rep spread 1.5 % > the delta |
 | CORE2 16N GPU / NG5 16N GPU | — | — | behind the drained gpu partition | the motivating points: CORE2 16N bt = 7.8 ms busy + **11.8 ms MPI wait** of an 84 ms step |
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
