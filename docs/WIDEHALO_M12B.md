@@ -155,14 +155,33 @@ from knob-off); CORE2 np128 is NaN before step 500; farc 2048 is NaN by step 300
 **rank-count dependent**, which fits the interface fraction (ring-1 is 6.1 % of owned at np64,
 13.2 % at np128, 19.7 % at farc 2048).
 
-**Working hypothesis, under test (job 26953774):** the rung is a Schwarz-like decomposition in
-which each rank recomputes its neighbour's boundary values. That is stable when the recomputation
-is EXACT, but §3 established it cannot be — the viscosity makes Ū rank-dependent on the 0.55 % of
-multi-claimed elements, so each interface carries a small inconsistency that acts as a forcing.
-The decisive test is `FESOM_SE_VISC=0`, the one configuration where the ring compute is provably
-exact: if that arm is stable at np128 while the viscous arm is not, **exactness is a stability
-requirement here, not a nicety**, and the rung cannot ship until the multi-claimed elements are
-reconciled.
+**The hypothesis was wrong, and the measurement said so** (job 26953774): the `VISC=0` arm blew up
+too (step ~110 vs ~90 for the viscous arm) while the knob-off control ran clean to step 300. And at
+np128 with `VISC=0` the selfcheck showed the ring compute is exact **to one ulp** (2e-19 at step 2,
+3.9e-16 by step 40). So the residual was never the cause.
+
+### 🔴 The actual cause, and the fix: "halo == the owner's bytes" is an invariant the model relies on
+
+Inside the subcycle it does not matter that our ring-1 η is the owner's value only to within a ulp
+— it feeds the barotropic loop and nothing else. But at the end of the step **η leaves the
+module**: finalize writes `hbar` over the full node extent, substep 11 derives `eta_n`, and the 3-D
+model then consumes η **at halo nodes** (ALE layer thicknesses, level masks, wet/dry decisions).
+Those consumers assume a halo entry is a byte-copy of the owner's value — which an exchange
+guarantees and a local recomputation does not. A one-ulp disagreement is enough for two ranks to
+reach different *structural* decisions about the same node.
+
+**Fix: one η exchange per STEP** (not per substep), restoring the invariant where it matters.
+At M=50 the rung becomes 100 → **51** exchanges rather than 100 → 50, so essentially all of the
+saving survives.
+
+**Result at CORE2 np128, 300 steps** (job 26953980): the rung now runs clean and ends at
+`η=2.02, uv=1.47` — **identical to the knob-off control at the same step**.
+
+⚠️ The `VISC=0` arm still dies (~step 200-250) *with* the fix. Before reading anything into that:
+`FESOM_SE_VISC=0` was used as a diagnostic without ever checking that the CERTIFIED path is stable
+without the two-term viscosity — a control I should have run first (job 26954124 is running it
+now). The viscosity is part of the certified scheme; if knob-off is also unstable without it, the
+`VISC=0` blow-up says nothing about the rung.
 
 ⚠️ `FESOM_SPEED_PHASESTATS` resolves **OFF on the Serial backend** without `FESOM_SPEED_FORCE_SERIAL=1`
 (rule 0.24; the guard announces it rather than producing an empty report), so phase attribution

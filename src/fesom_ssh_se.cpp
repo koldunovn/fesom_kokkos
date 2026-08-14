@@ -1464,6 +1464,25 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                          wide ? FESOM_HALO_ELEM2D_FULL : FESOM_HALO_ELEM2D, 1, 2, p);
     }
 
+    /* 🔴 M12b — restore "halo == the owner's bytes" ONCE PER STEP.
+     *
+     * Inside the subcycle the ring-1 η we compute is the owner's value to within
+     * a ulp, and that is fine: it only feeds the barotropic loop. But at the end
+     * of the step η leaves this module — finalize writes hbar over the full node
+     * extent, substep 11 derives eta_n, and the 3-D model then consumes η at HALO
+     * nodes (ALE layer thicknesses, level masks, wet/dry decisions). Those
+     * consumers assume a halo entry is a byte-copy of the owner's value, which is
+     * what an exchange guarantees and a local recomputation does not. A one-ulp
+     * disagreement there lets two ranks reach different structural decisions about
+     * the same node, and the model blows up within ~100 steps at np128 (measured;
+     * np8 survives much longer, and the failure tracks the interface fraction).
+     *
+     * One exchange per STEP restores the invariant and costs 1 message where the
+     * certified path spends M: at M=50 the rung is still 100 -> 51, not 100 -> 50.
+     * The saving survives; the invariant is not negotiable. */
+    if (wide && !wide_chk)
+        fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+
     /* GEOCHK, end of step: is Ū itself rank-consistent on the elements that more
      * than one rank claims? Geometry, stencil and forcing are (measured), so if
      * Ū is not, the redundant computation itself is the seed — and no local
