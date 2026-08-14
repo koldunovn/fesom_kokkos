@@ -443,7 +443,10 @@ advantages, CPU = just better scaling — matches the M12b GO-GPU-first scoping 
 Interim large-CPU head-to-head (same-day, 4 arms/point, min-of-2):
 | point | SE vs SI(zstar) | M10 best vs SI(linfs) | zstar-vs-linfs offset |
 |---|---|---|---|
-| CORE2 2048 CPU | **−19.9%** | pcsi **−25.5%** (pcsi WINS the point) | −4.1% |
+| CORE2 2048 CPU ⚠️ | **−19.9%** | pcsi **−25.5%** (pcsi WINS the point) | −4.1% |
+⚠️ CORE2-2048-CPU is BEYOND the mesh's ~800-rank CPU saturation (user 2026-08-14: "CORE2 does
+not scale beyond around 800 CPU no matter what"; M10 efficiency 55% there) — historical
+footnote, NOT an operating point; no further CORE2 CPU runs (rule in memory).
 | farc 2048 CPU | **−14.2%** | oati −13.5% (SE wins by 0.7pp, same day) | +1.8% |
 | dars 32N (4096r) | −1.3% | oati +0.3% | +3.5% |
 | dars 64N (8192r) | **−4.4%** | oati −2.4% (SE ahead, growing with ranks) | +1.2% |
