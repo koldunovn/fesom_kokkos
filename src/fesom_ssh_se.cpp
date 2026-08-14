@@ -1350,6 +1350,40 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
     /* Once per step: forcing (T3) + the m=0 viscosity anchor + zero the mean. */
     se_forcing(step_n, mesh, dyn);
 
+    /* 🔴 s3 ROOT-CAUSE FIX — restore "halo == the owner's bytes" for H0e.
+     *
+     * se_forcing computes H0e locally over owned+eDim on every rank, and the
+     * halo copies are NOT the owner's bytes (measured: 1334 elements differ by
+     * up to 1.0e-1 m — η-class — at step 2, job 26959682; exactly 0 at step 1
+     * because H0e is η-independent at the cold start, which is why every
+     * step-1 gate was green). k3's viscosity reads H0e[nb] at HALO slots, so
+     * two holders of the same multi-claimed element see different hh whenever
+     * the neighbour resides in the halo on one of them — THE seed of the s2
+     * holder divergence (Ubt 529 elements @ step 2 END), which the free rung
+     * then amplifies into the farc NaN. One tiny per-STEP exchange makes every
+     * H0e copy the owner's bytes; with it the k3 stencil is rank-consistent
+     * and the multi-claimed copies stay bitwise-locked (probe-verified).
+     * Under the rung the FULL list also fills the eXDim tail — the exact
+     * remedy the se_wide_startup guard (1) prescribes.
+     * FESOM_SE_H0E_XCHG=0 keeps the legacy (incoherent) behaviour for A/B. */
+    {
+        static int h0e_xchg = -1;
+        if (h0e_xchg < 0) {
+            const char *e = getenv("FESOM_SE_H0E_XCHG");
+            if (!e || !e[0] || strcmp(e, "1") == 0)      h0e_xchg = 1;
+            else if (strcmp(e, "0") == 0)                h0e_xchg = 0;
+            else { fprintf(stderr, "FESOM_SE_H0E_XCHG=%s not supported (0|1)\n", e); exit(1); }
+            if (p->mype == 0 && !h0e_xchg)
+                fprintf(stderr, "[ssh_se] WARNING: FESOM_SE_H0E_XCHG=0 — halo H0e stays "
+                                "locally recomputed (NOT the owner's bytes); the viscosity "
+                                "stencil is then rank-inconsistent on multi-claimed elements "
+                                "(the s2/s3 seed). Diagnostic arms only.\n");
+        }
+        if (h0e_xchg)
+            fesom_halo_field(s_se.H0e, wide ? FESOM_HALO_ELEM2D_FULL : FESOM_HALO_ELEM2D,
+                             1, 1, p);
+    }
+
     /* FESOM_SE_WIDE_GEOCHK: is the per-step forcing rank-consistent on the
      * elements that more than one rank claims? Geometry and stencil size are
      * (measured 0 differences), so if the ring-1 mismatch has a seed it must be
@@ -1361,6 +1395,63 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
         const int NeF = mesh->myDim_elem2D + mesh->eDim_elem2D;   /* se_forcing extent */
         se_gk_elem2("Fbt", step_n, -1, NeF, Eown, s_se.Fbt.h(), 2, mesh, p);
         se_gk_elem2("H0e", step_n, -1, NeF, Eown, s_se.H0e.h(), 1, mesh, p);
+
+        /* Decompose a halo-H0e mismatch into its two inputs: He = Σ helem and
+         * meta = mean η at the element (H0e = He − meta). Both are recomputed
+         * here with the kernel's own guard, from the HOST mirrors each rank
+         * actually holds — so a nonzero spread names the incoherent input. */
+        if (se_wide_geochk_level() >= 2) {
+            mesh->helem_fld.sync_host(); s_se.eta[0].sync_host();
+            const int nl = mesh->nl;
+            std::vector<real_t> Hep((size_t)NeF, 0.0), metap((size_t)NeF, 0.0);
+            for (int e = 0; e < NeF; ++e) {
+                double He = 0.0;
+                if (mesh->ulevels[e] == 1)
+                    for (int nz = mesh->ulevels[e] - 1; nz < mesh->nlevels[e] - 1; ++nz)
+                        He += (double)mesh->helem[FESOM_ELEM3D(e, nz, nl)];
+                const int n0 = mesh->elem_nodes[3*e + 0];
+                const int n1 = mesh->elem_nodes[3*e + 1];
+                const int n2 = mesh->elem_nodes[3*e + 2];
+                const real_t *eh = s_se.eta[0].h();
+                Hep[(size_t)e]   = (real_t)He;
+                metap[(size_t)e] = (real_t)(((double)eh[n0] + (double)eh[n1]
+                                             + (double)eh[n2]) / 3.0);
+            }
+            se_gk_elem2("He",   step_n, -1, NeF, Eown, Hep.data(),   1, mesh, p);
+            se_gk_elem2("meta", step_n, -1, NeF, Eown, metap.data(), 1, mesh, p);
+
+            /* Offender dump: up to 3 halo slots per rank whose H0e differs
+             * from the owners' agreed value, with the He/meta split. */
+            const long GE = (long)mesh->elem2D;
+            std::vector<double> lo3((size_t)(3*GE), 1e300), hi3((size_t)(3*GE), -1e300);
+            s_se.H0e.sync_host();
+            const real_t *Hh = s_se.H0e.h();
+            for (int e = 0; e < Eown; ++e) {
+                const long g = (long)p->myList_elem2D[e] - 1;
+                if (g < 0 || g >= GE) continue;
+                lo3[(size_t)g]        = hi3[(size_t)g]        = (double)Hh[e];
+                lo3[(size_t)(GE+g)]   = hi3[(size_t)(GE+g)]   = (double)Hep[(size_t)e];
+                lo3[(size_t)(2*GE+g)] = hi3[(size_t)(2*GE+g)] = (double)metap[(size_t)e];
+            }
+            MPI_Allreduce(MPI_IN_PLACE, lo3.data(), (int)(3*GE), MPI_DOUBLE, MPI_MIN,
+                          p->MPI_COMM_FESOM);
+            MPI_Allreduce(MPI_IN_PLACE, hi3.data(), (int)(3*GE), MPI_DOUBLE, MPI_MAX,
+                          p->MPI_COMM_FESOM);
+            int ndump = 0;
+            for (int e = Eown; e < NeF && ndump < 3; ++e) {
+                const long g = (long)p->myList_elem2D[e] - 1;
+                if (g < 0 || g >= GE || lo3[(size_t)g] > 1e299) continue;
+                const double dH = fabs((double)Hh[e] - lo3[(size_t)g]);
+                if (dH <= 1e-13) continue;
+                ++ndump;
+                fprintf(stderr, "[ssh_se-gk-dump] r%d step %d gid %ld HALO slot %d: "
+                                "dH0e=%.3e dHe=%.3e dmeta=%.3e (owner H0e=[%.15g,%.15g])\n",
+                        p->mype, step_n, g + 1, e,
+                        dH, (double)Hep[(size_t)e] - lo3[(size_t)(GE+g)],
+                        (double)metap[(size_t)e] - lo3[(size_t)(2*GE+g)],
+                        lo3[(size_t)g], hi3[(size_t)g]);
+            }
+        }
     }
     if (fesom_se_check_on())
         se_check_forcing(step_n, mesh, p);
