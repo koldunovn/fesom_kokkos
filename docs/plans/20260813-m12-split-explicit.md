@@ -450,9 +450,34 @@ footnote, NOT an operating point; no further CORE2 CPU runs (rule in memory).
 | farc 2048 CPU | **−14.2%** | oati −13.5% (SE wins by 0.7pp, same day) | +1.8% |
 | dars 32N (4096r) | −1.3% | oati +0.3% | +3.5% |
 | dars 64N (8192r) | **−4.4%** | oati −2.4% (SE ahead, growing with ranks) | +1.2% |
+➕ **NG5 LARGE-CPU TRIO (2026-08-14, user-requested 32→256-node sweep; 300 steps, min-of-2):**
+| NG5 point | v/core | SI(CG) | SE | oati | SE vs SI | SE vs oati |
+|---|---|---|---|---|---|---|
+| 128N (16384r) | 452 | 0.1814 | 0.1539 | 0.1557 | **−15.2%** | −1.2% |
+| 160N (20480r) | 361 | CG diverged | 0.1270 | 0.1310 | n/a | **−3.1%** |
+| 192N (24576r) | 301 | 0.1478 | **0.1149** | 0.1171 | **−22.3%** | −1.9% |
+SE's margin GROWS with ranks and it still scales (0.154→0.127→0.115); SE beats oati at every
+large-CPU NG5 point; SE's reps are TIGHT (0.1149/0.1191) while SI/oati wobble (fewer
+collectives = less jitter sensitivity). 256N (32768r, 226 v/core) chained behind the
+dist_32768 partitioner (job 26946830).
+➕ **BAROTROPIC-COMPONENT TABLE (phasestats mean ms/step, busy+wait=total):**
+| point | SI cg | SE bt | Δcomp | cg share | ssh MPI/step |
+|---|---|---|---|---|---|
+| CORE2 4N GPU | 11.5+9.1=20.6 | 6.9+7.7=14.6 | −29% | 27% | 321→101 |
+| CORE2 16N GPU | 12.2+16.2=28.4 | 7.8+11.8=19.6 | −31% | 30% | 321→101 |
+| farc 2048 | 2.6+20.6=23.2 | 6.6+5.2=11.8 | −49% | 27% | 846→181 |
+| dars 2048 (dt120) | 1.4+15.4=16.8 | 11.1+13.6=24.7 | +47% | 4% | 149→41 |
+| dars 64N | 0.7+7.7=8.4 | 2.5+3.1=5.6 | −33% | 8% | 149→41 |
+| NG5 64 GPU | 9.7+12.0=21.7 | 11.4+5.3=16.7 | −23% | 9% | 234→41 |
+| NG5 128N | 1.4+25.2=26.6 | 3.2+6.1=9.3 | −65% | 15% | 309→41 |
+| NG5 192N | 1.2+26.8=28.0 | 2.1+9.6=11.7 | −58% | 21% | 309→41 |
+At scale the cg phase is nearly ALL WAIT (NG5 192N: 1.2 ms busy in 28 ms) — the pure
+allreduce-latency regime; dars-dt120 is the honest counter-example (cheap solve, SE's 2-D
+busy work costs more). NG5 192N (301 v/core) sits AT Sergey's <300 threshold for the CPU
+doubled halo; 256N (226) will be the first in-regime CPU test for M12b.
+
 ➕ **FINDING (NG5-CPU): the STOCK CG DIVERGES on NG5 /pool dist_4096 AND dist_8192**
-("CG_kk residual diverged" abort, both reps, both zstar and linfs) while **SE and oati both
-run clean on the same partitions** — consistent with M11's "NG5 = most partition-fragile
+("CG_kk residual diverged" abort, both reps, both zstar and linfs) **and on bigpart dist_20480** while **SE and oati run clean on ALL of them** (CG survives dist_16384/24576 — per-partition fragility in BOTH directions, the M11 pattern) — consistent with M11's "NG5 = most partition-fragile
 mesh". The SI baseline is unavailable at NG5-CPU; the honest comparison there is SE-vs-oati
 head-to-head + the CG fragility recorded as a result in its own right.
 
