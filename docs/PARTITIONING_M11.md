@@ -3256,3 +3256,47 @@ difference is the initial condition"; leg B is the dead-knob guard (L80). The fo
 scripts default to these binaries and to det, print the setting, and flag any leg whose log
 lacks the announce line. `m11_harvest_races.py` now carries an `ic` column and `--best` groups by
 it, so a det row can never be silently compared against a legacy one.
+
+## 🔴 The two stability failures that shaped the dars recommendation are REFUTED, not merely void
+
+dars 2048 CPU, 3,000-step screen under det, all four legs in one allocation (job 26961564):
+
+| leg | 3,000 steps | s/step | vs base | what the legacy campaign recorded |
+|---|---|--:|--:|---|
+| base (shipped) | clean | 0.4129 | — | — |
+| `MINCONN` (`a4m`) | **clean** | 0.3954 | **−4.24 %** | F39: "diverges before step 3,000 — unusable" |
+| KaMinPar `w=100+nlev` | clean | 0.4049 | −1.94 % | the recommendation that replaced it |
+| `dars_seed660013` | **clean** | 0.3942 | **−4.53 %** | F45: "BLOWUP at step 14" |
+
+Both partitions the campaign declared unusable run the full screen. The census explains why they
+were declared so: each starts 27 PSU away from the shipped partition's initial state.
+
+**Consequence: the dars 2048 CPU recommendation flips from KaMinPar back to `MINCONN`**, which
+leads by 2.3 pp at protocol length and by 0.7 pp in the matched min-of-2 race (26961290: `MINCONN`
+−3.74 %, KaMinPar −3.04 %, slack −2.79 %, `MINCONN`+`CONTIG` −2.60 %, every repetition spread
+≤0.4 %). The engine's "only stable and tier-1 arm" status at dars rested on the F39 failure and on
+tier-4 verdicts that the det gate (26961424) dissolves — there, no arm is distinguishable from a
+seed re-roll on any field, and every leg takes an identical CG iteration path for twenty steps.
+
+★ **A lead worth its own measurement**: the fastest leg in that screen is `dars_seed660013`, a
+seed-only re-roll of the *stock* recipe. If that holds up in a matched race, re-rolling the seed
+is worth several per cent at dars 2048 with no change of recipe at all — and the shipped dars
+partition is simply an unlucky draw. Raced properly in 26962958 (base + three stock seed re-rolls
++ `MINCONN`, min-of-2); one repetition is not a result.
+
+## NG5 2048 CPU: still a null, but for an entirely different reason
+
+All four arms now run. Two of them (`MINCONN`, `MINCONN`+`UFACTOR=30`) are the ones F34 recorded
+dying at steps 71 and 63; each completes 300 steps twice, clean.
+
+| arm | det (min-of-2) | legacy |
+|---|--:|--:|
+| `MINCONN`+`UFACTOR=30` | +0.43 % | died at step 63 |
+| `MINCONN` | +0.76 % | died at step 71 |
+| slack `UFACTOR=30` | +1.06 % | +0.87 % |
+| `MINCONN`+`CONTIG` | +2.05 % | died |
+
+Jobs 26961645 / 26961646, repetition spreads 0.1–2.2 %. Every arm is slower than the shipped
+partition and every difference is inside the noise. The verdict "null" survives; the story
+attached to it — **"NG5 is the most partition-fragile mesh in the campaign"** — does not. There is
+no fragility. Repartitioning simply does not pay on NG5 at 2048 cores.
