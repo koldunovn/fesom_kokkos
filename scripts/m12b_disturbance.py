@@ -14,9 +14,18 @@ arm's difference from the reference sits inside the control spread, the rung
 perturbs the model no more than running it on a different number of ranks — the
 standard the project already accepts (L79, and M11's graded framework).
 
+🔴 The comparison must be PAIRED AT THE SAME RANK COUNT. An arm run at a
+different rank count from the reference differs by the lever AND by the rank
+count, and the second term dominates by orders of magnitude — the first version
+of this script compared on@np128 with off@np64 and reported it "outside the
+spread", when in fact it was measuring the rank-count change with the lever
+buried in the last digits. So: each --pair is (knob-off, knob-on) at ONE rank
+count and gives the LEVER effect; the --controls give the model's own rank-count
+spread, which is the bar the lever is judged against.
+
 usage:
-  m12b_disturbance.py --ref <dir> --controls <d1> <d2> ... --arms <a1> [a2 ...]
-                      [--snap snap_000020.nc] [--vars temp,salt,ssh]
+  m12b_disturbance.py --ref <off_dir> --controls <off_d1> ... --pair <off> <on>
+                      [--pair <off2> <on2>] [--snap snap_000020.nc] [--vars ...]
 """
 import argparse
 import os
@@ -29,7 +38,7 @@ try:
 except ImportError:
     sys.exit("netCDF4 not available in this interpreter")
 
-DEFAULT_VARS = ["ssh", "temp", "salt", "u", "v"]
+DEFAULT_VARS = ["eta_n", "T", "S", "u", "v", "w", "m_ice", "a_ice"]
 
 
 def load(d, snap, var):
@@ -61,7 +70,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ref", required=True)
     ap.add_argument("--controls", nargs="+", required=True)
-    ap.add_argument("--arms", nargs="+", required=True)
+    ap.add_argument("--pair", nargs=2, action="append", metavar=("OFF", "ON"),
+                    required=True,
+                    help="a (knob-off, knob-on) pair at ONE rank count; repeatable")
     ap.add_argument("--snap", default=None,
                     help="snapshot filename; default = the last snap_*.nc in --ref")
     ap.add_argument("--vars", default=",".join(DEFAULT_VARS))
@@ -87,12 +98,14 @@ def main():
                 s = stats(ref, o)
                 if s:
                     crows.append((os.path.basename(c), s))
-        for m in a.arms:
-            o = load(m, snap, var)
-            if o is not None and o.shape == ref.shape:
-                s = stats(ref, o)
-                if s:
-                    arows.append((os.path.basename(m), s))
+        for off_d, on_d in a.pair:
+            b = load(off_d, snap, var)
+            o = load(on_d, snap, var)
+            if b is None or o is None or b.shape != o.shape:
+                continue
+            s = stats(b, o)          # LEVER effect: same rank count, knob off vs on
+            if s:
+                arows.append((f"{os.path.basename(on_d)} vs its own off", s))
         if not crows or not arows:
             continue
 
@@ -107,14 +120,19 @@ def main():
             print("   !! controls are identical to the reference: the spread is vacuous")
             rc = 1
         for n, s in arows:
-            verdict = ("INSIDE the control spread" if s["rms"] <= cmax else
-                       f"OUTSIDE by x{s['rms']/cmax:.2f}" if cmax > 0 else "no spread")
-            print(f"   ARM     {n:<28s} rms {s['rms']:.4g}  max {s['mx']:.4g}  -> {verdict}")
+            if cmin > 0:
+                verdict = (f"{cmin/s['rms']:.0f}x SMALLER than the smallest control"
+                           if s["rms"] < cmin else
+                           "inside the control spread" if s["rms"] <= cmax else
+                           f"OUTSIDE by x{s['rms']/cmax:.2f}")
+            else:
+                verdict = "no spread"
+            print(f"   LEVER   {n:<34s} rms {s['rms']:.4g}  max {s['mx']:.4g}  -> {verdict}")
             if cmax > 0 and s["rms"] > cmax:
                 rc = 1
         print(f"   control spread rms [{cmin:.4g}, {cmax:.4g}]")
 
-    print("\n# rc=0 means every arm sits inside the control spread on every field")
+    print("\n# rc=0 means the LEVER effect sits inside the model's own rank-count spread everywhere")
     return rc
 
 

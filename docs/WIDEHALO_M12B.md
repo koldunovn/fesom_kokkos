@@ -107,6 +107,32 @@ perturbation class the residual belongs to.
 *Independently of M12b, this says the SE viscosity yields slightly different Ū on ~0.5 % of
 elements depending on which rank you ask. Worth putting to Sergey on its own.*
 
+## 3b. Disturbance report — the lever against the model's own rank-dependence (W5b, PASS)
+
+Job 26953179, CORE2, 20 steps, `scripts/m12b_disturbance.py`. The residual is a rank-ordering
+effect, so it is judged against the spread the model already shows when only the rank count
+changes — the same perturbation class, and the standard the project accepts (L79).
+
+🔴 **Paired at the same rank count.** An arm run at a *different* rank count from the reference
+differs by the lever AND by the rank count, and the second term dominates by orders of magnitude:
+the first version of this report compared on@np128 with off@np64 and called it "outside the
+spread" when it was in fact measuring the rank-count change. Each lever row below is knob-off vs
+knob-on at ONE rank count; the controls are knob-off runs at other rank counts.
+
+| field | control spread (rms) | **lever** rms @np64 | @np128 | lever vs smallest control |
+|---|---|---|---|---|
+| `eta_n` | 3.2e-3 … 1.2e-2 | 7.88e-7 | 7.80e-7 | **4087× smaller** |
+| `T` | 2.5e-2 … 4.5e-2 | 6.67e-7 | 7.97e-7 | 37368× |
+| `S` | 2.3e-2 … 2.6e-1 | 2.22e-7 | 2.92e-7 | 103165× |
+| `u` / `v` | 1.4e-3 … 2.4e-3 | 4.7e-7 / 4.4e-7 | 4.4e-7 / 4.6e-7 | ~3000× |
+| `w` | 8.4e-6 … 1.7e-5 | 3.99e-10 | 3.79e-10 | 21112× |
+| `m_ice` / `a_ice` | 1.7e-2 … 2.4e-2 | 8.4e-6 / 7.2e-6 | 8.5e-6 / 7.3e-6 | ~2200× |
+
+**rc=0 on every field**, and the two rank counts agree with each other to within a few per cent —
+the lever's footprint is a property of the transformation, not of the partition it ran on. In the
+M11 grading this is comfortably tier 1: the winner is not distinguishable from a seed re-roll,
+by three to five orders of magnitude.
+
 ## 4. The extended-mesh contract (design of record; not built)
 
 The rule that makes deep K and higher-order advection share one layer: **extended entities are
