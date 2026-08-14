@@ -1388,7 +1388,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * elements that more than one rank claims? Geometry and stencil size are
      * (measured 0 differences), so if the ring-1 mismatch has a seed it must be
      * here — F and H0e are the only per-step, 3-D-derived inputs k3 reads. */
-    if (se_wide_geochk_level() >= 1 && step_n <= 3) {
+    if (se_wide_geochk_level() >= 1 && step_n <= 5) {
         s_se.Fbt.sync_host(); s_se.H0e.sync_host();
         /* level-1 probes compared the x component only (the s2 blind spot);
          * probe BOTH components + H0e, holder-vs-holder AND halo-vs-owner. */
@@ -1466,7 +1466,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * (step 2 substep 1), so the anchor and the k3 inputs are probed at full
      * resolution here. */
     const int gklev = se_wide_geochk_level();
-    if (gklev >= 2 && step_n <= 2) {
+    if (gklev >= 2 && step_n <= 5) {
         s_se.Ubt_n.sync_host();
         se_gk_elem2("anchor", step_n, -1, Ne, Eown, s_se.Ubt_n.h(), 2, mesh, p);
     }
@@ -1496,7 +1496,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
          * U0 is the live ring, "all" scope = halo-copy-vs-owner too; eta is
          * nodal, whose ownership IS a partition, so only the halo scope can
          * differ there (checked host-side against the owner's gid value). */
-        if (gklev >= 2 && step_n <= 2 && m <= 3) {
+        if (gklev >= 2 && step_n <= 5 && m <= 3) {
             s_se.Ubt[0].sync_host();
             se_gk_elem2("U0", step_n, m, Ne, Eown, s_se.Ubt[0].h(), 2, mesh, p);
             s_se.eta[0].sync_host();
@@ -1677,7 +1677,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
          * which viscosity term carries the disagreement? vm = V[Ūᵐ], vn = V[Ūⁿ],
          * recomputed HOST-side with the kernel's own accumulation order and
          * inputs, each scaled by 1/area like the kernel's combined term. */
-        if (gklev >= 2 && step_n <= 2 && m <= 3) {
+        if (gklev >= 2 && step_n <= 5 && m <= 3) {
             s_se.Ubt[2].sync_host(); s_se.Ubt[0].sync_host();
             s_se.Ubt_n.sync_host(); s_se.H0e.sync_host();
             se_gk_elem2("Unew", step_n, m, Eown, Eown, s_se.Ubt[2].h(), 2, mesh, p);
@@ -1782,7 +1782,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * than one rank claims? Geometry, stencil and forcing are (measured), so if
      * Ū is not, the redundant computation itself is the seed — and no local
      * recomputation can reproduce the node owner's η. */
-    if (se_wide_geochk_level() >= 1 && step_n <= 3) {
+    if (se_wide_geochk_level() >= 1 && step_n <= 5) {
         s_se.Ubt[0].sync_host();
         /* both components + halo-vs-owner (the level-1 probe read Uh[2*e] only). */
         se_gk_elem2("UbtEND", step_n, 99, Ne, Eown, s_se.Ubt[0].h(), 2, mesh, p);
