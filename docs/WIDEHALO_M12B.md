@@ -470,35 +470,59 @@ Two things fall out, and both change the arithmetic.
    the ring. So the honest compute term is `(1 + zone_K − zone_1)`, calibrated at zero for K=1,
    not `(1 + zone_K)`.
 
-With `bt_wait(K) = bt_wait_cert × [φ + (1−φ)·msg_ratio(K)^ε_f]` — φ the imbalance share, ε_f the
-floor elasticity — CORE2 16N GPU (7.8 ms busy + 11.8 ms wait of an 84 ms step) brackets like
-this:
+**φ did not need the W6 pair — it was already on disk.** The M12 board's GPU runs carry per-rank
+phasestats, so the imbalance share of the *bt* wait can be read at every GPU point right now
+(`scripts/m12b_wait_anatomy.py` on jobs 26936705 / 26936711 / 26938162, certified SE path):
 
-| K | msg ratio | zone−zone₁ | Δ step, latency-bound (φ=0, ε_f=1) | Δ step, CPU-like (φ=0.4, ε_f=0.45) |
-|---|---|---|---|---|
-| 1 | 0.530 | 0.00 | **−6.6 %** | **−2.1 %** |
-| 2 | 0.280 | 0.08 | **−9.4 %** | −2.9 % |
-| 4 | 0.166 | 0.24 | −9.5 % | −2.4 % |
-| 8 | 0.104 | 0.61 | −6.9 % | +0.3 % |
+| point | step (ms) | bt busy mean / **max** | bt wait | corr(busy, wait) | **φ** | floor (ms) | bt share of step |
+|---|---|---|---|---|---|---|---|
+| CORE2 4N GPU | 70.3 | 6.88 / 10.20 | 7.69 | −0.990 | 47 % | 4.06 | 21 % |
+| CORE2 16N GPU | 84.3 | 7.79 / **14.50** | 11.82 | −0.993 | **56 %** | 5.17 | 23 % |
+| NG5 16N GPU | 246.1 | 11.36 / 12.80 | 5.32 | −0.952 | **31 %** | 3.70 | 6.8 % |
 
-The two columns disagree about whether deep K is worth building at all: latency-bound, K=2–4 is
-worth 1.4× the K=1 gain and the extended-mesh layer earns its keep; CPU-like, the whole rung is
-a ~2 % lever at CORE2 and deep K is negative by K=8. Both agree that **K=8 is never the answer
-at CORE2** and that NG5/dars 16N — zone ≤ 0.14 even at K=8 — are where deep K is cheapest.
+The correlations are −0.95…−0.99: on GPU the bt wait is *more* imbalance-driven than on CPU, not
+less. NG5 has the smallest share, as §8's partition table predicted (its element imbalance is
+1.008, the most balanced point we have). And note the CORE2 16N line: the widely quoted "7.8 ms
+busy" is the **mean**; the critical path is 14.5 ms, and 6.7 of the 11.8 ms wait is the other
+ranks waiting for it.
 
-**Pre-registered prediction for the pending W6 GPU pair:** if the model holds, CORE2 16N GPU
-lands between **−2.1 %** (CPU-like) and **−6.6 %** (latency-bound). A result outside that band
-means something the model does not contain — most likely the GPU pack/unpack cost, which on this
-fabric stages through pinned host memory.
+⚠️ On GPU the busy spread is **not** the element-count effect of §8 — at CORE2 16N the entity
+imbalance is 1.035 while bt busy max/mean is 1.86, and the correlation runs to the **halo**
+(+0.63) rather than to owned elements (+0.38, R² 0.15). With ~4 000 elements per rank the
+subcycle kernels are launch- and halo-staging-bound, so §8's prescription is a CPU one.
+
+With `bt_wait(K) = bt_wait_cert·φ + floor·msg_ratio(K)^ε_f` and `bt_busy(K) = bt_busy_cert ×
+(1 + zone_K − zone_1)`, the measured φ narrows the prediction sharply (ε_f = 1 is the
+latency-bound bound, ε_f = 0.45 the CPU-measured one; exchanges/step 101 → 53 at CORE2 M=50, and
+41 → 23 at NG5 M=20):
+
+| point | K | Δ step at ε_f = 1 | Δ step at ε_f = 0.45 |
+|---|---|---|---|
+| CORE2 16N GPU | 1 | **−2.9 %** | **−1.5 %** |
+| CORE2 16N GPU | 4 | −2.9 % | −1.2 % |
+| NG5 16N GPU | 1 | **−0.7 %** | **−0.35 %** |
+| NG5 16N GPU | 4 | −1.0 % | −0.5 % |
+
+**Pre-registered prediction for the queued W6 GPU pairs (26962396 / 26962397):** CORE2 16N lands
+in **−1.5 % … −2.9 %** and NG5 16N in **−0.35 % … −0.7 %**. (The earlier version of this section
+predicted −2.1 % … −6.6 % for CORE2; that band assumed φ = 0 in its optimistic column, which the
+measurement above rules out.) A result outside the new band means something the model does not
+contain — most likely the GPU pack/unpack cost, which on this fabric stages through pinned host
+memory, or a change in the imbalance itself.
 
 🔴 **So the W6 GPU pair is not only a performance row: it measures ε and φ on the fabric that
 matters.** Run `scripts/m12b_wait_anatomy.py off=<off_ph1_dir> on=<on_ph1_dir>` on its
 phasestats legs — the same two numbers, on GPU. The queued M-sweep (26952126/27) is the
-independent check on the baseline. **Decision rule, pre-registered:** build the §4 extended-mesh
-layer only if the GPU floor elasticity is ≥0.7 *and* the imbalance share φ is ≤0.3 — that is the
-regime where the left-hand column is right and K=2–4 buys another ~40 % over K=1. Otherwise the
-K=1 rung is where this line stops, and the remaining bt wait is an imbalance problem, i.e. M11's
-territory, not the halo's.
+independent check on the baseline. **And with φ measured, the deep-K question is answered — "no".** The decision rule was: build the
+§4 extended-mesh layer only if the GPU floor elasticity is ≥0.7 *and* φ ≤ 0.3. φ is 0.56 at CORE2
+16N and 0.47 at 4N, so the rule already fails there, and the table shows why: at CORE2 16N, K=4
+returns **the same −2.9 %** as K=1 even in the latency-bound limit, because the 6.7 ms of
+imbalance in the wait is untouchable and the redundant compute grows into whatever the messages
+give back. NG5 passes the φ half of the rule (0.31) but its bt block is only 6.8 % of a 246 ms
+step, so deep K there moves −0.7 % to −1.0 %. **On this evidence the extended-mesh layer is not
+worth building for SE**, and the K=1 rung is where this line stops. The remaining bt wait is an
+imbalance problem — M11's territory, not the halo's. The W6 pairs test the K=1 half of the
+prediction; if they land in the band, this verdict stands as written.
 
 ## 8. Where the barotropic imbalance comes from (s4) — and why it is worth more than the halo on CPU
 
