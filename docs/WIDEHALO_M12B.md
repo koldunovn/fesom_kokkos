@@ -1,8 +1,10 @@
 # M12b — wide halo for the SE barotropic subcycle (`FESOM_SE_WIDE`)
 
-**Status 2026-08-14: K=1 rung implemented and gated on Serial; GPU board pending the maintenance
-window.** Plan + full gate record: `docs/plans/20260814-m12b-widehalo.md`. SE reference:
-`docs/SSH_SE_M12.md`.
+**Status 2026-08-14 s3: the s2 instability is ROOT-CAUSED and FIXED (§3 — halo H0e was not the
+owner's bytes; one per-step exchange, `FESOM_SE_H0E_XCHG=1` default). The rung is exact through
+the first steps and its free-running drift plateaus at machine noise (§3e). Stability screens at
+np128/farc-2048 and the perf board are the s3 verification wave.** Plan + full gate record:
+`docs/plans/20260814-m12b-widehalo.md`. SE reference: `docs/SSH_SE_M12.md`.
 
 ## What it is
 
@@ -27,8 +29,9 @@ partner structure, tags 2300–2302.
 | knob | default | notes |
 |---|---|---|
 | `FESOM_SE_WIDE` | 0 | `1` = the rung; **`≥2` aborts** — deep K needs the extended-mesh layer (§4). Requires `FESOM_SSH_MODE=se`; set while SE is off it prints the L80 dead-knob note |
-| `FESOM_SE_WIDE_SELFCHECK` | 0 | `1` = compute ring-1 η locally **and** exchange, diff, abort on nonzero; `2` = report without aborting (growth curves) |
-| `FESOM_SE_WIDE_GEOCHK` | off | debug: min/max over holders of `elem_area`, the viscosity stencil size, `Fbt`/`H0e`, `Ubt` — the probe that produced §3 |
+| `FESOM_SE_H0E_XCHG` | **1** | s3 root-cause fix (§3): one per-STEP exchange makes halo `H0e` the owner's bytes (`ELEM2D_FULL` under the rung). `0` = the legacy incoherent halo, diagnostic arms only — it re-arms the seed |
+| `FESOM_SE_WIDE_SELFCHECK` | 0 | `1` = per-substep compare (exchange restored — proves the ring math; aborts on nonzero, and a 3-D-born ulp reaches the ring from step ~4, §3e); `2` = FREE running + per-step drift report (the stability instrument) |
+| `FESOM_SE_WIDE_GEOCHK` | off | `1` = the s2 probes (holder-vs-holder, x-component); `2` = the s3 ingredient probes: BOTH components, `viscM`/`viscN` separately, halo-copy-vs-owner scope, `He`/`meta` decomposition, offender dump — the instrument that found §3 |
 
 Startup aborts, both from measured assumptions rather than belief: an owned element whose
 viscosity neighbour lands in the eXDim tail, and any `com_elem2D_full` rlist that fails to cover
@@ -72,17 +75,45 @@ across substeps, SE's η/Ū alternation does not. Cumulative node zone / owned:
 Deep K is cheapest where the mesh is **biggest per rank** — nearly free at NG5/dars GPU, hopeless
 at the big-CPU points.
 
-## 3. 🔴 The rung is exact, but not bitwise — and the reason is in the SE module
+## 3. 🔴 ROOT CAUSE (s3, 2026-08-14): halo `H0e` was not the owner's bytes — FIXED
 
-`myDim_elem2D` is **not a partition**: 1341 of 244659 CORE2 `dist_8` elements (0.55 %) sit in the
-`myDim` range of more than one rank, are computed redundantly, and are reconciled by no exchange
-(rlist covers only `[myDim, …)`). With the two-term viscosity V[Ūᵐ]−V[Ūⁿ] those copies diverge
-from the first step whose anchor Ūⁿ is nonzero — step 2, because the cold start makes it exactly
-zero at step 1. The certified path hides this completely (η is exchanged, so the node owner's copy
-wins); the rung recomputes η from its own copies and so reproduces a different, equally valid
-member of the family.
+**The s2 story below ("not bitwise by module property") is superseded.** The seed was found,
+measured to the byte, and removed:
 
-Each hypothesis was killed by measurement, not argument:
+1. `se_forcing` computes `H0e` locally over owned+eDim on every rank. At halo elements that
+   computation was **η-class WRONG**: an eDim *edge-neighbour* element's far vertex is routinely a
+   ring-2 node, absent from the local node list, and the scatter stores `elem_nodes = -1` there —
+   so the η-mean read `eta0[-1]`, out of bounds. Measured (GEOCHK=2, jobs 26959682/26959760):
+   1334 halo copies differ from the owner's value by up to **1.0e-1 m**, and the decomposition is
+   unambiguous — `dHe = 0` for every offender, `dmeta` carries the whole difference. At step 1 the
+   error is invisible because H0e is η-independent at cold start (the Z7 shape, for the third time).
+2. k3's viscosity reads `H0e[nb]` **at halo slots**. Two holders of a multi-claimed element whose
+   shared neighbour resides in the halo on one of them therefore evaluated V with different `hh` —
+   and the difference expresses exactly when the two viscosity terms stop cancelling: the first
+   nonzero V[Ūᵐ]−V[Ūⁿ] with a nonzero anchor, step 2 substep 1. Probe-verified: at step 2
+   substep 0 `viscM` and `viscN` carry **identical** spreads (max 5.0e-10) that cancel exactly —
+   Unew stays coherent; from substep 1 they no longer cancel and the copies diverge.
+3. The free-running rung then amplified the η-class interface inconsistency (~1.2×/substep) into
+   the farc NaN of §3d.
+
+**Fix (`FESOM_SE_H0E_XCHG`, default 1): one per-STEP H0e exchange** — halo H0e becomes the
+owner's bytes; the local recompute at halo slots was never legitimate in this data model (its
+vertices are not all local). Under the rung the exchange runs over `ELEM2D_FULL`, which also fills
+the eXDim tail — precisely the remedy the startup guard (1) had prescribed for a different
+trigger. The `eta0[-1]` read is additionally guarded (`-1` vertex → 0.0 contribution; owned
+elements are assert-mapped at scatter, so the certified owned rows are untouched).
+
+`Fbt` halo copies are garbage-class (uninitialized `uv_rhs` reads) — **dead state**, k3 reads F
+at owned elements only; documented, deliberately not exchanged.
+
+**What survives of the s2 finding:** `myDim_elem2D` is still not a partition (1341 of 244659
+CORE2 dist_8 elements multi-claimed, unreconciled) — but the redundancy was the *site* where the
+incoherence became observable, not its origin. With owner-coherent inputs the redundant copies
+stay bitwise-locked (measured through step 3), so "no local recomputation can be bitwise" is
+**retracted**; what remains is §3e's 3-D-born ulp.
+
+The s2 hypothesis-elimination table, all rows still valid measurements (they cleared everything
+except the one array no probe compared halo-vs-owner):
 
 | question | answer |
 |---|---|
@@ -94,18 +125,42 @@ Each hypothesis was killed by measurement, not argument:
 | the forcing? | `Fbt`/`H0e` identical at steps 1 **and** 2 |
 | Ū itself? | step 1 END **0**; step 2 END **529 elements, max 5.2e-07** |
 
-**Residual** (CORE2 np8, 200 steps, job 26952789): 0 at step 1 → 6.1e-10 (step 2) → 1.5e-6
-(step 50) → **2.4e-6 m at step 200**, saturating, while η itself reaches 3.01 m. For scale, the SE
-CUDA coupled floor is η ~1e-3 and the M12 1-year SE-vs-SI twin differs by 2e-4 m rms — the
-residual sits ~400× below the floor the SE track already judges GPU runs against.
+*(The s2 residual curve — 6.1e-10 at step 2 → 2.4e-6 m saturating at step 200, job 26952789 —
+was this seed's growth under the per-substep exchange. It is obsolete: the fixed module's residual
+is §3e's ulp plateau, ~9 orders smaller.)*
 
-Consequence for the ladder: the byte gate is retired and replaced by **exactness where the model
-is rank-consistent** (≡ 0.0 at step 1 and for every `VISC=0` substep) plus the stability screen and
-the graded disturbance report, whose controls are rung-off runs at other rank counts — the same
-perturbation class the residual belongs to.
+### 3e. What remains after the fix: a 3-D-born ulp, and the ladder consequence
 
-*Independently of M12b, this says the SE viscosity yields slightly different Ū on ~0.5 % of
-elements depending on which rank you ask. Worth putting to Sergey on its own.*
+With the fix, the rung is **EXACT — 0.0, not a tolerance — through step 3** (np8 selfcheck AND
+free-running, job 26959760). At step 4 a fresh seed enters from OUTSIDE the SE module: `Fbt`
+differs across holders of ONE multi-claimed element by 2.2e-19/4.3e-19 (x/y — one ulp of the 3-D
+vertically-integrated RHS) **before any SE state has diverged** (job 26959826). The 3-D model's
+own per-element redundancy is rank-inconsistent at the last bit; SE inherits it through F. Within
+a step it grows roughly linearly (Unew-y 1.4e-17 → 5.9e-17 over 4 substeps), and the free-running
+drift **plateaus at the rounding floor instead of amplifying**:
+
+| free-running max\|local − owner\| (np8, M=50) | steps 1-3 | 4 | 10 | 25 |
+|---|---|---|---|---|
+| fixed (job 26959760) | **0.000000** | 1.7e-17 | 1.1e-15 | **1.2e-15, flat** |
+| unfixed s2 farc reference (M=90) | 0 → 3.0e-8 | — | 3.2e-6 | 115 m @30 → NaN |
+
+The plateau ≈ seed × 1.2^M (1e-19 × 9e3 at M=50): the scheme's per-substep interface
+amplification is still present but now acts on a ulp seed refreshed at rounding class, not on an
+η-class error re-injected every step — it saturates at machine noise, indistinguishable from the
+model's own rank-count perturbation class.
+
+Consequence for the ladder: **W1 byte identity is resurrected as "exact through the first steps
+and whenever the 3-D state is rank-consistent"**; the operational gates are the SELFCHECK=2 drift
+plateau (must stay rounding-class, no growth), the 3000-step screens, and the graded disturbance
+report. `FESOM_SE_WIDE_SELFCHECK=1`'s 0.0-abort remains the ring-math proof instrument but
+necessarily trips on the 3-D ulp from step ~4 — use `=2` for anything longer.
+
+*For Sergey: two findings worth reporting independently of M12b — (a) halo `H0e` in the SE module
+was locally recomputed from unmappable vertices (fixed by the per-step exchange, which his
+reference avoids by construction only when M runs the full exchange); (b) the 3-D model's
+`myDim_elem2D` redundancy leaves per-element fields (uv_rhs-derived) different at the last bit
+across claimants — harmless, but it bounds ANY compute-instead-of-communicate transformation to
+rounding-class beyond the first steps.*
 
 ## 3b. Disturbance report — the lever against the model's own rank-dependence (W5b, PASS)
 
@@ -182,7 +237,11 @@ step range (200–250)**, so that instability belongs to the certified scheme wi
 not to the rung. Using `VISC=0` as a "provably exact" diagnostic arm without first checking that
 the certified path survives it was a mistake — the control should always precede the diagnostic.
 
-### 🔴 3d. The rung is UNSTABLE, and the free-running drift is what shows it
+### 🔴 3d. [s2 verdict, RESOLVED by §3] The rung was UNSTABLE, and the free-running drift is what showed it
+
+**Status 2026-08-14 s3: the instability below was the §3 H0e seed under amplification, and is
+FIXED — the fixed rung's drift plateaus at machine noise (§3e; farc re-measurement in §3f). The
+section is kept as the record of the measurement that forced the root-cause hunt.**
 
 The per-step coherence exchange fixed CORE2 np128 (300 steps, matching the control) but **not
 farc 2048, which is still NaN by step 300.** The instrument that had been missing all along:
@@ -211,6 +270,12 @@ the two options that follow from the measurement are:
    k = ∞. With the measured growth rate ~1.2×/substep, a small k keeps the drift at ulp level;
    k=2 would still remove 25 % of the exchanges. The growth rate is now measurable per point, so
    the largest viable k can be derived rather than guessed.
+
+*(s3 outcome: neither option was needed. The seed was not the redundancy itself but the §3
+halo-H0e incoherence feeding it; with that fixed, the redundant copies stay locked on their own
+and the k-periodic fallback is unnecessary. The measured amplification rate stands — it is what
+turns any systematically re-injected interface error into a blow-up, and it is why the H0e fix is
+load-bearing rather than cosmetic.)*
 
 ⚠️ Also fixed here: `SELFCHECK=2` previously still took the per-substep compare path, which
 re-runs the exchange — so it too repaired what it measured, and a farc run under it looked healthy
