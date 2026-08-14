@@ -538,6 +538,31 @@ latency-bound column of §7 most nearly right**, and CORE2 16N — 1.052 element
 steepest zone — is where the rung has the most imbalance mixed into its "wait" and the least room
 for deep K.
 
+**Testing the mechanism on a partition that already exists (job 26961927).** M11's certified farc
+partition is the same mesh **byte for byte** (md5 of `nod2d.out`/`elem2d.out` match /pool) with a
+different partition — Mt-KaHyPar weighted by `nlev`, i.e. balancing 3-D column work — and in the
+2-D currencies it is markedly worse:
+
+| farc 2048 partition | owned nodes max/min | owned elements max/mean | owned elements max/min | halo elems mean |
+|---|---|---|---|---|
+| stock | 1.010 | 1.062 | 1.468 | 141.5 |
+| M11-certified (`MTKAHYPAR_w100+nlev`, −7.52 % CPU) | **1.857** | **1.233** | **2.275** | 137.5 |
+
+That is the nlev weighting doing exactly what it is for: nodes are deliberately unbalanced so the
+3-D work balances. It also makes the partition a ready-made test of §8, run at farc 2048 under SE
+with these predictions written down first:
+
+* **P1** bt busy max/mean rises from the measured 1.146 toward ~1.23, and the bt *wait* rises with
+  it — the §8 mechanism, on a partition chosen for an unrelated reason. **A failure here falsifies
+  §8 and the handover with it.**
+* **P2** the 3-D `ocean` phase's busy imbalance falls (1.62 max/mean at stock) — what the weighting
+  buys, and why M11 measured −7.52 %.
+* **P3** net under SE the M11 partition still wins, but by *less* than −7.52 %, because SE moves
+  work out of the implicit solver (which the weighting helps) into bt (which it hurts).
+
+(The 2.6 % above is an **upper bound**: it assumes perfect element balance removes all of the
+imbalance absorption, and the element fit leaves 8 % of the busy spread unexplained.)
+
 🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
 (balance owned nodes **and** owned elements) rather than the single node constraint in use. M11
 has Mt-KaHyPar in its toolbox, which supports multi-constraint partitioning directly; its earlier
