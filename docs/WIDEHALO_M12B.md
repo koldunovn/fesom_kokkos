@@ -564,6 +564,21 @@ bt. The sign is right — −6.7 % against −7.4 % — but the 0.7-point differ
 the rep spread (1.2–1.5 % between reps of one arm), so **P3 is consistent, not resolved**; it
 would need more reps to call.
 
+The SI legs also say, in one line, why SE wins at all here — and that the elasticity of L118 is a
+**per-phase** property, not a machine constant:
+
+| farc 2048, stock partition | busy mean (ms) | wait mean (ms) | MPI calls/step |
+|---|---|---|---|
+| `cg` (implicit solver) | 2.6 | **20.3** | **845.8** |
+| `bt` (SE subcycle) | 6.7 | 5.3 | 182 |
+
+The implicit solver's wait is 20.3 ms of an 85 ms step against 2.6 ms of arithmetic, spread over
+846 MPI calls — a latency chain, with almost no imbalance in it (its busy is 1.6–3.6 ms across all
+2048 ranks). The SE block replaces 22.9 ms of that with 12.0 ms, which is the measured −13 %
+almost exactly. **So `cg` is message-bound and `bt` is imbalance-bound, in the same run**: a
+communication lever pays handsomely on the first and barely on the second, and only the per-phase
+decomposition tells you which you are looking at.
+
 What is resolved is more useful: **the two levers are independent and compose.** SE is worth
 −13 % on either partition, the partition is worth −7 % under either solver, and together
 0.0840 → 0.0679 = **−19.2 %** at farc 2048 CPU. The M12 board's farc SE number was earned on the
