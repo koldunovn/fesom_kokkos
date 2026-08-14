@@ -190,6 +190,20 @@ share while the redundant compute is paid in full. The GPU pairs (CORE2 and NG5 
 where the bt phase is 7.8 ms busy against **11.8 ms MPI wait** of an 84 ms step) are queued;
 they are the points the rung was built for.
 
+**One more measurement, which qualifies the whole expectation.** The argument for the wide halo
+is that the barotropic block's MPI wait is large (60 % of its cost at CORE2 16N GPU). But a wait
+is not automatically a latency pool. The CPU pairs halve the exchange count at unchanged compute,
+so they measure the elasticity directly: at farc 2048 the bt wait went 5.23 → 4.69 ms for
+182 → 94 exchanges (elasticity **0.17**), at dars 8192 3.09 → 2.75 ms for 42 → 24 (**0.21**).
+Per-rank statistics say why: a rank's bt wait correlates with its own bt busy at −0.6, i.e. a
+quarter to a half of the "wait" is the block's load imbalance being absorbed at the exchange, and
+even the floor left at the busiest rank has elasticity only ~0.45. Two consequences worth your
+view: (a) on CPU the remaining barotropic wait is a partitioning problem rather than a
+communication one; (b) the ring-1 redundant compute turned out to be *free* — bt busy is
+unchanged to 0.3 % although the ring adds +20…28 % of node work, because the exchange the rung
+removes took its pack/unpack with it. The GPU equivalent of these two numbers is what decides
+whether we build the deeper-K layer at all.
+
 **Questions 6–8.**
 6. Does the Fortran wide-halo plan intend to keep a coherence exchange every k substeps, or to
    make all substep inputs owner-coherent as we did? Our measurement says the second is

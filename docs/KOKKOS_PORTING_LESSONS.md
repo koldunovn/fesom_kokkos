@@ -1456,3 +1456,20 @@ seven points: pi np2 → 35 eDim + 94 eXDim refs; CORE2 np128 → 15 483 + 37 80
 Cost 0.08 node-hours to prove at the production partition. **A convention
 that consumers silently rely on should be checked where it is established, not documented
 where it is used** — the same defect class as L114 costs an entire session to find later.
+
+## L118 (M12b s4): an MPI wait is not a latency pool — measure its elasticity before sizing a communication lever
+
+The wide halo was motivated by a share: at CORE2 16N GPU the barotropic block is 7.8 ms busy and
+**11.8 ms MPI wait** of an 84 ms step, so halving its exchanges looked like a large lever. The
+W6 CPU pairs measure what that assumption is worth, because they halve the exchange count at
+unchanged compute: farc 2048 bt wait 5.23 → 4.69 ms for 182 → 94 exchanges — elasticity
+**dln(wait)/dln(exchanges) = 0.17**; dars 8192 3.09 → 2.75 for 42 → 24 — **0.21**. Per-rank
+phasestats say why (`scripts/m12b_wait_anatomy.py`): a rank's bt wait correlates with its own bt
+busy at **−0.6**, and regressing wait on the busy deficit gives `wait ≈ 2.0 × (busy_max − busy) +
+floor`, so 24–48 % of the mean wait is load imbalance being absorbed at the exchange. Even the
+floor — what the busiest rank still waits — has elasticity only 0.44–0.46. **A wait attributed to
+a phase is the sum of a latency term and the phase's own imbalance; only the first responds to a
+communication lever, and the split is measurable from per-rank timers you already collect.**
+Corollary from the same pair: the rung's +20…28 % ring-1 redundant compute cost **nothing** (bt
+busy unchanged to 0.3 %) because the exchange it removed took its pack/unpack out of `busy` with
+it — so a "redundant compute" census is an upper bound on the price, not the price.

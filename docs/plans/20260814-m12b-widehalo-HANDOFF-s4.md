@@ -42,9 +42,18 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
      `docs/REFERENCE_RUNS.md`) before touching anything; `GEOCHK=2` probes work on CUDA too.
    - Drift GROWING → stop, do not run perf; instrument as in s3 (probe the READS, both
      components, halo-vs-owner).
-3. **Harvest the M-sweep 26952126/27** — they measure whether the baseline `se0` bt wait tracks
-   the exchange count, which is assumption (i) of §7's deep-K model.
-4. Then the deep-K decision (§7 has the arithmetic; it needs exactly the W6 GPU numbers) and the
+3. **Run `scripts/m12b_wait_anatomy.py off=<off_ph1_dir> on=<on_ph1_dir>` on the W6 GPU pair's
+   phasestats legs.** This is the s4 finding that reframes the whole deep-K question: on CPU the
+   bt wait's elasticity to the exchange count is only **0.17–0.21**, because a quarter to a half
+   of that "wait" is the block's own load imbalance (a rank's wait correlates with its own busy
+   at −0.6) and even the busiest rank's floor has elasticity ~0.45. If the GPU behaves the same
+   way, the rung is a ~2 % lever there and deep K is not worth building; if the GPU is
+   latency-bound, K=2–4 buys another ~40 % over K=1. §7 has the pre-registered decision rule
+   (build the extended-mesh layer only if the GPU floor elasticity ≥0.7 and imbalance share
+   ≤0.3) and a pre-registered prediction band for the CORE2 16N pair itself: **−2.1 % to −6.6 %**.
+4. **Harvest the M-sweep 26952126/27** — the independent check of the same elasticity on the
+   baseline `se0`.
+5. Then the deep-K decision (§7 has the arithmetic; it needs exactly the W6 GPU numbers). The
    Sergey packet is already updated (addendum 2 in `docs/report/M12_SERGEY_PACKET.md`).
 
 ## 3. What session 4 added

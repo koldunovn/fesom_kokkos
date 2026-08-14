@@ -421,33 +421,65 @@ redundant compute.
 64 → 0.06 / 0.14 / 0.30 / 0.67 at K=1/2/4/8; NG5 64 → 0.01 / 0.02 / 0.05 / 0.10; dars 64 →
 0.02 / 0.03 / 0.07 / 0.14; farc 2048 CPU → 0.20 / 0.46 / 1.04 / 2.49.
 
-**The model.** With `bt_wait(K) = bt_wait_cert × msg_ratio(K)` (i), `bt_busy(K) = bt_busy_cert ×
-(1 + zone_K)` (ii) and the rest of the step unchanged (iii), CORE2 16N GPU — the only point
-whose bt split we already know, 7.8 ms busy + 11.8 ms MPI wait of an 84 ms step — predicts:
+**The model, and the assumption in it that turned out to be measurable already.** Write
+`bt_wait(K) = bt_wait_cert × msg_ratio(K)^ε` and `bt_busy(K) = bt_busy_cert × (1 + zone_K)`.
+The first version of this section took ε = 1 — the bt wait is a latency pool, halve the messages
+and halve the wait — and the W6 CPU pairs turn out to measure ε directly, because they halve the
+message count at unchanged compute. They do not support ε = 1
+(`scripts/m12b_wait_anatomy.py`, per-rank phasestats of jobs 26960156/57; the counter is
+*exchanges* per step, each fanning out to the ~6 partners of the table above, and at K=1 the
+partner count is unchanged so exchanges and messages fall by the same factor):
 
-| K | msg ratio | zone | bt busy+wait (ms) | Δ step |
+| point | msg/step | bt busy (ms) | bt wait (ms) | ε = dln(wait)/dln(msg) | corr(busy, wait) | wait left at the busiest rank |
+|---|---|---|---|---|---|---|
+| farc 2048, certified | 182 | 6.72 | 5.23 | — | −0.59 | 3.28 |
+| farc 2048, rung K=1 | 94 | 6.70 (−0.3 %) | 4.69 | **0.166** | −0.60 | 2.46 (−25 %) |
+| dars 8192, certified | 42 | 2.55 | 3.09 | — | −0.60 | 2.34 |
+| dars 8192, rung K=1 | 24 | 2.55 (−0.3 %) | 2.75 | **0.208** | −0.62 | 1.81 (−23 %) |
+
+Two things fall out, and both change the arithmetic.
+
+1. **A quarter to a half of the bt "wait" is the block's own load imbalance, which no message
+   reduction can touch.** A rank's bt wait correlates with its bt busy at −0.6 at both points: the ranks that
+   finish the subcycle early are the ones that wait. Regressing wait on the busy deficit gives
+   `wait ≈ 2.0 × (busy_max − busy) + floor`, i.e. 24–48 % of the mean wait is imbalance
+   absorption. Only the **floor** — what the busiest rank still waits — is message-related, and
+   *its* elasticity is **0.44–0.46**, not 1: halving the messages removed a quarter of it.
+2. **The ring-1 redundant compute is free at K=1.** bt busy is unchanged to 0.3 % at both points
+   although the census says the rung adds +19.7 % (farc) and +28.2 % (dars) of ring-1 node work.
+   The exchange the rung removes took its pack/unpack out of `busy` with it, and that pays for
+   the ring. So the honest compute term is `(1 + zone_K − zone_1)`, calibrated at zero for K=1,
+   not `(1 + zone_K)`.
+
+With `bt_wait(K) = bt_wait_cert × [φ + (1−φ)·msg_ratio(K)^ε_f]` — φ the imbalance share, ε_f the
+floor elasticity — CORE2 16N GPU (7.8 ms busy + 11.8 ms wait of an 84 ms step) brackets like
+this:
+
+| K | msg ratio | zone−zone₁ | Δ step, latency-bound (φ=0, ε_f=1) | Δ step, CPU-like (φ=0.4, ε_f=0.45) |
 |---|---|---|---|---|
-| certified | 1.000 | 0 | 7.8 + 11.8 = 19.6 | — |
-| 1 | 0.530 | 0.06 | 8.3 + 6.3 = 14.5 | **−6.1 %** |
-| 2 | 0.280 | 0.14 | 8.9 + 3.3 = 12.2 | **−8.8 %** |
-| 4 | 0.166 | 0.30 | 10.1 + 2.0 = 12.1 | **−8.9 %** |
-| 8 | 0.104 | 0.67 | 13.0 + 1.2 = 14.3 | −6.4 % |
+| 1 | 0.530 | 0.00 | **−6.6 %** | **−2.1 %** |
+| 2 | 0.280 | 0.08 | **−9.4 %** | −2.9 % |
+| 4 | 0.166 | 0.24 | −9.5 % | −2.4 % |
+| 8 | 0.104 | 0.61 | −6.9 % | +0.3 % |
 
-So at CORE2 the optimum is **K = 2–4 and it saturates there**, worth about 1.5× the K=1 gain;
-K=8 is back to K=1. Where the subdomain is large relative to the ring — NG5 and dars at 16N,
-zone ≤ 0.14 even at K=8 — the redundant term never bites and the optimum is deep: those points
-would take ~2× the K=1 gain. On the CPU points deep K is out on compute grounds alone (farc
-2048 at K=2 already pays +46 % redundant node work for a bt block that is 16 % of the step).
+The two columns disagree about whether deep K is worth building at all: latency-bound, K=2–4 is
+worth 1.4× the K=1 gain and the extended-mesh layer earns its keep; CPU-like, the whole rung is
+a ~2 % lever at CORE2 and deep K is negative by K=8. Both agree that **K=8 is never the answer
+at CORE2** and that NG5/dars 16N — zone ≤ 0.14 even at K=8 — are where deep K is cheapest.
 
-🔴 **Assumption (i) is the measurement that is missing**, and it is the one the queued M-sweep
-(26952126/27) makes: does the baseline's bt MPI wait actually track the exchange count? Two
-things would break the model — the fabric being bandwidth- rather than latency-bound at these
-sizes (bytes/substep already grow ×1.34–1.49 at K=1, and more with the zone), and the GPU pack
-cost growing with the zone (on a fabric without GPUDirect the packed-halo staging is not free).
-**Decision rule, pre-registered:** build the §4 extended-mesh layer only if the W6 GPU pair
-confirms a real K=1 gain at CORE2/NG5 16N *and* the M-sweep confirms (i); then target K=4 at
-CORE2 and K=8 at NG5/dars. If the K=1 GPU gain is ≤1 %, deep K cannot rescue it — the model's
-own best case is ~1.5–2× K=1.
+**Pre-registered prediction for the pending W6 GPU pair:** if the model holds, CORE2 16N GPU
+lands between **−2.1 %** (CPU-like) and **−6.6 %** (latency-bound). A result outside that band
+means something the model does not contain — most likely the GPU pack/unpack cost, which on this
+fabric stages through pinned host memory.
+
+🔴 **So the W6 GPU pair is not only a performance row: it measures ε and φ on the fabric that
+matters.** Run `scripts/m12b_wait_anatomy.py off=<off_ph1_dir> on=<on_ph1_dir>` on its
+phasestats legs — the same two numbers, on GPU. The queued M-sweep (26952126/27) is the
+independent check on the baseline. **Decision rule, pre-registered:** build the §4 extended-mesh
+layer only if the GPU floor elasticity is ≥0.7 *and* the imbalance share φ is ≤0.3 — that is the
+regime where the left-hand column is right and K=2–4 buys another ~40 % over K=1. Otherwise the
+K=1 rung is where this line stops, and the remaining bt wait is an imbalance problem, i.e. M11's
+territory, not the halo's.
 
 ## Open items (s4)
 
