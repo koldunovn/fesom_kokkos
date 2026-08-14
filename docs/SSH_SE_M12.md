@@ -26,6 +26,7 @@ anywhere in the module — SASS-audited).
 | `FESOM_SE_CHI` | **0.1** | **measured, not guessed**: 0.05 dies on CORE2 real forcing by step ~300 (Antarctic-shelf setdown → vertical-CFL tracer death); 0.1 saturates at the SI η class; 0.15 indistinguishable |
 | `FESOM_SE_VISC` | 1 | live two-term harmonic viscosity; `FESOM_SE_VISC_GAMMA0/GAMMA1` (Zenodo defaults 10 / 2750) |
 | `FESOM_SE_CHECK` | off | invariant suite (η-compatibility, trim consistency, layer-sum, volume window; NaN-loud) |
+| `FESOM_SE_WIDE` | 0 | **M12b**: `1` = the K=1 wide-halo rung (η computed on the ring-1 nodes from shipped owner rows; Ū over `ELEM2D_FULL`) ⇒ 2 → 1 exchanges per substep. `≥2` aborts. See `docs/WIDEHALO_M12B.md` |
 | `FESOM_SE_DUMP` | off | per-rank barotropic-state dump (determinism gates) |
 
 Interplay: `FESOM_SPEED_SSHRAILS` force-off under `se` (announced); `FESOM_DIAG_SSHSLV/SPREAD`
@@ -37,6 +38,13 @@ and `FESOM_KK_VERIFY=ssh` abort; wsplit composes (3000-step screen green).
   fidelity gate PASS — at T1, after T4/T5, and at T6.
 - **G1** (machine-precision invariants, CORE2 1000 steps): η-compatibility ≤ 2e-14 m ·
   trim ≤ 3.4e-13 m²/s · layer-sum 1.5e-11 m · volume drift ≡ 18 nm of mean sea level.
+- ⚠️ **Rank-redundancy caveat, found by M12b (2026-08-14):** `myDim_elem2D` is not a partition —
+  1341 of 244659 CORE2 dist_8 elements (0.55 %) are claimed by more than one rank, computed
+  redundantly, and reconciled by no exchange. With the two-term viscosity those copies diverge
+  from step 2 (Ū differs across holders for 529 elements, max 5.2e-07 at step 2), so **the module
+  gives slightly different Ū on ~0.5 % of elements depending on which rank you ask**. The exchanged
+  η hides it in the certified path. Independent of M12b, and worth putting to Sergey — details and
+  the hypothesis-elimination table in `docs/WIDEHALO_M12B.md` §3.
 - **G2**: serial same-binary byte-determinism (CORE2 dist_8); 0 atomic/RED SASS instructions
   in all SE kernels; CUDA coupled floor recorded in `docs/REFERENCE_RUNS.md` (η ~1e-3 —
   judge SE-CUDA runs against that row, not the SI one).
