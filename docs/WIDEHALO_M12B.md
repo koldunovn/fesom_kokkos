@@ -444,7 +444,10 @@ Two things fall out, and both change the arithmetic.
    finish the subcycle early are the ones that wait. Regressing wait on the busy deficit gives
    `wait ≈ 2.0 × (busy_max − busy) + floor`, i.e. 24–48 % of the mean wait is imbalance
    absorption. Only the **floor** — what the busiest rank still waits — is message-related, and
-   *its* elasticity is **0.44–0.46**, not 1: halving the messages removed a quarter of it.
+   *its* elasticity is **0.44–0.46**, not 1: halving the messages removed a quarter of it. (The
+   floor is itself an *upper* bound on the latency part: skew inherited from earlier phases lands
+   wherever the next exchange is, and for the SE step that is bt. So the genuinely message-elastic
+   component is at most this, and the case for a communication lever is if anything weaker.)
 2. **The ring-1 redundant compute is free at K=1.** bt busy is unchanged to 0.3 % at both points
    although the census says the rung adds +19.7 % (farc) and +28.2 % (dars) of ring-1 node work.
    The exchange the rung removes took its pack/unpack out of `busy` with it, and that pays for
@@ -562,6 +565,26 @@ with these predictions written down first:
 
 (The 2.6 % above is an **upper bound**: it assumes perfect element balance removes all of the
 imbalance absorption, and the element fit leaves 8 % of the busy spread unexplained.)
+
+**The whole-step wait budget, since the same decomposition runs on every phase.** farc 2048 CPU,
+certified path, 73 ms/step of which the phasestats TOTAL wait is 28.9 ms (40 %):
+
+| phase | busy mean (ms) | wait mean (ms) | corr(busy, wait) | imbalance part | message floor |
+|---|---|---|---|---|---|
+| ocean | 26.63 (9.0 … 43.1) | 15.18 | **−0.955** | **12.5 ms (82 %)** | 2.65 |
+| bt | 6.72 | 5.23 | −0.591 | 2.0 ms (37 %) | 3.28 |
+| icedyn | 5.03 (0.8 … 8.5) | 4.80 | −0.970 | 3.2 ms (68 %) | 1.56 |
+| force | 3.58 | 2.73 | −0.736 | 2.7 ms (~100 %) | ~0 |
+
+**About 20 of the 28.9 ms — 70 % of the MPI wait, 27 % of the whole step — is load imbalance being
+absorbed at an exchange, against ~7.5 ms that any communication lever could address at all.** The
+`ocean` phase alone contributes 12.5 ms of imbalance, with a busy spread of 9.0 → 43.1 ms across
+ranks (4.8×) — the bathymetry effect M10 identified, here in wait-milliseconds. This is the
+proportion to keep in mind for the whole SSH line: M10's "half the step is MPI wait" is true, and
+most of that wait is not communication. (Caveat: each phase's imbalance is measured against its
+own busiest rank, and skew propagates between phases — a rank late in `ocean` arrives late at
+`bt` — so the per-phase split is a good attribution for the large phases and rougher for the
+small ones, where `force`'s slightly-over-100 % shows the fit's edge.)
 
 🔴 **This is an M11 item, not an M12b one** — and a specific one: a *two-constraint* partition
 (balance owned nodes **and** owned elements) rather than the single node constraint in use. M11
