@@ -90,6 +90,12 @@ def harvest_ab():
                 if f"SOLVER={s}" in legname:
                     solver = s
             rows.append(dict(tag=tag, job=job, mesh=mesh, backend=backend, nodes=nodes,
+                             # M13: the initial-condition regime this row was measured in.
+                             # `det` = FESOM_IC_EXTRAP=det (partition-independent fill), tagged
+                             # det_*; everything earlier is the legacy first-fill-wins fill.
+                             # The two regimes integrate DIFFERENT trajectories and must never
+                             # share a curve — same rule as partitions from different sources.
+                             ic="det" if tag.startswith("det_") else "legacy",
                              ranks=ranks, solver=solver, sstep=float(mm.group(2)),
                              d_total=float(mm.group(3)), ssh_ms=float(mm.group(4)),
                              d_ssh=float(mm.group(5)), ssh_pct=float(mm.group(6)),
@@ -97,7 +103,7 @@ def harvest_ab():
     return rows
 
 
-def configs(rows):
+def configs(rows, ic="legacy"):
     """Group into COMPLETE A/B points: a configuration counts only if its baseline AND at
     least one variant are both verified fallbacks=0 in the SAME job. Taking the "best solver"
     across a configuration where some legs were dropped for firing the guard would silently
@@ -124,22 +130,29 @@ def configs(rows):
         byjob.setdefault((r["job"], r["mesh"], r["backend"], r["ranks"]), []).append(r)
     out = []
     for (job, mesh, backend, ranks), legs in byjob.items():
-        if mesh == "ng5" and backend == "cpu":
+        # NG5 CPU under LEGACY fill is excluded: every such run hit the IC artifact (M13 §5b —
+        # no NG5 partition was ever clean under the legacy fill), so those legs died or
+        # completed as NaN zombies. Under det the same rungs are valid points.
+        if mesh == "ng5" and backend == "cpu" and legs[0]["ic"] == "legacy":
             continue
         base = [l for l in legs if l["solver"] == "cg" and l["fallbacks"] == 0]
         var = [l for l in legs if l["solver"] != "cg" and l["fallbacks"] == 0]
         if not base or len(var) < 3:          # require the COMPLETE four-leg set
             continue
-        out.append(dict(job=job, mesh=mesh, backend=backend, ranks=ranks,
+        out.append(dict(job=job, mesh=mesh, backend=backend, ranks=ranks, ic=legs[0]["ic"],
                         ssh_pct=base[0]["ssh_pct"],           # the BASELINE share of the step
                         legs={l["solver"]: l for l in var}))
-    # newest job per configuration
+    # newest job per configuration — keyed by IC REGIME too, so a det re-run of a rung does
+    # not silently displace its legacy row (they are different trajectories, not reps).
     best = {}
     for c in out:
-        k = (c["mesh"], c["backend"], c["ranks"])
+        k = (c["mesh"], c["backend"], c["ranks"], c["ic"])
         if k not in best or int(c["job"]) > int(best[k]["job"]):
             best[k] = c
-    return list(best.values())
+    out = list(best.values())
+    if ic is not None:
+        out = [c for c in out if c["ic"] == ic]
+    return out
 
 
 # --------------------------------------------------------------------------- fig 1
