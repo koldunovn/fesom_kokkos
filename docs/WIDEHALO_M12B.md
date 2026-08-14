@@ -5,8 +5,13 @@ coherence repairs (§3: per-step H0e exchange + owner-wins F over the multi-clai
 free-running rung is BITWISE-exact (drift ≡ 0.0 — np8 ×25, np128 ×300, farc-2048 ×50), both
 3000-step screens are green (farc η=2.05, np128 η=1.89 = the SE references), W5b rc=0, and the W6
 CPU board reads farc −1.8 % / dars +0.4 % (§5) — the CPU latency share bounds the payoff, as
-Sergey predicted. GPU (W2 gate + W6 pairs) queued behind the maintenance window.** Plan + full
-gate record: `docs/plans/20260814-m12b-widehalo.md`. SE reference: `docs/SSH_SE_M12.md`.
+Sergey predicted. GPU (W2 gate + W6 pairs) queued behind the maintenance window.**
+**s4 (2026-08-14 late): the `elem_nodes(-1)` hygiene item is CLOSED — 45 read sites audited, one
+real defect fixed, the containment invariant now measured at startup and green at seven points
+(§6) — and the deep-K partner growth is MEASURED (§7): flat in K on GPU-sized subdomains,
++42…74 % at the big-CPU points. The GPU rows did not move (the account's 5 GPU job slots were
+held all session).** Plan + full gate record: `docs/plans/20260814-m12b-widehalo.md`. SE
+reference: `docs/SSH_SE_M12.md`.
 
 ## What it is
 
