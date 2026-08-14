@@ -448,6 +448,11 @@ Two things fall out, and both change the arithmetic.
    floor is itself an *upper* bound on the latency part: skew inherited from earlier phases lands
    wherever the next exchange is, and for the SE step that is bt. So the genuinely message-elastic
    component is at most this, and the case for a communication lever is if anything weaker.)
+   The mechanism is not subtle once stated: **imbalance-driven wait is conserved under any
+   communication lever.** The time difference between a fast rank and a slow one has to be
+   absorbed somewhere; removing an exchange does not remove it, it relocates it to the next
+   synchronisation point. Only the latency component is actually removable, which is why an
+   elasticity measured against the *total* wait can never approach 1 in an imbalanced phase.
 2. **The ring-1 redundant compute is free at K=1.** bt busy is unchanged to 0.3 % at both points
    although the census says the rung adds +19.7 % (farc) and +28.2 % (dars) of ring-1 node work.
    The exchange the rung removes took its pack/unpack out of `busy` with it, and that pays for

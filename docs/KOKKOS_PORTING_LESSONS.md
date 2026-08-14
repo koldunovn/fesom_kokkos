@@ -1470,6 +1470,11 @@ floor`, so 24–48 % of the mean wait is load imbalance being absorbed at the ex
 floor — what the busiest rank still waits — has elasticity only 0.44–0.46. **A wait attributed to
 a phase is the sum of a latency term and the phase's own imbalance; only the first responds to a
 communication lever, and the split is measurable from per-rank timers you already collect.**
+The reason is structural, not empirical: **imbalance-driven wait is conserved under any
+communication lever** — the time difference between a fast and a slow rank must be absorbed
+somewhere, and removing an exchange relocates it to the next synchronisation point rather than
+removing it. So a lever sized against a phase's *total* wait is oversized by exactly the
+imbalance share.
 Corollary from the same pair: the rung's +20…28 % ring-1 redundant compute cost **nothing** (bt
 busy unchanged to 0.3 %) because the exchange it removed took its pack/unpack out of `busy` with
 it — so a "redundant compute" census is an upper bound on the price, not the price.
