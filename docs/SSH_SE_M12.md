@@ -55,6 +55,7 @@ and `FESOM_KK_VERIFY=ssh` abort; wsplit composes (3000-step screen green).
 | CORE2 16N GPU dt1800 | 0.0942 | 0.0839 | **−10.9%** |
 | farc 2048 CPU dt900 (M=90) | 0.0860 | 0.0738 | **−14.2%** |
 | dars 2048 CPU dt120 (M=20) | 0.4196 | 0.4243 | +1.1% |
+| NG5 64 GPU dt180 (M=20, wsplit) | 0.2544 | 0.2456 | **−3.5%** |
 
 farc −14.2% **beats the M10 best implicit-solver result (oati −13.28%)** at the same point.
 Mechanism (phasestats): at farc the SI cg phase is wait-dominated (2.6 ms busy + 20.6 ms MPI
@@ -67,7 +68,7 @@ Frozen bins: `/work/ab0995/a270088/port2/m12/bin/` `fesom_port_serial_se0` (df95
 
 ## Open items
 
-NG5 64-GPU pair (queued) · the formal M11-style 20-step disturbance report · wide-halo phase
+the formal M11-style 20-step disturbance report · wide-halo phase
 (M12b) decision on the board · Sergey review packet (deviations D1–D4; the reference's
 SI-Coriolis/∇ηᵐ vs the notes' AB3/η^AM4 — we implement the notes; H_e=Σhelem exactness note;
 the χ=0.1 stability measurement).

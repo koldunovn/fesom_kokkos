@@ -395,6 +395,7 @@ wsplit on farc/dars, 300 steps, per-mesh M from the CFL probes; jobs 26936699-26
 | CORE2 16N GPU (dt1800) | 0.0942 | 0.0839 | **−10.9%** | ssh comp 28.4→19.6 ms; ssh MPI 320→101/step |
 | farc 2048 CPU (dt900, M=90) | 0.0860 | 0.0738 | **−14.2%** | cg was WAIT-dominated (2.6 busy + 20.6 wait ms, 846 MPI/step) → bt 11.8 ms, 181 MPI/step; TOTAL MPI/step 1196→526 |
 | dars 2048 CPU (dt120, M=20) | 0.4196 | 0.4243 | +1.1% | low ssh share at dt120 — the M10 share law holds |
+| NG5 64 GPU (dt180, M=20, wsplit) | 0.2544 | 0.2456 | **−3.5%** | 116k verts/GPU — small share, modest win (jobs 26938157-62) |
 
 **farc −14.2% BEATS the M10 best implicit-solver result (oati −13.28%) at the same point.**
 NG5 64-GPU pair queued (M=20 from probe M_min=17). ⚠️ absolute s/step here are LOOP-ONLY
