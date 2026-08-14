@@ -165,7 +165,11 @@ nodes np1-vs-np8); det is **bitwise identical across np** (0 differing nodes, al
    print precision (uv 3.27, eta 3.18, T[−2.07,30.23], S[5.66,41.19]) — under legacy fill even
    the two healthy partitions differed visibly (3.34 vs 3.27 class). det restores
    cross-partition comparability of NG5 cold starts.
-4b. In flight at write time: dist_32768 256N (b256det 26960238), NG5 dist_64 GPU CUDA leg
+4b. **dist_32768 (b256det 26960238, 32768 ranks): 300/300 clean** (legacy died at step 15) —
+   same identical final state row. **ALL FOUR legacy-failing NG5 partitions FLIPPED; all five
+   NG5 det runs end in state rows identical at print precision.** The full census also
+   completed: all six NG5 partitions (incl. dist_32768 at 32768 ranks) pass V1/V3/V4/V5 with
+   zero violations. Still pending (job-count limits, noncritical): NG5 dist_64 GPU CUDA leg
    (bg64det 26960226, cuda bin d20ba293).
 5. Before any default-on adoption: the M10-class solver gates + a climate twin (det changes
    every cold-start trajectory on every mesh — a solver-class change under house rules), and
