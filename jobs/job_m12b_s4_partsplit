@@ -45,15 +45,22 @@ PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 STOCK=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
 M11=/work/ab0995/a270088/port2/mesh_m11_certified/farc_v1
 
-export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=90 FESOM_WSPLIT=1
+# SOLVER=se (default) or si — P3 needs BOTH, measured the same day on the same
+# allocation: the claim is that the nlev-weighted partition wins by LESS under SE
+# than under the implicit solver, and a cross-study comparison against M11's
+# -7.52 % (different protocol, different day) cannot test that.
+SOLVER=${SOLVER:-se}
+export FESOM_ALE=zstar FESOM_WSPLIT=1
+if [ "$SOLVER" = "se" ]; then export FESOM_SSH_MODE=se FESOM_SE_M=90
+else unset FESOM_SSH_MODE; fi
 export FESOM_PRINT_EVERY=500
 sha256sum "$BIN"
-echo "=== M12b s4 partition split, farc 2048 CPU dt900 M=90 SE ==="
+echo "=== M12b s4 partition split, farc 2048 CPU dt900 SOLVER=$SOLVER ==="
 
 leg () {   # $1 arm(stock|m11)  $2 rep  $3 phasestats(0|1)
   local arm=$1 rep=$2 ph=$3
   local MESH=$STOCK; [ "$arm" = "m11" ] && MESH=$M11
-  local OUT=$BASE/psplit_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
+  local OUT=$BASE/psplit_${SOLVER}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
   rm -rf "$OUT"; mkdir -p "$OUT"
   # 🔴 on Serial the FESOM_SPEED family needs FORCE_SERIAL (rule 0.24), so the
   # phasestats legs are separate and the timing legs stay lever-free.
@@ -72,10 +79,11 @@ leg stock 1 1;  leg m11 1 1
 
 for arm in stock m11; do
   D=$STOCK/dist_2048; [ "$arm" = "m11" ] && D=$M11/dist_2048
-  for PH in bt ocean; do
+  PHASES_OF_INTEREST="bt ocean"; [ "$SOLVER" = "si" ] && PHASES_OF_INTEREST="cg ocean"
+  for PH in $PHASES_OF_INTEREST; do
     echo "=== $arm / phase $PH ==="
     "$PY" "$ROOT/scripts/m12b_bt_imbalance.py" "$D" \
-          "$BASE/psplit_${arm}_r1_ph1_${SLURM_JOB_ID}" --phase $PH || true
+          "$BASE/psplit_${SOLVER}_${arm}_r1_ph1_${SLURM_JOB_ID}" --phase $PH || true
   done
 done
 echo "=== partition split done — min-of-2 on the timing legs ==="

@@ -560,8 +560,10 @@ with these predictions written down first:
   §8 and the handover with it.**
 * **P2** the 3-D `ocean` phase's busy imbalance falls (1.62 max/mean at stock) — what the weighting
   buys, and why M11 measured −7.52 %.
-* **P3** net under SE the M11 partition still wins, but by *less* than −7.52 %, because SE moves
-  work out of the implicit solver (which the weighting helps) into bt (which it hurts).
+* **P3** net under SE the M11 partition still wins, but by *less* than under the implicit solver,
+  because SE moves work out of the solver (which the weighting helps) into bt (which it hurts).
+  🔴 M11's −7.52 % was measured on another day with another protocol, so P3 needs **both** solvers
+  measured here: job 26961927 runs the SE pair, 26961990 the SI pair, same allocation, same day.
 
 (The 2.6 % above is an **upper bound**: it assumes perfect element balance removes all of the
 imbalance absorption, and the element fit leaves 8 % of the busy spread unexplained.)
