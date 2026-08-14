@@ -179,6 +179,79 @@ static int fesom_se_wide_selfcheck(void)
     return cached;
 }
 
+/* GEOCHK level: 0 = off, 1 = the session-2 probes (holder-vs-holder,
+ * x-component), >=2 adds the s3 ingredient probes: BOTH components, the
+ * viscosity's two terms separately, and halo-copy-vs-owner coherence — the
+ * two blind spots the level-1 probes turned out to have. */
+static int se_wide_geochk_level(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_WIDE_GEOCHK");
+        if (!e || !e[0] || strcmp(e, "0") == 0) {
+            cached = 0;
+        } else {
+            char *end = NULL;
+            const long v = strtol(e, &end, 10);
+            cached = (end != e && end && !*end && v >= 2) ? (int)v : 1;
+        }
+    }
+    return cached;
+}
+
+/* gid-keyed min/max spread across ranks of an interleaved 2-component element
+ * field: scope "own" compares the myDim copies of multi-claimed elements
+ * against each other; scope "all" additionally folds in every HALO copy, so a
+ * halo slot that is not a byte-copy of the owner shows up here and only here.
+ * Prints count + max per component. Diagnostic path — host arrays, blocking
+ * collectives. */
+static void se_gk_elem2(const char *tag, int step, int m, int scope_n, int Eown,
+                        const real_t *v, int ncomp, const struct fesom_mesh *mesh,
+                        struct fesom_partit *p)
+{
+    const long GE = (long)mesh->elem2D;
+    for (int scope = 0; scope < 2; ++scope) {
+        const int lim = scope ? scope_n : Eown;
+        std::vector<double> lo((size_t)(ncomp * GE),  1e300);
+        std::vector<double> hi((size_t)(ncomp * GE), -1e300);
+        for (int e = 0; e < lim; ++e) {
+            const long g = (long)p->myList_elem2D[e] - 1;
+            if (g < 0 || g >= GE) continue;
+            for (int c = 0; c < ncomp; ++c) {
+                const double x = (double)v[ncomp * e + c];
+                const size_t k = (size_t)(c * GE + g);
+                if (x < lo[k]) lo[k] = x;
+                if (x > hi[k]) hi[k] = x;
+            }
+        }
+        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)(ncomp * GE), MPI_DOUBLE, MPI_MIN,
+                      p->MPI_COMM_FESOM);
+        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)(ncomp * GE), MPI_DOUBLE, MPI_MAX,
+                      p->MPI_COMM_FESOM);
+        long   n[2] = { 0, 0 };
+        double w[2] = { 0.0, 0.0 };
+        for (int c = 0; c < ncomp; ++c)
+            for (long g = 0; g < GE; ++g) {
+                const size_t k = (size_t)(c * GE + g);
+                if (lo[k] > 1e299) continue;
+                if (hi[k] != lo[k]) {
+                    ++n[c];
+                    const double d = hi[k] - lo[k];
+                    if (d > w[c]) w[c] = d;
+                }
+            }
+        if (p->mype == 0) {
+            if (ncomp == 2)
+                fprintf(stderr, "[ssh_se-gk] step %d sub %d %-6s %s: x %ld (max %.3e)  "
+                                "y %ld (max %.3e)\n", step, m, tag,
+                        scope ? "all" : "own", n[0], w[0], n[1], w[1]);
+            else
+                fprintf(stderr, "[ssh_se-gk] step %d sub %d %-6s %s: %ld (max %.3e)\n",
+                        step, m, tag, scope ? "all" : "own", n[0], w[0]);
+        }
+    }
+}
+
 static int fesom_se_visc_on(void)
 {
     static int cached = -1;
@@ -504,6 +577,31 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
         if (p->mype == 0)
             fprintf(stderr, "[ssh_se-geochk] viscosity stencil SIZE differs between holders for "
                             "%ld of %ld elements\n", nstencil, GE);
+
+        /* Same SIZE does not mean same CONTENT: compare the gid-sorted
+         * neighbour TRIPLE positionally (canonicalisation ran — wide is on
+         * whenever this function runs), boundary encoded as gid 0. A holder
+         * whose slot s names a different global neighbour drops/duplicates a
+         * viscosity term the size probe cannot see. */
+        for (int s = 0; s < 3; ++s) {
+            std::vector<double> clo((size_t)GE,  1e300), chi((size_t)GE, -1e300);
+            const int *en3 = s_se.elem_nb.h();
+            for (int e = 0; e < Eown; ++e) {
+                const long g = (long)p->myList_elem2D[e] - 1;
+                if (g < 0 || g >= GE) continue;
+                const int nb = en3[3*e + s];
+                clo[(size_t)g] = chi[(size_t)g] =
+                    (nb >= 0) ? (double)p->myList_elem2D[nb] : 0.0;
+            }
+            MPI_Allreduce(MPI_IN_PLACE, clo.data(), (int)GE, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+            MPI_Allreduce(MPI_IN_PLACE, chi.data(), (int)GE, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+            long ncontent = 0;
+            for (long g = 0; g < GE; ++g)
+                if (clo[(size_t)g] < 1e299 && chi[(size_t)g] != clo[(size_t)g]) ++ncontent;
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se-geochk] viscosity neighbour slot %d CONTENT differs "
+                                "between holders for %ld of %ld elements\n", s, ncontent, GE);
+        }
     }
 
     /* (1) viscosity neighbours in the eXDim tail */
@@ -1256,32 +1354,13 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * elements that more than one rank claims? Geometry and stencil size are
      * (measured 0 differences), so if the ring-1 mismatch has a seed it must be
      * here — F and H0e are the only per-step, 3-D-derived inputs k3 reads. */
-    if (getenv("FESOM_SE_WIDE_GEOCHK") && step_n <= 3) {
+    if (se_wide_geochk_level() >= 1 && step_n <= 3) {
         s_se.Fbt.sync_host(); s_se.H0e.sync_host();
-        const real_t *Fh = s_se.Fbt.h();
-        const real_t *Hh = s_se.H0e.h();
-        const long GE = (long)mesh->elem2D;
-        std::vector<double> lo((size_t)(2*GE),  1e300), hi((size_t)(2*GE), -1e300);
-        for (int e = 0; e < Eown; ++e) {
-            const long g = (long)p->myList_elem2D[e] - 1;
-            if (g < 0 || g >= GE) continue;
-            lo[(size_t)g]      = hi[(size_t)g]      = (double)Fh[2*e];
-            lo[(size_t)(GE+g)] = hi[(size_t)(GE+g)] = (double)Hh[e];
-        }
-        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)(2*GE), MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
-        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)(2*GE), MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
-        long nF = 0, nH = 0; double wF = 0.0, wH = 0.0;
-        for (long g = 0; g < GE; ++g) {
-            if (lo[(size_t)g] < 1e299 && hi[(size_t)g] != lo[(size_t)g]) {
-                ++nF; const double d = hi[(size_t)g] - lo[(size_t)g]; if (d > wF) wF = d;
-            }
-            if (lo[(size_t)(GE+g)] < 1e299 && hi[(size_t)(GE+g)] != lo[(size_t)(GE+g)]) {
-                ++nH; const double d = hi[(size_t)(GE+g)] - lo[(size_t)(GE+g)]; if (d > wH) wH = d;
-            }
-        }
-        if (p->mype == 0)
-            fprintf(stderr, "[ssh_se-geochk] step %d: Fbt differs between holders for %ld elements "
-                            "(max %.3e), H0e for %ld (max %.3e)\n", step_n, nF, wF, nH, wH);
+        /* level-1 probes compared the x component only (the s2 blind spot);
+         * probe BOTH components + H0e, holder-vs-holder AND halo-vs-owner. */
+        const int NeF = mesh->myDim_elem2D + mesh->eDim_elem2D;   /* se_forcing extent */
+        se_gk_elem2("Fbt", step_n, -1, NeF, Eown, s_se.Fbt.h(), 2, mesh, p);
+        se_gk_elem2("H0e", step_n, -1, NeF, Eown, s_se.H0e.h(), 1, mesh, p);
     }
     if (fesom_se_check_on())
         se_check_forcing(step_n, mesh, p);
@@ -1289,6 +1368,17 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
     s_se.Ubt_n.modify_device();
     Kokkos::deep_copy(s_se.Ubt_mean.d(), 0.0);
     s_se.Ubt_mean.modify_device();
+
+    /* GEOCHK>=2: is the anchor the same field everywhere — across holders AND
+     * between a halo copy and its owner — at the moment it is frozen? The s2
+     * evidence localises the incoherence to V[Ūⁿ]'s first nonzero contribution
+     * (step 2 substep 1), so the anchor and the k3 inputs are probed at full
+     * resolution here. */
+    const int gklev = se_wide_geochk_level();
+    if (gklev >= 2 && step_n <= 2) {
+        s_se.Ubt_n.sync_host();
+        se_gk_elem2("anchor", step_n, -1, Ne, Eown, s_se.Ubt_n.h(), 2, mesh, p);
+    }
 
     /* Mesh/forcing pointers reused across substeps (L109 lean captures). */
     const int    *ulev_n = mesh->ulevels_nod2D_fld.d().data();
@@ -1310,6 +1400,38 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                                                        * se_forcing — free now */
 
     for (int m = 0; m < M; ++m) {
+        /* GEOCHK>=2: k3-input coherence at substep entry (step 2, first four
+         * substeps — the measured onset window; step 1 rides along as the null).
+         * U0 is the live ring, "all" scope = halo-copy-vs-owner too; eta is
+         * nodal, whose ownership IS a partition, so only the halo scope can
+         * differ there (checked host-side against the owner's gid value). */
+        if (gklev >= 2 && step_n <= 2 && m <= 3) {
+            s_se.Ubt[0].sync_host();
+            se_gk_elem2("U0", step_n, m, Ne, Eown, s_se.Ubt[0].h(), 2, mesh, p);
+            s_se.eta[0].sync_host();
+            const long GN = (long)mesh->nod2D;   /* global count (bcast header) */
+            std::vector<double> lo((size_t)GN, 1e300), hi((size_t)GN, -1e300);
+            const real_t *eh = s_se.eta[0].h();
+            for (int n = 0; n < Nown; ++n) {
+                const long g = (long)p->myList_nod2D[n] - 1;
+                if (g >= 0 && g < GN) lo[(size_t)g] = hi[(size_t)g] = (double)eh[n];
+            }
+            MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)GN, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+            MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)GN, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+            double wloc = 0.0; long nloc = 0;
+            for (int j = 0; j < eDim; ++j) {
+                const long g = (long)p->myList_nod2D[Nown + j] - 1;
+                if (g < 0 || g >= GN || lo[(size_t)g] > 1e299) continue;
+                const double d = fabs((double)eh[Nown + j] - lo[(size_t)g]);
+                if (d > 0.0) { ++nloc; if (d > wloc) wloc = d; }
+            }
+            double glob[2] = { wloc, (double)nloc };
+            MPI_Allreduce(MPI_IN_PLACE, glob, 2, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se-gk] step %d sub %d eta    halo-vs-owner: "
+                                "%ld (max %.3e)\n", step_n, m, (long)glob[1], glob[0]);
+        }
+
         /* k1: AB3 extrapolation + mean accumulation (owned+eDim). */
         {
             const real_t *U0 = s_se.Ubt[0].d().data();
@@ -1460,6 +1582,51 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             s_se.Ubt[2].modify_device();
         }
 
+        /* GEOCHK>=2, after k3: does Ū^{m+1} agree across holders — and if not,
+         * which viscosity term carries the disagreement? vm = V[Ūᵐ], vn = V[Ūⁿ],
+         * recomputed HOST-side with the kernel's own accumulation order and
+         * inputs, each scaled by 1/area like the kernel's combined term. */
+        if (gklev >= 2 && step_n <= 2 && m <= 3) {
+            s_se.Ubt[2].sync_host(); s_se.Ubt[0].sync_host();
+            s_se.Ubt_n.sync_host(); s_se.H0e.sync_host();
+            se_gk_elem2("Unew", step_n, m, Eown, Eown, s_se.Ubt[2].h(), 2, mesh, p);
+            if (visc_on) {
+                const real_t *U0h = s_se.Ubt[0].h();
+                const real_t *Unh = s_se.Ubt_n.h();
+                const real_t *Hh  = s_se.H0e.h();
+                const int    *nbh = s_se.elem_nb.h();
+                std::vector<real_t> vm((size_t)(2*Eown), 0.0), vn((size_t)(2*Eown), 0.0);
+                for (int e = 0; e < Eown; ++e) {
+                    const double He_e = (double)Hh[e];
+                    double mxx = 0.0, mxy = 0.0, nxx = 0.0, nxy = 0.0;
+                    for (int s = 0; s < 3; ++s) {
+                        const int nb = nbh[3*e + s];
+                        if (nb < 0) continue;
+                        const double len = sqrt((double)mesh->elem_area[e]
+                                              + (double)mesh->elem_area[nb]);
+                        const double ihh = 1.0 / (0.5 * (He_e + (double)Hh[nb]));
+                        double dux = (double)U0h[2*e+0] - (double)U0h[2*nb+0];
+                        double duy = (double)U0h[2*e+1] - (double)U0h[2*nb+1];
+                        double spd = sqrt(dux*dux + duy*duy) * ihh;
+                        double vi  = sqrt(fmax((double)vg0, (double)vg1 * spd) * len);
+                        mxx -= dux * vi;  mxy -= duy * vi;
+                        dux = (double)Unh[2*e+0] - (double)Unh[2*nb+0];
+                        duy = (double)Unh[2*e+1] - (double)Unh[2*nb+1];
+                        spd = sqrt(dux*dux + duy*duy) * ihh;
+                        vi  = sqrt(fmax((double)vg0, (double)vg1 * spd) * len);
+                        nxx += dux * vi;  nxy += duy * vi;
+                    }
+                    const double ia = 1.0 / (double)mesh->elem_area[e];
+                    vm[(size_t)(2*e)+0] = (real_t)(mxx * ia);
+                    vm[(size_t)(2*e)+1] = (real_t)(mxy * ia);
+                    vn[(size_t)(2*e)+0] = (real_t)(nxx * ia);
+                    vn[(size_t)(2*e)+1] = (real_t)(nxy * ia);
+                }
+                se_gk_elem2("viscM", step_n, m, Eown, Eown, vm.data(), 2, mesh, p);
+                se_gk_elem2("viscN", step_n, m, Eown, Eown, vn.data(), 2, mesh, p);
+            }
+        }
+
         /* Ū ring rotate, then exchange the new current level (fused pair).
          * M12b: ELEM2D_FULL under the rung — same partner ranks, ~2.2x the
          * entities each, and it is the ONLY exchange left in the substep. */
@@ -1524,26 +1691,10 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * than one rank claims? Geometry, stencil and forcing are (measured), so if
      * Ū is not, the redundant computation itself is the seed — and no local
      * recomputation can reproduce the node owner's η. */
-    if (getenv("FESOM_SE_WIDE_GEOCHK") && step_n <= 3) {
+    if (se_wide_geochk_level() >= 1 && step_n <= 3) {
         s_se.Ubt[0].sync_host();
-        const real_t *Uh = s_se.Ubt[0].h();
-        const long GE = (long)mesh->elem2D;
-        std::vector<double> lo((size_t)GE, 1e300), hi((size_t)GE, -1e300);
-        for (int e = 0; e < Eown; ++e) {
-            const long g = (long)p->myList_elem2D[e] - 1;
-            if (g < 0 || g >= GE) continue;
-            lo[(size_t)g] = hi[(size_t)g] = (double)Uh[2*e];
-        }
-        MPI_Allreduce(MPI_IN_PLACE, lo.data(), (int)GE, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
-        MPI_Allreduce(MPI_IN_PLACE, hi.data(), (int)GE, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
-        long nU = 0; double wU = 0.0;
-        for (long g = 0; g < GE; ++g)
-            if (lo[(size_t)g] < 1e299 && hi[(size_t)g] != lo[(size_t)g]) {
-                ++nU; const double d = hi[(size_t)g] - lo[(size_t)g]; if (d > wU) wU = d;
-            }
-        if (p->mype == 0)
-            fprintf(stderr, "[ssh_se-geochk] step %d END: Ubt differs between holders for %ld "
-                            "elements (max %.3e)\n", step_n, nU, wU);
+        /* both components + halo-vs-owner (the level-1 probe read Uh[2*e] only). */
+        se_gk_elem2("UbtEND", step_n, 99, Ne, Eown, s_se.Ubt[0].h(), 2, mesh, p);
     }
 
     /* M12b selfcheck verdict, once per step (collective). The rung is EXACT by
