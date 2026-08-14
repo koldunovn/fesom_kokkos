@@ -180,8 +180,8 @@ barotropic interface amplifies whatever it is seeded with, exponentially per ste
 | W1 selfcheck=1, 0.0-abort armed | np8, 25 steps | **EXACT 0.0, every substep** | 26959980 |
 | free-running drift | np8 ×25 · np128 ×300 · farc 2048 ×50 | **0.000000e+00 at every step** | 26959980/81/82 |
 | W5 3000-step screen, rung ON free | farc 2048, M=90, wsplit | **clean; η=2.05/uv=2.01 ≈ control η=2.05/uv=2.00** | 26959982 |
-| W5 3000-step screen | CORE2 np128 | in queue | 26960088 |
-| W5b graded disturbance | np64/np128 | in queue | 26960089 |
+| W5 3000-step screen, rung ON free | CORE2 np128 | **clean; η=1.89 both arms (the SE reference), print-precision match** (s2: NaN by 500) | 26960088 |
+| W5b graded disturbance | np64/np128 | **rc=0 at BOTH rank counts; lever 2200-2400× below the rank-count spread** | 26960089 |
 | W2 CUDA drift gate | CORE2 4N GPU | in queue (partition drained) | 26960090 |
 
 **The rung is bitwise-exact free-running** (its trajectory ≡ the same binary's exchanged path with
