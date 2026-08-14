@@ -61,6 +61,11 @@ echo "    BIN    = $FESOM"
 echo "    sha256 = $(sha256sum "$FESOM" | cut -c1-16)"
 echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
 echo "    mode   = $([ -n "$PHST" ] && echo 'INSTRUMENTED (icedyn; do NOT quote SYPD from this run)' || echo 'CLEAN (SYPD; no phase split)')"
+# M13: which cold-start hole fill built the IC. Legacy is partition-DEPENDENT, so a scaling
+# curve run under it compares points that integrate different oceans. Recorded here because
+# the knob arrives through the environment and the only other trace is one rank-0 line buried
+# in each leg's run log (which the harvest greps for -- see the det fleet's collect step).
+echo "    ic     = FESOM_IC_EXTRAP=${FESOM_IC_EXTRAP:-<unset = legacy>}"
 echo "    every leg gets FESOM_SPEED=1 + FESOM_SPEED_FORCE_SERIAL=1 (the latter is MANDATORY on"
 echo "    Serial — without it every lever, PHASESTATS and every M9 knob included, resolves OFF)"
 echo "    io     = ${IOCFG:-$ROOT/jobs/io.config.m9_timing}"
