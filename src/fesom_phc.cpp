@@ -387,6 +387,158 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
     free(work);
 }
 
+/*--- extrap_nod3D_det — M13 CG-blowups fix (FESOM_IC_EXTRAP=det) ----------
+ * The legacy extrap_nod3D is ORDER- AND PARTITION-DEPENDENT: it fills each
+ * dummy node from already-valid neighbours by in-place Gauss-Seidel, runs each
+ * rank's fill to local exhaustion between halo exchanges, and never revisits a
+ * filled node (first-fill-wins). Marginal seas (e.g. the whole Sea of Marmara:
+ * any land corner of the 1° PHC cell marks a node dummy) therefore get filled
+ * with DIFFERENT WATER MASSES on different partitions — measured 2026-08-14 on
+ * NG5 elem 8241930 nz=36: S = 18.611/18.611/18.611 on dist_4096 vs
+ * 21.9/25.5/27.9 on dist_8192 → Δrho ≈ 10 kg/m³ across one 2-km element →
+ * pgf 5.5e-3 m/s² → linear |uv| ramp 0.5 m/s per step from step 1 → CFL blow-up
+ * (the "CG blow-ups on specific partitions" class; same defect upstream in
+ * gen_support.F90:400-507).
+ *
+ * det variant: ring-Jacobi. Per sweep, validity is FROZEN to the previous
+ * sweep's state; every still-dummy node with ≥1 valid neighbour is filled with
+ * the multiplicity-weighted mean of those neighbours (same stencil and
+ * eligibility tests as legacy), accumulated in ASCENDING GLOBAL-ID order so
+ * the FP sum is bitwise partition-independent; halo exchange after every
+ * sweep; terminate when a global Allreduce reports no progress on any layer.
+ * The fill thus depends only on the global mesh + ring distance, not on the
+ * decomposition or the local numbering. NOTE on np=1 this differs from legacy
+ * (Jacobi ≠ Gauss-Seidel), so the knob defaults OFF and byte-certified
+ * baselines are untouched.
+ */
+static void extrap_det_exchange_all(const struct fesom_mesh *mesh,
+                                    struct fesom_partit *partit, real_t *arr)
+{
+    if (!partit || partit->npes <= 1) return;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int nl = mesh->nl;
+    real_t *layer = (real_t *)malloc((size_t)N_alloc * sizeof(real_t));
+    FESOM_CHECK(layer, "extrap_det: oom (layer)");
+    for (int nz = 0; nz < nl; ++nz) {
+        for (int n = 0; n < N_alloc; ++n)
+            layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
+        fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
+        for (int n = 0; n < N_alloc; ++n)
+            arr[FESOM_NODE3D(n, nz, nl)] = layer[n];
+    }
+    free(layer);
+}
+
+static void extrap_nod3D_det(const struct fesom_mesh *mesh,
+                             struct fesom_partit     *partit,
+                             real_t                  *arr)
+{
+    const int N       = mesh->myDim_nod2D;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int nl      = mesh->nl;
+
+    real_t *prev = (real_t *)malloc((size_t)N_alloc * (size_t)nl * sizeof(real_t));
+    FESOM_CHECK(prev, "extrap_det: oom (prev)");
+
+    extrap_det_exchange_all(mesh, partit, arr);   /* halo current before ring 0 */
+
+    int sweeps = 0;
+    for (;;) {
+        ++sweeps;
+        FESOM_CHECK(sweeps < 100000, "extrap_det: sweep cap hit — should be unreachable");
+        memcpy(prev, arr, (size_t)N_alloc * (size_t)nl * sizeof(real_t));
+        int progress = 0;
+        for (int nz = 0; nz < nl - 1; ++nz) {
+            for (int n = 0; n < N; ++n) {
+                if (!(prev[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) ||
+                    !(mesh->nlevels_nod2D[n] - 1 > nz)) continue;
+                /* Gather (gid, value) of valid neighbours WITH multiplicity —
+                 * same stencil as legacy: vertices of the node's element ring. */
+                int    ngid[64];
+                real_t nval[64];
+                int    cnt = 0;
+                int o0 = mesh->nod_in_elem2D_offsets[n];
+                int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+                for (int kk = o0; kk < o1; ++kk) {
+                    int el = mesh->nod_in_elem2D[kk];
+                    if (nz > mesh->nlevels[el] - 1) continue;
+                    for (int j = 0; j < 3; ++j) {
+                        int v = mesh->elem_nodes[3*el + j];
+                        if (v < 0 || v >= N_alloc) continue;
+                        if (prev[FESOM_NODE3D(v, nz, nl)] < 0.99 * PHC_DUMMY &&
+                            mesh->nlevels_nod2D[v] - 1 > nz) {
+                            FESOM_CHECK(cnt < 64, "extrap_det: ring overflow");
+                            ngid[cnt] = partit->myList_nod2D
+                                            ? partit->myList_nod2D[v] : v + 1;
+                            nval[cnt] = prev[FESOM_NODE3D(v, nz, nl)];
+                            ++cnt;
+                        }
+                    }
+                }
+                if (cnt == 0) continue;
+                /* Insertion sort by ascending gid (ties = identical values,
+                 * order irrelevant) → FP sum independent of the partition. */
+                for (int a = 1; a < cnt; ++a) {
+                    int    g = ngid[a]; real_t w = nval[a]; int b = a - 1;
+                    while (b >= 0 && ngid[b] > g) {
+                        ngid[b+1] = ngid[b]; nval[b+1] = nval[b]; --b;
+                    }
+                    ngid[b+1] = g; nval[b+1] = w;
+                }
+                real_t val = 0.0;
+                for (int a = 0; a < cnt; ++a) val += nval[a];
+                arr[FESOM_NODE3D(n, nz, nl)] = val / (real_t)cnt;
+                progress = 1;
+            }
+        }
+        if (partit && partit->npes > 1) {
+            MPI_Allreduce(MPI_IN_PLACE, &progress, 1, MPI_INT, MPI_MAX,
+                          partit->MPI_COMM_FESOM);
+        }
+        if (!progress) break;
+        extrap_det_exchange_all(mesh, partit, arr);
+    }
+    if (!partit || partit->mype == 0) {
+        printf("[fesom_phc] det extrap converged in %d ring sweeps\n", sweeps);
+    }
+
+    /* Vertical fill — identical to legacy (order-independent). */
+    for (int n = 0; n < N; ++n) {
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = 1; nz < nl1; ++nz) {
+            if (arr[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) {
+                arr[FESOM_NODE3D(n, nz, nl)] = arr[FESOM_NODE3D(n, nz - 1, nl)];
+            }
+        }
+    }
+    extrap_det_exchange_all(mesh, partit, arr);   /* final exchange */
+
+    free(prev);
+}
+
+/* FESOM_IC_EXTRAP knob: "det" = deterministic fill; unset/"legacy" = the
+ * literal-port Gauss-Seidel. Any other value refuses loudly (house rule:
+ * a knob announces itself or aborts — never dies silent). */
+static int ic_extrap_det_on(struct fesom_partit *partit)
+{
+    static int s_det = -1;
+    if (s_det < 0) {
+        const char *e = getenv("FESOM_IC_EXTRAP");
+        if (!e || !e[0] || strcmp(e, "legacy") == 0) {
+            s_det = 0;
+        } else if (strcmp(e, "det") == 0) {
+            s_det = 1;
+            if (!partit || partit->mype == 0) {
+                printf("[fesom_phc] FESOM_IC_EXTRAP=det — deterministic "
+                       "partition-independent hole fill (ring-Jacobi, gid-ordered sums)\n");
+            }
+        } else {
+            FESOM_DIE("FESOM_IC_EXTRAP=%s not recognised (want: det | legacy)", e);
+        }
+    }
+    return s_det;
+}
+
 /*--- Top-level entry -----------------------------------------------------*/
 void fesom_phc_load_ic(const char                  *path,
                        const struct fesom_mesh     *mesh,
@@ -519,8 +671,13 @@ void fesom_phc_load_ic(const char                  *path,
     }
 
     /* Extrapolate to fill any remaining dummy-tagged ocean nodes. */
-    extrap_nod3D(mesh, partit, T);
-    extrap_nod3D(mesh, partit, S);
+    if (ic_extrap_det_on(partit)) {
+        extrap_nod3D_det(mesh, partit, T);
+        extrap_nod3D_det(mesh, partit, S);
+    } else {
+        extrap_nod3D(mesh, partit, T);
+        extrap_nod3D(mesh, partit, S);
+    }
 
     /* Final cleanup (Fortran do_ic3d lines 536-557): replace remaining dummy
      * with 0, zero-out below nlevels_nod2D, K → C if T > 100.

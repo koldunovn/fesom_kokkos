@@ -1437,6 +1437,86 @@ skip_rest_state:
                         }
                     }
                 }
+                /* M13 CG-blowups: FESOM_DIAG_ELEM=<1-based global elem gid> —
+                 * per-print-step probe of ONE element + its 3 nodes, printed by
+                 * every rank that holds the element locally (owned or halo).
+                 * FESOM_DIAG_ELEM_NZ picks the probed level (default: column
+                 * |uv| argmax each step). Print-only, env-gated, byte-inert;
+                 * host arrays are current here on Serial/CPU builds only. */
+                {
+                    static long s_pe_gel = -2;      /* -2 unresolved, -1 off */
+                    static int  s_pe_le = -1, s_pe_nz = -1;
+                    if (s_pe_gel == -2) {
+                        const char *e = getenv("FESOM_DIAG_ELEM");
+                        s_pe_gel = (e && e[0]) ? atol(e) : -1;
+                        const char *z = getenv("FESOM_DIAG_ELEM_NZ");
+                        s_pe_nz = (z && z[0]) ? atoi(z) : -1;
+                        if (s_pe_gel > 0) {
+                            int my_e = mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D;
+                            for (int i = 0; i < my_e; ++i)
+                                if (mpi.myList_elem2D[i] == (int)s_pe_gel) { s_pe_le = i; break; }
+                        }
+                        if (s_pe_le >= 0) {
+                            const char *cls = s_pe_le < mesh.myDim_elem2D ? "own"
+                                : (s_pe_le < mesh.myDim_elem2D + mesh.eDim_elem2D ? "eDim" : "eXDim");
+                            fprintf(stderr, "[elemprobe] init rank %d: gel=%ld le=%d cls=%s nlev_e=%d",
+                                    mpi.mype, s_pe_gel, s_pe_le, cls, mesh.nlevels[s_pe_le]);
+                            for (int k = 0; k < 3; ++k) {
+                                int ln = mesh.elem_nodes[3*s_pe_le + k];
+                                int gid = (ln >= 0) ? mpi.myList_nod2D[ln] : -1;
+                                fprintf(stderr, "  n%d: lidx=%d gid=%d %s nlev=%d", k, ln, gid,
+                                        (ln < 0) ? "UNMAPPED" : (ln < mesh.myDim_nod2D ? "own" : "halo"),
+                                        (ln >= 0) ? mesh.nlevels_nod2D[ln] : -1);
+                            }
+                            fprintf(stderr, "\n"); fflush(stderr);
+                        }
+                    }
+                    if (s_pe_le >= 0) {
+                        int le = s_pe_le, nl = mesh.nl;
+                        int nz = s_pe_nz;
+                        if (nz < 0) {            /* column argmax of |uv| */
+                            real_t best = -1.0;
+                            for (int z2 = 0; z2 < mesh.nlevels[le] - 1; ++z2) {
+                                real_t a = fabs(dyn.uv[(size_t)le*(size_t)nl*2 + 2*z2])
+                                         + fabs(dyn.uv[(size_t)le*(size_t)nl*2 + 2*z2 + 1]);
+                                if (a > best) { best = a; nz = z2; }
+                            }
+                        }
+                        size_t iu = (size_t)le*(size_t)nl*2 + 2*nz;
+                        fprintf(stderr, "[elemprobe] step %d rank %d nz=%d uv=(%.10e,%.10e) "
+                                "pgf=(%.10e,%.10e) Av=%.4e\n", n, mpi.mype, nz,
+                                (double)dyn.uv[iu], (double)dyn.uv[iu+1],
+                                (double)aux.pgf_x[FESOM_ELEM3D(le, nz, nl)],
+                                (double)aux.pgf_y[FESOM_ELEM3D(le, nz, nl)],
+                                (double)aux.Av[FESOM_ELEM3D(le, nz, nl)]);
+                        for (int k = 0; k < 3; ++k) {
+                            int ln = mesh.elem_nodes[3*le + k];
+                            if (ln < 0) { fprintf(stderr, "[elemprobe]   n%d UNMAPPED\n", k); continue; }
+                            size_t i3 = FESOM_NODE3D(ln, nz, nl);
+                            fprintf(stderr, "[elemprobe]   n%d gid=%d eta=%.10e hp=%.10e rho=%.10e "
+                                    "T=%.10e S=%.10e Kv=%.4e w=%.6e w_i=%.6e\n",
+                                    k, mpi.myList_nod2D[ln], (double)dyn.eta_n[ln],
+                                    (double)aux.hpressure[i3], (double)aux.density_m_rho0[i3],
+                                    (double)tracers.data[FESOM_TRACER_T].values[i3],
+                                    (double)tracers.data[FESOM_TRACER_S].values[i3],
+                                    (double)aux.Kv[i3], (double)dyn.w[i3], (double)dyn.w_i[i3]);
+                        }
+                        if (n == 1) {            /* one-time IC columns: T,S per node */
+                            for (int k = 0; k < 3; ++k) {
+                                int ln = mesh.elem_nodes[3*le + k];
+                                if (ln < 0) continue;
+                                fprintf(stderr, "[elemprobe-ic] n%d gid=%d Tcol:", k, mpi.myList_nod2D[ln]);
+                                for (int z2 = 0; z2 < mesh.nlevels_nod2D[ln] - 1; ++z2)
+                                    fprintf(stderr, " %.6f", (double)tracers.data[FESOM_TRACER_T].values[FESOM_NODE3D(ln, z2, nl)]);
+                                fprintf(stderr, "\n[elemprobe-ic] n%d gid=%d Scol:", k, mpi.myList_nod2D[ln]);
+                                for (int z2 = 0; z2 < mesh.nlevels_nod2D[ln] - 1; ++z2)
+                                    fprintf(stderr, " %.6f", (double)tracers.data[FESOM_TRACER_S].values[FESOM_NODE3D(ln, z2, nl)]);
+                                fprintf(stderr, "\n");
+                            }
+                        }
+                        fflush(stderr);
+                    }
+                }
                 /* Guard threshold overridable for wsplit debugging: Fortran F1
                  * legitimately rides the Gibraltar cold-start event past uv 5
                  * (CFLz peaks 6.1 at step ~248); FESOM_UV_GUARD=30 lets the port
