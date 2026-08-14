@@ -133,23 +133,36 @@ the lever's footprint is a property of the transformation, not of the partition 
 M11 grading this is comfortably tier 1: the winner is not distinguishable from a seed re-roll,
 by three to five orders of magnitude.
 
-## 3c. First performance number — farc 2048 CPU (W6, job 26953153)
+## 3c. 🔴 RETRACTED performance number, and the failure it exposed (W5/W6)
 
-Same binary, same allocation, knob off vs on, interleaved reps, 300 steps loop-only, dt900, M=90.
+**The farc 2048 CPU result of −8.9 % (0.0723 → 0.0659 s/step, job 26953153) is WITHDRAWN: the
+knob-on legs ran to all-NaN.** The diagnostic print shows `T[1e30, -1e30]` with every norm at
+zero — the signature of an all-NaN field, because NaN comparisons leave a min/max reduction's
+sentinels untouched. A NaN run's wall-clock is not a performance measurement. The same failure
+appears in the W5 3000-step screen: knob-off reaches step 3000 at η=1.89 (the SE reference),
+knob-on is NaN by step 500.
 
-| arm | reps (s/step) | min-of-2 |
-|---|---|---|
-| rung OFF | 0.0735 · 0.0723 · 0.0723 | 0.0723 |
-| rung ON | 0.0659 · 0.0659 · 0.0661 | **0.0659** |
+**Why every earlier run looked healthy — the trap worth naming.** Every clean wide run to that
+point was either 20 steps, or ran with `FESOM_SE_WIDE_SELFCHECK`, **which performs the η exchange
+as well** (stash → exchange → diff). The selfcheck therefore restores the certified data path each
+substep, so it validates the ring COMPUTATION while hiding what happens when the rung runs free.
+The residual growth curve in §3 was measured in exactly that configuration: it is a faithful
+measure of the per-substep seed, and NOT of free-running drift. 🔴 **A diagnostic that repairs the
+thing it measures cannot certify it — run the lever free before believing any of its numbers.**
 
-**−8.9 %**, with the wire confirming 180 → 90 exchanges/step and partners ×0.500. The on-arm reps
-agree to 0.3 %, so the result is not noise. Notable because this is the point where the rung pays
-its LARGEST arithmetic penalty on the board (+19.7 % ring-1 redundant compute at 311 verts/core):
-halving the messages still wins by nearly 9 %, which strengthens rather than weakens the GPU case.
+**Free-running behaviour, measured:** CORE2 np8 is healthy past step 260 (η ~3.1, indistinguishable
+from knob-off); CORE2 np128 is NaN before step 500; farc 2048 is NaN by step 300. So the failure is
+**rank-count dependent**, which fits the interface fraction (ring-1 is 6.1 % of owned at np64,
+13.2 % at np128, 19.7 % at farc 2048).
 
-Against the M12 G4 board (SE 0.0738 vs SI 0.0860 at the same point), the rung would take the SE
-advantage over SI from −14.2 % to roughly −23 % — but that is a cross-day composition, not a
-measured pair, so the −8.9 % is the number of record.
+**Working hypothesis, under test (job 26953774):** the rung is a Schwarz-like decomposition in
+which each rank recomputes its neighbour's boundary values. That is stable when the recomputation
+is EXACT, but §3 established it cannot be — the viscosity makes Ū rank-dependent on the 0.55 % of
+multi-claimed elements, so each interface carries a small inconsistency that acts as a forcing.
+The decisive test is `FESOM_SE_VISC=0`, the one configuration where the ring compute is provably
+exact: if that arm is stable at np128 while the viscous arm is not, **exactness is a stability
+requirement here, not a nicety**, and the rung cannot ship until the multi-claimed elements are
+reconciled.
 
 ⚠️ `FESOM_SPEED_PHASESTATS` resolves **OFF on the Serial backend** without `FESOM_SPEED_FORCE_SERIAL=1`
 (rule 0.24; the guard announces it rather than producing an empty report), so phase attribution
