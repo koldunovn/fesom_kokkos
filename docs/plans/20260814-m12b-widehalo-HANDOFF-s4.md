@@ -31,7 +31,13 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
    are already submitted** on the gate's binary — `26962396` (core2), `26962397` (ng5). So the
    first action is to **harvest those**: `loop timing` min-of-2 per arm, check the `it=` lines
    (trap 6), then read the wait-anatomy and bt-imbalance blocks the job prints at the end, and
-   compare with §7's pre-registered band (**−2.1 % … −6.6 %** at CORE2 16N).
+   compare with §7's pre-registered band: **−1.5 % … −2.9 %** at CORE2 16N, **−0.35 % … −0.7 %**
+   at NG5 16N. Those bands come from φ (the imbalance share of the bt wait) measured at all three
+   GPU points from the M12 board's own per-rank phasestats — 47 % / 56 % / 31 % — which also
+   **answers deep K with "no"**: at CORE2, K=4 returns the same −2.9 % as K=1 even in the
+   latency-bound limit. If the pairs land in the band, that verdict stands and the track is
+   finished at K=1; if they land outside it, the model is missing something (most likely the GPU
+   pack cost) and §7 needs revisiting before any deep-K conclusion is quoted.
 
 1. *(superseded)* If for any reason `26960090` needs re-running, harvest
    `/work/ab0995/a270088/port2/m12b/w2cu_26960090.out`: gate = `drift nonzero-steps=0` and
