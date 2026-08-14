@@ -27,8 +27,16 @@ while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-
 # because when an arm dies mid-run the step number is the whole finding.
 export FESOM_PRINT_EVERY=${FESOM_PRINT_EVERY:-999}
 
-BIN=${BIN:-/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_serial}
-BIN_MD5_EXPECT=5c3c90fc0ea3939df86cfbe275287c36
+# M13 (2026-08-14): the deterministic initial-condition fill is ON by default in every
+# partition-exploration run. Under the legacy fill the climatology hole-filler produces a
+# DIFFERENT initial state for every decomposition, so two partitions of one mesh were never
+# integrating the same problem — which is what made partitions "fragile" (F34/F39/F45) and what
+# made cross-partition timings compare different transients. See docs/CG_BLOWUPS_M13.md.
+# FESOM_IC_EXTRAP=legacy reproduces the pre-M13 behaviour for a deliberate A/B.
+export FESOM_IC_EXTRAP=${FESOM_IC_EXTRAP:-det}
+
+BIN=${BIN:-/work/ab0995/a270088/port2/m11/bin/det1/fesom_port_serial}
+BIN_MD5_EXPECT=${BIN_MD5_EXPECT:-07d982e0757e8e258a479485840d897c}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 DT=${DT:-1800}; NSTEPS=${NSTEPS:-300}; REPS=${REPS:-2}
 YEAR=${YEAR:-1958}
@@ -41,6 +49,7 @@ md5=$(md5sum "$BIN" | cut -d' ' -f1)
 [ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 is not certified h17 Serial"; exit 2; }
 echo "=== M11 partition race  ranks=$NPES nodes=$SLURM_NNODES  dt=$DT steps=$NSTEPS reps=$REPS"
 echo "    BIN=$BIN md5=$md5   $(date '+%F %T')"
+echo "    FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP"
 m7_provenance "$OUT" "$BIN"
 
 NAMES=""; declare -A MESH
@@ -85,6 +94,11 @@ run() {
     t=$(grep -a "loop timing" "$OUT/log_${a}_$r.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step.*/\1/')
     printf "  %-14s rep%-2s rc=%-3s s/step=%s\n" "$a" "$r" "$rc" "${t:-FAILED}"
     grep -aqE "identity test \(positive\)" "$OUT/log_${a}_$r.txt" || echo "        !! halo gate silent"
+    # dead-knob guard (L80): if we asked for det, the fill must have announced itself
+    if [ "$FESOM_IC_EXTRAP" = det ] \
+       && ! grep -aq "FESOM_IC_EXTRAP=det" "$OUT/log_${a}_$r.txt"; then
+        echo "        !! IC KNOB SILENT — this leg ran the LEGACY fill"
+    fi
     grep -aiE "blow ?up|NaN|FATAL" "$OUT/log_${a}_$r.txt" | head -2 | sed 's/^/        !! /'
     echo "${t:-}" >> "$OUT/times_$a.txt"
 }

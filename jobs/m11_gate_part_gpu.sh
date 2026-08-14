@@ -31,9 +31,13 @@ export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
 export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
 export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
 export FESOM_SPEED=${FESOM_SPEED:-1}
+# M13: deterministic IC fill by default. This matters MORE in the gate than in the race —
+# under the legacy fill the seed-control envelope this gate measures against was partly the
+# spread of the initial conditions themselves, not the model's response to the decomposition.
+export FESOM_IC_EXTRAP=${FESOM_IC_EXTRAP:-det}
 
-BIN=${BIN:-/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda}
-BIN_MD5_EXPECT=f8384e86830620510568b95440e61eab
+BIN=${BIN:-/work/ab0995/a270088/port2/m11/bin/det1/fesom_port_cuda}
+BIN_MD5_EXPECT=${BIN_MD5_EXPECT:-1f16832befb6039b4f71f6b1b1785836}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 DT=${DT:-1800}; NSTEPS=${NSTEPS:-20}; YEAR=${YEAR:-1958}
@@ -42,8 +46,9 @@ ARMS=${ARMS:?ARMS="name=dir,..." required}
 OUT=/work/ab0995/a270088/port2/m11/gpartgpu.${SLURM_JOB_ID}
 mkdir -p "$OUT"
 md5=$(md5sum "$BIN" | cut -d' ' -f1)
-[ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 is not certified h17 CUDA"; exit 2; }
+[ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 is not the pinned CUDA binary"; exit 2; }
 echo "=== M11 partition gate (CUDA)  ranks=$NPES  dt=$DT steps=$NSTEPS  BIN md5 $md5  $(date '+%F %T')"
+echo "    FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP"
 nvidia-smi -L | head -1
 m7_provenance "$OUT" "$BIN"
 
@@ -67,6 +72,9 @@ for n in $NAMES; do
     rc=$?
     printf "  %-14s rc=%-3s %s\n" "$n" "$rc" \
         "$(grep -acE 'identity test \(positive\)' "$OUT/log_$n.txt" | sed 's/^0$/!! HALO GATE SILENT/;s/^[1-9].*/halo gate ok/')"
+    if [ "$FESOM_IC_EXTRAP" = det ] && ! grep -aq "FESOM_IC_EXTRAP=det" "$OUT/log_$n.txt"; then
+        echo "      !! IC KNOB SILENT — this leg ran the LEGACY fill"
+    fi
     grep -aiE "blow ?up|NaN|FATAL|diverged" "$OUT/log_$n.txt" | head -2 | sed 's/^/      !! /'
 done
 

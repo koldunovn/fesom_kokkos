@@ -27,9 +27,12 @@ export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
 export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
 export FESOM_PRINT_EVERY=999
 export FESOM_SPEED=${FESOM_SPEED:-1}          # the production GPU environment
+# M13 (2026-08-14): deterministic initial-condition fill by default — see the note in
+# jobs/m11_race_part.sh and docs/CG_BLOWUPS_M13.md. FESOM_IC_EXTRAP=legacy for a deliberate A/B.
+export FESOM_IC_EXTRAP=${FESOM_IC_EXTRAP:-det}
 
-BIN=${BIN:-/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda}
-BIN_MD5_EXPECT=f8384e86830620510568b95440e61eab
+BIN=${BIN:-/work/ab0995/a270088/port2/m11/bin/det1/fesom_port_cuda}
+BIN_MD5_EXPECT=${BIN_MD5_EXPECT:-1f16832befb6039b4f71f6b1b1785836}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 DT=${DT:-1800}; NSTEPS=${NSTEPS:-300}; REPS=${REPS:-2}
 YEAR=${YEAR:-1958}
@@ -39,9 +42,9 @@ OUT=/work/ab0995/a270088/port2/m11/racepartgpu.${SLURM_JOB_ID}
 mkdir -p "$OUT"
 
 md5=$(md5sum "$BIN" | cut -d' ' -f1)
-[ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 is not certified h17 CUDA"; exit 2; }
+[ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 is not the pinned CUDA binary"; exit 2; }
 echo "=== M11 partition race  ranks=$NPES nodes=$SLURM_NNODES  dt=$DT steps=$NSTEPS reps=$REPS"
-echo "    FESOM_SPEED=$FESOM_SPEED  nodes: $SLURM_JOB_NODELIST"
+echo "    FESOM_SPEED=$FESOM_SPEED  FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP  nodes: $SLURM_JOB_NODELIST"
 nvidia-smi -L | head -1
 echo "    BIN=$BIN md5=$md5   $(date '+%F %T')"
 m7_provenance "$OUT" "$BIN"
@@ -88,6 +91,10 @@ run() {
     t=$(grep -a "loop timing" "$OUT/log_${a}_$r.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step.*/\1/')
     printf "  %-14s rep%-2s rc=%-3s s/step=%s\n" "$a" "$r" "$rc" "${t:-FAILED}"
     grep -aqE "identity test \(positive\)" "$OUT/log_${a}_$r.txt" || echo "        !! halo gate silent"
+    if [ "$FESOM_IC_EXTRAP" = det ] \
+       && ! grep -aq "FESOM_IC_EXTRAP=det" "$OUT/log_${a}_$r.txt"; then
+        echo "        !! IC KNOB SILENT — this leg ran the LEGACY fill"
+    fi
     grep -aiE "blow ?up|NaN|FATAL" "$OUT/log_${a}_$r.txt" | head -2 | sed 's/^/        !! /'
     echo "${t:-}" >> "$OUT/times_$a.txt"
 }

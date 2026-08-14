@@ -27,7 +27,13 @@ source "$ROOT/env.sh"
 ulimit -s 204800
 while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
 
-BIN=${BIN:-/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_serial}
+# M13: deterministic IC fill by default. This matters MORE in the gate than in the race —
+# under the legacy fill the seed-control envelope this gate measures against was partly the
+# spread of the initial conditions themselves, not the model's response to the decomposition.
+export FESOM_IC_EXTRAP=${FESOM_IC_EXTRAP:-det}
+
+BIN=${BIN:-/work/ab0995/a270088/port2/m11/bin/det1/fesom_port_serial}
+BIN_MD5_EXPECT=${BIN_MD5_EXPECT:-07d982e0757e8e258a479485840d897c}
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 DT=${DT:-1800}; NSTEPS=${NSTEPS:-20}
@@ -35,8 +41,9 @@ ARMS=${ARMS:?ARMS="name=dir,..." required}
 OUT=/work/ab0995/a270088/port2/m11/gpart.${SLURM_JOB_ID}
 mkdir -p "$OUT"
 md5=$(md5sum "$BIN" | cut -d' ' -f1)
-[ "$md5" = 5c3c90fc0ea3939df86cfbe275287c36 ] || { echo "BIN md5 $md5 not certified"; exit 2; }
+[ "$md5" = "$BIN_MD5_EXPECT" ] || { echo "BIN md5 $md5 not the pinned binary"; exit 2; }
 echo "=== M11 partition gate  ranks=$SLURM_NTASKS  dt=$DT steps=$NSTEPS  BIN md5 $md5  $(date '+%F %T')"
+echo "    FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP"
 
 NAMES=""; declare -A MESH
 IFS=',' read -ra SPECS <<< "$ARMS"
@@ -58,6 +65,9 @@ for n in $NAMES; do
     rc=$?
     printf "  %-14s rc=%-3s %s\n" "$n" "$rc" \
         "$(grep -acE 'identity test \(positive\)' "$OUT/log_$n.txt" | sed 's/^0$/!! HALO GATE SILENT/;s/^[1-9].*/halo gate ok/')"
+    if [ "$FESOM_IC_EXTRAP" = det ] && ! grep -aq "FESOM_IC_EXTRAP=det" "$OUT/log_$n.txt"; then
+        echo "      !! IC KNOB SILENT — this leg ran the LEGACY fill"
+    fi
     grep -aiE "blow ?up|NaN|FATAL|diverged" "$OUT/log_$n.txt" | head -2 | sed 's/^/      !! /'
 done
 

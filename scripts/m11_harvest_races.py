@@ -28,6 +28,12 @@ SUMROW = re.compile(r"^\s{2}(\S+)\s+([\d.]+)\s+([\d.]+)%\s*([-+][\d.]+ %)?\s*$")
 FAILROW = re.compile(r"^\s{2}(\S+)\s+FAILED\s*$")
 REPROW = re.compile(r"^\s{2}(\S+)\s+rep(\d+)\s+rc=(\d+)\s+s/step=(\S+)")
 
+# M13: which climatology hole-fill the run used. Jobs older than 2026-08-14 have no such line and
+# are legacy by construction. This column must exist, because under the legacy fill two partitions
+# of one mesh start from DIFFERENT initial conditions (measured: 27 PSU at CORE2 512), so a legacy
+# row and a det row are not comparable even at the same point on the same day.
+ICLINE = re.compile(r"FESOM_IC_EXTRAP=(\w+)")
+
 # The sandbox directory name identifies the mesh; the zoo path carries it one level deeper. A few
 # session-2 arms point at the PRIVATE mesh tree (/port2/mesh/...) rather than the M11 sandbox, so
 # match that too and flag it — an arm whose mesh files come from a different tree is not covered
@@ -72,6 +78,13 @@ def parse(path):
     job = job.group(1) if job else os.path.basename(path)
     backend = "gpu" if "racepartgpu" in os.path.basename(path) else "cpu"
 
+    ic = "legacy"
+    for line in txt[:12]:
+        m = ICLINE.search(line)
+        if m:
+            ic = m.group(1)
+            break
+
     meshes, order = {}, []
     for line in txt:
         m = MESHLINE.match(line)
@@ -114,7 +127,7 @@ def parse(path):
         t, st = rows[a]
         d = 100 * (t / b - 1) if (t == t and b == b and b) else float("nan")
         mname, tree = mesh_and_tree(meshes.get(a, ""))
-        out.append(dict(job=job, backend=backend, mesh=mname, tree=tree, ranks=h["ranks"],
+        out.append(dict(job=job, backend=backend, mesh=mname, tree=tree, ic=ic, ranks=h["ranks"],
                         nodes=h["nodes"], dt=h["dt"], steps=h["steps"], reps=h["reps"],
                         arm=a, is_base=(a == base), s_step=t, delta_pct=d, status=st,
                         meshdir=meshes.get(a, "")))
@@ -130,6 +143,9 @@ def main():
     ap.add_argument("--min-steps", type=int, default=0)
     ap.add_argument("--best", action="store_true",
                     help="per (mesh, backend, ranks): the best arm among PROTOCOL runs only")
+    ap.add_argument("--ic", choices=["det", "legacy"],
+                    help="keep only rows run with this climatology hole-fill (M13). Without it, "
+                         "--best reports det and legacy separately rather than mixing them.")
     a = ap.parse_args()
 
     rows = []
@@ -139,6 +155,8 @@ def main():
         rows = [r for r in rows if r["mesh"] == a.mesh]
     if a.backend:
         rows = [r for r in rows if r["backend"] == a.backend]
+    if a.ic:
+        rows = [r for r in rows if r["ic"] == a.ic]
     if a.min_steps:
         rows = [r for r in rows if r["steps"] >= a.min_steps]
     if not rows:
@@ -156,16 +174,17 @@ def main():
                 continue
             if r["is_base"] or r["status"] != "ok":
                 continue
-            k = (base_mesh(r["mesh"]), r["backend"], r["ranks"])
+            k = (base_mesh(r["mesh"]), r["backend"], r["ranks"], r["ic"])
             if k not in pts or r["delta_pct"] < pts[k]["delta_pct"]:
                 pts[k] = r
-        print(f"  {'mesh':<8}{'backend':<9}{'ranks':>7}  {'best arm':<20}{'gain':>9}{'steps':>7}  job")
-        for k in sorted(pts, key=lambda k: (k[1], k[0], k[2])):
+        print(f"  {'mesh':<8}{'backend':<9}{'ranks':>7} {'IC':<8} {'best arm':<20}"
+              f"{'gain':>9}{'steps':>7}  job")
+        for k in sorted(pts, key=lambda k: (k[3], k[1], k[0], k[2])):
             r = pts[k]
             num = "" if r["mesh"] == k[0] else f"  [{r['mesh']}]"
             if r["tree"] != "sandbox":
                 num += f"  !! mesh files from the {r['tree']} tree"
-            print(f"  {k[0]:<8}{k[1]:<9}{k[2]:>7}  {r['arm']:<20}{r['delta_pct']:>8.2f}%"
+            print(f"  {k[0]:<8}{k[1]:<9}{k[2]:>7} {k[3]:<8} {r['arm']:<20}{r['delta_pct']:>8.2f}%"
                   f"{r['steps']:>7}  {r['job']}{num}")
         print(f"\n  {off} row(s) excluded: raced at a dt other than the mesh's cold-start ladder dt "
               f"({', '.join(f'{m}={d}' for m, d in LADDER_DT.items())}).")
