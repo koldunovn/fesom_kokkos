@@ -336,12 +336,57 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
 
-## Open items (s3)
+## 6. s4: the `elem_nodes(-1)` audit — one real defect, and the invariant is now checked
 
-W2 CUDA drift gate (26960090) + W6 GPU pairs — queued for the GPU partition's return (the
-motivating points) · hygiene: other 3-D consumers of `elem_nodes` at HALO elements were not
-audited for the −1 convention (the certified path is C-parity-validated and stable, so any such
-read is at worst benign-by-parity — but new code must guard, see the scatter_mesh note) ·
+The s3 hygiene item is closed. All **203 references / 45 read sites** of `elem_nodes` across 28
+files were audited (enclosing loop bound + guard, then every bound resolved by hand). The
+result is a rule with one exception:
+
+> Every consumer in the 3-D model, the ice and the IO loops either over **owned elements** or
+> over **`nod_in_elem2D` rows of owned nodes**. Both are `-1`-free — provided an element
+> incident to an owned node has all three vertices in the local node list.
+
+That proviso is an assumption about the partition, so `fesom_mesh_compute_metrics` now
+**measures** it at startup (`audit_elem_nodes_unmappable`): a per-class census of the
+unmappable refs, and a hard abort if any owned-node CSR row reaches an element with a `-1`
+vertex. One pass over the elements, one over the owned rows.
+
+| point | `-1` refs at eDim | at eXDim | at owned elements | reachable from owned `nod_in_elem2D` rows |
+|---|---|---|---|---|
+| pi np2 (login) | 35 | 94 | 0 | **0** |
+| CORE2 np8 | 1 335 | 3 204 | 0 | **0** |
+| CORE2 np128 | 15 483 | 37 802 | 0 | **0** |
+| farc np128 | 37 604 | 89 518 | 0 | **0** |
+| NG5 np128 | 130 684 | 265 773 | 0 | **0** |
+| farc 2048 | 128 585 | 321 078 | 0 | **0** |
+| dars 8192 | 858 207 | 1 902 795 | 0 | **0** |
+
+Jobs 26961249 (CORE2/farc/NG5 legs, 1 node), 26961257 (farc 2048, 16 nodes, 0.08 node-hours),
+26961258 (dars 8192, 64 nodes). The two np128 legs on the other mesh families died *after* the
+census, for reasons that belong to the leg and not to the code: farc at dt900 hit the SE
+startup CFL guard (the job carried CORE2's `FESOM_SE_M=50`; the guard wants ≥82 there — L113
+doing its job), and NG5 at 128 ranks on ONE node was OOM-killed. Both printed the census first,
+which is what those legs were for.
+
+The eDim column is the s3 finding at scale: the unmappable refs are **not** an eXDim-tail
+curiosity — at farc 2048 the first halo ring carries 129 k of them, at dars 8192 858 k. The
+scatter message that said "(outer eXDim ring)" is corrected.
+
+Same job also re-ran the rung free at CORE2 np128 on the new binary: **drift nonzero-steps = 0**
+(25 steps), and the np8 inertness null is `diff_snap rc=0` against `base_np8`.
+
+**The one defect the audit found:** `fesom_forcing_analytical.cpp` looped the FULL element
+extent and read `geo_coord_nod2D` at a `-1` vertex — the identical defect class to §3's, in the
+analytical-forcing path. It now averages the mappable vertices only; at owned elements the
+arithmetic is unchanged bit for bit, and the pi np2 gate (which runs analytical forcing) is
+**bit-identical to the frozen s3 binary `90c5c12d`**. A comment was added at the EVPWIDE
+adjacency build, whose `n < myDim` filter also admits `-1` and is safe only because its extent
+is owned-only. Bin `4cc9eda4`; lessons L114–L117.
+
+## Open items (s4)
+
+W2 CUDA drift gate (26960090) + W6 GPU pairs — still queued behind the account's 5-GPU-job
+limit (13 jobs ahead as of s4; the user's call was to wait rather than move accounts) ·
 per-step wire is now M+3
 (subcycle + η coherence + H0e + F-reconcile) vs the certified 2M · deep-K decision on the W6
 numbers — note the s3 induction transfers to deep K only if ring-K inputs are owner-coherent the

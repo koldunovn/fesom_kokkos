@@ -119,3 +119,85 @@ Actions taken: (a) per-mesh M is automated by the startup CFL guard (this packet
 ladder already runs per-mesh M; (b) following "50 is already a lot", CORE2 M=40 arms (guard
 minimum 35) submitted at 4N/16N GPU + 2048 CPU; (c) the wide-halo phase (M12b) is scoped
 GPU-first, with the CPU variant framed as a scaling play — exactly this guidance.
+
+## Addendum 2 — M12b wide halo (K=1): what it took to make it exact, and two findings that stand on their own
+
+The wide-halo step you asked for is built and certified on CPU (K=1 rung, `FESOM_SE_WIDE=1`).
+Instead of receiving η on the halo, each rank computes it on its ring-1 nodes; only Ū is
+exchanged, over the existing `com_elem2D_full` partner structure. Messages per substep are
+halved — measured ×0.500 at 11 operating points (CORE2/farc/dars/NG5, 16–8192 ranks), because
+the full element list reaches the *same* partner ranks, not more of them. The price is the
+ring-1 redundant compute: **+1.2 % (NG5 16N GPU) … +6.1 % (CORE2 16N GPU) … +19.7 % (farc 2048
+CPU) … +28.2 % (dars 8192 CPU)** — the GPU/CPU asymmetry in your comment, as a number.
+
+Getting from "it runs" to "it is exact" took two repairs, and both are worth reporting
+independently of M12b, because neither is a property of the wide halo.
+
+**(a) In the SE module the halo copy of `H0e` was not the owner's bytes.** `se_forcing`
+recomputes `H0e` locally over owned+halo elements. At a halo element that computation reads η
+at vertices that are not all in the local node list — an edge-neighbour's far vertex is
+routinely a ring-2 node, and our scatter marks it −1 — so the η-mean read `eta0[-1]`, out of
+bounds. Measured: 1334 halo copies differ from the owner's value by up to **1.0e-1 m**, and the
+decomposition is unambiguous (the depth part is identical for every offender; the η part
+carries the whole difference). At step 1 it is invisible, because `H0e` is η-independent at
+cold start. In the certified path those halo values are dead state — Ū at halo elements is
+received, not computed — so nothing was ever wrong in the results we certified. They become
+live the moment anything is computed instead of received, which is exactly what a wide halo
+does: k3's viscosity reads `H0e[nb]` at halo slots, two holders of a shared element then
+evaluate V with different hh, and the two viscosity terms stop cancelling. Fix: one per-step
+owner exchange of `H0e` (plus a −1 guard at the local recompute).
+
+**(b) The 3-D model's element ownership is not a partition, and per-element fields differ at
+the last bit across the claimants.** 1341 of 244659 CORE2 dist_8 elements are claimed by more
+than one rank, and `Fbt` (the vertically integrated velocity RHS) differs across holders at the
+last bit: with everything else made coherent, the first offender appears at step 4 — one
+element, 2.2e-19 in x — before any barotropic state has diverged. Harmless wherever the value
+is subsequently exchanged. It is not harmless as a seed.
+
+**(c) The measurement that ties them together: the free barotropic interface iteration is
+linearly unstable to any rank-inconsistency.** Running the rung free (no η exchange at all)
+and reporting the per-step drift of the locally computed η against the owner's value:
+
+| free-running max\|local − owner\| | step 1–3 | 10 | 25/30 | 300 | growth |
+|---|---|---|---|---|---|
+| CORE2 np8, M=50 | 0.0 | 1.1e-15 | 1.2e-15 | — | flat |
+| CORE2 np128, M=50 | 0.0–ulp | ~1e-15 | ~2e-15 | 1.7e-10 | **×1.056 / step** |
+| farc 2048, M=90 | 0.0 → 5.2e-17 | 6.1e-13 | **49 m @ 30** | NaN | **×5.35 / step** |
+
+Cutting the seed by nine orders of magnitude moved the farc blow-up by ~15 steps. The rate
+rises with the ring-1 fraction of the subdomain (6.1 % of owned at np64, 13.2 % at np128,
+19.7 % at farc 2048), so it is a property of the scheme, not of the seed: **no seed reduction
+suffices — every input of the substep must be single-valued across ranks, exactly.** With
+`H0e` exchanged once per step and `Fbt` reconciled owner-wins over the 0.55 % multi-claimed
+elements (one small extra message per step), the redundant copies stay **bitwise** locked by
+induction and the free rung's drift is 0.000000e+00 at every step — verified at np8 (25
+steps), np128 (300) and farc 2048 (50), with both 3000-step screens landing on the SE
+references (farc η=2.05, CORE2 np128 η=1.89). Per-step wire: M+3 messages against the
+certified 2M.
+
+**Rim algebra for deeper K.** With Ū valid to element ring E and η to node ring D: η^{m+1} is
+valid wherever its incident elements are (D′ = E), and Ū^{m+1} loses one ring to the
+viscosity's edge-neighbour term (E′ = E−1). **K substeps therefore need K rings, not the 2K−1
+of mEVP** — mEVP carries element σ across substeps, the η/Ū alternation does not. Cumulative
+node zone as a fraction of owned at K=8: NG5 64 GPU **0.10** · CORE2 64 GPU 0.66 · farc 2048
+CPU 2.40 · dars 8192 CPU 3.02. Deep K is nearly free exactly where the subdomain is largest.
+
+**First CPU numbers, and they say what you said.** Same-day pinned pairs, 300 steps, min-of-2,
+loop-only: **farc 2048 −1.8 %**, **dars 8192 +0.4 % (a wash)**. The mechanism is intact — bt
+MPI calls per step 182→94 (farc) and 42→24 (dars), as designed — but the barotropic block is
+only ~16 % (farc) and ~6 % (dars) of the step there, so the latency saving is bounded by that
+share while the redundant compute is paid in full. The GPU pairs (CORE2 and NG5 at 16 nodes,
+where the bt phase is 7.8 ms busy against **11.8 ms MPI wait** of an 84 ms step) are queued;
+they are the points the rung was built for.
+
+**Questions 6–8.**
+6. Does the Fortran wide-halo plan intend to keep a coherence exchange every k substeps, or to
+   make all substep inputs owner-coherent as we did? Our measurement says the second is
+   required if η is never exchanged: at farc-class interface fractions even a 1e-17 seed
+   reaches metres in 30 steps.
+7. Is the multi-claimed-element redundancy (b) something you would rather fix in the mesh
+   layer (one owner per element) than work around per module? Every future
+   compute-instead-of-communicate transformation will meet it.
+8. For deep K on GPU, is K=8 with a K-ring extended mesh (owner bytes shipped once at startup,
+   BFS ring order) the direction you would take, given that its node-zone cost at NG5/dars GPU
+   is 10–30 % of owned?

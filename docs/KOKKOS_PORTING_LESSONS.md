@@ -1399,3 +1399,60 @@ step 1, confirming the bound is real, not conservative theater. Every explicit s
 option needs this shape: derive the limit from the mesh at startup, print the admissible
 minimum, abort unless forced. The per-mesh M values it produced (CORE2 50 · farc 90 ·
 dars 20 · NG5 20) became the ladder protocol directly.
+
+## L114 (M12b): a halo entry that is COMPUTED instead of RECEIVED must be provably the owner's bytes
+
+`se_forcing` recomputed `H0e` locally over owned+halo elements. At halo elements that
+computation is not well defined: an eDim edge-neighbour's far vertex is routinely a ring-2
+node, absent from the local node list, where `scatter_mesh` stores `-1` — so the η-mean read
+`eta0[-1]`, out of bounds. 1334 halo copies were wrong by up to **1.0e-1 m** (η-class), and it
+had never mattered, because in the certified path Ū at halo elements is *received*: the wrong
+values were dead state. They went live the instant the wide-halo rung computed instead of
+received, and the ×5.35/step amplification of L115 turned them into a NaN by step 30.
+Invisible at step 1 in the Z7 shape (H0e is η-independent at cold start), so the first-step
+gate passed. **Before any compute-instead-of-communicate lever: enumerate every input the
+kernel reads at halo slots and prove each is owner bytes — a probe that compares only myDim
+copies, or only one component, certifies nothing about the bytes actually read.**
+
+## L115 (M12b): a small seed is not a small error — the free barotropic interface amplifies exponentially
+
+With the L114 seed cut by NINE orders of magnitude (5.2e-17 instead of 3.0e-8 at step 2), the
+free-running rung still blew up — the drift grew **×5.35 per step at farc 2048 (M=90)** and
+×1.056 per step at CORE2 np128 (M=50), reaching 49 m by step 30. The rate tracks the ring-1
+fraction of the subdomain (6.1 % of owned at np64, 13.2 % at np128, 19.7 % at farc 2048), so it
+is a property of the scheme — each side integrates its own version of the interface once the
+coupling exchange is gone. **No seed reduction suffices; the acceptance criterion for a lever
+that replaces communication with local computation is bitwise-zero drift, not small drift.**
+Reaching it needed every substep input single-valued: the L114 exchange plus owner-wins
+reconciliation of the one field (`Fbt`) the 3-D model leaves ulp-different across the ~0.55 %
+multi-claimed elements. Then the redundant copies stay locked by induction — drift
+0.000000e+00 at every step, np8/np128/farc-2048.
+
+## L116 (M12b): a diagnostic that repairs the thing it measures cannot certify it
+
+`FESOM_SE_WIDE_SELFCHECK=1` compares the locally computed ring against the exchanged value —
+by stashing, **exchanging**, and diffing. It therefore restores the certified data path every
+substep: it validates the ring COMPUTATION and hides what the lever does when it runs free.
+Every clean run of the rung for two sessions was either 20 steps or ran under that selfcheck;
+the first free 3000-step screen was NaN by step 500, and a retracted −8.9 % performance number
+came from legs that had run to all-NaN (a NaN run's wall-clock is not a measurement — and NaN
+comparisons leave a min/max reduction's sentinels untouched, so the diagnostic print read
+`T[1e30,-1e30]` rather than obviously dying, cf. L110). Twice in one session. **Check whether
+a diagnostic restores the invariant it is testing, and run the lever free before believing any
+of its numbers — including its timings.**
+
+## L117 (M12b s4): turn "this index is always valid" into a startup census, not a comment
+
+`elem_nodes` carries `-1` at halo elements whose vertex is not in the local node list. Every
+other consumer in the model is safe only because it loops over owned elements or over
+`nod_in_elem2D` rows of owned nodes — i.e. because an element incident to an owned node always
+has all three vertices local. That is an assumption about the partitioner, and the audit of all
+203 references / 45 read sites found exactly one place that violated the discipline
+(`fesom_forcing_analytical.cpp`, looping the full element extent, reading `geo_coord_nod2D` at
+a `-1` vertex). The fix is a one-pass startup census that reports the `-1` refs by halo class
+and **aborts** if any owned-node CSR row reaches an element with a `-1` vertex. Measured at
+seven points: pi np2 → 35 eDim + 94 eXDim refs; CORE2 np128 → 15 483 + 37 802; farc 2048 →
+128 585 + 321 078; dars 8192 → 858 207 + 1 902 795 — and **0 owned-reachable everywhere**.
+Cost 0.08 node-hours to prove at the production partition. **A convention
+that consumers silently rely on should be checked where it is established, not documented
+where it is used** — the same defect class as L114 costs an entire session to find later.
