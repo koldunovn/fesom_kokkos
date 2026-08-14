@@ -149,11 +149,21 @@ def step1_spread(root, prefixes=("sc", "scd")):
     diagnostic row ACROSS node counts within one mesh and one backend. Every field on that row
     is a global reduction, so under identical initial conditions it must be identical.
 
-    🔴 Pick the field carefully. The global T and S EXTREMES are useless here: the fill differs
-    in the marginal seas, whose values sit inside the global range, so T[] and S[] agree to the
-    printed precision across every partition even when the ICs differ. `pgf` -- the largest
-    pressure-gradient force -- is the sensitive one, because M13's mechanism IS a density front
-    across a single element, and `eta` is its immediate response.
+    🔴🔴 TWO traps in choosing the field, and both of them produce a confident wrong answer.
+
+    1. The global T and S EXTREMES are useless: the fill differs in the marginal seas, whose
+       values sit inside the global range, so T[] and S[] agree to the printed precision across
+       every partition even when the ICs differ. Using them says "no problem anywhere".
+
+    2. ⚠️ ON THE CUDA ARM MOST OF THIS ROW IS STALE. The diagnostics are assembled on the host,
+       and the device-resident fields are never mirrored back for it: `uv`, `w`, `vs`, `rs`,
+       `bv`, `Kv`, `Av` all print as exactly 0.00e+00, and `pgf`, `rho` and `hp` carry
+       un-mirrored values -- the same DARS configuration reads pgf=3.00e-04 on Serial and
+       8.20e-02 on CUDA. So **pgf is a Serial-only fingerprint.** The fields that do agree
+       across backends, and are therefore usable on both, are the CG iteration count and `eta`.
+
+    `pgf` is the most sensitive field where it is valid, because M13's mechanism IS a density
+    front across a single element and pgf is what that front produces.
     """
     rows = {}
     for pfx in prefixes:
@@ -174,22 +184,26 @@ def step1_spread(root, prefixes=("sc", "scd")):
 
     print("=== step-1 state across the node counts of one curve "
           "(identical ICs => zero spread) ===")
-    print(f"  {'fleet':<5} {'backend':<4} {'mesh':<6} {'pts':>3}  "
-          f"{'max|pgf| spread':>16}  {'max eta spread':>15}  {'CG iters':>10}")
+    print("  pgf is Serial-only (stale host mirror on CUDA); eta and CG iters are valid on both.")
+    print(f"  {'fleet':<5} {'back':<4} {'mesh':<6} {'pts':>3}  "
+          f"{'max|pgf| (SERIAL ONLY)':>26}  {'eta':>7}  {'CG iters':>9}  verdict")
     for key in sorted(rows):
         pfx, backend, mesh = key
         pts = sorted(rows[key])
         if len(pts) < 2:
             continue
-        pg = [p[1] for p in pts]
-        et = [p[2] for p in pts]
-        it = [p[3] for p in pts]
-        fac = max(pg) / min(pg) if min(pg) > 0 else float("inf")
+        pg, et, it = [p[1] for p in pts], [p[2] for p in pts], [p[3] for p in pts]
         efac = max(et) / min(et) if min(et) > 0 else float("inf")
-        flag = "" if fac < 1.001 else ("  <== PARTITION-DEPENDENT" if fac > 1.05 else "")
-        print(f"  {pfx:<5} {backend:<4} {mesh:<6} {len(pts):>3}  "
-              f"{min(pg):.2e}-{max(pg):.2e} ({fac:.2f}x)  "
-              f"{efac:>13.2f}x  {min(it)}-{max(it):<5}{flag}")
+        if backend == "cpu":
+            fac = max(pg) / min(pg) if min(pg) > 0 else float("inf")
+            cell = f"{min(pg):.2e}-{max(pg):.2e} ({fac:.2f}x)"
+        else:
+            fac, cell = 1.0, "n/a (CUDA host mirror)"
+        # a curve is partition-dependent if ANY field that is valid on this backend varies
+        worst = max(fac, efac, (max(it) / min(it)) if min(it) else 1.0)
+        flag = "PARTITION-DEPENDENT" if worst > 1.005 else "flat"
+        print(f"  {pfx:<5} {backend:<4} {mesh:<6} {len(pts):>3}  {cell:>26}  "
+              f"{efac:>6.2f}x  {min(it):>4}-{max(it):<4}  {flag}")
     print()
 
 
