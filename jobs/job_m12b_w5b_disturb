@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_w5b
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/w5b_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/w5b_%j.err
+#
+# M12b W5b — the graded disturbance report (M11 framework), CORE2, 20 steps.
+#
+# The rung's residual is a rank-ordering effect (plan FINDING), so it is judged
+# against the model's OWN rank-dependence rather than against zero:
+#
+#   reference : rung OFF at np64
+#   controls  : rung OFF at np8, np16, np128  — same physics, different partition
+#               order; these differ from the reference ONLY by the rounding class
+#               the rung also lives in, and they must be DEMONSTRATED DISTINCT
+#   arms      : rung ON at np64 and np128
+#
+# An arm inside the control spread perturbs the model no more than changing the
+# rank count already does — the standard the project accepts (L79).
+# CORE2 at <=128 ranks is a GATE, not a scaling run.
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b/w5b_$SLURM_JOB_ID
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+mkdir -p "$BASE"
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+
+run () {   # $1 tag  $2 nranks  $3 wide(0|1)
+  local OUT=$BASE/$1
+  mkdir -p "$OUT"
+  if [ "$3" = "1" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
+  srun -n "$2" -l "$BIN" "$MESH" "$OUT" 1800 20 20 "$PHC" 1958 \
+       > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "--- $1 (np=$2 wide=$3) exit=$?  snaps=$(ls $OUT/snap_*.nc 2>/dev/null | wc -l)"
+}
+
+run ref_off_np64  64  0
+run ctl_off_np8    8  0
+run ctl_off_np16  16  0
+run ctl_off_np128 128 0
+run arm_on_np64   64  1
+run arm_on_np128  128 1
+
+echo "=== disturbance report ==="
+"$PY" "$ROOT/scripts/m12b_disturbance.py" \
+      --ref "$BASE/ref_off_np64" \
+      --controls "$BASE/ctl_off_np8" "$BASE/ctl_off_np16" "$BASE/ctl_off_np128" \
+      --arms "$BASE/arm_on_np64" "$BASE/arm_on_np128"
+echo "report rc=$?"
