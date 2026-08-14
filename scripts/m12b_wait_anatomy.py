@@ -20,11 +20,33 @@ import sys, os, re
 import numpy as np
 
 argv = list(sys.argv[1:])
+# 🔴 The per-rank columns follow the SUMMARY table's phase order, and that order has
+# changed between binaries (an older CUDA build printed a header with 8 names against
+# 9 columns). So the phase list is read from the summary rows of the run itself, with
+# this list only as a fallback, and the extracted mean is checked against the summary.
 PHASES = ['force', 'ice', 'icedyn', 'iceadv', 'coupl', 'ocean', 'cg', 'bt', 'other']
+
+
+def phase_order(path):
+    """Phase names in per-rank column order, from the run's own summary table."""
+    names, means = [], {}
+    row = re.compile(r'\[phasestats\]\s+(\w+)\s*\|([^|]*)\|([^|]*)\|\s*([\d.]+)')
+    for line in open(path, errors='ignore'):
+        m = row.search(line)
+        if not m or m.group(1) in ('phase', 'TOTAL'):
+            continue
+        if m.group(1) in names:
+            break                                   # second report; one is enough
+        names.append(m.group(1))
+        b = [float(x) for x in m.group(2).replace('/', ' ').split() if not x.startswith('@')]
+        w = [float(x) for x in m.group(3).replace('/', ' ').split() if not x.startswith('@')]
+        means[m.group(1)] = (b[1] if len(b) > 1 else None,
+                             w[1] if len(w) > 1 else None,
+                             float(m.group(4)))
+    return (names or PHASES), means
 phase = 'bt'
 while '--phase' in argv:
     i = argv.index('--phase'); phase = argv[i + 1]; del argv[i:i + 2]
-col = PHASES.index(phase)
 
 rank_re = re.compile(r'\[phasestats-rank\]\s+(\d+)\s*\|(.*)\|(.*)$')
 summ_re = re.compile(r'\[phasestats\]\s+(\w+)\s*\|([^|]*)\|([^|]*)\|\s*([\d.]+)')
@@ -33,6 +55,10 @@ res = {}
 for arg in argv:
     label, d = arg.split('=', 1)
     log = os.path.join(d, 'run.log')
+    names, summary = phase_order(log)
+    if phase not in names:
+        print(f"{label}: no phase '{phase}' in {log} (found {names})");  continue
+    col = names.index(phase)
     busy, wait = {}, {}
     mpi = None
     for line in open(log, errors='ignore'):
@@ -52,6 +78,15 @@ for arg in argv:
     rs = np.array(sorted(busy))
     b = np.array([busy[r] for r in rs]);  w = np.array([wait[r] for r in rs])
     res[label] = dict(b=b, w=w, mpi=mpi)
+
+    # self-check: the per-rank column must reproduce the summary's mean for this phase
+    sb, sw, smpi = summary.get(phase, (None, None, None))
+    for got, want, what in ((b.mean(), sb, 'busy'), (w.mean(), sw, 'wait')):
+        if want and abs(got - want) > 0.05 * max(want, 1e-9):
+            print(f"  🔴 {label}: per-rank {what} mean {got:.2f} != summary {want:.2f} — "
+                  f"column mapping is wrong, do not use these numbers")
+    if smpi:
+        mpi = smpi
 
     bmax = b.max()
     corr = float(np.corrcoef(b, w)[0, 1])

@@ -72,4 +72,19 @@ leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats(0|1)
 leg off 1 0;  leg on 1 0
 leg off 2 0;  leg on 2 0
 leg off 1 1;  leg on 1 1
+
+# 🔴 The phasestats legs are not only for attribution: this pair halves the exchange
+# count at fixed compute, so it MEASURES the elasticity of the bt wait to the message
+# count and the imbalance share phi — the two numbers the deep-K decision turns on
+# (WIDEHALO_M12B §7). Run the analysis here so it exists even if the harvest is late.
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIST=$MESH/dist_$SLURM_NTASKS
+echo "=== wait anatomy (elasticity + imbalance share) ==="
+"$PY" "$ROOT/scripts/m12b_wait_anatomy.py" \
+      off=$BASE/w6_${POINT}_off_r1_ph1_${SLURM_JOB_ID} \
+      on=$BASE/w6_${POINT}_on_r1_ph1_${SLURM_JOB_ID} || true
+echo "=== bt imbalance vs the partition ($DIST) ==="
+"$PY" "$ROOT/scripts/m12b_bt_imbalance.py" "$DIST" \
+      $BASE/w6_${POINT}_off_r1_ph1_${SLURM_JOB_ID} || true
+
 echo "=== W6 $POINT done — quote min-of-2, both currencies (step and bt phase) ==="

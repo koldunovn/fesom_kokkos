@@ -14,12 +14,38 @@ import sys, os, re
 import numpy as np
 
 argv = list(sys.argv[1:])
+# 🔴 The per-rank columns follow the SUMMARY table's phase order, and that order has
+# changed between binaries (an older CUDA build printed a header with 8 names against
+# 9 columns). So the phase list is read from the summary rows of the run itself, with
+# this list only as a fallback, and the extracted mean is checked against the summary.
 PHASES = ['force', 'ice', 'icedyn', 'iceadv', 'coupl', 'ocean', 'cg', 'bt', 'other']
+
+
+def phase_order(path):
+    """Phase names in per-rank column order, from the run's own summary table."""
+    names, means = [], {}
+    row = re.compile(r'\[phasestats\]\s+(\w+)\s*\|([^|]*)\|([^|]*)\|\s*([\d.]+)')
+    for line in open(path, errors='ignore'):
+        m = row.search(line)
+        if not m or m.group(1) in ('phase', 'TOTAL'):
+            continue
+        if m.group(1) in names:
+            break                                   # second report; one is enough
+        names.append(m.group(1))
+        b = [float(x) for x in m.group(2).replace('/', ' ').split() if not x.startswith('@')]
+        w = [float(x) for x in m.group(3).replace('/', ' ').split() if not x.startswith('@')]
+        means[m.group(1)] = (b[1] if len(b) > 1 else None,
+                             w[1] if len(w) > 1 else None,
+                             float(m.group(4)))
+    return (names or PHASES), means
 phase = 'bt'
 while '--phase' in argv:
     i = argv.index('--phase'); phase = argv[i + 1]; del argv[i:i + 2]
-col = PHASES.index(phase)
 dist, run = argv[0], argv[1]
+names, summary = phase_order(os.path.join(run, 'run.log'))
+if phase not in names:
+    sys.exit(f"no phase '{phase}' in {run}/run.log (found {names})")
+col = names.index(phase)
 
 rank_re = re.compile(r'\[phasestats-rank\]\s+(\d+)\s*\|(.*)\|(.*)$')
 busy, wait = {}, {}
@@ -47,6 +73,10 @@ rs = sorted(set(busy) & set(own_n))
 b  = np.array([busy[r] for r in rs]);      w  = np.array([wait[r] for r in rs])
 on = np.array([own_n[r] for r in rs], float);  oe = np.array([own_e[r] for r in rs], float)
 hn = np.array([halo_n[r] for r in rs], float); he = np.array([halo_e[r] for r in rs], float)
+
+sb, sw, _ = summary.get(phase, (None, None, None))
+if sb and abs(b.mean() - sb) > 0.05 * sb:
+    sys.exit(f"per-rank busy mean {b.mean():.2f} != summary {sb:.2f} — column mapping is wrong")
 
 print(f"=== {os.path.basename(dist)} / {os.path.basename(run)}  ({len(rs)} ranks, phase '{phase}') ===")
 def spread(x, name, unit=''):
