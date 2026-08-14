@@ -555,9 +555,13 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
         const int m_wide = p->com_elem2D_full.rPEnum;
         const long d_base = (long)p->eDim_nod2D + 2L * p->eDim_elem2D;
         const long d_wide = 2L * (p->eDim_elem2D + p->eXDim_elem2D);
+        /* per STEP the rung also does ONE eta exchange to restore
+         * "halo == the owner's bytes" for the 3-D consumers, so it is M+1, not M.
+         * Quoting M here would overstate the saving. */
         fprintf(stderr, "[ssh_se-wire] rank0 exchanges/substep %d -> %d | doubles/substep "
-                        "%ld -> %ld | per step (M=%d): %d -> %d exchanges\n",
-                2, 1, d_base, d_wide, M, 2 * M, M);
+                        "%ld -> %ld | per step (M=%d): %d -> %d exchanges (M subcycle + 1 "
+                        "coherence)\n",
+                2, 1, d_base, d_wide, M, 2 * M, M + 1);
         fprintf(stderr, "[ssh_se-wire] rank0 partners: nod2D %d + elem2D %d = %d -> "
                         "elem2D_full %d  (messages/substep x%.3f)\n",
                 p->com_nod2D.rPEnum, p->com_elem2D.rPEnum, m_base, m_wide,
@@ -1221,7 +1225,12 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
     const real_t d2 = wzeta;
 
     const int    wide     = fesom_se_wide();     /* M12b K=1 rung */
-    const int    wide_chk = wide && fesom_se_wide_selfcheck();
+    /* 🔴 SELFCHECK=1 ONLY takes the per-substep compare path, which re-runs the
+     * exchange and therefore restores the certified data path. SELFCHECK=2 must
+     * leave the rung FREE and measure the drift once per step — otherwise the
+     * "diagnostic" silently repairs the thing it is measuring, which has now
+     * fooled this session twice. */
+    const int    wide_chk = wide && (fesom_se_wide_selfcheck() == 1);
     const int    eDim     = mesh->eDim_nod2D;
     const int    Neta     = Nown + (wide ? eDim : 0);   /* k2 range: owned + ring 1 */
     const int    visc_on  = fesom_se_visc_on();
@@ -1480,8 +1489,36 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * One exchange per STEP restores the invariant and costs 1 message where the
      * certified path spends M: at M=50 the rung is still 100 -> 51, not 100 -> 50.
      * The saving survives; the invariant is not negotiable. */
-    if (wide && !wide_chk)
+    if (wide && !wide_chk) {
+        /* SELFCHECK=2 measures the FREE-RUNNING drift here, which is the number
+         * that actually matters and which the per-substep selfcheck cannot see:
+         * it stashes what M substeps of local computation produced, lets the
+         * exchange deliver the owner's values on top, and reports the gap. */
+        const int chk2 = (fesom_se_wide_selfcheck() == 2) && eDim > 0;
+        if (chk2) {
+            if (!s_se.wide_chk.allocated()) s_se.wide_chk.alloc("se.wide.chk", (size_t)eDim);
+            const real_t *e = s_se.eta[0].d().data();
+            real_t       *s = s_se.wide_chk.d().data();
+            Kokkos::parallel_for("se_wide_stash_step", Kokkos::RangePolicy<>(0, eDim),
+                KOKKOS_LAMBDA(const int j) { s[j] = e[Nown + j]; });
+        }
         fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
+        if (chk2) {
+            const real_t *e = s_se.eta[0].d().data();
+            const real_t *s = s_se.wide_chk.d().data();
+            double mx = 0.0;
+            Kokkos::parallel_reduce("se_wide_chk_step", Kokkos::RangePolicy<>(0, eDim),
+                KOKKOS_LAMBDA(const int j, double &acc) {
+                    const double d = (double)e[Nown + j] - (double)s[j];
+                    const double a = d < 0.0 ? -d : d;
+                    if (a > acc) acc = a;
+                }, Kokkos::Max<double>(mx));
+            MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+            if (p->mype == 0)
+                fprintf(stderr, "[ssh_se-wide-drift] step %d free-running max|local - owner| "
+                                "over ring-1 eta after %d substeps = %.6e\n", step_n, M, mx);
+        }
+    }
 
     /* GEOCHK, end of step: is Ū itself rank-consistent on the elements that more
      * than one rank claims? Geometry, stencil and forcing are (measured), so if

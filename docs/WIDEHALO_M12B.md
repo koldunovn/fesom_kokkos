@@ -177,11 +177,45 @@ saving survives.
 **Result at CORE2 np128, 300 steps** (job 26953980): the rung now runs clean and ends at
 `η=2.02, uv=1.47` — **identical to the knob-off control at the same step**.
 
-⚠️ The `VISC=0` arm still dies (~step 200-250) *with* the fix. Before reading anything into that:
-`FESOM_SE_VISC=0` was used as a diagnostic without ever checking that the CERTIFIED path is stable
-without the two-term viscosity — a control I should have run first (job 26954124 is running it
-now). The viscosity is part of the certified scheme; if knob-off is also unstable without it, the
-`VISC=0` blow-up says nothing about the rung.
+✅ The `VISC=0` control came back (job 26954124): **knob-OFF with `VISC=0` blows up in the same
+step range (200–250)**, so that instability belongs to the certified scheme without its viscosity,
+not to the rung. Using `VISC=0` as a "provably exact" diagnostic arm without first checking that
+the certified path survives it was a mistake — the control should always precede the diagnostic.
+
+### 🔴 3d. The rung is UNSTABLE, and the free-running drift is what shows it
+
+The per-step coherence exchange fixed CORE2 np128 (300 steps, matching the control) but **not
+farc 2048, which is still NaN by step 300.** The instrument that had been missing all along:
+measure the drift of the FREE-RUNNING rung, by stashing what M substeps of local computation
+produced and letting the per-step exchange deliver the owner's values on top
+(`FESOM_SE_WIDE_SELFCHECK=2`; job 26954275, farc 2048, M=90).
+
+| step | 1 | 2 | 3 | 10 | 20 | **30** | 40+ |
+|---|---|---|---|---|---|---|---|
+| free-running max\|local − owner\| (m) | 0 | 3.0e-8 | 6.9e-7 | 3.2e-6 | 9.3e-6 | **1.15e+02** | NaN |
+
+**The scheme amplifies.** After the 90 substeps of step 2 the drift is 3.0e-8, where accumulating
+ulp-level per-substep seeds would give ~1e-14 — six orders smaller. That is growth of roughly
+**1.2× per substep** of an interface perturbation. The seed is irreducible (the §3 redundant
+elements), the amplification is the scheme's, and together they reach 115 m by step 30.
+
+**Consequence.** Replacing the η exchange entirely removes the coupling that keeps neighbouring
+subdomains' barotropic solutions locked to one another; each side then integrates its own version
+of the interface and the difference grows. The rung is therefore **not viable in this form**, and
+the two options that follow from the measurement are:
+
+1. **Reconcile the redundantly-computed elements** so Ū is globally consistent and the seed is
+   exactly zero — the option deferred earlier as optional cleanup, which the evidence now makes a
+   *prerequisite*. With no seed, the amplification has nothing to act on.
+2. **Exchange η every k substeps rather than never** — the design space the rung occupies at
+   k = ∞. With the measured growth rate ~1.2×/substep, a small k keeps the drift at ulp level;
+   k=2 would still remove 25 % of the exchanges. The growth rate is now measurable per point, so
+   the largest viable k can be derived rather than guessed.
+
+⚠️ Also fixed here: `SELFCHECK=2` previously still took the per-substep compare path, which
+re-runs the exchange — so it too repaired what it measured, and a farc run under it looked healthy
+to step 100. **That is the same trap twice in one session**: a wide-halo diagnostic must be checked
+for whether it restores the exchange before its verdict is believed.
 
 ⚠️ `FESOM_SPEED_PHASESTATS` resolves **OFF on the Serial backend** without `FESOM_SPEED_FORCE_SERIAL=1`
 (rule 0.24; the guard announces it rather than producing an empty report), so phase attribution
