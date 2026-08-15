@@ -1,0 +1,98 @@
+#!/bin/bash
+#SBATCH --job-name=m14_nullcost
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH -o /work/ab0995/a270088/port2/m14/nullcost.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/nullcost.%j.err
+#
+# M14 G3 — THE NULL-COST GATE (plan Task B3), CPU half.
+#
+# Question: does the integration binary cost anything per step when every new knob is OFF?
+# A byte-identical binary can still be slower — five merges added branches, and some sit in
+# hot paths. If the answer is "inside noise", BOTH campaign arms run the integration binary,
+# which removes the compiler/day/binary confound from every point on the board. If it is
+# outside noise, that is a FINDING to report and fix, NOT a reason to split binaries:
+# splitting would put a binary+toolchain difference under every single point instead.
+#
+# Configuration: knobs OFF + FESOM_SPEED=1 — the baseline arm's actual per-step config (D7).
+# 🔴 det is deliberately NOT set: h17 PREDATES M13 and has no FESOM_IC_EXTRAP, so it cannot
+# be matched. det changes the IC fill (startup), not the per-step cost, and this measures
+# per-step cost, so nothing is lost.
+#
+# Both binaries run in ONE allocation on the SAME nodes, in ALTERNATING order (m14,h17,h17,m14)
+# so any drift over the allocation cancels instead of loading onto one arm. That is stronger
+# than "same day", which cannot control node identity.
+#
+# The fArc leg doubles as the C4 check: the E.T1 proto hang is reported for fArc >=128 ranks and
+# covers EVERY point of the fArc CPU ladder, so it must be shown to fire or not before D3.
+#
+# Usage:
+#   sbatch --nodes=4  --ntasks=512  --export=ALL,POINT=core2_512 jobs/job_m14_nullcost_cpu
+#   sbatch --nodes=16 --ntasks=2048 --export=ALL,POINT=farc_2048 jobs/job_m14_nullcost_cpu
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+
+case "${POINT:?POINT required}" in
+  core2_512) MESH=/work/ab0995/a270088/port2/mesh/core2 ; DT=1800 ;;   # private mesh (L73)
+  farc_2048) MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc ; DT=900 ;;
+  dars_2048) MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars ; DT=120 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+NSTEPS=${NSTEPS:-300}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+# Frozen binaries only — never a build-tree path (a queued job resolves its binary at RUN time).
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_serial            # main/pre-campaign, md5 5c3c90fc
+NEW=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i1}/fesom_port_serial # md5 ab0b3ea1
+
+# knobs OFF, then the production master back on (the baseline arm's config).
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+export FESOM_SPEED=1
+
+BASE=/work/ab0995/a270088/port2/m14/nullcost_${POINT}_${SLURM_JOB_ID}
+mkdir -p "$BASE"
+echo "=== M14 null cost — POINT=$POINT nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=$DT nsteps=$NSTEPS ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+md5sum "$REF" "$NEW"
+echo "config: knobs OFF + FESOM_SPEED=1 (det NOT set — h17 predates M13)"
+
+leg () {                      # leg <name> <binary> <index>
+    local nm=$1 bin=$2 idx=$3 out="$BASE/${idx}_${nm}"
+    mkdir -p "$out"
+    srun "$bin" "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    local rc=$?
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
+    echo "leg $idx $nm: rc=$rc  s/step=${t:-NA}"
+    echo "${nm} ${t:-NA}" >> "$BASE/legs.txt"
+}
+
+# alternating order so allocation drift cancels rather than loading onto one arm
+leg m14 "$NEW" 1
+leg h17 "$REF" 2
+leg h17 "$REF" 3
+leg m14 "$NEW" 4
+
+echo; echo "=== result ==="
+python3 - "$BASE/legs.txt" <<'PY'
+import sys
+d={}
+for ln in open(sys.argv[1]):
+    k,v=ln.split()
+    if v!='NA': d.setdefault(k,[]).append(float(v))
+if len(d)<2 or any(len(v)<2 for v in d.values()):
+    print("INCOMPLETE — a leg failed to report a per-step time:", d); raise SystemExit(1)
+m,h=min(d['m14']),min(d['h17'])
+sm=(max(d['m14'])-min(d['m14']))/min(d['m14'])*100
+sh=(max(d['h17'])-min(d['h17']))/min(d['h17'])*100
+print(f"  m14 legs {d['m14']}  min={m:.4f}  spread={sm:.2f}%")
+print(f"  h17 legs {d['h17']}  min={h:.4f}  spread={sh:.2f}%")
+print(f"  NULL COST = {(m-h)/h*100:+.2f}%   (m14 relative to h17, min over legs)")
+print(f"  within-arm spread {max(sm,sh):.2f}% => this test cannot resolve an effect smaller than that")
+PY
