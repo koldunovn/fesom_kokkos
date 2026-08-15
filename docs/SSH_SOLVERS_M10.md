@@ -2190,3 +2190,31 @@ are unchanged everywhere else under det (farc 376.4 → 375.1, dars 55.28 → 55
 per run); the first attempt (26969006) hit a 35-min limit after 6 of 8 runs. Its completed legs
 were clean (`fallbacks=0`, baseline 0.2474 s/step at an 8.4 % SSH share, `cg2` 0.2437 = −1.5 %),
 but a partial job is not a row. Re-queued at `-t 01:00:00`.
+
+### NG5 GPU under det (26733171 → 26970298) — and the pattern that closes the campaign
+
+| leg | legacy | **det** | iters legacy → det |
+|---|--:|--:|--:|
+| `cg2` | −1.24 % | **−1.21 %** | 76.12 → 76.19 |
+| `oati` | −1.29 % | **−1.49 %** | 76.56 → 76.66 |
+| **`pcsi`** | **−2.32 %** | **−1.70 %** | **78.33 → 87.37** |
+
+SSH share 8.5 → 8.4 %. (The NG5 det runs also carry `FESOM_WSPLIT=1`, so their baseline
+absolute — 0.2411 → 0.2476 s/step — is not a like-for-like comparison; the ratios are, being
+intra-allocation.)
+
+⭐⭐⭐ **The whole det re-run campaign resolves into one sentence: `cg2` and `oati` reproduce
+everywhere, `pcsi` does not — because P-CSI's cost is set by an estimate that depends on the
+initial state.** Its iteration count moved wherever the Lanczos eigenbound moved (CORE2 GPU
+121.5 → 133.0, **+9.5 %**; NG5 GPU 78.3 → 87.4, **+11.5 %**) and stayed put where it did not
+(farc 376.4 → 375.1, dars 55.28 → 55.23) — and its measured advantage tracked that exactly:
+CORE2 GPU −5.19 → −3.11 % (losing first place to `oati`), NG5 GPU −2.32 → −1.70 % (its lead
+over `oati` collapsing from 1.03 pp to 0.21 pp), farc and dars unchanged.
+
+This is the T8c lesson again in a new guise (*"the old default was faster BECAUSE it was
+wrong"*): a Chebyshev method's headline number is only as portable as its spectral estimate.
+**Practical consequence: quote `cg2`/`oati` gains as properties of the method; quote `pcsi`
+gains as properties of the method AND the state it was tuned on.** Nothing here weakens P-CSI
+as an option — it still wins at CORE2 CPU scale and it is the only variant that never fired a
+false-positive stall on farc — but its per-configuration numbers need the estimate quoted with
+them.
