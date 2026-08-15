@@ -354,7 +354,8 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 | farc 2048 CPU dt900 M=90 wsplit | 0.0731 | 0.0718 | **−1.8 %** | bt mpi/step 182→94 (halved, as designed), bt wait 5.2→4.7 ms; bt is only ~16 % of the 73 ms step here — the latency share bounds the CPU payoff (Sergey's "on CPU it is just better scaling", now as a number). Job 26960156, all four legs healthy (η=3.47, T sane), reps within 0.4 % |
 | dars 8192 CPU dt120 M=20 wsplit | 0.0976 | 0.0980 | **+0.4 % (wash)** | bt mpi/step 42→24, bt wait 3.1→2.8 ms — mechanism intact, but bt is ~6 % of a 98 ms step and the +28.2 % ring-1 redundant compute eats the rest, exactly as the census predicted. Job 26960157, legs healthy (η=4.08), off-rep spread 1.5 % > the delta |
 | **CORE2 16N GPU dt1800 M=50** | 0.0841 | 0.0744 | **−11.5 %** | the track's headline. bt 19.7 → 12.5 ms: busy **7.84 → 5.37 (−31 %)** and wait **11.82 → 7.15 (−40 %)**, exchanges/step 102 → 54. On GPU the exchange cost sits in *busy* (staging + launch, ~51 µs each here) and its rank-variation is most of the imbalance, so halving the exchanges takes both. Job 26962396, all legs end at η=2.02 / T[−2.06,30.05] / S[5.63,41.12], identical off and on |
-| **NG5 16N GPU dt180 M=20** | 0.2461 | 0.2469 | **+0.3 % (wash)** | busy **11.41 → 12.22 (+7.1 %)**, wait 5.40 → 5.44 (flat): with 115 670 nodes per rank the block is compute-bound, the ring work costs more than the staging saves. Job 26962397, all legs η=3.62 |
+| **CORE2 4N GPU dt1800 M=50** | 0.0683 | 0.0617 | **−9.7 %** | the same mechanism at a third of the ranks: bt busy **6.92 → 4.80 (−30.6 %)**, wait 7.67 → 4.37 (−43 %), exchanges 102 → 54. Per-exchange staging **44 µs** here against 51 µs at 16N — a per-CALL cost, near-independent of subdomain size, which is why it dominates wherever the per-rank arithmetic is small. Job 26969116, on-arm reps 0.0617/0.0617/0.0617 |
+| **NG5 16N GPU dt180 M=20** (fat bin) | 0.2461 | 0.2469 | **+0.3 % (wash)** | busy **11.41 → 12.22 (+7.1 %)**, wait 5.40 → 5.44 (flat): with 115 670 nodes per rank the block is compute-bound, the ring work costs more than the staging saves. Job 26962397, all legs η=3.62 |
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
 
@@ -570,10 +571,10 @@ The law says the payoff is set by nodes per rank, through the staging share of t
 busy. Two GPU points fill the gap between 1 982 (CORE2 16N, −11.5 %) and 115 670 (NG5 16N,
 +0.3 %), and their predictions are written down before they run:
 
-| point | nodes/rank | bt busy / wait (certified, measured) | **predicted Δ step** |
-|---|---|---|---|
-| CORE2 4N GPU (job 26969116) | 7 928 | 6.88 / 7.69 ms of a 70.3 ms step | **−6 % … −9 %** |
-| dars 16N GPU (job 26969117) | 49 380 | not yet measured | **−1 % … −3 %** |
+| point | nodes/rank | bt busy / wait (certified, measured) | **predicted Δ step** | **measured** |
+|---|---|---|---|---|
+| CORE2 4N GPU (job 26969116) | 7 928 | 6.88 / 7.69 ms of a 70.3 ms step | **−6 % … −9 %** | **−9.7 %** — just outside, the model still slightly conservative on the wait side (it assumed the imbalance term would hold, and the busy spread fell 4.5 → 3.3 ms with the staging) |
+| dars 16N GPU (job 26970050, lean bin) | 49 380 | not yet measured | **−1 % … −3 %** | pending |
 
 The CORE2 4N reasoning: at 102 exchanges and ~51 µs each, staging is ~5.2 ms of that 6.88 ms
 busy, so the rung should take ~2.5 ms of busy plus a proportional slice of the 7.69 ms wait — call
