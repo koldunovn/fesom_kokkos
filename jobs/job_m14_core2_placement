@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=m14_place
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=16
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/place.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/place.%j.err
+#
+# Is CORE2's 864-1536 PLATEAU real, or an artifact of comparing different allocations?
+#
+# Each ladder rung so far ran in its OWN allocation: 1536 landed on l[40474-40485] (rack 404) and
+# 2048 on l[10508-10523] (rack 105). Within-job spreads are 0.23-0.81 %, so every point is precise
+# -- but nothing controls PLACEMENT across rungs, and at 62-124 owned nodes/rank CORE2 is deep in
+# the latency-bound regime where placement matters most.
+#
+# This runs 864 / 1024 / 1536 / 2048 inside ONE 16-node allocation, i.e. on the SAME nodes, twice
+# each in an interleaved order so allocation drift cancels. If the plateau survives, it is a
+# property of the mesh. If it vanishes, the ladder's SHAPE carries allocation noise and every
+# strong-scaling curve here needs that caveat.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env.sh"
+MESH_S=/work/ab0995/a270088/port2/mesh/core2
+MESH_B=/work/ab0995/a270088/port2/mesh/core2_bigpart
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=/work/ab0995/a270088/port2/m14/bin/i3/fesom_port_serial
+O=/work/ab0995/a270088/port2/m14/place_$SLURM_JOB_ID; mkdir -p $O
+export FESOM_SPEED=1 FESOM_IC_EXTRAP=det
+echo "=== CORE2 placement control — ALL rungs on ONE allocation ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+run () {                       # run <ranks> <rep>
+    local n=$1 rep=$2 mesh=$MESH_B
+    [ "$n" -le 864 ] && mesh=$MESH_S
+    local o=$O/${n}_$rep; mkdir -p $o
+    srun -n "$n" --ntasks-per-node=128 "$BIN" "$mesh" "$o" 1800 300 -1 "$PHC" 1958 > $o/log 2>&1
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' $o/log | tail -1 | grep -oE '[0-9.]+')
+    echo "  ranks=$n rep=$rep  s/step=${t:-NA}"
+    [ -n "$t" ] && echo "$n $t" >> $O/all.txt
+}
+run 2048 warm      # discard: first leg of an allocation is systematically slow
+: > $O/all.txt
+for rep in 1 2; do for n in 864 1024 1536 2048; do run $n $rep; done; done
+echo; echo "=== min over reps, SAME NODES ==="
+sort -k1 -n $O/all.txt | awk '{if($2<m[$1]||m[$1]=="")m[$1]=$2} END{for(k in m) print k, m[k]}' | sort -n | \
+  awk '{printf "  %5d ranks  %8.4f s/step", $1, $2; if(p)printf "   step %+6.1f%% for %.2fx", ($2/p-1)*100, $1/q; print ""; p=$2; q=$1}'

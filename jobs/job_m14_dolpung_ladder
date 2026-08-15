@@ -102,16 +102,10 @@ if [ "$#" -eq 2 ]; then echo; echo "--- ABBA ---"; leg "$1" 1; leg "$2" 2; leg "
 else                    echo; echo "--- $1 x2 ---"; leg "$1" 1; leg "$1" 2; fi
 
 echo; echo "=== result ==="
-python3 - "$OUT/legs.txt" "$POINT" "$N" "${BASE_KNOBS:-}" <<'PY'
-import sys, collections
-d=collections.OrderedDict()
-for ln in open(sys.argv[1]):
-    k,v=ln.split(); d.setdefault(k,[]).append(float(v))
-if not d: print("NO ADMITTED LEGS"); raise SystemExit(1)
-for k,v in d.items():
-    print(f"  {k:5s} legs {v}  min={min(v):.4f}  spread={(max(v)-min(v))/min(v)*100:.2f}%")
-if 'base' in d and 'best' in d:
-    b,x=min(d['base']),min(d['best']); print(f"  GAIN = {(x-b)/b*100:+.2f}%")
-cfg=(sys.argv[4] or "prod").replace(" ","+") if len(sys.argv)>4 else "prod"
-print(f"DCSV {sys.argv[2]},{sys.argv[3]},cfg={cfg}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
-PY
+# 🔴 awk, NOT python3: the dolpung nodes are aarch64 with NO modules, and the project's python
+# lives in an x86 conda env. The first run produced legs fine and then printed nothing at all.
+awk '{a[$1]=(a[$1]==""||$2<a[$1])?$2:a[$1]; n[$1]++}
+     END{ for(k in a) printf "  %-5s min=%.4f (%d legs)\n", k, a[k], n[k];
+          if (a["base"]!="" && a["best"]!="") printf "  GAIN = %+.2f%%\n", (a["best"]-a["base"])/a["base"]*100;
+          printf "DCSV %s,%s,", MESH, N; for(k in a) printf "%s=%.4f,", k, a[k]; printf "\n" }' \
+     MESH="$POINT" N="$N" "$OUT/legs.txt"

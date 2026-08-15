@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=m14_dnan
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=16 --ntasks=64 --ntasks-per-node=4
+#SBATCH --gres=gpu:4 --gpu-bind=none -C a100_80
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/dnan.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/dnan.%j.err
+# dars at 64 GPUs NaNs in the CG at step 2 -- on BOTH the candidate and the STOCK partition, so it
+# is the CONFIGURATION, not the partition. Bracket which knob does it. 20 steps is enough: it dies
+# at step 2.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=/work/ab0995/a270088/port2/m14/bin/i3/fesom_port_cuda
+O=/work/ab0995/a270088/port2/m14/dnan_$SLURM_JOB_ID; mkdir -p $O
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+probe () { local tag=$1; shift; local o=$O/$tag; mkdir -p $o
+  ( for kv in "$@"; do export "$kv"; done
+    srun -l "$BIN" "$MESH" "$o" 120 20 -1 "$PHC" 1958 ) > $o/log 2>&1
+  local rc=$?
+  printf "  %-22s rc=%-3s steps=%-3s %s\n" "$tag" "$rc" \
+    "$(grep -cE '^ *0: *[0-9]+ +it=' $o/log)" "$(grep -m1 -oE 'FATAL.*' $o/log | cut -c1-60)"
+}
+echo "=== dars 64 GPU NaN bracket (stock partition, 20 steps) ==="
+probe bare
+probe speed_only     FESOM_SPEED=1
+probe det_only       FESOM_IC_EXTRAP=det
+probe speed_plus_det FESOM_SPEED=1 FESOM_IC_EXTRAP=det

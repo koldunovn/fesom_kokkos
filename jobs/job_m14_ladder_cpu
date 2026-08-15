@@ -74,6 +74,10 @@ echo "mesh : $MESH/dist_$N"
 echo "nodes: $SLURM_JOB_NODELIST"
 md5sum "$BIN"
 [ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
+if [ -n "${BEST_MESH:-}" ]; then
+    echo "best mesh : $BEST_MESH/dist_$N   (partition lever)"
+    [ -d "$BEST_MESH/dist_$N" ] || { echo "REFUSE: $BEST_MESH/dist_$N does not exist"; exit 2; }
+fi
 
 clean_env () {
     unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
@@ -96,12 +100,17 @@ clean_env () {
 leg () {                       # leg <arm> <index>
     local arm=$1 idx=$2
     local out="$OUT/${idx}_${arm}"
+    # BEST_MESH: the PARTITION lever is a different mesh directory, not an env knob, so the best
+    # arm may read a different dist_N than the base arm. Both still run in ONE allocation on the
+    # SAME nodes in ABBA order, which is what makes the comparison fair.
+    local mesh="$MESH"
+    [ "$arm" = best ] && [ -n "${BEST_MESH:-}" ] && mesh="$BEST_MESH"
     mkdir -p "$out"
     clean_env
     if [ "$arm" = best ] && [ -n "$BEST_KNOBS" ]; then
         for kv in $BEST_KNOBS; do export "$kv"; done
     fi
-    srun "$BIN" "$MESH" "$out" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    srun "$BIN" "$mesh" "$out" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
     local rc=$?
     local t;  t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
     # ZOMBIE CHECK (M10 L106): rc=0 is not aliveness. A NaN-blind guard turns a broken run into a

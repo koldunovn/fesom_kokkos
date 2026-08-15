@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=m14_lad1
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH -o /work/ab0995/a270088/port2/m14/lad1.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/lad1.%j.err
+#
+# A STRONG-SCALING LADDER MUST LIVE IN ONE ALLOCATION.
+#
+# Measured 2026-08-16 (job 26988639): running the SAME CORE2 rungs on ONE fixed 16-node allocation
+# vs in separate allocations changes the curve's SHAPE, not just its noise:
+#     ranks   separate allocs   one alloc
+#      864       0.0441          0.0429
+#     1024       0.0433          0.0393   (10 % apart)
+#     1536       0.0431          0.0352   (22 % apart!)
+#     2048       0.0371          0.0371
+# The separate-allocation ladder showed a PLATEAU at 864-1536 and no rollover. On fixed hardware
+# the plateau vanishes, CORE2 scales through 1536 and then goes NEGATIVE at 2048. Within-allocation
+# reps agree to ~1 %, so that 22 % is allocation variation, not noise.
+#
+# So: allocate the LARGEST rung once, then run every rung inside it. Small rungs use a subset of
+# the same nodes. Two reps per rung, interleaved, warmup discarded.
+#
+#   sbatch --nodes=64 --time=03:00:00 --export=ALL,POINT=core2,RUNGS="128 256 512 864 1024 1536 2048 3072 4096 6144 8192" jobs/job_m14_ladder1alloc
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env.sh"
+case "${POINT:?}" in
+  core2) DT=1800; MS=/work/ab0995/a270088/port2/mesh/core2; MB=/work/ab0995/a270088/port2/mesh/core2_bigpart; SW=864 ;;
+  farc)  DT=900;  MS=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc; MB=/work/ab0995/a270088/port2/mesh/farc_bigpart; SW=2304 ;;
+  dars)  DT=120;  MS=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars; MB=/work/ab0995/a270088/port2/mesh/dars_bigpart; SW=4096 ;;
+  ng5)   DT=180;  MS=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5;  MB=/work/ab0995/a270088/port2/mesh/ng5_bigpart;  SW=8192 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=/work/ab0995/a270088/port2/m14/bin/i3/fesom_port_serial
+NSTEPS=${NSTEPS:-300}
+O=/work/ab0995/a270088/port2/m14/lad1_${POINT}_$SLURM_JOB_ID; mkdir -p $O
+export FESOM_SPEED=1 FESOM_IC_EXTRAP=det
+echo "=== M14 one-allocation ladder — $POINT  rungs='${RUNGS:?}' dt=$DT ==="
+echo "nodes: $SLURM_JOB_NODELIST   ($SLURM_NNODES allocated)"
+run () {                       # run <ranks> <tag>
+    local n=$1 tag=$2 mesh=$MB
+    [ "$n" -le "$SW" ] && mesh=$MS
+    [ -d "$mesh/dist_$n" ] || { echo "  ranks=$n SKIP (no dist_$n)"; return; }
+    local o=$O/${n}_$tag; mkdir -p $o
+    srun -n "$n" -N $(( (n + 127) / 128 )) --ntasks-per-node=128 \
+         "$BIN" "$mesh" "$o" "$DT" "$NSTEPS" -1 "$PHC" 1958 > $o/log 2>&1
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' $o/log | tail -1 | grep -oE '[0-9.]+')
+    local last; last=$(grep -E '^ *[0-9]+ +it=' $o/log | tail -1)
+    echo "  ranks=$n $tag s/step=${t:-NA}$(echo "$last" | grep -qiE 'nan|inf' && echo ' !!NONFINITE')"
+    [ -n "$t" ] && ! echo "$last" | grep -qiE 'nan|inf' && echo "$n $t" >> $O/all.txt
+}
+set -- $RUNGS
+run "$1" warm; : > $O/all.txt          # first leg of an allocation is systematically slow
+for rep in 1 2; do for n in $RUNGS; do run "$n" "r$rep"; done; done
+echo; echo "=== $POINT ladder, ONE allocation, min over reps ==="
+sort -n $O/all.txt | awk '{if(m[$1]==""||$2<m[$1])m[$1]=$2} END{for(k in m)print k,m[k]}' | sort -n | \
+awk '{printf "  %6d ranks  %8.4f s/step",$1,$2; if(p)printf "   %+6.1f%% for %.2fx",($2/p-1)*100,$1/q; print""; p=$2;q=$1}'

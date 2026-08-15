@@ -28,7 +28,10 @@
 set -u
 MESHNAME=${MESHNAME:?set MESHNAME=dars or ng5}
 MESH=/work/ab0995/a270088/port2/mesh/${MESHNAME}_bigpart
-SRC=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/${MESHNAME}
+# 🔴 CORE2 MUST come from the PRIVATE mesh, never /pool: /pool's core2 has nlvls/elvls
+# swapped (L73). Verified 2026-08-16: private nlvls md5 cbcbee86 vs /pool 8e54713c, and
+# core2_bigpart matches the PRIVATE one. SRC_OVERRIDE keeps the integrity gate meaningful.
+SRC=${SRC_OVERRIDE:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/${MESHNAME}}
 W=$MESH/_partwork
 case "$MESHNAME" in
   dars) TARGETS="6144 8192 10240" ;;
@@ -39,6 +42,9 @@ case "$MESHNAME" in
   # a turnover at all, which is what the campaign's past-the-knee points are for.
   #   3072 -> 208 v/core | 4096 -> 156 | 8192 -> 78 (deep past the rule of thumb)
   farc) TARGETS="3072 4096 8192" ;;
+  # CORE2 push to NEGATIVE scaling: at 2048 it still improves (0.0371). 8192 ranks is
+  # 15 verts/rank, far past any sane operating point -- the aim is to SHOW the rollover.
+  core2) TARGETS="3072 4096 6144 8192" ;;
   *)    echo "unknown mesh $MESHNAME"; exit 2 ;;
 esac
 TARGETS=${TARGETS_OVERRIDE:-$TARGETS}
