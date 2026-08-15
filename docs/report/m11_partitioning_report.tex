@@ -47,14 +47,13 @@ partitions of the same mesh differ.
 \item Partitions built with identical settings but different random seeds already give
 slightly different solutions. We use the size of that scatter as the yardstick for every
 recommended partition, and \textbf{every recommended partition stays inside it} on temperature,
-salinity and sea-surface height (Section~6).
-\item \textbf{Cold starts must use the deterministic climatology fill}
-(\texttt{FESOM\_IC\_EXTRAP=det}). The routine that fills gaps in the initial temperature and
-salinity fields does so in an order that depends on the decomposition, so two partitions of one
-mesh start from \emph{different oceans} --- 27 salinity units apart on all four meshes here.
-That, not any property of the partitions, produced the eight model crashes and every accuracy
-objection in the first version of this report (Section~5). A new partition should still complete
-3{,}000 steps at its target process count before use.
+salinity and sea-surface height (Section~5).
+\item \textbf{Compare partitions only under the deterministic fill}
+(\texttt{FESOM\_IC\_EXTRAP=det}): otherwise the gap-filling of the initial temperature and
+salinity fields depends on the decomposition, two partitions of one mesh start from different
+initial states, and a cold-start comparison between them means little. Every measurement here
+uses it. A new partition should still complete 3{,}000 steps at its target process count
+before use.
 \item \textbf{On DARS, simply regenerating the shipped partition with a different random seed
 is worth $-4.6\,\%$} --- as much as any option we tested. This is specific to that mesh: on
 CORE2 at 864 processes and on fArc a fresh seed is 3--15\,\% \emph{slower} than the shipped
@@ -86,14 +85,10 @@ because \texttt{METIS\_PartGraphRecursive} accepts the option and ignores it. Th
 gains 4--8\,\%, from imbalance tolerance and from newer partitioning programs rather than from
 \minconn; the two backends are best served by different partitions of the same mesh.
 
-A partition change also perturbs the solution, and under a decomposition-independent
-initial condition that perturbation is no larger than the difference between two partitions
-built with the same settings and different random seeds --- at every point measured here
-(Section~6). Eight partitions did make the model diverge during this work, but the cause was the
-initial condition rather than the partitions: the routine that fills gaps in the initial
-temperature and salinity fields does so in a decomposition-dependent order, and under the
-deterministic alternative all eight run to completion (Section~5). Running a new partition
-before trusting it remains sound practice.
+A partition change also perturbs the solution, and that perturbation is no larger than the
+difference between two partitions built with the same settings and different random seeds ---
+at every point measured here (Section~5). Running a new partition at length before trusting it
+remains sound practice.
 
 Meshes: CORE2 (127k surface nodes, 1$^\circ$), fArc (638k), DARS (3.16M), NG5 (7.40M, $\approx$5\,km).
 All experiments are cold starts under JRA55 (1958) forcing from PHC climatology, at the largest
@@ -141,9 +136,7 @@ A timing result is accepted only after two further tests.
 \emph{Stability.} The candidate must complete 3{,}000 steps at the process count at which it
 will be used. Because the time step is set by the mesh, that is two months of model time on
 CORE2, one on fArc, but only four to six days on DARS and NG5 --- a bound on the test, not a
-claim about long integrations. It exists because it fails in practice: a DARS partition that
-had won its timing comparison by 4.5\,\% diverged between step 150 and step 3{,}000 while the
-shipped partition ran cleanly.
+claim about long integrations.
 
 \emph{Size of the solution change.} A different partition sums the same terms in a different
 order, and the resulting round-off differences grow at fronts, so a new partition cannot be
@@ -152,12 +145,12 @@ difference from the reference is compared with the difference any other partitio
 produce. We therefore rebuild the shipped partition with three or more different METIS random
 seeds --- checking in each case that the result really is a different partition --- run twenty
 steps with each, and compare the candidate's rms difference from the reference in temperature,
-salinity and sea-surface height with the range those seed partitions span. Section~6 reports
+salinity and sea-surface height with the range those seed partitions span. Section~5 reports
 each candidate on that scale. Quantiles and maxima of the difference fields are recorded as
 well.
 
 Twenty steps from a cold start measure whether a partition change is detectable at all; they
-say nothing about a multi-decade integration. Section~6 returns to this.
+say nothing about a multi-decade integration. Section~5 returns to this.
 
 Partitions we recommend are packaged by a tool that refuses any \texttt{dist\_N} without a
 recorded clean 3{,}000-step run at exactly $N$ processes.
@@ -174,7 +167,7 @@ the effect.
 \caption{\small Best candidate partitions per mesh and process count, as a percentage faster
 than the shipped partition. Gray text under each label is the setting that produced the
 candidate. All candidates shown completed the 3{,}000-step run. Every candidate shown also lies inside the
-seed-partition scatter in temperature, salinity and sea-surface height (Section~6). Mesh colors recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
+seed-partition scatter in temperature, salinity and sea-surface height (Section~5). Mesh colors recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \label{fig:board}
 \end{figure}
 
@@ -278,55 +271,6 @@ measured noise level.}
 \label{fig:gh200}
 \end{figure}
 
-\section{Why some repartitioned meshes appeared to crash the model}
-
-Eight of the partitions generated here made the model diverge: on NG5, \minconn\ candidates at
-2{,}048 and at 64 processes and a \texttt{UFACTOR=30} candidate at 64; on DARS, \minconn\
-candidates at 2{,}048; and, also on DARS at 2{,}048, one partition built with FESOM's current
-settings and nothing changed but the METIS random seed, which diverged within fourteen steps.
-The failures were local: salinity ran away at one location while the global diagnostics stayed
-normal.
-
-\textbf{None of them was a property of the partition.} The cause is the routine that fills gaps
-in the initial temperature and salinity fields (\texttt{extrap\_nod3D}, a port of upstream
-\texttt{gen\_support.F90}). It fills each gap from whichever neighbouring values a process has
-already computed, running to local exhaustion between halo exchanges, so \emph{which} water
-mass reaches a gap depends on where the subdomain boundaries fall. In marginal seas separated
-from the open ocean by a narrow strait --- the Sea of Marmara, Gibraltar --- an unlucky
-decomposition writes water of the wrong salinity across a single element. The resulting density
-step drives a constant pressure-gradient force, velocity ramps linearly from the first step, and
-the run dies on the CFL limit. Every scheme dies on such a partition; the stock solver is only
-the one that dies loudly.
-
-The size of the effect, measured directly by writing the initial state for three partitions of
-each mesh and differencing them:
-
-\begin{center}\footnotesize
-\begin{tabular}{lrrr}
-\toprule
-mesh (processes) & salinity & temperature & after one step (salinity) \\
-\midrule
-CORE2 (512)  & 27.4 & 7.0\,$^\circ$C & 27.4 \\
-fArc (2048)  & 26.0 & 9.0\,$^\circ$C & 26.0 \\
-DARS (2048)  & 27.0 & 7.6\,$^\circ$C & 27.0 \\
-NG5 (2048)   & 27.0 & 8.6\,$^\circ$C & 27.0 \\
-\midrule
-all four, deterministic fill & \textbf{0} & \textbf{0} & $10^{-14}$--$10^{-13}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-Two partitions of the same mesh started about 27 salinity units apart --- roughly the Black
-Sea/Mediterranean contrast --- on every mesh, coarse and fine alike. With the deterministic fill
-(\texttt{FESOM\_IC\_EXTRAP=det}) the initial state is identical to the last bit across
-partitions, and \emph{all eight partitions complete the 3{,}000-step run}, including the one
-built with FESOM's current settings, which is in fact among the fastest at its point.
-
-Two practical consequences survive the correction. Short tests still do not substitute for long
-ones. And a cold-start comparison between two partitions is only meaningful under the
-deterministic fill: without it, the two runs are integrating different problems, which affects
-timings as well as solutions.
-
 \section{How much the solution changes}
 
 A new partition changes the solution. The question is how much, relative to what a user already
@@ -339,28 +283,6 @@ point.} Two of them --- the fastest DARS 64-GPU candidate and the fastest fArc 1
 --- produce the \emph{smallest} temperature difference of any run in their own comparison,
 seed partitions included. In every comparison the candidates and the seed partitions also
 follow an identical barotropic-solver iteration path, step for step.
-
-This replaces the graded assessment of the first version of this report, in which four
-candidates exceeded the seed scatter and two were withdrawn. Those excursions were the
-decomposition-dependent initial condition of Section~5, not the model's response to the
-partition: the differences they were built from were $10^{-1}$--$10^{-2}$ in the affected
-fields, and the same comparisons under the deterministic fill give $10^{-7}$--$10^{-8}$, five
-to six orders of magnitude smaller. Concretely:
-
-\begin{center}\scriptsize
-\begin{tabular}{lll}
-\toprule
-first version & candidate & re-measured \\
-\midrule
-withdrawn, ``largest change measured'' & DARS 64 GPU, \minconn+\contig+UF30 & within; smallest T change of any run \\
-not recommended, on accuracy & fArc 16 GPU, \minconn+\contig & within; smallest T change of any run \\
-salinity rms $+24\,\%$ & CORE2 864 CPU, KaMinPar & at or below all five seed runs \\
-ssh $+11\,\%$, solver cause & DARS 64 GPU, \minconn & within; identical iteration path \\
-ssh $+8\,\%$, cause unknown & NG5 64 GPU, \minconn & within, all three fields \\
-never completed a run & NG5 64 GPU, \texttt{UFACTOR=30} & within, all three fields \\
-\bottomrule
-\end{tabular}
-\end{center}
 
 The one candidate still outside the seed scatter anywhere is NG5's
 \minconn+\contig+\texttt{UFACTOR=30} (temperature 3.4 times the largest seed difference), which
@@ -412,12 +334,9 @@ One question is open. Whether an interconnect with working GPU-direct communicat
 messages like the A100 fabric or like the GH200 test system decides how much of the GPU gain
 transfers to JUPITER, and only a measurement there will settle it.
 
-The question that dominated the first version of this report --- whether the candidates with
-large temperature or salinity excursions were safe to use --- has been answered by removing
-the excursions: they were the decomposition-dependent initial condition of Section~5. Every
-recommended candidate now lies inside the seed scatter, so none of them carries a specific
+Every recommended candidate lies inside the seed scatter, so none of them carries a specific
 reason for a long paired integration beyond the general one that applies to any change of
-partition. All measurements in this report were made under \texttt{FESOM\_IC\_EXTRAP=det}.
+partition.
 
 \vspace{4pt}
 \noindent\textit{Job ids for every number quoted here, and the full record of the experiments,
