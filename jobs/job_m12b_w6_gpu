@@ -48,6 +48,11 @@ case "$POINT" in
   *) echo "unknown POINT=$POINT"; exit 2 ;;
 esac
 
+# M override: the rung's saving should be LINEAR in the number of exchanges it
+# removes, which is what the deep-K extrapolation of §7c rests on. Running the
+# same pair at 2M tests that directly, and is physically admissible (the startup
+# CFL guard only sets a lower bound on M).
+M=${M_OVERRIDE:-$M}
 export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=$M
 export FESOM_SPEED=1
 export FESOM_PRINT_EVERY=500                  # the 41 %-of-step diagnostic-print trap
@@ -58,7 +63,7 @@ echo "=== M12b W6 $POINT: nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=$DT M=$M o
 
 leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats(0|1)
   local arm=$1 rep=$2 ph=$3
-  local OUT=$BASE/w6_${POINT}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
+  local OUT=$BASE/w6_${POINT}m${M}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
   rm -rf "$OUT"; mkdir -p "$OUT"
   if [ "$arm" = "on" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
   if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1; else unset FESOM_SPEED_PHASESTATS; fi
@@ -83,10 +88,10 @@ PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 DIST=$MESH/dist_$SLURM_NTASKS
 echo "=== wait anatomy (elasticity + imbalance share) ==="
 "$PY" "$ROOT/scripts/m12b_wait_anatomy.py" \
-      off=$BASE/w6_${POINT}_off_r1_ph1_${SLURM_JOB_ID} \
-      on=$BASE/w6_${POINT}_on_r1_ph1_${SLURM_JOB_ID} || true
+      off=$BASE/w6_${POINT}m${M}_off_r1_ph1_${SLURM_JOB_ID} \
+      on=$BASE/w6_${POINT}m${M}_on_r1_ph1_${SLURM_JOB_ID} || true
 echo "=== bt imbalance vs the partition ($DIST) ==="
 "$PY" "$ROOT/scripts/m12b_bt_imbalance.py" "$DIST" \
-      $BASE/w6_${POINT}_off_r1_ph1_${SLURM_JOB_ID} || true
+      $BASE/w6_${POINT}m${M}_off_r1_ph1_${SLURM_JOB_ID} || true
 
 echo "=== W6 $POINT done — quote min-of-2, both currencies (step and bt phase) ==="

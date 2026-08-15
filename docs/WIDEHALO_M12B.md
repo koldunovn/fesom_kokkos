@@ -600,9 +600,22 @@ same shape as the original §7 table, for a completely different reason. 🔴 Th
 extrapolation, not a measurement: it assumes the wait keeps tracking the staging spread and that
 the K-ring exchange keeps the same partner count (measured flat in §7) and per-exchange cost.
 **The honest status is: reopened, with a measured case at small-per-rank-size GPU points and none
-at large ones.** What would settle it cheaply, before any extended-mesh build: a `k`-periodic η
-exchange arm (exchange every k substeps with the *existing* ring-1 data, accepting the drift the
-s3 measurement quantifies) would trace the staging curve at K=2 and 4 without the §4 layer.
+at large ones.**
+
+⚠️ An earlier version of this paragraph proposed a "k-periodic η exchange" arm as the cheap way to
+trace the curve. **That was wrong and is withdrawn**: the rung already exchanges no η at all, so
+exchanging it every k substeps is a step *back* towards the certified path, not towards deep K.
+And there is no valid shortcut — K=2 needs Ū on element ring 3 (to get η on node ring 2, to get Ū
+on ring 1 for the second substep), which is exactly what the §4 extended mesh provides and what
+the local data cannot.
+
+**What can be tested cheaply is the extrapolation's load-bearing assumption: that the saving is
+LINEAR in the number of exchanges removed.** Running the same pair at **M=100** doubles the
+exchanges the rung removes (98 instead of 48) at an admissible substep count (the CFL guard only
+sets a lower bound, M_min=35 here). Pre-registered, from the measured 51 µs/exchange and the
+observed wait-to-busy saving ratio of ~1.9: **CORE2 16N GPU at M=100 lands in −12 % … −16 %**
+(job 26969145; the certified M=100 leg is already measured at 0.1007 s/step by the M-sweep). A
+saving that saturates instead would falsify the linear staging model and with it §7c's table.
 
 ## 🔴 7b. The prediction was wrong by 4×, and the reason is where the pack cost lives
 
