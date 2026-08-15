@@ -3404,3 +3404,28 @@ small and unexplained"**, and it was the sole occupant of that category. On this
 ssh excursion is gone: `MINCONN` is inside the control range on ssh and below both controls on
 temperature. If the 4-control gate confirms it, **every accuracy objection this campaign raised
 traces to the hole-filler**, and tier 3 empties.
+
+### ⚠️ Budget for the deterministic fill: it is a one-shot init cost, but it is not small
+
+Measured on NG5 at 64 ranks (job 26969072): **10,385 fill sweeps + ~30,000 relaxation sweeps
+≈ 7 minutes**, against a 300-step timestep loop of 71 s. The fill is a global iteration to a
+tolerance, so its cost grows with mesh size and *falls* with rank count — at 2048 ranks on the
+same mesh it is minutes, at 64 ranks it dominates a short job.
+
+Consequence for anyone planning campaign runs under det: size the walltime from
+`(legs × ~7 min) + compute`, not from the compute. Three jobs in this re-run hit their limit on
+exactly this and had to be split (26961261/62 census, 26969071 NG5 gate, 26969072 NG5 race).
+Production runs of hours are unaffected. `FESOM_IC_EXTRAP_TOL` (default 1e−3) is the knob if the
+cost ever matters, but loosening it re-introduces the fronts the relaxation exists to remove.
+
+### NG5 64 GPU race under det (26969072, rep 1 of 2; base repeats to 0.17 %)
+
+| arm | vs base | legacy |
+|---|--:|--:|
+| slack `UFACTOR=30` | −9.73 % | — |
+| **`MINCONN`** | **−9.57 %** | −9.71 / −9.76 % ✔ reproduces |
+| `MINCONN`+`CONTIG` | −8.07 % | "diverged in both reps" |
+| +`UFACTOR=30` | −5.80 % | "diverged in both reps" |
+
+The two arms the campaign recorded as diverging at the ladder dt now run to 300 steps and are
+simply slower than the winner. Completion race (base + the two best arms, 2 reps): 26975543.
