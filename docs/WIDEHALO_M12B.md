@@ -729,10 +729,26 @@ buffer crosses the bus, MPI moves it, and a second kernel scatters the received 
 `Fbt` never leaves the device and the traffic is proportional to the multi-claimed count. The same
 values are moved, so the trajectory must be bitwise unchanged — which is the gate (job 26969407).
 
-**Audit result for the rest of the module:** every other `sync_host()` on the SE per-step path is
-inside an env-gated diagnostic (`GEOCHK`/`SELFCHECK`, and `step_n ≤ 5` at that). The H0e coherence
-exchange uses `fesom_halo_field`, the certified packed-halo path, which stays device-resident.
-One live offender, now fixed.
+**Audit result for the rest of the module.** Every other `sync_host()` on the SE per-step path is
+inside an env-gated diagnostic (`GEOCHK`/`SELFCHECK`, and `step_n ≤ 5` at that), and the H0e
+coherence exchange uses `fesom_halo_field`, the certified packed-halo path, which stays
+device-resident. One live offender.
+
+There is a second whole-array sync per step — `hbar` and `hbar_old` after the η commit (~1.9 MB at
+NG5 16N) — but it is a different animal on two counts: it is **required** (the ALE pre-block reads
+`hbar`/`hbar_old` on the host to build `ssh_rhs_old`, `eta_n`, `zbar_3d_n` and `dhe`, and the ice
+coupling reads `hbar` for `srfoce_ssh`), and it is **paid by both arms**, so it cancels exactly in
+every A/B on this board. It is a standing candidate for moving the ALE pre-block to the device —
+an M12/ALE item, not an M12b one, and not touched here. The reconcile's copies were rung-only,
+which is precisely why they distorted the comparison.
+
+**The same scan across the whole port** (a `sync_host()` on a field followed by that field's
+`sync_device()` within 40 lines, comments excluded) finds **19 further sites**: `fesom_ice.cpp` 10,
+`fesom_kpp.cpp` 4, `fesom_step.cpp` 3, `fesom_ice_thermo.cpp` 1, `fesom_ssh.cpp` 1. Several are
+certainly legitimate — a genuinely host-side algorithm has to bring its data over — but each is a
+whole-array round trip whose cost scales with the mesh per rank, and none of them can be seen from
+a CPU pair. Listed here for the tracks that own those files rather than touched from M12b; the
+scan is two lines of Python and worth running before any GPU per-rank-size claim.
 
 ⚠️ **The GPU board rows in §5 and the three queued rows were all measured with the fat version**,
 so they are a lower bound wherever the mesh per rank is large. The lean re-measurement at NG5 and
