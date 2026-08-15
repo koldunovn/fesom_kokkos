@@ -1470,8 +1470,11 @@ floor`, so 24–48 % of the mean wait is load imbalance being absorbed at the ex
 floor — what the busiest rank still waits — has elasticity only 0.44–0.46. **A wait attributed to
 a phase is the sum of a latency term and the phase's own imbalance; only the first responds to a
 communication lever, and the split is measurable from per-rank timers you already collect.**
-The reason is structural, not empirical: **imbalance-driven wait is conserved under any
-communication lever** — the time difference between a fast and a slow rank must be absorbed
+⚠️ **Read this together with L120: on GPU the pack lands in `busy`, so part of what this
+decomposition calls "imbalance" is communication cost, and the elasticity came out at 0.79 rather
+than 0.17.** The algebra below is sound; the labels depend on which side of the timer the pack
+sits. The reason is structural, not empirical: **imbalance-driven *work* wait is conserved under
+any communication lever** — the time difference between a fast and a slow rank must be absorbed
 somewhere, and removing an exchange relocates it to the next synchronisation point rather than
 removing it. So a lever sized against a phase's *total* wait is oversized by exactly the
 imbalance share.
@@ -1501,3 +1504,22 @@ explained by 2-D counts (R² 0.21; its 1.62× spread is bathymetry, cf. M10), so
 different constraints and the fix is a *multi-constraint* partition, not a re-weighting.
 **Before optimizing a phase's communication, regress its per-rank busy time on the per-rank entity
 counts you already have on disk — it costs nothing and it can redirect the whole lever.**
+
+## L120 (M12b s4): which side of the timer the halo pack sits on decides what a phase's wait is made of — and it differs between CPU and GPU
+
+L118 measured that halving the barotropic exchanges moved the bt wait by an elasticity of only
+0.17 on CPU, and attributed the rest to load imbalance. The same experiment on GPU returned
+**0.79**, and the step gain was **−11.5 %** against a pre-registered **−1.5…−2.9 %**. The term
+that failed was `bt_busy`, which the CPU had said was invariant: there the removed exchange's pack
+is a memcpy that exactly paid for the ring compute (busy flat to 0.3 %). On GPU the pack/unpack
+and its staging are kernels and copies — they land in **`busy`**, and at 1 982 nodes per rank they
+dominate it (~51 µs of busy per exchange against ~2.6 ms of arithmetic), so bt busy fell **31 %**.
+And because staging scales with halo size, which varies 11× across ranks (corr(bt busy, halo
+elements) **+0.63** vs +0.38 for owned elements), removing the exchanges removed the busy *spread*
+too (9.2 → 5.2 ms) and with it the absorption. **A large part of what the CPU decomposition
+labelled "imbalance" was communication cost wearing an imbalance costume.** Two rules follow:
+regress a phase's busy on the **halo** counts as well as the owned ones before deciding what its
+wait is made of; and never carry a busy-side calibration across backends — the pack changes sides.
+The same lever is a **wash (+0.3 %)** at NG5 16N GPU, where 115 670 nodes per rank make staging a
+rounding error and the ring compute a real cost: **the board is a per-rank-size law, not a mesh
+law**, and the payoff sits at the strong-scaling limit.
