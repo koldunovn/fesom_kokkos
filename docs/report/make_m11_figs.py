@@ -31,24 +31,26 @@ L = common.MESH_LABEL
 
 # ---------------------------------------------------------------- fig 1: the board
 # (mesh, ranks, gain %, setting, status). All arms shown passed the 3,000-step stability
-# screen; status codes the 20-step DISTURBANCE vs the seed-control spread (user protocol
-# decision 2026-08-13 — graded reporting, not a pass/fail accuracy verdict):
-#   t1  = inside/below the seed spread     ssh = SSH-only excursion
-#   ts  = temperature/salinity excursion   null = no candidate beat shipped
+# screen. Re-measured 2026-08-15 under the DETERMINISTIC initial-condition fill
+# (FESOM_IC_EXTRAP=det, M13): under the legacy fill two partitions of one mesh started ~27 PSU
+# apart, so the old "disturbance" statuses were grading the hole-filler, not the decomposition.
+# Every recommended candidate is now inside the seed-control scatter on all three fields:
+#   t1  = inside/below the seed spread     null = no candidate beat shipped
 GPU = [
-    ("dars",  64,  19.7, "MINCONN+CONTIG+UFACTOR=30",        "ts"),        # 26895260 screen; 26908840: T rms +13 %, T max x1.8-2.5
-    ("dars",  64,  14.3, "MINCONN",                   "ssh"),       # 26895260 screen, 26908840 gate (+11 %, stopping mech.)
-    ("ng5",   64,   9.8, "MINCONN",                   "ssh"),       # 26908635 screen, 26911630 gate (+8 %, unexplained)
-    ("core2",  4,   8.1, "MINCONN",                   "t1"),        # 26892875 + 3,000-step re-proof
-    ("farc",  16,   3.6, "MINCONN+CONTIG",            "ts"),        # 26893934: T rms +33 %, 4 controls
+    ("dars",  64,  18.5, "MINCONN+CONTIG+UFACTOR=30", "t1"),   # 26968998 race, 26969047 gate (5 ctl; lowest T of any leg)
+    ("dars",  64,  12.9, "MINCONN",                   "t1"),   # 26968998 race, 26969047 gate
+    ("ng5",   64,   9.6, "MINCONN",                   "t1"),   # 26969072 race, 26972358 gate (4 ctl; in class all 3 fields)
+    ("core2",  4,   7.1, "MINCONN",                   "t1"),   # 26961428 race, 26961547 gate (4 ctl)
+    ("farc",  16,   3.9, "MINCONN+CONTIG",            "t1"),   # 26970463 race (median), 26969048 gate (3 ctl)
 ]
 CPU = [
-    ("farc",  2048, 7.5, "Mt-KaHyPar w=100+nlev",     "t1"),
-    ("core2",  512, 5.8, "Hilbert renumbering + KaHIP",          "t1"),
-    ("core2",  864, 4.9, "KaMinPar",                  "ts"),        # 26904986: salt rms +24 %, 5 controls
-    ("dars",  2048, 4.2, "KaMinPar w=100+nlev",       "t1"),        # 26895271 race, 26904739 gate
-    ("core2",  512, 3.8, "UFACTOR=30",          "t1"),
-    ("ng5",   2048, 0.0, "no candidate was faster", "null"),
+    ("farc",  2048, 7.8, "Mt-KaHyPar w=100+nlev",     "t1"),   # 26962959 at 3,000 steps
+    ("core2",  512, 5.4, "Hilbert renumbering + KaHIP", "t1"), # 26962962 at 3,000 steps
+    ("core2",  864, 5.1, "KaMinPar",                  "t1"),   # 26962961 at 3,000 steps; 26961426 gate (5 ctl)
+    ("dars",  2048, 4.6, "a fresh seed of the stock recipe", "t1"),  # 26963431 min-of-3
+    ("dars",  2048, 4.3, "MINCONN",                   "t1"),   # 26961564 at 3,000 steps
+    ("core2",  512, 3.7, "UFACTOR=30",                "t1"),   # 26962960 at 3,000 steps
+    ("ng5",   2048, 0.0, "no candidate was faster",   "null"),
 ]
 
 HATCH = {"t1": None, "ssh": "//", "ts": "xx", "null": None}
