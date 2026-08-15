@@ -62,9 +62,27 @@ def ice_cost(legdir):
     return tot if seen else None
 
 
+# 🔴 A resubmitted point leaves TWO ab*.out files carrying the same TAG -- the timed-out original
+# and the replacement. Merging their LEG lines would silently build one "point" from two different
+# allocations, which is exactly what the campaign's same-allocation rule forbids. Keep only the
+# newest job per tag (the filename carries the job id, which increases monotonically).
+def job_id(path):
+    m = re.search(r"\.(\d+)\.out$", path)
+    return int(m.group(1)) if m else -1
+
+
+newest = {}
+for out in sorted(glob.glob(os.path.join(args.root, "ab*.out")), key=job_id):
+    with open(out, errors="replace") as f:
+        for ln in f:
+            m = HDR.match(ln)
+            if m:
+                newest[m.group(1)] = out       # later job id wins
+                break
+
 # tag -> {"step": {leg: s}, "ice": {leg: s}, "det": bool}
 runs = {}
-for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
+for out in sorted(newest.values(), key=job_id):
     tag, legs, ic = None, {}, "legacy"
     with open(out, errors="replace") as f:
         for ln in f:
@@ -106,7 +124,7 @@ def fill_signature_check(root):
     """
     # ⚠️ The fill runs TWICE per model start -- once for temperature, once for salinity -- so a
     # run emits two lines and they differ from each other. The invariant is over the PAIR.
-    sigs = {}
+    sigs, partial = {}, []
     for log in glob.glob(os.path.join(root, "scd_*", "*", "run.1.log")) + \
                glob.glob(os.path.join(root, "op6_*", "*", "run.1.log")):
         tag = log.split(os.sep)[-3]
@@ -117,7 +135,11 @@ def fill_signature_check(root):
                 found = [m.group(0) for m in (SWEEP.search(ln) for ln in f) if m]
         except OSError:
             continue
-        if found:
+        # ⚠️ A leg still running has written the T line but not yet the S one. Comparing that
+        # partial pair against complete ones reports a false disagreement -- skip it and say so.
+        if len(found) == 1:
+            partial.append(f"{tag}/{log.split(os.sep)[-2]}")
+        elif found:
             key = " | ".join(found)          # order is T then S, fixed by the loader
             sigs.setdefault(mesh, {}).setdefault(key, set()).add(f"{tag}/{log.split(os.sep)[-2]}")
     ok = True
@@ -133,6 +155,9 @@ def fill_signature_check(root):
             for s, tags in sorted(variants.items()):
                 print(f"           {s}   <- {', '.join(sorted(tags)[:4])}"
                       f"{' …' if len(tags) > 4 else ''}")
+    if partial:
+        print(f"  ({len(partial)} leg(s) still running — only the T fill line written so far, "
+              f"e.g. {partial[0]})")
     print()
     return ok
 
