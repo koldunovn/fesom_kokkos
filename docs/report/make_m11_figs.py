@@ -39,7 +39,8 @@ L = common.MESH_LABEL
 GPU = [
     ("dars",  64,  18.5, "MINCONN+CONTIG+UFACTOR=30", "t1"),   # 26968998 race, 26969047 gate (5 ctl; lowest T of any leg)
     ("dars",  64,  12.9, "MINCONN",                   "t1"),   # 26968998 race, 26969047 gate
-    ("ng5",   64,   9.6, "MINCONN",                   "t1"),   # 26969072 race, 26972358 gate (4 ctl; in class all 3 fields)
+    ("ng5",   64,  10.1, "UFACTOR=30",                "t1"),   # 26975543 race, 26980859 gate (3 ctl; in class all 3 fields)
+    ("ng5",   64,   9.5, "MINCONN",                   "t1"),   # 26975543 race, 26972358 gate (4 ctl; in class all 3 fields)
     ("core2",  4,   7.1, "MINCONN",                   "t1"),   # 26961428 race, 26961547 gate (4 ctl)
     ("farc",  16,   3.9, "MINCONN+CONTIG",            "t1"),   # 26970463 race (median), 26969048 gate (3 ctl)
 ]

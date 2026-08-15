@@ -27,7 +27,7 @@
 \title{\vspace{-12mm}\large\bfseries Mesh partitioning and node ordering for FESOM2/Kokkos:\\
 measurements on CPU and GPU, and a procedure for adopting a new partition}
 \author{\normalsize Technical report}
-\date{\normalsize 13 August 2026 --- Levante (128-core CPU nodes, 4$\times$A100 GPU nodes; GH200 testbed)}
+\date{\normalsize 15 August 2026 --- Levante (128-core CPU nodes, 4$\times$A100 GPU nodes; GH200 testbed)}
 
 \begin{document}
 \maketitle
@@ -59,7 +59,7 @@ objection in the first version of this report (Section~5). A new partition shoul
 is worth $-4.6\,\%$} --- as much as any option we tested. This is specific to that mesh: on
 CORE2 at 864 processes and on fArc a fresh seed is 3--15\,\% \emph{slower} than the shipped
 partition, so elsewhere the gains come from the options, not from luck.
-\item Renumbering the mesh nodes along a Hilbert curve pays only on CORE2 ($-5.8\,\%$
+\item Renumbering the mesh nodes along a Hilbert curve pays only on CORE2 ($-5.4\,\%$
 together with repartitioning); the other meshes are already well ordered.
 \end{itemize}
 \vspace{2pt}
@@ -79,7 +79,7 @@ does not currently use, with three other partitioning programs, and after two re
 the mesh nodes --- and timed them against the shipped partitions on both backends of the
 C++/Kokkos port.
 
-The shipped partitions cost the GPU backend up to 20\,\% of the model step. Most of that is
+The shipped partitions cost the GPU backend up to 18\,\% of the model step. Most of that is
 recovered by a single METIS option, \minconn, which minimises the largest number of
 neighbouring subdomains any process has and which no FESOM partition has ever had active,
 because \texttt{METIS\_PartGraphRecursive} accepts the option and ignores it. The CPU backend
@@ -178,17 +178,18 @@ seed-partition scatter in temperature, salinity and sea-surface height (Section~
 \label{fig:board}
 \end{figure}
 
-\begin{table}[h]\centering\footnotesize
-\setlength{\tabcolsep}{3.4pt}
+\begin{table}[h]\centering\scriptsize
+\setlength{\tabcolsep}{3.2pt}
 \begin{tabular}{llrlll}
 \toprule
 mesh & processes & gain & setting & 3{,}000 steps & solution change vs seed scatter \\
 \midrule
-DARS  & 64 GPU   & $\mathbf{-18.5\,\%}$ & \minconn+\contig+\texttt{UF=30} & clean & \textbf{within} (smallest T change of any leg) \\
+DARS  & 64 GPU   & $\mathbf{-18.5\,\%}$ & \minconn+\contig+\texttt{UF=30} & clean & within; smallest T change of any leg \\
 DARS  & 64 GPU   & $\mathbf{-12.9\,\%}$ & \minconn            & clean & within (T, ssh); S at the edge \\
-NG5   & 64 GPU   & $\mathbf{-9.6\,\%}$  & \minconn             & clean & \textbf{within} on T, S and ssh \\
-CORE2 & 4 GPU     & $\mathbf{-7.1\,\%}$  & \minconn             & clean & below every seed partition \\
-fArc  & 16 GPU   & $-3.9\,\%$           & \minconn+\contig     & clean & \textbf{within} (smallest T change of any leg) \\
+NG5   & 64 GPU   & $\mathbf{-10.1\,\%}$ & \texttt{UFACTOR=30} & clean & within, all three fields \\
+NG5   & 64 GPU   & $\mathbf{-9.5\,\%}$  & \minconn            & clean & within, all three fields \\
+CORE2 & 4 GPU     & $\mathbf{-7.1\,\%}$  & \minconn            & clean & below every seed partition \\
+fArc  & 16 GPU   & $-3.9\,\%$           & \minconn+\contig    & clean & within; smallest T change of any leg \\
 \midrule
 fArc  & 2048 CPU & $\mathbf{-7.8\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & clean & within \\
 CORE2 & 512 CPU  & $\mathbf{-5.4\,\%}$  & Hilbert renumbering + KaHIP & clean & within \\
@@ -200,10 +201,11 @@ NG5   & 2048 CPU & none                 & ---                  & --- & --- \\
 \bottomrule
 \end{tabular}
 \caption{\small Best candidates per mesh and process count, relative to the shipped partition,
-at the time step given in Section~1. The last column gives the twenty-step rms difference from
-the reference where it exceeds what different METIS seeds produce, with the field responsible;
-Section~6 gives the numbers and what is known about their cause. On NG5 at 2{,}048 CPU
-processes no candidate was faster than the shipped partition.}
+at the time step given in Section~1, all measured under the deterministic
+initial-condition fill. The last column compares each candidate's twenty-step rms difference
+from the reference with the range that different METIS seeds of the shipped recipe produce;
+every candidate here falls inside that range, and Section~6 gives the numbers. On NG5 at
+2{,}048 CPU processes no candidate was faster than the shipped partition.}
 \label{tab:board}
 \end{table}
 
@@ -244,7 +246,7 @@ five percentage points on DARS GPU when added to \minconn\ --- \contig\ and \tex
 \subsection{Node renumbering pays only on CORE2}
 
 On CORE2, Hilbert renumbering is worth $-1.2$ to $-2.4\,\%$ on CPU and $-5.0\,\%$ on a single
-GPU node, and combines almost additively with repartitioning ($-5.8\,\%$ at 512 processes).
+GPU node, and combines almost additively with repartitioning ($-5.4\,\%$ at 512 processes).
 The other meshes gain nothing: 88\,\% of the nodes an element gathers from are already
 adjacent in memory, against 27.6\,\% on CORE2. Since renumbering forces every reference
 solution to be re-established (Section~2), it is worth taking only where that cost is
@@ -345,16 +347,17 @@ partition: the differences they were built from were $10^{-1}$--$10^{-2}$ in the
 fields, and the same comparisons under the deterministic fill give $10^{-7}$--$10^{-8}$, five
 to six orders of magnitude smaller. Concretely:
 
-\begin{center}\footnotesize
+\begin{center}\scriptsize
 \begin{tabular}{lll}
 \toprule
 first version & candidate & re-measured \\
 \midrule
-withdrawn, ``largest solution change measured'' & DARS 64 GPU, \minconn+\contig+UF30 & within; smallest T change of any run \\
+withdrawn, ``largest change measured'' & DARS 64 GPU, \minconn+\contig+UF30 & within; smallest T change of any run \\
 not recommended, on accuracy & fArc 16 GPU, \minconn+\contig & within; smallest T change of any run \\
-salinity rms $+24\,\%$ & CORE2 864 CPU, KaMinPar & at or below all five seed partitions \\
-sea-surface height $+11\,\%$, solver cause & DARS 64 GPU, \minconn & within; identical iteration path \\
-sea-surface height $+8\,\%$, cause unknown & NG5 64 GPU, \minconn & within, all three fields \\
+salinity rms $+24\,\%$ & CORE2 864 CPU, KaMinPar & at or below all five seed runs \\
+ssh $+11\,\%$, solver cause & DARS 64 GPU, \minconn & within; identical iteration path \\
+ssh $+8\,\%$, cause unknown & NG5 64 GPU, \minconn & within, all three fields \\
+never completed a run & NG5 64 GPU, \texttt{UFACTOR=30} & within, all three fields \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -382,8 +385,11 @@ step before production use; a failure is answered by rebuilding with a new seed.
 a single neighbour as reassignment candidate, and update METIS to 5.2.1.
 \end{enumerate}
 
-For runs on the machines measured here: use \minconn\ on GPU, and decide \contig\ and
-\texttt{UFACTOR} by a timing run, since they help on some meshes and cost on others. On CPU
+For runs on the machines measured here: try \minconn\ first on GPU --- it is the best or
+near-best candidate at four of the five GPU points --- and decide \contig\ and \texttt{UFACTOR}
+by a timing run, since they help on some meshes and cost on others. NG5 at 64 processes is the
+exception that shows why the timing run is not optional: there the plain \texttt{UFACTOR=30}
+candidate is the fastest of all, half a point ahead of \minconn. On CPU
 use KaMinPar or Mt-KaHyPar with $w = 100 + \mathrm{nlev}$, or \texttt{UFACTOR=30} if adding a
 partitioning program to the workflow is not worth it: at CORE2 512 the two are equal, at fArc
 the program is 2.5 percentage points better, and at DARS 2{,}048 the program is the

@@ -3501,3 +3501,14 @@ of five points, but at NG5 the plain slack arm is 0.5 pp ahead of it.
 ⇒ NG5 64 GPU's recommended arm should be re-checked against `a5_u30` before promotion: same
 gain class, and the gate (26972358) covered `MINCONN`, `MINCONN`+`CONTIG` and
 `MINCONN`+`UFACTOR=30` but NOT the plain slack arm. One gate leg would settle it.
+
+### NG5 64 GPU slack-arm gate (26980859, 3 controls): tier 1 as well
+
+| field | control range | `UFACTOR=30` (the winner) | `MINCONN` |
+|---|--:|--:|--:|
+| temp | 1.16 – 1.55e−7 | 1.51e−7 — in | 1.44e−7 — in |
+| salt | 3.99 – 5.08e−8 | 5.04e−8 — in | 4.99e−8 — in |
+| ssh  | 1.86 – 1.97e−9 | **1.82e−9 — below all** | 1.84e−9 — below all |
+
+Identical CG iteration paths on every leg. So NG5's fastest arm (−10.05 %) is tier 1 too, and
+the point is a clean recommendation with the slack arm rather than `MINCONN`.
