@@ -1,0 +1,124 @@
+#!/bin/bash
+#SBATCH --job-name=m9_clim1yr
+#SBATCH -A ab0995
+#SBATCH --time=02:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/clim.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/clim.%j.err
+#
+# M9 P1 — ONE 1-year CORE2 mEVP climate leg, run FROM THE ICE WORKTREE.
+# Pre-registration: docs/plans/20260805-m9-PREREG-P1.md (committed before the first leg).
+#
+# Purpose: quantify what the LAGGED mEVP HALO (cell 5) costs in simulated climate. Session 1
+# proved the speed (-13..-26% of the GPU step) and failed to measure the accuracy; max|d| at
+# 300 steps has no monotone trend with K because 1-5 chaotic ice-edge points carry it. This
+# job produces the annual monthly means that corr/RMS/bias can actually be computed from.
+#
+# ONE leg per job (not the multi-leg A/B pattern) because each leg is ~30 min of model time
+# and writes ~600 MB of NetCDF; separate jobs let them run concurrently and fail independently.
+#
+# 🔴 DEFAULT IO ON PURPOSE. jobs/io.config.m9_timing writes ONLY sst -- correct for timing legs,
+#    useless here. FESOM_IO_CONFIG is explicitly UNSET so the compiled-in default writes monthly
+#    means for every default variable (sst sss ssh a_ice m_ice uice vice ...), which is what
+#    scripts/m32_climate_compare.py reads.
+#
+# 🔴 FESOM_SPEED_FORCE_SERIAL=1 IS MANDATORY ON CPU (trap 1 / L105a). Without it every
+#    FESOM_SPEED_* lever resolves OFF on the Serial backend and the "lag8" leg silently runs
+#    CLASSIC -- i.e. the whole accuracy campaign would return "no difference" and be wrong.
+#    The knob-fired greps at the end of this script are the proof, not the intent.
+#
+# 🔴 ALWAYS PIN BIN=.
+#
+# env: BACKEND=cpu|gpu (required), BIN, TAG, KNOBS ("k=v;k=v", may be empty), MESH, DT, NSTEPS.
+#
+# Usage -- CPU arm (deterministic; the arm of record), 2 nodes x 128 ranks:
+#   for L in "classic::" "classic_rep::" "lag2::FESOM_SPEED_MEVPLAG=2" \
+#            "lag4::FESOM_SPEED_MEVPLAG=4" "lag8::FESOM_SPEED_MEVPLAG=8"; do
+#     sbatch -p compute -N2 --ntasks=256 \
+#       --export=ALL,BACKEND=cpu,TAG=p1c_${L%%::*},KNOBS="${L#*::}",\
+# BIN=/work/ab0995/a270088/port2/m9/bin/b_faecfaec/fesom_port_serial jobs/job_m9_climate1yr
+#   done
+#
+# Usage -- GPU arm, 2 nodes x 4 ranks:
+#   sbatch -p gpu -N2 --ntasks=8 --ntasks-per-node=4 --gres=gpu:4 --gpu-bind=none \
+#     --constraint=a100_80 --export=ALL,BACKEND=gpu,TAG=p1g_lag8,KNOBS="FESOM_SPEED_MEVPLAG=8",\
+# BIN=/work/ab0995/a270088/port2/m9/bin/b_ecf53112/fesom_port_cuda jobs/job_m9_climate1yr
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+BACKEND=${BACKEND:?BACKEND required — cpu or gpu}
+source /sw/etc/profile.levante
+case "$BACKEND" in
+  cpu) source "$ROOT/env.sh" ;;
+  gpu) # ⚠️ env_cuda.sh ONLY. env.sh exports a non-CUDA UCX_TLS that survives a module swap and
+       # makes UCX pack DEVICE pointers through a host transport -> segfault in ucp_dt_pack.
+       source "$ROOT/env_cuda.sh"
+       export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+       export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321
+       export HDF5_USE_FILE_LOCKING=FALSE ;;
+  *)   echo "ERROR: BACKEND must be cpu or gpu, got '$BACKEND'"; exit 2 ;;
+esac
+
+FESOM=${BIN:?BIN required — pin the frozen binary, never a build dir}
+TAG=${TAG:?TAG required}
+KNOBS=${KNOBS-}                      # may legitimately be empty (the classic legs)
+MESH=${MESH:-/work/ab0995/a270088/port2/mesh/core2}   # private mesh, NEVER /pool (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=${DT:-1800}
+NSTEPS=${NSTEPS:-17280}              # 1 model year @ dt=1800
+SNAP=${SNAP:-1440}
+YEAR=${YEAR:-1958}
+
+OUT=/work/ab0995/a270088/port2/m9/clim/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+echo "=== M9 P1 climate leg  TAG=$TAG  backend=$BACKEND  $(date) ==="
+echo "    ROOT   = $ROOT"
+echo "    BIN    = $FESOM"
+echo "    sha256 = $(sha256sum "$FESOM" | cut -c1-16)"
+echo "    commit = $( cd "$ROOT" && git rev-parse HEAD 2>/dev/null )"
+echo "    mesh   = $MESH   nodes=$SLURM_NNODES ntasks=$NPES"
+echo "    dt=$DT steps=$NSTEPS (= $(awk "BEGIN{printf \"%.2f\", $DT*$NSTEPS/86400/365}") model yr) year=$YEAR"
+echo "    KNOBS  = '${KNOBS:-<none — classic>}'"
+echo "    io     = ${IOCFG:-COMPILED-IN DEFAULT (monthly means, all default vars)}"
+echo
+
+# Clean slate: no stray physics or speed knobs inherited through --export=ALL.
+unset FESOM_MIX_SCHEME FESOM_ALE FESOM_ALE_DUMP_DIR FESOM_IO_CONFIG
+# IOCFG= overrides the compiled-in default. Used by the partition-imprint test, which needs
+# DAILY ice fields (jobs/io.config.m9_daily_ice); a monthly mean averages away 30 days of the
+# very thing that test is looking for. Unset => the default monthly-means behaviour above.
+[ -n "${IOCFG:-}" ] && export FESOM_IO_CONFIG="$IOCFG"
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+
+export FESOM_WHICH_EVP=1             # <-- mEVP. Cell 5 is a no-op under std EVP.
+export FESOM_SPEED=1
+[ "$BACKEND" = cpu ] && export FESOM_SPEED_FORCE_SERIAL=1   # see the banner above
+export FESOM_PRINT_EVERY=${PRINT_EVERY:-1000}
+IFS=';'; for kv in $KNOBS; do [ -n "$kv" ] && export "$kv"; done; unset IFS
+
+echo "--- speed env actually exported ---"; env | grep '^FESOM_SPEED' | sort | sed 's/^/    /'
+echo
+
+srun -l "$FESOM" "$MESH" "$OUT" "$DT" "$NSTEPS" "$SNAP" "$PHC" "$YEAR" \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+EC=$?
+echo "=== done $(date) — exit $EC ==="
+
+# ⚠️ NO '^' ANCHOR and BOTH streams. srun -l prefixes every line with "<rank>: ", and the model
+# writes these to stderr while the step diagnostics go to stdout. An anchored grep on run.log
+# alone matches nothing and prints an empty "provenance" block that looks like a clean run —
+# which is precisely the dead-knob failure mode these greps exist to catch. (Caught by the probe.)
+echo "--- [m9] provenance (the single grep target: which cell actually ran) ---"
+grep -hE '\[m9\]' "$OUT/run.err" "$OUT/run.log" 2>/dev/null | sed 's/^ *//' | sort -u | sed 's/^/    /' \
+    || echo "    NONE — provenance line missing!"
+echo "--- mEVP knob announce (knob-fired proof, L80/L102) ---"
+grep -hE 'MEVPLAG|MEVPDIV|EVPWIDE' "$OUT/run.err" "$OUT/run.log" 2>/dev/null | sed 's/^ *//' | sort -u | sed 's/^/    /' || true
+echo "--- levers that RESOLVED OFF (must be empty for the requested knob) ---"
+grep -hiE 'REQUESTED BUT RESOLVES TO' "$OUT/run.err" "$OUT/run.log" 2>/dev/null | sed 's/^ *//' | sort -u | sed 's/^/    /' || true
+echo "--- last step (sanity: T/S bounded, no runaway) ---"
+grep -E " it=" "$OUT/run.log" | tail -1
+echo "--- nan/blowup check ---"; grep -icE "nan|blowup|inf" "$OUT/run.err" || true
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+ls "$OUT"/*.monthly.nc 2>/dev/null | sed 's|.*/|    |' || true
+exit $EC

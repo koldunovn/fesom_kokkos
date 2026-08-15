@@ -1,0 +1,10 @@
+# M9 — DAILY ice fields, for the partition-imprint test.
+#
+# The concern this serves: under the delayed halo exchange the stale values sit exactly on the
+# sub-domain rim, and the partition is static, so any error is re-injected at the same nodes
+# every step. Monthly means average over 30 days of that and can hide a coherent imprint;
+# daily fields show it forming (or not) and can be animated.
+#
+# Ice only, and no 3-D fields: 60 daily records of the 3-D ocean would be ~100 GB per leg and
+# nothing here reads them.
+a_ice,m_ice,m_snow,uice,vice    daily

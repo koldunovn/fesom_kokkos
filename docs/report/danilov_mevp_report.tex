@@ -1,0 +1,389 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage[colorlinks=true,linkcolor=black,urlcolor=blue!60!black]{hyperref}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf}
+
+\setlength{\parskip}{0.42em}
+\setlength{\parindent}{0pt}
+
+\title{\vspace{-1.7cm}\large Divergence-form and wide-halo mEVP in the GPU version of FESOM2:\\
+implementation and measurements}
+\author{\normalsize Nikolay Koldunov}
+\date{\normalsize 6 August 2026}
+
+\begin{document}
+\maketitle
+\vspace{-1.1cm}
+
+\section*{1. Scope}
+
+Two of your proposals were implemented in our GPU version of FESOM2 and measured:
+\textbf{(a)} the \textbf{reformulation of the mEVP sub-cycling} in which the quantity carried from
+one sub-cycle to the next is the divergence of the stress, held at nodes, instead of the three
+stress components held at elements; and \textbf{(b)} the \textbf{wide halo}, in which the halo is
+exchanged only every $K$-th sub-cycle and the missing information is recomputed locally in a ring
+of ghost cells $K$ deep, so that the result is identical to exchanging after every sub-cycle.
+
+The main finding is about neither proposal directly. \textbf{How the ring computation is written
+matters more than what it carries.} Written as separate kernels for the ring --- which is how we
+first implemented it --- the wide halo removes 10 to 28\% of the sea-ice cost. Written as a
+widening of the loops that already exist, which is how your reference code does it, the same
+scheme removes 37 to 58\%. Our first set of conclusions, including a negative one about your
+reformulation, was measuring our implementation.
+
+Every timing is given twice, against the model step and against the ice cost, because sea ice is
+5 to 13\% of a step and the step divides an ice-only change by about ten.
+
+\section*{2. Configurations, meshes, machine}
+
+mEVP advances the ice momentum with 120 sub-cycles per model step in all our configurations. In
+the standard scheme the ice-velocity halo is exchanged after every one of them.
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{name} & \textbf{carried between sub-cycles} & \textbf{halo} \\
+\midrule
+standard & stress $\sigma_{11},\sigma_{12},\sigma_{22}$ at elements & exchanged every sub-cycle \\
+divergence form & $\nabla\!\cdot\!\sigma$ (two components) at nodes & exchanged every sub-cycle \\
+wide halo, standard form & stress at elements, ring $K$ deep & every $K$-th, \emph{exact} \\
+wide halo, divergence form & $\nabla\!\cdot\!\sigma$ at nodes, ring $K$ deep & every $K$-th, \emph{exact} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each wide-halo configuration exists in two \emph{writings} of the same scheme, which is the axis
+this report is really about: \textbf{ring kernels} (a separate GPU kernel per stage per sub-cycle
+for the ghost ring) and \textbf{widened loops} (the ring folded into the owned loop it duplicates).
+The two compute the same ring and put identical traffic on the wire.
+
+All four meshes are production configurations. Levante at DKRZ: GPU nodes carry four NVIDIA A100
+(80\,GB), one MPI process per GPU; CPU nodes two AMD EPYC 7763, 128 cores each. Every comparison is
+made inside one job allocation with the same executable and is the faster of two repetitions;
+repetition spread is below 0.4\% on GPU, about 1.5\% on CPU.
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrl@{}}
+\toprule
+& \textbf{surface nodes} & \textbf{elements} & \textbf{levels} & \textbf{time step} \\
+\midrule
+CORE2 & 126\,858 & 251\,746 & 48 & 1800\,s \\
+fArc  & 638\,387 & 1\,270\,173 & 48 & 900\,s \\
+DARS  & 3\,160\,340 & 6\,294\,801 & 57 & 120\,s \\
+NG5   & 7\,402\,886 & 14\,827\,217 & 70 & 180\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{Initial conditions.} All runs are cold starts from the PHC winter climatology. The nodes it
+leaves empty --- the marginal seas --- are conventionally filled by a Gauss-Seidel sweep run to
+exhaustion on each process between halo exchanges, first value winning, which makes the result
+depend on the decomposition. Since every point of a scaling curve uses a different decomposition,
+the points of one curve would not start from the same ocean. We therefore use a
+decomposition-independent fill throughout, and checked that it is one: the largest
+pressure-gradient force after one step varies by factors of 1.8 to 2.5 across the process counts of
+a single curve under the conventional fill, and is constant under ours. Running the whole fleet
+both ways changes no verdict's sign and moves the model-step figures by at most 1.1 points.
+
+\section*{3. Why the sub-cycle is expensive}
+
+One model step performs 120 ice-velocity halo exchanges, each moving very little data, with very
+little arithmetic between them. Koldunov et al.\ (2019, GMD 12, 3991) diagnosed this on fArc and
+proposed, without testing it, ``wider halo regions to reduce communication frequency''.
+
+\textbf{On CPU}, at 2304 cores on fArc, the ice is 13.2\% of the step, and inside the ice dynamics
+the time spent \emph{waiting} for MPI is 4.8\,ms per step against 3.5\,ms of computation. The cost
+is idle time.
+
+\textbf{On GPU} there is a second reason. Each exchange is a sequence of small GPU operations, each
+carrying a fixed issue cost independent of how little data it touches. On CORE2 with 8 GPUs the
+ice-dynamics phase takes 8.2\,ms per step, of which about 1.25\,ms is arithmetic, spread over some
+480 separate operations. The sub-cycle is limited by how often work is dispatched, not by
+arithmetic or memory traffic --- which is the single fact behind most of what follows, including
+the results that came out negative.
+
+\section*{4. What was implemented, and how it was checked}
+
+All configurations are selected at run time and are off by default.
+
+\textbf{The divergence form.} The stress recursion is replaced by a recursion for
+$R=\nabla\!\cdot\!\sigma$ at nodes, with the ice-element mask applied so that $R$ advances only
+where ice elements contribute.
+
+\textbf{The wide halo.} At the start of each model step one extended exchange fills a ring of ghost
+nodes and elements $K$ cells deep with the owner's values of the eleven fields the sub-cycle needs.
+Over the next $K-1$ sub-cycles each process advances that ring itself and needs no communication;
+on the $K$-th the ring is refreshed. Ring geometry, boundary mask and per-step element quantities
+are shipped from their owners rather than recomputed, because a locally recomputed value can differ
+in the last bit and that is enough to destroy exactness.
+
+\textbf{Widened loops.} Each ring kernel is folded into the owned loop it duplicates, selecting the
+ghost arrays by an index branch, and --- the two being one loop thereafter --- the ring nodes are
+assembled by the same scatter the owned nodes use rather than by replaying the owner's summation
+order. That last step gives up bit-identity deliberately; Sect.~5.5 is the test that replaces it.
+
+\textbf{Correctness.} For the exact writings the requirement is strict: with the option on the
+model must produce bit-for-bit the same output as with it off. Verified for both forms at $K=4$ and
+$K=8$, and separately for the same machinery under standard EVP. All options were shown to leave
+the model unchanged when a different vertical mixing scheme or vertical coordinate is selected, and
+the GPU version was checked against the CPU version with the options on.
+
+\section*{5. Results}
+
+\subsection*{5.1 The reformulation is exact}
+
+Carrying $R$ and $\sigma$ simultaneously and comparing them sub-cycle by sub-cycle, $R$ agrees with
+$\nabla\!\cdot\!\sigma$ to $1$--$2.5\times10^{-15}$ relative, and this does not grow over 20 model
+steps, i.e.\ 2400 sub-cycles.
+
+One genuine non-equivalence is worth naming. Within a step the ice-element mask is fixed and the
+two forms are equivalent; \emph{across} steps, when an element enters or leaves the mask, they are
+not, because the recursion has been applied after summation around a node rather than before. It
+fires only on steps where mask membership changes and is bounded by $2.1\times10^{-11}$ relative
+--- far below physical significance, but it means the divergence form should be introduced as a
+scheme change rather than as an optimisation.
+
+\subsection*{5.2 What the reformulation costs or saves by itself}
+
+Measured against the ice cost the reformulation \textbf{does} pay on CPU, and more so the more
+processes are used: $-2.2\%$ at 512 processes on fArc, $-3.2\%$ at 1024, $-5.6\%$ at 1536,
+$-6.7\%$ at 2048, and $-8.5\%$ on CORE2 at 512. Against the model step the same runs read $-0.5\%$
+to $0\%$, which is why we first reported it as nothing. On GPU it is a \emph{cost} in both
+currencies, $+2$ to $+17\%$ of the ice.
+
+The reason is Sect.~3. To bound the largest saving it could possibly deliver we ran a control:
+three element-sized arrays that the mEVP path writes every sub-cycle and never reads were simply
+not written. That removes strictly more memory traffic than the reformulation does, and it changed
+the run time by \textbf{exactly 0.00\%}. Total GPU arithmetic time is identical in the two forms,
+21.8 against 21.7\,ms per step. There was no memory-traffic saving available to collect.
+
+\subsection*{5.3 The wide halo, and the fact that dominated it}
+
+\textbf{As we first wrote it}, with a ring kernel per stage per sub-cycle, the wide halo removes
+10 to 28\% of the ice cost at the four operating points, and nothing at all on CPU.
+
+Before changing anything we profiled why. Our ring kernels add \textbf{362 GPU kernel launches per
+model step}, and each is on a slower launch path than the owned kernel it duplicates: the ring
+kernels capture enough array descriptors to cross a threshold in Kokkos above which arguments are
+staged through constant memory rather than passed with the launch. The measured gap between
+consecutive launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels, and over
+a step the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic. The
+launch structure was more than twice the computation it carried.
+
+\textbf{Written as widened loops} the same scheme, computing the same ring and refreshing it on the
+same schedule, gives:
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+change of the sea-ice cost at $K$=8, & CORE2 & fArc & DARS & NG5 \\
+each mesh at its operating point & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
+\midrule
+reference: sea-ice cost per step             & 15.4\,ms & 26.3\,ms & 43.0\,ms & 38.7\,ms \\
+wide halo, standard form, ring kernels       & $-10.4\%$ & $-11.4\%$ & $-22.8\%$ & $-11.1\%$ \\
+wide halo, divergence form, ring kernels     & $+7.8\%$  & $-5.7\%$  & $-28.1\%$ & $-15.5\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.1\%}$ & $\mathbf{-36.9\%}$ & $\mathbf{-43.0\%}$ & $\mathbf{-33.3\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-57.8\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.2\%}$ & $\mathbf{-42.6\%}$ \\
+\midrule
+best widened-loop row, as a share of the model step & $-13.9\%$ & $-9.9\%$ & $-12.5\%$ & $-6.6\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Two things in the table matter beyond the headline.
+
+\textbf{It is a compute result, not a communication one.} Each pair of rows posts identical message
+and byte counts --- 390.5 messages and 1\,542\,053 doubles per step for the standard form in both
+writings. Nothing moved on the wire; the difference is 360 kernel launches. After the rewriting
+only 2 of the 362 remain on the slow path, the ice-dynamics region falls from 16.5 to 5.5\,ms per
+step, and the \emph{owned} kernels speed up as well, their launch gap falling from 5.5 to
+1.3\,$\mu$s --- the constant-memory staging had been serialising its neighbours too.
+
+\textbf{Your reformulation wins once the launch structure is removed, and we had been measuring
+past it.} With ring kernels the standard form leads by 18.2 points of ice cost on CORE2 and 5.7 on
+fArc, while the divergence form leads on the two large meshes, by 5.3 on DARS and 4.4 on NG5. With
+widened loops the divergence form leads
+at all four meshes, and its lead is ordered by how much mesh each GPU holds: 0.7, 6.5, 7.2 and 9.3
+points of ice cost against 32, 40, 99 and 116 thousand surface nodes per GPU. That is what a halved
+nodal message should produce, and it is monotone across the four. It is ahead at every $K$ we tried
+as well. It is not a law over every configuration, though: a scaling sweep across node counts
+(Sect.~5.4) has it ahead at every point but one, the exception being fArc on two GPU nodes, where
+the standard form is 0.7 points of the model step ahead --- outside the repetition spread there, so
+real rather than noise. An earlier note of ours decomposed the ring-kernel
+gap into a message term and a byte term; both were isolated at bit-identical output and both are
+real, but they were smaller than the launch term sitting on top of them, which fell hardest on the
+divergence form because its ring gather was the most expensive of the ring kernels.
+
+\textbf{$K$.} Both writings improve monotonically from $K$=2 to 4 to 8, on both meshes swept and in
+both forms, so $K$=8 remains the choice. This was not a foregone conclusion: the term the rewriting
+removes is launches, which is independent of $K$, while the ring's arithmetic grows with it.
+
+\textbf{On CPU} the rewriting is not a gain, and the reason is instructive. With no launches to
+remove it only trades a gather of plain reads for an atomic scatter. In the standard form, where
+the gather merely re-read stored stresses, that costs 18 to 30\% of the ice cost; in the divergence
+form, where the gather had to recompute each element's stress once per incident ring node, about
+six times over, it saves 3 to 15\%. That the divergence form gains on both backends, while the
+launch term exists on only one, is the cleanest evidence that this particular term is arithmetic
+rather than dispatch. Neither writing is profitable on CPU at any of the three core counts tried:
+the wide halo at least doubles the ice cost there.
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=0.88\textwidth]{fig1_icecost.pdf}
+\caption{Cost of the sea ice relative to the standard scheme; negative is a saving. Each mesh is at
+its operating point, the largest node count at which the model still gains from more GPUs. Within
+each pair of bars the ring, the messages and the bytes are identical --- only the kernel structure
+differs.}
+\label{fig:meshes}
+\end{figure}
+
+\subsection*{5.4 Scaling}
+
+Figures~\ref{fig:scstep} and~\ref{fig:scice} give the strong scaling of the standard scheme and of
+the two widened-loop wide halos, on both backends, for the model step and for the sea ice
+separately. The two are shown apart because they behave differently, and the ice figure carries the
+result. As a check on the whole fleet, the three points it shares with the operating-point table of
+Sect.~5.3 reproduce it to between 0.2 and 0.8\%, on different days and in different allocations.
+
+\textbf{On GPU the sea ice does not scale.} For the standard scheme its cost per step is flat or
+rising with node count on every mesh. In milliseconds per step: CORE2 15.7, 15.2, 22.8, 23.8, 33.7
+at 1 to 16 nodes; fArc 24.4, 28.0, 26.3, 28.0, 27.0; DARS 38.5, 34.0, 43.3, 43.2 at 2 to 16; NG5
+48.8, 42.3, 46.8, 39.0. The ocean around it scales normally, which is why the model step still
+falls --- and which is exactly why the step is the wrong measure here. Adding GPUs buys nothing on
+the ice and on the smaller meshes costs.
+
+\textbf{Written as widened loops the wide halo lowers that cost and partly restores its scaling.}
+In the divergence form the ice cost \emph{falls} with node count where the standard scheme's rises:
+fArc 17.1, 15.0, 13.3, 12.8\,ms at 2 to 16 nodes, DARS 27.0, 21.8, 21.8, 21.3, NG5 34.3, 25.9,
+25.5, 22.0. On CORE2 it still rises, but from 6.5\,ms instead of 15.7 and less than half as
+steeply.
+
+\textbf{The saving therefore grows with the number of GPUs}, which is the opposite of how an
+optimisation usually ages, and is the reason a table at one node count per mesh understates the
+scheme. In the divergence form, comparing each mesh's smallest and largest node count, it goes from
+$-59$ to $-65\%$ of the ice cost on CORE2, $-39$ to $-53\%$ on fArc, $-30$ to $-51\%$ on DARS and
+$-30$ to $-44\%$ on NG5. The individual points are not perfectly monotone --- CORE2 dips to
+$-51\%$ at 2 nodes and NG5 peaks at $-46\%$ at 8 --- but every mesh ends better than it starts.
+
+\textbf{On CPU the sea ice scales cleanly} --- on fArc 94.5\,ms at 1 node down to 10.5 at 16 ---
+and the wide halo is a uniform penalty, between $+41$ and $+172\%$ of the ice cost across all
+fifteen points measured, which is $+2.2$ to $+22\%$ of the model step. There is no node count at
+which it becomes profitable. Three intended CPU points are absent, all for the same reason ---
+the mesh does not fit in the memory of one or two 128-core nodes: DARS on one node (3.2 million
+surface nodes), and NG5 on one and on two (7.4 million).
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{fig2_scaling_step.pdf}
+\caption{Strong scaling of the whole model time step. Lower is better.}
+\label{fig:scstep}
+\end{figure}
+
+\begin{figure}[tb]
+\centering
+\includegraphics[width=\textwidth]{fig3_scaling_ice.pdf}
+\caption{Strong scaling of the sea-ice cost alone --- ice, ice dynamics and ice advection,
+computation together with time spent waiting for communication. This is the measure appropriate to
+a sea-ice scheme; the model step divides an ice-only change by roughly ten. NG5 is run here from
+the shared-archive copy of the mesh rather than the locally repartitioned one used for the
+operating-point table, because only the former carries the range of process counts a scaling curve
+needs; the two have identical geometry but different partitions, so NG5 curves should not be
+compared point-by-point with the NG5 column of Sect.~5.3.}
+\label{fig:scice}
+\end{figure}
+
+\subsection*{5.5 Does the ring leave the decomposition in the ice?}
+
+Giving up the owner's summation order costs what you predicted. After one step of 120 sub-cycles
+the ice velocity differs from the exact wide halo by 8 to 15 units in the last place; after twenty
+steps that has grown, by ordinary sensitivity rather than by structure, to the size of this port's
+own difference between its GPU and CPU arms at identical arithmetic.
+
+Because that removes the bit-identity check, we hold the widened-loop version to a stronger test
+instead: 60 days on fArc with 16 GPUs, comparing the mean $|\Delta|$ on the one-cell boundary of
+each sub-domain with the mean in the interior. A scheme that let halo values age would concentrate
+its error there, because the decomposition is fixed for the whole run.
+
+\begin{center}\small
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+boundary / interior ratio, 60 days, fArc, 16 GPUs & two identical runs & ring kernels & \textbf{widened loops} \\
+\midrule
+ice thickness     & 0.854 & 0.866 & \textbf{0.836} \\
+ice concentration & 0.831 & 0.817 & \textbf{0.796} \\
+ice velocity      & 1.325 & 1.211 & \textbf{1.196} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The widened-loop version is at or below its own control on every field, and a placebo built from a
+decomposition the runs never used gives 0.87 and 0.72, so the ratio does not follow a partition the
+model never saw. Ice velocity is the field where two identical runs already score 1.33; that is a
+property of the field on this mesh, which is why each row carries its own control rather than being
+read against a common threshold.
+
+\subsection*{5.6 What goes on the wire}
+
+The wide halo ships eleven auxiliary fields once per model step so that rings $2\ldots K$, which do
+not exist in FESOM's data structures, have values at all. You objected that this is far more than
+the sub-cycle needs. We measured both halves of that.
+
+\emph{What it costs}: 1.6 to 6.2\% of the scheme's messages and 3.6 to 9.2\% of the data it moves,
+because it fires once per step against $120/K$ window exchanges.
+
+\emph{Whether it is necessary}: instrumenting the exchange to compare each arriving owner value
+against the value the receiving process already holds, \textbf{nine of the eleven arrive exactly
+equal} --- ice velocity, concentration, thickness, snow, ocean velocity, wind stress --- because
+FESOM's own halo exchange has already put them there. The two right-hand sides do not, being
+assembled and area-scaled over owned nodes only. But the redundancy stops at the first ring, and
+rings $2\ldots K$ have no other source at any $K$, so what could be removed is 37\% of that
+exchange at $K$=2 and 17\% at $K$=4 --- under one percent of the scheme's traffic, and no messages.
+We did not implement the trimmed version, and that measurement is why.
+
+\section*{6. Summary}
+
+\begin{center}\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+& \textbf{GPU} & \textbf{CPU} \\
+\midrule
+divergence form alone & $+2$ to $+17\%$ of the ice & $-2$ to $-8.5\%$ of the ice \\
+wide halo, ring kernels & $-10$ to $-28\%$ & not profitable \\
+\textbf{wide halo, widened loops} & $\mathbf{-37}$ \textbf{to} $\mathbf{-58\%}$ & not profitable \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For production we would use the wide halo at $K$=8 on GPU, in the divergence form, written as a
+widening of the existing loops. Its cost is bit-identity, and the test of Sect.~5.5 is what we
+would hold it to in place of that. Where bit-identity is required the ring-kernel writing remains
+available and is exact.
+
+\section*{7. Not measured}
+
+\begin{itemize}\itemsep0.12em
+\item \textbf{The divergence form over a long integration.} The $2.1\times10^{-11}$ per-step
+non-equivalence of Sect.~5.1 has not been followed to its long-term consequences.
+\item \textbf{Core counts above 2304 on fArc.} The 2019 paper reaches 6912; the partition set we
+have stops at 2304, and the separately partitioned copy in the shared archive does not run in this
+port. Our measured ice share reaches 13\% at 2304 cores where the paper interpolates 25--30\%; the
+two candidate reasons --- this port's own communication optimisations, and mEVP here versus
+standard EVP there --- are untested.
+\item \textbf{Trimming the eleven auxiliary fields} (Sect.~5.6): measured, and not built.
+\end{itemize}
+
+\vspace{0.5em}
+{\footnotesize All configurations are switchable at run time; the underlying runs, job scripts and
+the full internal write-up can be shared on request.}
+
+\end{document}

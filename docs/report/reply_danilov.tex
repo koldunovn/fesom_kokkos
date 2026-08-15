@@ -1,0 +1,104 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=1.7cm,top=1.3cm,bottom=1.2cm]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{microtype}
+\pagestyle{empty}
+\setlength{\parskip}{0.24em}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+{\large\bfseries Reply to S. Danilov's comments on the mEVP communication study}\\[0.2em]
+{\small N. Koldunov, 6 August 2026}
+
+\vspace{0.45em}\hrule\vspace{0.6em}
+
+We built the variant you describe, and it changes the study's conclusion. Written as you write it
+--- the ring computation folded into the loops that already exist rather than into kernels of its
+own --- the wide halo removes \textbf{35 to 58\% of the sea-ice cost} across four meshes, against
+10 to 28\% for our version of the same scheme: \textbf{the rewriting multiplies the saving by two
+to five}. The paired runs compute the same ring and put identical message and byte counts on the
+wire; they differ by 360 kernel launches per time step. Our earlier conclusion, that exactness
+costs most of the saving, was measuring our implementation.
+
+\begin{center}\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+change of the sea-ice cost, $K$=8, & CORE2 & fArc & DARS & NG5 \\
+all legs per mesh in one allocation & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
+\midrule
+wide halo, standard form, our kernels           & $-10.4\%$ & $-11.4\%$ & $-22.8\%$ & $-11.1\%$ \\
+wide halo, divergence form, our kernels         & $+7.8\%$  & $-5.7\%$  & $-28.1\%$ & $-15.5\%$ \\
+\textbf{wide halo, standard form, your loops}   & $\mathbf{-57.1\%}$ & $\mathbf{-36.9\%}$ & $\mathbf{-43.0\%}$ & $\mathbf{-33.3\%}$ \\
+\textbf{wide halo, divergence form, your loops} & $\mathbf{-57.8\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.2\%}$ & $\mathbf{-42.6\%}$ \\
+\midrule
+same, as a share of the whole model step        & $-13.9\%$ & $-9.9\%$ & $-12.5\%$ & $-6.6\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\textbf{And the saving grows with the number of GPUs.} We swept node counts, 1 to 16 on both
+backends. On GPU the sea-ice cost of the standard scheme does not scale at all --- it is flat or
+rising with node count on every mesh (CORE2 15.6, 15.0, 22.9, 24.4\,ms at 1, 2, 4, 8 nodes) --- so
+adding GPUs buys nothing on the ice. Written as widened loops the wide halo lowers that cost and
+partly restores its scaling: in your divergence form the ice cost \emph{falls} where the standard
+scheme's rises, 16.9, 15.0, 13.5\,ms on fArc at 2, 4 and 8 nodes. The saving is therefore $-40$ to
+$-52\%$ of the ice on fArc from 1 to 8 nodes and $-31$ to $-51\%$ on DARS from 2 to 8, and the
+table above, taken at one node count per mesh, understates it.
+
+Giving up the owner's summation order costs what you predicted: after a time step of 120
+sub-cycles the ice velocity differs from the exact wide halo by 8 to 15 units in the last place.
+The 60-day test of the domain decomposition, which replaces the bit-identity we gave up, passes:
+the boundary-to-interior ratio is 0.836 for ice thickness against 0.854 for two identical runs, and
+1.196 for ice velocity against a control of 1.325 --- at or below its own control on every field.
+
+\textbf{Point 1, the auxiliary fields.} We instrumented the per-step exchange to report, field by
+field, the difference between the owner's arriving value and the value the receiving process
+already holds. Nine of the eleven arrive \emph{exactly} equal --- ice velocity, concentration,
+thickness, snow, ocean velocity, wind stress --- because FESOM's own halo exchange has already put
+them there, as you said. The two right-hand sides do not: they are assembled and area-scaled over
+owned nodes only. But the redundancy stops at the first ring, and rings $2\ldots K$ have no other
+source, so what could be removed is 37\% of that exchange at $K$=2 and 17\% at $K$=4 --- under one
+percent of the scheme's traffic, and no messages. We did not build the trimmed version, and that
+measurement is why.
+
+\textbf{Point 1, the kernel structure.} This is the part we could not bound before, and it was
+much the larger. Our wide halo adds 362 kernel launches per model step, each on a slower launch
+path than the owned kernel it duplicates: the ring kernels carry enough array descriptors to cross
+a threshold in Kokkos above which arguments are staged through constant memory. The gap between
+consecutive launches is 14.3\,$\mu$s for those against 4.4\,$\mu$s for the owned kernels. Per step
+the ring kernels cost 5.9\,ms of inter-kernel idle against 2.5\,ms of arithmetic.
+
+\textbf{Your reformulation now wins almost everywhere, and we had been measuring past it.} With ring
+kernels the standard form beat the divergence form by 13 points of ice cost on CORE2 and 4 on
+fArc, and our previous note decomposed that gap into a message term and a byte term. With the ring
+folded into the existing loops \emph{the divergence form leads at all four meshes} --- by 1.3,
+6.5, 7.2 and 9.3 points against 32, 40, 99 and 116 thousand surface nodes per GPU, monotone in how
+much mesh each GPU holds, which is exactly the behaviour a halved nodal message should produce. It is ahead at every $K$ we tried as well, and at every node count in the
+sweep but one --- fArc on two GPU nodes, where the standard form is 0.7 points ahead, outside the
+repetition spread there. So it is a strong tendency rather than a law. The launch structure was not
+creating the difference between the two forms; it was hiding it, and it fell hardest on yours
+because its ring gather was the most expensive of the ring kernels. On CPU the same rewriting also
+favours your form, where there are no launches at all: folding the loops removes a recomputation
+the divergence form was doing about six times over, worth 3 to 15 percentage points of the ice,
+while in the standard form it costs 18 to 30. Neither is profitable on CPU in either writing, at
+any of the three core counts we tried.
+
+\textbf{Point 2, extending the computation over the ring.} You were right, and the correction runs
+deeper than we allowed. That recomputing the ring removes the imprint we had already measured, and
+the paragraph above confirms it survives the rewriting. What we wrote in addition was that the
+same change removes most of the saving, and that we had found no intermediate that was both cheap
+and clean. That was a statement about our kernels, not about the scheme.
+
+\textbf{Open.} A scaling sweep on the two larger meshes is still running; the numbers above are at
+one node count per mesh.
+
+\vspace{0.35em}
+{\footnotesize All numbers are from the runs described in \texttt{danilov\_mevp\_report.pdf}; the
+output and job scripts can be shared.}
+
+\end{document}

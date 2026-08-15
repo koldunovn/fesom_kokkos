@@ -1639,3 +1639,237 @@ different partition, silently, mid-campaign.
 Generalisation: a manifest guards what it hashes. When a derived artefact (a partition, an index,
 a cache) is an experimental input in its own right, it needs its own protection —
 `m11_partgen.sh` now refuses to overwrite an existing `dist_N` without `OVERWRITE_DIST=1`.
+
+> **M14 renumbering note (2026-08-15), continued.** M9 also assigned `L103`, which `main`
+> already used for the dolpung debug-fallback lesson (2026-07-22). M9's lesson — *a diagnostic
+> branch inside a kernel you intend to time is a measurement bug* — was renumbered `L103`->`L128`.
+> M9's `L104`, `L105` and `L109` were free and are unchanged.
+
+---
+
+## L128 — A diagnostic branch inside a kernel you intend to time is a measurement bug (M9, 2026-08-05)
+
+The M9 divergence-subcycled mEVP (S. Danilov's reformulation: carry `R = ∇·σ` at nodes instead
+of `σ` at elements) shipped with an in-kernel equivalence check — `if (m9_selfcheck) { … }`
+inside the hot element kernel, guarded by a runtime bool that is `false` in every timing leg.
+
+Measured with it in place: `icedyn` **+30 %** on GPU (CORE2 np8) and **+39 %** at CPU np1.
+Measured with the identical algorithm after moving the diagnostic to its own launch:
+**+13 %** on GPU and **−0.65 %** on CPU. Same maths, same trajectory (L3 magnitudes identical to
+the last digit), same binaries otherwise.
+
+**On CUDA a never-taken branch still costs the registers its body needs, and the occupancy those
+registers buy. On CPU it inhibits vectorisation.** The branch is free only in the sense that it
+does not execute.
+
+Worse than the number was the reasoning it provoked. The `+30 %` was attributed to a real,
+defensible mechanism — the M9 trap that forces the R recursion to run over every owned node
+while the classic node solve returns early for non-ice nodes, which on a global mesh with
+partial ice cover genuinely converts a masked kernel into a full-domain one. A masked variant
+was built to fix it. The ablation then measured **10.9 vs 10.8 ms** — the mask changed nothing,
+and the story was wrong. Only then did the confound surface.
+
+**Rules:**
+- **Never leave a diagnostic branch inside a kernel you intend to time.** Give it its own
+  launch; a diagnostic only runs in diagnostic mode, where speed is irrelevant, so it can
+  recompute whatever it needs rather than share registers with the timed path.
+- **Quote the noise floor with every delta**, derived from legs that *must* be identical. Here
+  `classic` (leg 1) vs `classic_noeps` (leg 4) differ by 0.16 %, and rep 1 of leg 1 runs ~3 %
+  slow from job warm-up — which also proves leg-order/thermal drift is not present, since leg 4
+  is as fast as leg 1. All of that was already in the output being quoted from.
+- **A causal story is a hypothesis until an ablation isolates it.** Weight the ablation that
+  *disproves* your explanation above the one that confirms it.
+
+## L104 — For the mEVP subcycle on GPU at small per-rank size, the phase is launch-bound (M9)
+
+nsys, ratio-validated against the untraced A/B (traced +1.76 % vs untraced +1.63 %; absolute
+trace times are 48 % inflated and were not used): of the 8.2 ms `icedyn` phase at CORE2 np8 on
+one A100, only **~1.25 ms is mEVP kernel execution**, spread over ~480 launches/step. Total
+kernel-busy is *identical* between the classic and divergence forms (21.8 vs 21.7 ms/step), and
+the divergence form's kernels are marginally the cheaper pair (1.24 vs 1.27 ms).
+
+Consequences: (a) no kernel-level lever can pay in that regime, which is why the M9 element-
+kernel saving is invisible there and why `FESOM_SPEED_MEVPNOEPS` — which removes three element
+stores per element per subcycle — measures **exactly 0.00 %**; (b) the levers that *do* pay are
+the ones that remove whole launches or whole exchanges. Cell ⑤ (exchange every K-th subcycle)
+removes 120 → 120/K exchanges and delivers **−15 % to −21 % of the whole model step** at np8 and
+np32 respectively. **Size an ice-dynamics lever against the launch/exchange count first, and
+against kernel bytes second.**
+
+## L105 — Three campaign-hygiene traps from M9, each of which silently produced a wrong or wasted run
+
+**(a) On the Serial backend EVERY `FESOM_SPEED_*` lever is vetoed unless
+`FESOM_SPEED_FORCE_SERIAL=1`** (`fesom_speed.hpp:111-113` for the boolean resolvers, `:168-170`
+for `fesom_speed_int`). The M9 zero-point run set `FESOM_SPEED=1` and nothing else; **fifteen**
+levers shouted `WAS REQUESTED BUT RESOLVES TO OFF`, PHASESTATS among them. Had that gone
+unnoticed, the entire CPU half of the campaign would have run with every knob dead and no phase
+split, and would have returned a tidy table of 0.00 % differences — indistinguishable from
+"the lever does not pay". The announce lines were the only evidence; every A/B leg in
+`jobs/job_m9_ab_*` now prints them at the end of the leg for exactly this reason.
+**Any CPU A/B of a `FESOM_SPEED_*` lever must export `FORCE_SERIAL=1` and grep its announce.**
+
+**(b) Never overwrite a frozen-binary path while jobs may be executing it.** `cp` onto the
+reused `bin/wip/` path failed with `Text file busy` mid-campaign; the failure was non-fatal in
+the shell, so two gate jobs went out pinned to the *previous* build. It was caught only because
+the job's `EXPECT=` announce regex would not have matched. Freeze to **immutable
+`bin/b_<sha8>/` paths** — the sha in the path makes a stale pin impossible to express.
+
+**(c) Ranks-per-node is a memory constraint on large meshes, not just a scheduling choice.**
+`ng5_w3d` (7.4 M nodes) at 64 ranks packed onto one 256 GB node OOM-killed at task 47. The same
+64 ranks spread over 4 nodes ran fine. A probe run of the new mesh/rank combination cost ~2
+minutes and saved the night; **probe an unfamiliar mesh×ranks point before committing a fleet
+to it.** Note the corollary for cross-mesh comparison: runs at different ranks-per-node are
+valid *within* a mesh (which is all an A/B needs) but are not directly comparable *across*
+meshes.
+
+- **L106 — A GHOST REPLAY MUST READ THE STATE THE OWNER READ, WHICH MEANS ITS PLACE IN THE
+  KERNEL ORDER IS PART OF ITS CORRECTNESS — and if the replay recomputes rather than reads back,
+  it can also RACE against the very field it is updating.** (M9 cells ②/④, 2026-08-05.) The
+  wide-halo contract says a ghost node replays the owner's per-node sequence. Cell ② does that by
+  reading back the element σ its ghost element pass *stored*, and was bit-identical on the first
+  run. Cell ④ — the divergence form — deliberately stores no element stress, so its ghost gather
+  had to **recompute** each incident element's stress from `u_aux`. Placed inside the ghost node
+  kernel (the obvious home, right next to the value it feeds), that recompute was wrong twice
+  over, and neither fault is visible by reading the kernel:
+    1. **Timing.** The owned node solve runs first and *overwrites* `u_aux` at every owned node.
+       So the gather recomputed the owned elements' stress from POST-solve velocities while the
+       owner had assembled from PRE-solve ones. A read-back (cell ②) is immune because the stored
+       value is already frozen at the right instant; a recompute inherits whatever the array
+       happens to hold when it runs.
+    2. **A read-write race.** The recompute reads `u_aux` at the element's *other* vertices,
+       which can be other ghost slots — inside a kernel that is itself writing `u_aux` at ghost
+       slots. Deterministic-but-wrong on Serial, nondeterministic on CUDA.
+  The fix is the same for both: stage the gather in its own pass, placed where **nothing is
+  writing the field it reads** — between the owned element kernel and any node update.
+  **Rule: when a replay recomputes instead of reading back, its correctness depends on WHERE in
+  the kernel order it sits, and that dependency is invisible in the kernel body. State the
+  instant the recompute is supposed to represent, then check what has already run.**
+  Two further things worth keeping. **The discriminator was the sibling cell**: ② and ④ share the
+  rings, the ship, the per-step maps, the message machinery and the whole solve tail, so ②
+  passing byte-identically while ④ failed at 3.0e-4 pointed straight at the only structural
+  difference. Build the easy twin first and the hard one's bug has nowhere to hide. And a second
+  defect found in the same hunt: the ghost node mask was written as a **scatter over ghost
+  elements** setting the mask at their three vertices — but a ghost element's vertices include
+  OWNED nodes, so a "ghost-only" kernel reached back into owned state. Rewritten as a gather
+  (each ghost slot asks its own gather row), it is ghost-only by construction. **A ghost kernel
+  that writes at entity indices derived from ELEMENTS is not ghost-only; only one that writes at
+  its own loop index is.** (It did not change the failing bytes here — defect 1 dominated — which
+  is its own reminder that fixing a real bug is not evidence you fixed THE bug: re-run and
+  compare the magnitude, which in this case was identical to the digit.)
+
+- **L107 — ON A GPU, "REMOVING A MESSAGE" MOSTLY MEANS REMOVING LAUNCHES AND PACKING, WHICH THE
+  PROFILER CHARGES TO *BUSY*, NOT TO *WAIT*. So a communication-avoiding scheme that substitutes
+  local work for an exchange can remove every message it targeted and still be slower — it
+  relocated the cost instead of removing it.** (M9 cells ②/④ vs cell ⑤, 2026-08-05, three meshes,
+  both backends.) The exact wide halo and the lagged halo remove *the same* exchanges at the same
+  K. Measured on farc GPU 16 N, `icedyn` phase: cell ⑤ takes busy 12.1 → **3.5 ms (−71 %)** and
+  wait 10.9 → 1.4 (−87 %) and is worth −15.1 % of the model step; the exact cells cut messages
+  identically (16 vs 15 per step) but leave busy at **12.0 / 13.3 ms** and are worth only
+  −2.2 / −3.9 %. On farc CPU np512 the exact halo removes *more* messages than the approximation
+  (16 vs 30 per step) and is **+19.3 % SLOWER**, because ghost work nearly triples icedyn busy
+  (14.5 → 39.1 ms) and drags wait up with it (8.7 → 25.3 ms) — a ring zone is a different size on
+  every rank, so duplicating it adds a *new* load imbalance on top of the one it removes.
+  **The predictor is the ghost/owned ratio — K-ring updatable slots per owned node per rank,
+  which goes like K·perimeter/area.** At farc CPU np2048 the K=4 ring zone is **1.18× the rank's
+  own subdomain**, and that configuration costs +9.0 %. Get that ratio from the build summary
+  before running a fleet; it predicted every sign in the campaign.
+  Corollaries worth carrying: (1) **an exactness guarantee has a price, and it should be measured
+  the cheap way — at matched K the exact and approximate schemes remove identical messages, so
+  their difference IS the price** (here +6.6…+13.1 pp on GPU, +0.7…+8.1 pp on CPU) rather than
+  something to be argued about. (2) **The two schemes do not share a best K**: the exact cells
+  improve monotonically with K (bigger message saving outruns the bigger ring), while the
+  approximation wants *small* K on accuracy grounds — so "K=8" tuned for one is the wrong answer
+  for the other. (3) A lever that pays at the strong-scaling knee pays *nothing* far from it:
+  at 462 k nodes/rank (NG5, 16 ranks) neither scheme moved the step by more than 3 %.
+
+- **L108 — WHEN ONE VARIANT CARRIES TWO HANDICAPS, YOU HAVE NOT MEASURED EITHER OF THEM. BUILD
+  THE VERSION THAT REMOVES ONE AND HOLDS THE OTHER FIXED — IT IS USUALLY A TRANSPORT CHANGE, NOT
+  A REDESIGN, AND IT IS BIT-IDENTICAL SO THE GATE IS FREE.** (M9 P0b, 2026-08-06.) Cell ② lost to
+  cell ④ on GPU everywhere, by 1.9–7.1 pp, and ② shipped both **2× the bytes and 2× the
+  messages**. The campaign attributed the gap to bytes — that was the term the pre-registration
+  had named — and wrote it up as the one place Danilov's reformulation paid. Packing ②'s two
+  segments into one per-partner message (`FESOM_SPEED_EVPWIDE_FUSE`, one index object, same
+  values in the same order) recovered **106–142 % of the gap at K=2**: the message was the whole
+  effect, the byte term is ±1.5 pp with no consistent sign, and the reformulation's last apparent
+  win evaporated. **The discriminator was already in the published table and nobody read it:**
+  the gap decayed with K like 1/K, which is what an extra message per *window* does (120/K
+  windows per step), while a byte ratio is K-independent. **Before believing a mechanism, check
+  that the effect scales the way that mechanism must scale.**
+  Three corollaries: (1) **A pure transport variant is the cheapest experiment in the book** —
+  bit-identical output means the whole correctness ladder is "did the bytes change? no", so the
+  only cost is the build. (2) **It needs an observable, and it will not have one.** Fused and
+  unfused differ in no recorded quantity: the halo profiler's `mpi/step` counts WAITALL calls
+  (i.e. exchanges), the bytes are identical by design, the output is bit-identical on purpose.
+  A new counter — messages posted and doubles shipped, printed at end of loop — had to be added
+  *for the A/B to be readable at all*, and it is what proved ②fused and ④ post exactly the same
+  message count while ④ ships 19 % fewer doubles and is still slower. **If a variant's only
+  visible difference is a wall clock, you are one silent regression away from measuring nothing.**
+  (3) **Sanity-check the ratio you are theorising about against the wire.** The "8·Ng vs 4·Ng"
+  2× byte ratio described only the *window* ship; on the wire the real ratio was **1.23×**,
+  because the per-step 11-field prestep ship that both cells share dominates the volume. That was
+  computable before any run and would have made a 7 pp byte explanation implausible on its face.
+  Also: a byte-class lever's gate cannot use "output differs" as its knob-fired proof — run that
+  way, `job_m9_options3` reported this build FAIL *for passing its own gate* (the L80 family,
+  inverted).
+
+## L109 — A Kokkos kernel whose closure crosses 512 bytes changes LAUNCH PATH, and that is a 3× launch-latency cliff you will read as "the algorithm is slow"
+
+M9 P5, 2026-08-06, nsys on fArc np16 (jobs 26738629/30).
+
+The exact wide halo's ghost kernels (`maevp_stress_w`, `maevp_node_solve_w`, `maevp_edge_bc_w`)
+are character-for-character their owned twins with the views swapped. They should cost what the
+owned kernels cost, scaled by the ring's size. They did not. The trace says why:
+
+| | launch path | median inter-kernel gap |
+|---|---|---|
+| owned mEVP kernel | `cuda_parallel_launch_local_memory` | 4.38–5.47 µs |
+| **ghost mEVP kernel** | `cuda_parallel_launch_**constant**_memory` | **14.34 µs** |
+
+Kokkos chooses between the two at `CudaTraits::ConstantMemoryUseThreshold` = **512 bytes of
+closure**. Over that line the closure is staged through `__constant__` behind an event instead of
+riding the launch as a kernel argument. The ghost bodies captured the whole `FesomEvpwideDev` —
+about 25 `Kokkos::View`s, each ~24 B in a closure (data pointer + extent + allocation tracker) —
+so they were ~600 B and crossed it. The owned twins captured ~14 and did not.
+
+At 3 stages × 120 sub-cycles that is 360 launches per model step on the wrong side of the cliff:
+**+5.9 ms/step of inter-kernel gap against +2.5 ms/step of GPU busy — the launch term was 2.3× the
+arithmetic it was supposedly measuring.** Every conclusion drawn about "the price of exactness"
+had this baked in.
+
+Three things follow.
+
+1. **A `Kokkos::View` in a device closure is expensive as a CAPTURE, not just as an access.**
+   Where the kernel needs many arrays, capture `v.data()` and index the raw pointer. For 1-D
+   contiguous Views `p[i]` is exactly `v(i)`, and a pointer is 8 B instead of ~24. The M9 lean
+   kernels come to ~300 B this way and stay on the fast path; capturing the struct would have put
+   the *owned* body on the slow path too and made the fused kernel slower than the two it
+   replaced.
+2. **Fusing two kernels can lose if it merges their closures.** "One launch instead of two" is
+   only a win while the survivor stays under the threshold. Check the launch path, do not assume.
+3. **The observable exists and costs one query.** In the nsys sqlite, group
+   `CUPTI_ACTIVITY_KIND_KERNEL` by demangled name and look for `constant_memory` in it; the gap
+   before each launch is `start[i] - end[i-1]`. Neither number appears in `nsys stats` output, and
+   nothing in the Kokkos API reports which path a kernel took — so a build can sit on the slow
+   path for a whole campaign without a single symptom other than a wall clock.
+
+Related: L128 (a diagnostic branch inside a timed kernel costs the registers its body needs, even
+untaken), L107 (a removed message on GPU is mostly removed launches and packing, charged to
+`busy`) — this lesson is the mechanism *underneath* L107's second clause.
+
+**Check it at build time, not in a profile.** Which path a kernel took is a static property of its
+closure and is in the symbol table:
+
+```
+cuobjdump -symbols <binary> | c++filt \
+  | grep cuda_parallel_launch_constant_memory | grep -c 'ParallelFor<my_function('
+```
+
+M9 P5 used exactly this to confirm the five fused kernels stayed on the fast path before the first
+GPU job ran (constant-memory count unchanged at 9, local-memory 24 → 29).
+
+**It is not only slow for the kernel that uses it — it serialises its neighbours.** After the M9 P5
+fusion removed 360 of 362 constant-memory launches per step, the median gap before the *owned*
+local-memory kernels fell from 5.47 µs to **1.31 µs**, below even the build that had never had a
+ghost kernel at all (4.38 µs). The constant-memory staging blocks the launch stream, so the cost
+lands partly on whatever is dispatched next. Consequence for measurement: you cannot bound the
+damage by counting the slow kernels and multiplying by their own gap — that undercounts.

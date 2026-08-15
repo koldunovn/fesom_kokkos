@@ -1,0 +1,133 @@
+#!/bin/bash
+#SBATCH --job-name=m9_evpwreg
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/evpwreg.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/evpwreg.%j.err
+#
+# M9 Task 11 — REGRESSION gate for the evpw_exchange refactor (caller-supplied field plan).
+#
+# The refactor exists so mEVP can reuse the wide-halo machinery. It must not disturb the
+# CERTIFIED std-EVP EVPWIDE, which is what this job re-proves. std EVP is the DEFAULT rheology
+# here (whichEVP=0) — do not set FESOM_WHICH_EVP.
+#
+# 🔴 TWO CHECKS, AND THE SECOND IS THE ONE THE REFACTOR ACTUALLY THREATENS.
+#
+#   (1) BYTE: EVPWIDE=K must stay bit-identical to knob-OFF for K in {1,2,4}
+#       (FORCE_SERIAL byte proof — the session-12 certification class).
+#
+#   (2) DIAGNOSTICS ALIVE: before M9 every diagnostic inside evpw_exchange was keyed on the
+#       VALUE of nf — sig=(nf<=6), selfcheck nf<=6, dbg nf==6, window print nf==2, prestep echo
+#       nf==11. Handing the field list to the caller silently re-keys all of them, and A BYTE
+#       PROOF CANNOT SEE THAT: a dead diagnostic changes no bytes, so check (1) passes at full
+#       marks while the selfcheck, the drift print and the echo have all gone quiet. That is
+#       precisely the L80 class (SWSKIP/IOACC shipped silently dead and passed every gate).
+#       So: with FESOM_EVPWIDE_SELFCHECK=1 the run MUST still emit
+#         [evpwide-self] ... ghost drift ...        (the WINDOW plan's print)
+#         [evpwide-self] step-ship uv echo = ...    (the PRESTEP_ECHO plan's print, MUST be 0)
+#       Absence of either line FAILS this job even though every byte matched.
+#
+# Usage:
+#   sbatch --export=ALL,BIN=/work/.../m9/bin/wip/fesom_port_serial jobs/job_m9_evpwide_regress
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+K_BIN=${BIN:?BIN required}
+MESH=/work/ab0995/a270088/port2/mesh/core2      # PRIVATE mesh (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DT=1800; NSTEPS=20; SNAP=10; YEAR=1958
+BASE=/work/ab0995/a270088/port2/m9/evpwreg; rm -rf "$BASE"; mkdir -p "$BASE"
+
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18
+unset FESOM_WHICH_EVP FESOM_MIX_SCHEME FESOM_ALE        # std EVP is the default
+
+echo "=== M9 EVPWIDE regression (post field-plan refactor) ==="
+echo "    BIN = $K_BIN  ($(sha256sum "$K_BIN" | cut -c1-16))"
+RC=0
+
+REF=$BASE/off; mkdir -p "$REF"
+srun -l "$K_BIN" "$MESH" "$REF" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$REF/run.log" 2> "$REF/run.err"
+echo "knob-OFF exit=$?"
+
+for K in 1 2 4; do
+    OUT=$BASE/k$K; mkdir -p "$OUT"
+    ( export FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_EVPWIDE=$K
+      srun -l "$K_BIN" "$MESH" "$OUT" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT/run.log" 2> "$OUT/run.err" )
+    echo
+    echo "############ EVPWIDE=$K ############"
+    grep -hE "FESOM_SPEED_EVPWIDE = " "$OUT/run.err" "$OUT/run.log" | head -1 | sed 's/^/    /' \
+        || { echo "    FAIL — no EVPWIDE announce: the knob did not resolve"; RC=1; }
+    "$PY" "$ROOT/scripts/diff_snap.py" "$REF" "$OUT" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then echo "    BYTE PASS — bit-identical to knob-OFF"
+    else echo "    BYTE FAIL — the refactor changed certified std-EVP EVPWIDE output"; RC=1; fi
+done
+
+echo
+echo "############ DIAGNOSTICS-ALIVE (EVPWIDE=2 + SELFCHECK=1) ############"
+OUT=$BASE/k2_self; mkdir -p "$OUT"
+( export FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_EVPWIDE=2 FESOM_EVPWIDE_SELFCHECK=1
+  srun -l "$K_BIN" "$MESH" "$OUT" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT/run.log" 2> "$OUT/run.err" )
+echo "exit=$?"
+NDRIFT=$(grep -hc "ghost drift" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+NECHO=$(grep -hc "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+echo "    window drift lines : ${NDRIFT:-0}"
+echo "    prestep echo lines : ${NECHO:-0}"
+grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | tail -2 | sed 's/^/      /'
+[ "${NDRIFT:-0}" -gt 0 ] || { echo "    FAIL — the WINDOW diagnostic is DEAD (re-keyed by the refactor)"; RC=1; }
+[ "${NECHO:-0}"  -gt 0 ] || { echo "    FAIL — the PRESTEP_ECHO diagnostic is DEAD"; RC=1; }
+if grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | grep -qv "0.000e+00"; then
+    echo "    FAIL — the prestep echo is NONZERO (it must be exactly 0.000e+00)"; RC=1
+fi
+
+echo
+echo "############ FUSED TRANSPORT (D1/P0b): EVPWIDE=2 + EVPWIDE_FUSE=1 ############"
+# The fused form packs the SAME values in the SAME order into ONE per-partner message instead
+# of two, so it must be byte-identical to the unfused leg above — that is check (1) again, at
+# matched K, and it is the whole correctness content of the variant.
+#
+# 🔴 Check (2) matters MORE here than it did for the refactor. Fusing moves every entry to a
+#    different address in a different buffer; a diagnostic left indexing the old buffer reads
+#    stale or unwritten memory and prints a plausible number, while the byte check passes at
+#    full marks because model output never touches it. Same L80 shape, new costume.
+OUT=$BASE/k2_fused; mkdir -p "$OUT"
+( export FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_EVPWIDE=2 FESOM_SPEED_EVPWIDE_FUSE=1 \
+         FESOM_EVPWIDE_SELFCHECK=1
+  srun -l "$K_BIN" "$MESH" "$OUT" $DT $NSTEPS $SNAP "$PHC" $YEAR > "$OUT/run.log" 2> "$OUT/run.err" )
+echo "exit=$?"
+grep -hE "FESOM_SPEED_EVPWIDE_FUSE = " "$OUT/run.err" "$OUT/run.log" | head -1 | sed 's/^/    /'
+if ! grep -qE "FESOM_SPEED_EVPWIDE_FUSE = 1" "$OUT/run.err" "$OUT/run.log"; then
+    echo "    FAIL — the FUSE knob did not fire; everything below is VACUOUS"; RC=1
+fi
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/k2" "$OUT" >/dev/null 2>&1
+if [ $? -eq 0 ]; then echo "    BYTE PASS — fused == unfused at K=2, bit for bit"
+else echo "    BYTE FAIL — fusing changed the trajectory (it must not: same values, same order)"; RC=1; fi
+FDRIFT=$(grep -hc "ghost drift" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+FECHO=$(grep -hc "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | paste -sd+ | bc)
+echo "    window drift lines : ${FDRIFT:-0}   prestep echo lines : ${FECHO:-0}"
+grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | tail -2 | sed 's/^/      /'
+[ "${FDRIFT:-0}" -gt 0 ] || { echo "    FAIL — the WINDOW diagnostic is DEAD under fusing"; RC=1; }
+[ "${FECHO:-0}"  -gt 0 ] || { echo "    FAIL — the PRESTEP_ECHO diagnostic is DEAD under fusing"; RC=1; }
+if grep -hE "step-ship uv echo" "$OUT/run.log" "$OUT/run.err" 2>/dev/null | grep -qv "0.000e+00"; then
+    echo "    FAIL — the prestep echo is NONZERO under fusing"; RC=1
+fi
+# The drift print must also AGREE with the unfused run's, value for value: it is computed from
+# the recv buffer, so it is the one number that would move if the fused indexing were wrong in
+# a way the ghost values happen to survive.
+if diff <(grep -hE "ghost drift" "$BASE/k2_self/run.log" "$BASE/k2_self/run.err" 2>/dev/null) \
+        <(grep -hE "ghost drift" "$OUT/run.log" "$OUT/run.err" 2>/dev/null) >/dev/null; then
+    echo "    DIAG PASS — the drift series is identical to the unfused run's"
+else
+    echo "    FAIL — the drift series differs from the unfused run: the fused recv indexing is wrong"
+    RC=1
+fi
+
+echo
+[ "$RC" -eq 0 ] && echo "=== M9 EVPWIDE REGRESSION PASS ===" || echo "=== M9 EVPWIDE REGRESSION FAIL ==="
+exit $RC

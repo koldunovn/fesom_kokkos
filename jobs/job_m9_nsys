@@ -1,0 +1,79 @@
+#!/bin/bash
+#SBATCH --job-name=m9_nsys
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:45:00
+#SBATCH -o /work/ab0995/a270088/port2/m9/nsys.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m9/nsys.%j.err
+#
+# M7 Task 0.3 — nsys stall decomposition of the ~25-30% "remainder" of the step.
+#
+# Traces CUDA (kernels + memcpy + RUNTIME api) and MPI on rank 0, then exports the
+# report to sqlite so scripts/m7_kernel_busy.py can attribute every GPU-idle
+# nanosecond to a NAMED cause: fence drains (pre-MPI vs post-unpack, told apart by
+# the kernel that precedes them), MPI waits, launch gaps, host segments.
+#
+# ⚠️ FESOM_STEP_PROFILE is deliberately NOT set: the tic/toc wrapper in
+# fesom_profile.cpp inserts its OWN Kokkos::fence() around every phase
+# (fesom_profile.cpp:61,73) -- profiling the fence budget with a profiler that adds
+# fences measures the profiler. The step windowing is recovered from the kernel
+# trace instead (m7_kernel_busy.py finds the repeating per-step pattern).
+#
+# Mesh-parametrized. env: MESH, DT, NSTEPS, TAG, BIN (binary; default build-m7cuda).
+# Submit via: sbatch -N4 --ntasks=16 --export=ALL,MESH=...,DT=180,TAG=nsys_ng5_4n ...
+
+set -u
+ROOT=${ROOT:-/home/a/a270088/port_kokkos_ice}
+source "$ROOT/jobs/m7_provenance.sh"
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999   # suppress per-step diagnostic Gatherv/Reduce -> the MPI trace is the per-step comms only
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+OUT=/work/ab0995/a270088/port2/m9/$TAG; rm -rf "$OUT"; mkdir -p "$OUT"
+FESOM=${BIN:-$ROOT/build-m7cuda/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+
+NPES=$SLURM_NTASKS
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+cat > "$OUT/wrap.sh" <<WRAP
+#!/bin/bash
+F=$FESOM
+if [ "\${SLURM_PROCID:-0}" = "0" ]; then
+  exec nsys profile -t cuda,mpi,nvtx -o "\$NSYS_OUT" --force-overwrite=true \\
+       --capture-range=none --sample=none "\$F" "\$@"
+else exec "\$F" "\$@"; fi
+WRAP
+chmod +x "$OUT/wrap.sh"
+export NSYS_OUT="$OUT/trace"
+
+echo "=== M7 nsys $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES (dist_$NPES) dt=$DT nsteps=${NSTEPS:-35} ==="
+echo "binary: $FESOM   md5: $(md5sum "$FESOM" | cut -d' ' -f1)"
+echo "nodes:  $SLURM_JOB_NODELIST"
+srun "$OUT/wrap.sh" "$MESH" "$OUT" "${DT:?DT required}" "${NSTEPS:-35}" -1 "$PHC" 1958 > "$OUT/run.log" 2>&1
+echo "run rc=$?"
+grep -m1 'loop timing' "$OUT/run.log" || true
+
+# Column stats (human read) + sqlite (the stall-budget script's input).
+nsys stats --report cuda_gpu_kern_sum,cuda_gpu_mem_time_sum,cuda_api_sum,mpi_event_sum \
+     --format column "$NSYS_OUT.nsys-rep" > "$OUT/stats.txt" 2>&1
+echo "stats.txt: $(wc -l < "$OUT/stats.txt") lines"
+nsys export --type sqlite --force-overwrite=true -o "$NSYS_OUT.sqlite" "$NSYS_OUT.nsys-rep" > "$OUT/export.log" 2>&1
+echo "sqlite export rc=$?  size=$(du -h "$NSYS_OUT.sqlite" 2>/dev/null | cut -f1)"
+
+# Stall budget, computed in-job so the answer is in the slurm log.
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/m7_kernel_busy.py" "$NSYS_OUT.sqlite" --lo ${KLO:-20} --hi ${KHI:-130} --top ${KTOP:-30} | tee "$OUT/kernel_busy.txt"
+
+# The run leaves monthly output behind (tens of GB on NG5) — drop it, we only want the trace.
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true
+echo "=== done: $OUT ==="

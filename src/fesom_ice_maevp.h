@@ -59,4 +59,20 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
  * next to it in fesom_main.cpp. */
 void fesom_ice_maevp_free(void);
 
+/*
+ * M9 — nonzero when FESOM_SPEED_MEVPDIV is active (the divergence form carries R_u/R_v at nodes
+ * instead of sigma11/12/22 at elements).
+ *
+ * Exposed for ONE caller: fesom_ice.cpp's mEVP branch, which must then skip the sigma
+ * host<->device rails. Two reasons, and the second is the one that would have silently biased
+ * the whole study:
+ *   1. sigma is DEAD in this form — railing it is pure waste.
+ *   2. those rails sit INSIDE the icedyn phasestats bracket (the mark is at fesom_ice.cpp:676,
+ *      before the rheology branch), so leaving them in place while adding state would charge the
+ *      divergence form extra PCIe inside the very metric it is being measured on.
+ * The other fields on that rail (a/m/ms, srfoce_*, stress_atmice_*, uice/vice) are host-produced
+ * and MUST still be railed — only the sigma triplet is skipped.
+ */
+int fesom_ice_maevp_div_active(void);
+
 #endif /* FESOM_ICE_MAEVP_H */

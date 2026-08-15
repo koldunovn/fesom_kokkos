@@ -20,13 +20,192 @@
  */
 #include "fesom_ice_maevp.h"
 #include "fesom_ice_types.h"
+#include "fesom_types.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
 #include "fesom_halo_device.hpp"
+#include "fesom_ice_evpwide.h"   /* M9 cells ②/④: wide halo (mEVP ghost twins live in THIS TU) */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_speed.hpp"
 
 #include <Kokkos_Core.hpp>
+#include <cstdio>
+#include <cstdlib>
+
+/* ══════════════════════════════════════════════════════════════════════════════════════════
+ *  M9 — divergence-subcycled mEVP.  docs/plans/20260804-m9-mevp-divergence.md
+ *
+ *  S. Danilov's reformulation (ice_sergey/evp_div.tex): applying div to the mEVP stress
+ *  recursion turns  sigma^{p+1} = det1*sigma^p + det2*sigma~  into
+ *  d^{p+1} = det1*d^p + det2*div(sigma~)  EXACTLY — div is linear and the discrete divergence
+ *  operator is time-invariant. The carried state therefore moves from 3 ELEMENT arrays
+ *  (sigma11/12/22) to 2 NODE arrays (R_u/R_v). Possible only for mEVP, where all sigma
+ *  components share one alpha; standard EVP subcycles them differently.
+ *
+ *  All knobs are default-off and announce once on rank 0. The announce is not cosmetic:
+ *  FESOM_SPEED_SWSKIP and _IOACC once shipped SILENTLY DEAD on CUDA and passed EVERY
+ *  correctness gate while doing so (fesom_speed.hpp:93-102) — knob-OFF bytes are exactly what
+ *  a dead knob gives you. L102 (wsplit, 2026-08-04) sharpened it: a knob can be alive and
+ *  announcing while its code path is dead. So the M9 gates grep for evidence that the PATH
+ *  ran, and this file emits one [m9] provenance line naming the active cell.
+ * ══════════════════════════════════════════════════════════════════════════════════════════ */
+
+/* Cell ③④⑤b — carry R_u/R_v at nodes instead of sigma at elements. Mathematically identical,
+ * NOT bitwise (det1*sum(sigma) vs sum(det1*sigma) rounds differently, and the ice_el mask
+ * changes membership across ocean steps) => solver class, the CGPOLY precedent. */
+static bool maevp_div_on(void)   { static int c = -1; return fesom_speed_on_exp("MEVPDIV",   &c); }
+
+/* ══ M9 P5 — cells ②L/④L: the LEAN wide halo (S. Danilov's structure) ═════════════════════════
+ * FESOM_SPEED_EVPWIDE_LEAN=1, on top of FESOM_SPEED_EVPWIDE=K. Opt-in, default off, so the
+ * certified exact path (②/④) is untouched.
+ *
+ * WHAT IT CHANGES. `ice_sergey/ice_mevp_double.F90` widens the BOUNDS of the loops that already
+ * exist (`clength = myDim_elem2D+eDim_elem2D+eXDim_elem2D`); it adds no kernels. Ours launches a
+ * separate ghost twin per stage per subcycle. MEASURED (nsys, farc np16, 4 GPU nodes, K=8, jobs
+ * 26738629/30): the exact wide halo adds **362 mEVP launches per model step** on top of the
+ * classic form's 487, and every one of them takes Kokkos' CONSTANT-MEMORY launch path — the
+ * ghost closures carry the whole FesomEvpwideDev, ~25 Views, past
+ * CudaTraits::ConstantMemoryUseThreshold (512 B). Median gap before a ghost launch **14.34 us**
+ * against 4.38-5.47 us before an owned one; the ghost kernels cost 5.875 ms/step of inter-kernel
+ * GAP against 2.503 ms/step of GPU busy. The launch term is 2.3x the arithmetic term, and L107
+ * ("the exact halo relocates work rather than removing it") is that gap, named.
+ *
+ * SO THE LEAN PATH:
+ *   1. one kernel per stage over owned+ghost, selecting the `_g` arrays by an index branch —
+ *      🔴 capturing RAW POINTERS, never the Views. 8 bytes each keeps the fused closure under
+ *      the 512-byte threshold; capturing W would drag the OWNED kernel onto the constant-memory
+ *      path and lose more than the fusion buys.
+ *   2. the owner-order gather is dropped: ghost nodes are assembled by the same unguarded
+ *      atomic SCATTER the owned nodes use. This is what forfeits bit-identity, deliberately —
+ *      a ghost node's contributions are summed in MY element order instead of the owner's, so
+ *      the difference is last-bit in origin, exactly the class Danilov predicts ("will leave
+ *      only the last bit errors"). In the divergence form it also deletes the 6x-redundant
+ *      per-(node,element) stress recompute that `maevp_gather_div_w` had to do.
+ *   3. the once-per-step ghost maps (aux_init_w / node_pre_w / elem_pre_w / nod_has_el_set_w)
+ *      are LEFT ALONE: 4-5 launches per step out of 363. The prize is entirely in the 3 x 120
+ *      per-subcycle launches, and leaving the per-step maps exact also keeps the L106 gather
+ *      (which is the only correct way to reproduce the owner's node mask) in place.
+ *
+ * NOT BIT-IDENTICAL BY DESIGN => the L0/L1 byte rungs do not apply to it (knob-off byte still
+ * does, and EVPWIDE=1+LEAN=1 is still a byte null rung — see the range notes below). Its safety
+ * net is the partition-imprint test, promoted from diagnostic to GATE:
+ * scripts/m9_partition_artefact.py must return edge/interior ~0.85-0.90 on a 60-day fArc pair. */
+static bool maevp_lean_on(void) { static int c = -1; return fesom_speed_on_exp("EVPWIDE_LEAN", &c); }
+
+/* Confound control. eps11/12/22 are written by the element kernel every subcycle and read
+ * NOWHERE in the mEVP path (only std EVP reads those arrays, fesom_ice_evp.cpp:117-129), and
+ * they cost about what the reformulation saves. Measured on its OWN leg so the reformulation
+ * and the dead-write removal are never reported as one number. */
+static bool maevp_noeps_on(void) { static int c = -1; return fesom_speed_on_exp("MEVPNOEPS", &c); }
+
+/* Ablation switch: restore the NAIVE divergence form, whose R recursion runs over the whole
+ * owned domain instead of only the ice-element node set. Kept so the masked-vs-unmasked pair
+ * can be measured — that difference is what quantifies the cost of the ice_nod trap on a mesh
+ * with partial ice cover, and it is a result, not an implementation detail to hide. */
+static bool maevp_nomask_on(void) { static int c = -1; return fesom_speed_on_exp("MEVPDIV_NOMASK", &c); }
+
+/* Diagnostic: carry sigma AND R and compare. Perturbs the trajectory (it re-baselines R at
+ * each step entry), so it is NEVER a timing or trajectory leg. See the plan §L2. */
+static int maevp_div_selfcheck(void)
+{
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("FESOM_MEVPDIV_SELFCHECK"); c = e ? atoi(e) : 0; }
+    return c;
+}
+
+/* Cell ⑤ — exchange (u_aux,v_aux) every K-th subcycle; ring 1 goes up to K-1 subcycles stale.
+ * An explicit APPROXIMATION, never byte-neutral for K>1.
+ *
+ * fesom_speed_int is the SILENT helper (only the boolean resolvers announce), so this one owns
+ * its announce, its guard, and its own asked-but-off shout — on Serial a value knob silently
+ * returns the default unless FESOM_SPEED_FORCE_SERIAL=1, which would make an L1 null rung pass
+ * because the knob is DEAD rather than because the lever is neutral. */
+static int maevp_lag_K(const struct fesom_ice *ice, const struct fesom_partit *partit)
+{
+    static int cache = -2;
+    static int announced = 0;
+    const int K = fesom_speed_int("MEVPLAG", 1, &cache);
+    if (announced) return K;
+    announced = 1;
+
+    if (K > 1) {
+        /* The LAST subcycle must exchange. Otherwise the final u_ice = u_aux copy spanning
+         * myDim+eDim (trap 8) publishes a STALE HALO into the ocean coupling — a different and
+         * far worse error than a stale subcycle read. */
+        FESOM_CHECK(ice->evp_rheol_steps % K == 0,
+                    "MEVPLAG: K=%d must divide evp_rheol_steps=%d so the last subcycle exchanges",
+                    K, ice->evp_rheol_steps);
+        if (partit->mype == 0) {
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_MEVPLAG = %d (LAGGED single halo: exchange "
+                            "every %d-th subcycle, ring 1 up to %d subcycles stale; mEVP exchanges/"
+                            "step %d -> %d) — APPROXIMATION, not byte-neutral\n",
+                    K, K, K - 1, ice->evp_rheol_steps, ice->evp_rheol_steps / K);
+            fflush(stderr);
+        }
+    } else {
+        const char *e = getenv("FESOM_SPEED_MEVPLAG");
+        if (e && atoi(e) > 1 && partit->mype == 0) {
+            fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_MEVPLAG=%s WAS REQUESTED BUT RESOLVES TO "
+                            "1 — the lever is NOT running. (Serial backend without "
+                            "FESOM_SPEED_FORCE_SERIAL=1?)\n", e);
+            fflush(stderr);
+        } else if (e && atoi(e) == 1 && partit->mype == 0) {
+            /* K=1 explicitly requested = the NULL RUNG. It must announce, or the byte gate that
+             * proves it neutral cannot tell "neutral" from "knob never resolved" — the whole
+             * point of the rung. (The lever is genuinely inert at K=1: `shortstep % 1 == 0` is
+             * always true, so the exchange fires every subcycle exactly as it does by default.) */
+            fprintf(stderr, "[fesom_speed] FESOM_SPEED_MEVPLAG = 1 (NULL RUNG: exchange every "
+                            "subcycle = default behaviour; must be byte-identical)\n");
+            fflush(stderr);
+        }
+    }
+    return K;
+}
+
+/* One provenance line naming the active cell of the 2x3 study matrix. Every M9 gate and every
+ * A/B leg greps this; it is the single place that says what actually ran. */
+static void maevp_announce_cell(const struct fesom_partit *partit,
+                                bool div_on, bool noeps_on, int lagK, int selfcheck,
+                                bool nomask, int wideK, bool lean)
+{
+    static int announced = 0;
+    if (announced || partit->mype != 0) return;
+    announced = 1;
+    fprintf(stderr, "[m9] mEVP cell: form=%s halo=%s eps=%s%s\n",
+            div_on   ? (nomask ? "divergence(R@nodes,UNMASKED)" : "divergence(R@nodes,masked)")
+                     : "classic(sigma @elements)",
+            wideK    ? (lean ? "wide-lean" : "wide-exact") :
+            lagK > 1 ? "lagged"                     : "every-subcycle",
+            noeps_on ? "dropped"                    : "kept",
+            selfcheck ? "  [SELFCHECK ON — diagnostic mode, not a timing leg]" : "");
+    if (lagK > 1) fprintf(stderr, "[m9] mEVP cell: lag K=%d\n", lagK);
+    /* Name the study cell explicitly. The 2x3 matrix's two exact wide-halo cells differ ONLY in
+     * the carried form, so "EVPWIDE=4" alone does not say which one ran — and the whole point of
+     * ②-vs-④ is the comparison between them. */
+    if (wideK) {
+        fprintf(stderr, "[m9] mEVP cell: WIDE K=%d  ->  cell %s (%s)\n", wideK,
+                div_on ? "④" : "②",
+                div_on ? "divergence form: (u,v,R_u,R_v) on rings, ONE segment, 4*Ng doubles"
+                       : "classic form: (u,v) on rings + sigma on ghost elements, 8*Ng doubles");
+        /* D1: ②'s two segments can ride ONE message. Name it here, on the line every gate and
+         * A/B leg greps — fused and unfused are byte-identical, so this is the only place the
+         * distinction is visible at all. Stated for ④ too, where it is a no-op by construction
+         * (one segment), because "no line" and "no-op" must not look the same. */
+        fprintf(stderr, "[m9] mEVP cell: WIDE transport = %s\n",
+                div_on           ? "single-segment (cell ④ — FUSE is a no-op by construction)"
+                : fesom_evpwide_env_fuse() ? "FUSED (② — 1 msg/partner/window)"
+                                           : "unfused (② — 2 msgs/partner/window)");
+        /* P5. The lean path is a DIFFERENT CELL, not a tuning of ②/④: it drops the owner-order
+         * gather, so it is not bit-identical and does not inherit their byte certification.
+         * Named on the line every gate greps, because "wide" alone no longer says which. */
+        fprintf(stderr, "[m9] mEVP cell: WIDE kernels = %s\n",
+                lean ? "LEAN (cell ②L/④L — ghost twins FUSED into the owned kernels, "
+                       "3 launches/subcycle saved; scatter-assembled ghosts => NOT bit-identical)"
+                     : "EXACT (separate ghost twins, owner-order gather => bit-identical)");
+    }
+    fflush(stderr);
+}
 
 /*
  * Coastal-node mask for the edge BC (:823-857). The C zeros u_ice_aux/v_ice_aux at the two
@@ -51,6 +230,9 @@ static Kokkos::View<int*> g_maevp_coastal_mask;
  * the run completes, writes every snapshot, prints its timing — and THEN exits 134. */
 void fesom_ice_maevp_free(void) { g_maevp_coastal_mask = Kokkos::View<int*>(); }
 
+/* See the contract in fesom_ice_maevp.h. */
+int fesom_ice_maevp_div_active(void) { return maevp_div_on() ? 1 : 0; }
+
 static Kokkos::View<int*> maevp_coastal_mask(struct fesom_partit *partit, struct fesom_mesh *mesh)
 {
     if (g_maevp_coastal_mask.extent(0) != 0) return g_maevp_coastal_mask;
@@ -71,10 +253,56 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                                  struct fesom_partit *partit,
                                  struct fesom_mesh   *mesh)
 {
+    /* M9 knobs — resolved and announced at the TOP, before any kernel output, so the gate greps
+     * find the lines in a known place. Resolution is cached; the announce fires once. */
+    const bool m9_div       = maevp_div_on();
+    const bool m9_noeps     = maevp_noeps_on();
+    const bool m9_nomask    = maevp_nomask_on();
+    const int  m9_selfcheck = maevp_div_selfcheck();
+    const int  m9_lagK      = maevp_lag_K(ice, partit);
+    /* Cells ②/④ — the EXACT wide halo. Resolving here mirrors std EVP (fesom_ice_evp.cpp:611):
+     * the first ON call runs the collective lazy build and announces. Returns 0 when off, at
+     * npes==1, or when the scatter-time hook never ran. */
+    const int  m9_wideK     = fesom_evpwide_K(ice, partit, mesh);
+    /* Two mechanisms for one thing, and they do NOT compose: MEVPLAG skips the exchange the
+     * wide window depends on, so ring K would never be refreshed and the ghost zone would rot
+     * silently — an approximation nobody registered, wearing the name of the exact cell.
+     * Abort rather than pick a winner (the FESOM_ALE house rule: unrecognised combinations are
+     * an error, never a silent choice). */
+    FESOM_CHECK(!(m9_wideK && m9_lagK > 1),
+                "M9: FESOM_SPEED_EVPWIDE=%d and FESOM_SPEED_MEVPLAG=%d are mutually exclusive "
+                "(the lagged halo would starve the wide window's refresh). Pick one.",
+                m9_wideK, m9_lagK);
+    /* P5 — the lean kernels are a variant OF the wide halo; asked for on their own they would be
+     * a dead knob wearing a live name (L80/L102), which is the failure mode this project has
+     * paid for twice. Abort rather than run silently exact. */
+    const bool m9_lean = maevp_lean_on();
+    FESOM_CHECK(!(m9_lean && !m9_wideK),
+                "M9: FESOM_SPEED_EVPWIDE_LEAN=1 requires FESOM_SPEED_EVPWIDE=K (it is the fused "
+                "form OF the wide halo, not a halo scheme of its own).");
+    FESOM_CHECK(!(m9_lean && m9_selfcheck),
+                "M9: FESOM_SPEED_EVPWIDE_LEAN=1 and FESOM_MEVPDIV_SELFCHECK are incompatible — "
+                "the selfcheck's reference is the classic sigma recursion over OWNED elements, "
+                "which the lean scatter no longer reproduces at ghost slots.");
+    maevp_announce_cell(partit, m9_div, m9_noeps, m9_lagK, m9_selfcheck, m9_nomask, m9_wideK,
+                        m9_lean);
+
     const int N     = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* node_size */
     const int myDim = mesh->myDim_nod2D;
     const int Eo    = mesh->myDim_elem2D;
     const int nl    = mesh->nl;
+
+    /* Wide-halo handles. All extent-0 and both counts 0 while the knob is off, so every range
+     * below that reads `N + Wnext` / `Eo + Weg` collapses to the legacy range and the knob-off
+     * path is byte-identical by construction rather than by inspection. */
+    FesomEvpwideDev W;
+    if (m9_wideK) W = fesom_evpwide_dev();
+    const int Wnext = W.next;
+    const int Weg   = W.Eg;
+    /* Lean fused ranges. Both collapse to the legacy ones when the lean path is off, so every
+     * range below that uses them is unchanged by construction rather than by inspection. */
+    const int Lelem = m9_lean ? Eo + Weg   : Eo;      /* fused element range */
+    const int Lnode = m9_lean ? N + Wnext  : myDim;   /* fused node range    */
 
     /* setup (:513-518). ⚠️ TRAP 1: rdt is the FULL ice step — std EVP divides by
      * evp_rheol_steps, mEVP does NOT. */
@@ -125,6 +353,12 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     auto ice_nod = ice->work.mevp_ice_nod_fld.d();
     auto pfac    = ice->work.mevp_pressure_fac_fld.d();
     auto ice_el  = ice->work.mevp_ice_el_fld.d();
+    /* M9: the divergence form's carried node state (and the selfcheck's reference pair). */
+    auto R_u     = ice->work.mevp_Ru_fld.d();
+    auto R_v     = ice->work.mevp_Rv_fld.d();
+    auto Rchk_u  = m9_selfcheck ? ice->work.mevp_Rchk_u_fld.d() : R_u;   /* alias when unused */
+    auto Rchk_v  = m9_selfcheck ? ice->work.mevp_Rchk_v_fld.d() : R_v;
+    auto nod_el  = ice->work.mevp_nod_has_el_fld.d();
     /* mesh */
     auto en       = mesh->elem_nodes_fld.d();
     auto ea       = mesh->elem_area_fld.d();
@@ -136,6 +370,53 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     auto cor      = mesh->coriolis_node_fld.d();
     auto bc_index = mesh->bc_index_nod2D_fld.d();   /* pushed to device in fesom_ice.cpp (M6.2) */
     auto coastal  = maevp_coastal_mask(partit, mesh);
+
+    /* ══ P5 LEAN — raw pointers for the fused kernels ═══════════════════════════════════════
+     * 🔴 POINTERS, NOT VIEWS, AND THAT IS THE WHOLE POINT OF THE VARIANT. A captured
+     * Kokkos::View costs ~24 B in the closure (data pointer + extent + allocation tracker); the
+     * fused bodies need ~25 of them, i.e. ~600 B, which is past Kokkos'
+     * CudaTraits::ConstantMemoryUseThreshold (512 B). Over that line Kokkos stops emitting
+     * cuda_parallel_launch_local_memory and switches to cuda_parallel_launch_constant_memory,
+     * which stages the closure through __constant__ behind an event — MEASURED at a 14.34 us
+     * median launch gap against 4.38 us for the local-memory twins (nsys, farc np16, K=8). A
+     * fused kernel on that path would be SLOWER than the two it replaces. A pointer is 8 B, so
+     * the fused closures come to ~300 B and stay on the fast path. Verified after the fact by
+     * re-tracing and counting constant-memory launches (they must be 0 in the subcycle).
+     *
+     * All of these are 1-D contiguous Views, so p[i] is exactly v(i). The `_gp` half is only
+     * dereferenced under `m9_lean`, and every `_g` View is extent-0 when the knob is off — but
+     * .data() on an extent-0 View is a null pointer, never dereferenced, so the preamble itself
+     * is safe to run unconditionally. */
+    const int    *const en_p     = en.data();          const int    *const en_gp   = W.en_g.data();
+    const real_t *const gsca_p   = gsca.data();        const real_t *const gs_gp   = W.gs_g.data();
+    const real_t *const ea_p     = ea.data();          const real_t *const ea_gp   = W.ea_g.data();
+    const real_t *const mfac_p   = mfac.data();        const real_t *const mf_gp   = W.mf_g.data();
+    const real_t *const pfac_p   = pfac.data();        const real_t *const pfac_gp = W.pfac_g.data();
+    const int    *const ice_el_p = ice_el.data();      const int    *const iel_gp  = W.ice_el_g.data();
+    real_t       *const s11_p    = s11.data();         real_t       *const s11_gp  = W.s11_g.data();
+    real_t       *const s12_p    = s12.data();         real_t       *const s12_gp  = W.s12_g.data();
+    real_t       *const s22_p    = s22.data();         real_t       *const s22_gp  = W.s22_g.data();
+    const int    *const ulev_e_p = ulev_e.data();
+    real_t       *const eps11_p  = eps11.data();
+    real_t       *const eps12_p  = eps12.data();
+    real_t       *const eps22_p  = eps22.data();
+    real_t       *const u_rhs_p  = u_rhs.data();       real_t       *const v_rhs_p = v_rhs.data();
+    real_t       *const u_aux_p  = u_aux.data();       real_t       *const v_aux_p = v_aux.data();
+    const real_t *const u_ice_p  = u_ice.data();       const real_t *const v_ice_p = v_ice.data();
+    const real_t *const u_w_p    = u_w.data();         const real_t *const v_w_p   = v_w.data();
+    const real_t *const sax_p    = sax.data();         const real_t *const say_p   = say.data();
+    const real_t *const rhs_a_p  = rhs_a.data();       const real_t *const rhs_m_p = rhs_m.data();
+    const real_t *const inv_th_p = inv_th.data();      const real_t *const mass_p  = mass.data();
+    const int    *const ice_nod_p= ice_nod.data();     const int    *const nod_el_p= nod_el.data();
+    real_t       *const R_u_p    = R_u.data();         real_t       *const R_v_p   = R_v.data();
+    /* Owner bytes, valid over the WHOLE fused node range: evpw_build seeds corx/bcx from the
+     * local mesh for every slot < N and overwrites only ghost slots (>= myDim) with the owner's,
+     * so corx[i] == cor(i) and bcx[i] == bc_index(i) bitwise for i < myDim. One array, no
+     * branch — the branch that IS needed is the coastal mask, whose two versions genuinely
+     * disagree on ring 1 (local-edge parity vs the owner's). */
+    const real_t *const corx_p   = W.corx.data();      const real_t *const bcx_p   = W.bcx.data();
+    const int    *const coastal_p= coastal.data();     const int    *const coastx_p= W.coastx.data();
+    const int    *const gptr_p   = W.gath_ptr.data();
 
     /* u_ice_aux = u_ice over the FULL allocation extent (:521-522) — a whole-array Fortran
      * assignment, node_size = myDim+eDim. ⚠️ TRAP 8. */
@@ -214,13 +495,280 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
             }
         });
 
-    /* zero u_rhs/v_rhs over myDim (:668-673) */
-    Kokkos::parallel_for("maevp_rhs_uv_zero", Kokkos::RangePolicy<>(0, myDim),
+    /* zero u_rhs/v_rhs over myDim (:668-673).
+     * P5 LEAN widens this to the whole fused node range: the ghost slots become genuine
+     * accumulators there (the exact path ASSIGNS them from the gather, so it never needed a
+     * clean slate; the scatter does). Lnode == myDim with the lean path off. */
+    Kokkos::parallel_for("maevp_rhs_uv_zero", Kokkos::RangePolicy<>(0, Lnode),
         KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });
+
+    /* ── M9: the ice-element NODE mask, and the R reset that goes with it ───────────────────
+     * MEASURED NEED (Fleet 1A, GPU CORE2 np8, jobs 26698614/15): the classic node solve returns
+     * early for non-ice nodes, but the R recursion must run over EVERY owned node (the ice_nod
+     * trap above). On a global mesh where ice covers a minority of nodes that turns a masked
+     * kernel into a full-domain one — icedyn went from 8.3 to 10.8 ms/step, +30%, because the
+     * div form moved ~509 KB/subcycle of R traffic where the classic form moved ~240 KB of
+     * sigma over ICE ELEMENTS ONLY. The reformulation ADDED traffic.
+     *
+     * Fix, and it is also MORE FAITHFUL than the unmasked version: a node with no incident ice
+     * element receives nothing from the assembly (the element loop skips those elements), so
+     * div(sigma) there is EXACTLY 0 in the classic form — whereas an unmasked R sits there
+     * decaying by det1 per subcycle. So zero R on those nodes once per step and skip them in
+     * the recursion. The ice_el mask is fixed within a step, so the node mask is too.
+     *
+     * FESOM_SPEED_MEVPDIV_NOMASK=1 restores the naive full-domain behaviour — kept because the
+     * masked-vs-unmasked pair is the ablation that quantifies this effect for the write-up.
+     * (Sergey's reference F90 has no masks at all; it computes over whole arrays, which is why
+     * the question does not arise there and does arise in FESOM2's actual mEVP.) */
+    if (m9_div && !m9_nomask) {
+        Kokkos::parallel_for("maevp_nod_has_el_zero", Kokkos::RangePolicy<>(0, N + Wnext),
+            KOKKOS_LAMBDA(const int i) { nod_el(i) = 0; });
+        Kokkos::parallel_for("maevp_nod_has_el_set", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+                /* plain stores of the same value => idempotent, race-free on both backends */
+                nod_el(en(3*el + 0)) = 1; nod_el(en(3*el + 1)) = 1; nod_el(en(3*el + 2)) = 1;
+            });
+        Kokkos::parallel_for("maevp_R_reset_nonice", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) {
+                if (!nod_el(i)) { R_u(i) = 0.0; R_v(i) = 0.0; }
+            });
+    }
+
+    /* ══ M9 CELLS ②/④ — the wide-halo PRESTEP: one ship, then the ghost per-step maps ═══════
+     * This is the exact-wide-halo counterpart of cell ⑤'s one-line approximation, and it is
+     * what Koldunov et al. (2019, GMD 12, 3991) proposed and never tested. Everything above is
+     * untouched owned work; everything here runs only under the knob.
+     *
+     * Placement is NOT free: the ship must come AFTER maevp_node_pre because rhs_a/rhs_m are
+     * scaled inside it (trap 7), and AFTER maevp_elem_pre only in the sense that the ghost
+     * element map is a twin of it. The 11 shipped fields then let every ghost map below be a
+     * pure function of OWNER BYTES — nothing is re-derived locally, which is the cgpipe/libmvec
+     * rule that the ring-1 area0 mismatch taught this module the hard way. */
+    if (m9_wideK) {
+        fesom_evpwide_mevp_prestep_exchange(ice, partit);
+
+        /* (a) ghost u_aux/v_aux. The owned maevp_aux_init ran over [0,N) BEFORE the ship, so
+         * ring-1 slots already hold the right value and this rewrite is idempotent there; the
+         * extended slots [N, N+next) have no other source. ⚠️ TRAP 8's whole-array assignment
+         * is what this extends. */
+        Kokkos::parallel_for("maevp_aux_init_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+            KOKKOS_LAMBDA(const int row) { u_aux(row) = u_ice(row); v_aux(row) = v_ice(row); });
+
+        /* (b) ghost node pre-map — TWIN of "maevp_node_pre" — with TWO deliberate differences:
+         *   1. area(i,0) becomes W.area0x(i): the owner's bytes. A ghost slot's local mesh area
+         *      was summed in MY nod_in_elem2D order and differs in the last bits (the build
+         *      prints that max|diff|), and the replay must use what the OWNER's kernel used.
+         *   2. NO rhs_a/rhs_m scaling — they arrive already scaled (trap 7). Scaling here would
+         *      divide by area twice, which is a plausible-looking ~1e-9-magnitude wrong answer
+         *      rather than a crash.
+         * The cavity guard is omitted: evpw_build audits ulevels_nod2D==1 over the whole zone. */
+        Kokkos::parallel_for("maevp_node_pre_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+            KOKKOS_LAMBDA(const int i) {
+                inv_th(i)  = 0.0;
+                mass(i)    = 0.0;
+                ice_nod(i) = 0;
+                if (a_ice(i) >= 0.01) {
+                    const real_t it = (rhoice * m_ice(i) + rhosno * m_snow(i)) / a_ice(i);
+                    inv_th(i) = 1.0 / ((it > 9.0) ? it : 9.0);
+                    const real_t ms = m_ice(i) * rhoice + m_snow(i) * rhosno;
+                    const real_t ar = W.area0x(i);
+                    mass(i) = ms / ((1.0 + ms * ms) * ar);
+                    ice_nod(i) = 1;
+                }
+            });
+
+        /* (c) ghost element pre-map — TWIN of "maevp_elem_pre". mEVP's counterpart of std EVP's
+         * ghost ice_strength (fesom_ice_evp.cpp:634 "ice_evp_step3_w"): a pure map of the
+         * shipped m_ice/a_ice at the ghost element's vertices, so it is byte-equal to what the
+         * owner computed. pfac carries det2 (trap 2 — no 0.5 here). */
+        Kokkos::parallel_for("maevp_elem_pre_w", Kokkos::RangePolicy<>(0, Weg),
+            KOKKOS_LAMBDA(const int eg) {
+                W.pfac_g(eg)   = 0.0;
+                W.ice_el_g(eg) = 0;
+                const int n0 = W.en_g(3*eg + 0), n1 = W.en_g(3*eg + 1), n2 = W.en_g(3*eg + 2);
+                const real_t msum = (m_ice(n0) + m_ice(n1) + m_ice(n2)) * val3;
+                if (msum > 0.01) {
+                    W.ice_el_g(eg) = 1;
+                    const real_t asum = (a_ice(n0) + a_ice(n1) + a_ice(n2)) * val3;
+                    W.pfac_g(eg) = det2 * pstar * msum * Kokkos::exp(-c_press * (1.0 - asum));
+                }
+            });
+
+        /* (d) the divergence form's node mask over the ghost zone, and the R reset that goes
+         * with it.
+         *
+         * 🔴 THIS IS A GATHER, NOT A SCATTER, AND THAT IS THE WHOLE POINT. The first version
+         * looped ghost ELEMENTS and set `nod_el` at their three vertices — which is how the
+         * owned pass does it, and which is wrong here for a reason that is easy to miss: a
+         * ghost element's vertices include OWNED nodes. So the scatter reached back into owned
+         * state and set `nod_el` at owned nodes that the owned pass had left at 0, silently
+         * changing which owned nodes recurse R. The cell-④ byte gate caught it (26711790,
+         * a_ice max|Δ| 3.0e-4 at step 10 while cell ② was bit-identical) — the discriminator
+         * being that this kernel is the ONLY ghost-side kernel that can write at an owned index
+         * and the only one that runs in the divergence form alone.
+         *
+         * Correct construction: for each updatable ghost slot, ask the OWNER's question with
+         * the OWNER's data — does any element of MY GATHER ROW (which IS the owner's incident
+         * -element list, in the owner's order) carry ice? That writes at ghost slots only, by
+         * construction, and reproduces the owner's mask rather than approximating it. */
+        if (m9_div && !m9_nomask) {
+            Kokkos::parallel_for("maevp_nod_has_el_set_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+                KOKKOS_LAMBDA(const int n) {
+                    const int q0 = W.gath_ptr(n), q1 = W.gath_ptr(n + 1);
+                    int has = 0;
+                    for (int q = q0; q < q1 && !has; ++q) {
+                        const int ue = W.gath_elem(q);
+                        if (ue < Eo) { if (ulev_e(ue) <= 1 && ice_el(ue)) has = 1; }
+                        else         { if (W.ice_el_g(ue - Eo))          has = 1; }
+                    }
+                    if (has) nod_el(n) = 1;
+                });
+            Kokkos::parallel_for("maevp_R_reset_nonice_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+                KOKKOS_LAMBDA(const int i) {
+                    if (!nod_el(i)) { R_u(i) = 0.0; R_v(i) = 0.0; }
+                });
+        }
+    }
+
+    /* ── M9 SELFCHECK, step entry (plan §L2) ────────────────────────────────────────────────
+     * The naive check "R == div(sigma) for the whole run" CANNOT pass, and the reason is the
+     * scheme's own honest non-equivalence: the masks are recomputed every ocean step (above,
+     * outside this loop) and the classic assembly is restricted to ice_el, so div(sigma) drops a
+     * departing element's contribution INSTANTLY while R retains it decaying at det1 per
+     * subcycle. WITHIN a step the masks are fixed and the two forms are algebraically identical.
+     * So: measure the step-entry gap (that IS the mask-flip non-equivalence, a result to be
+     * reported), then re-baseline, then gate the INTRA-step drift at roundoff. */
+    double m9_jump = 0.0, m9_scale = 0.0, m9_drift = 0.0;
+    if (m9_div && m9_selfcheck) {
+        Kokkos::parallel_for("maevp_div_chk_zero", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+        /* div(sigma) under THIS step's masks, from the sigma carried out of the last step */
+        Kokkos::parallel_for("maevp_div_chk_asm", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+                const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * mfac(el);
+                const real_t S11 = s11(el), S12 = s12(el), S22 = s22(el);
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (n < myDim) {
+                        Kokkos::atomic_add(&Rchk_u(n), -(a * (S11*gsca(g+k) + S12*gsca(g+k+3)
+                                                              + S12*meancos)));
+                        Kokkos::atomic_add(&Rchk_v(n), -(a * (S12*gsca(g+k) + S22*gsca(g+k+3)
+                                                              - S11*meancos)));
+                    }
+                }
+            });
+        double jmax = 0.0, smax = 0.0;
+        Kokkos::parallel_reduce("maevp_div_chk_jump", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i, double &acc) {
+                const double du = Kokkos::fabs((double)R_u(i) - (double)Rchk_u(i));
+                const double dv = Kokkos::fabs((double)R_v(i) - (double)Rchk_v(i));
+                const double d  = du > dv ? du : dv;
+                if (d > acc) acc = d;
+            }, Kokkos::Max<double>(jmax));
+        Kokkos::parallel_reduce("maevp_div_chk_scale", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i, double &acc) {
+                const double au = Kokkos::fabs((double)Rchk_u(i));
+                const double av = Kokkos::fabs((double)Rchk_v(i));
+                const double a  = au > av ? au : av;
+                if (a > acc) acc = a;
+            }, Kokkos::Max<double>(smax));
+        m9_jump = jmax; m9_scale = smax;
+        /* re-baseline: from here the two forms start from the same state, so any gap that
+         * appears during the step is roundoff or a bug — nothing else. */
+        Kokkos::parallel_for("maevp_div_chk_rebase", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { R_u(i) = Rchk_u(i); R_v(i) = Rchk_v(i); });
+        /* Rchk is an ACCUMULATOR: it must be empty before the first subcycle assembles into it,
+         * or subcycle 1 would pile div(sigma^1) on top of this baseline. The in-loop zero (after
+         * each comparison) maintains the invariant from there on. */
+        Kokkos::parallel_for("maevp_div_chk_zero2", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+    }
 
     /* ================= mEVP pseudo-time iteration (:680-875) ================= */
     for (int shortstep = 1; shortstep <= steps; ++shortstep) {
 
+      if (!m9_div) {
+       if (m9_lean) {
+        /* ══ P5 CELL ②L — the FUSED element kernel ═══════════════════════════════════════════
+         * "maevp_stress" and "maevp_stress_w" in ONE launch over [0, Eo+Weg), which is the
+         * structure of Danilov's `ice_mevp_double.F90` (one loop, widened bounds) reached the
+         * only way a separate-array port can reach it: select the array by an index branch.
+         * Every expression below the selection is the owned body verbatim.
+         *
+         * TWO DELIBERATE DEPARTURES FROM THE EXACT PATH:
+         *   - the eps stores stay owned-only (`!gh`): eps11/12/22 are element-sized over owned
+         *     elements, and nothing in the mEVP path reads them (that is what MEVPNOEPS measures).
+         *   - 🔴 the assembly is now an UNGUARDED SCATTER. The exact path forbade a ghost
+         *     scatter because the ghost node's rhs had to be summed in the OWNER's element order
+         *     (that is what bought bit-identity); the lean path gives that up on purpose, so a
+         *     ghost node is assembled exactly the way an owned node is — atomically, in MY
+         *     element order. The difference against the exact path is therefore a summation
+         *     ORDER, i.e. last-bit in origin, which is the class Danilov predicts.
+         *   - the ghost half still stops at `n < myDim`. A ghost element is one I do NOT hold in
+         *     [0, Eo); the owned assembly over [0, Eo) is what defines an owned node's rhs, so if
+         *     such an element ever did touch an owned node (L106 says it can) its contribution is
+         *     not part of that definition and must not be added. One compare, and it makes the
+         *     L106 hazard structurally impossible rather than audited. */
+        Kokkos::parallel_for("maevp_stress_lean", Kokkos::RangePolicy<>(0, Lelem),
+            KOKKOS_LAMBDA(const int idx) {
+                const bool gh = (idx >= Eo);
+                const int  el = gh ? idx - Eo : idx;
+                if (!gh && ulev_e_p[el] > 1) return;                /* (:690) */
+                if (!(gh ? iel_gp[el] : ice_el_p[el])) return;      /* (:693) */
+
+                const int    *const EN = gh ? en_gp   : en_p;
+                const real_t *const GS = gh ? gs_gp   : gsca_p;
+                const real_t *const EA = gh ? ea_gp   : ea_p;
+                const real_t *const MF = gh ? mf_gp   : mfac_p;
+                const real_t *const PF = gh ? pfac_gp : pfac_p;
+                real_t *const A11 = gh ? s11_gp : s11_p;
+                real_t *const A12 = gh ? s12_gp : s12_p;
+                real_t *const A22 = gh ? s22_gp : s22_p;
+
+                const int eln[3] = { EN[3*el + 0], EN[3*el + 1], EN[3*el + 2] };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * MF[el];
+                const real_t U0 = u_aux_p[eln[0]], U1 = u_aux_p[eln[1]], U2 = u_aux_p[eln[2]];
+                const real_t V0 = v_aux_p[eln[0]], V1 = v_aux_p[eln[1]], V2 = v_aux_p[eln[2]];
+
+                const real_t E11 = GS[g+0]*U0 + GS[g+1]*U1 + GS[g+2]*U2
+                                 - (V0 + V1 + V2) * meancos;
+                const real_t E22 = GS[g+3]*V0 + GS[g+4]*V1 + GS[g+5]*V2;
+                const real_t E12 = 0.5 * ( GS[g+3]*U0 + GS[g+4]*U1 + GS[g+5]*U2
+                                         + GS[g+0]*V0 + GS[g+1]*V1 + GS[g+2]*V2
+                                         + (U0 + U1 + U2) * meancos );
+                if (!gh && !m9_noeps) { eps11_p[el] = E11; eps22_p[el] = E22; eps12_p[el] = E12; }
+
+                const real_t eps1 = E11 + E22;
+                const real_t eps2 = E11 - E22;
+
+                const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                const real_t pressure = PF[el] / (delta + delta_min);
+
+                /* trap 2: the 0.5 is on 11/22, never on 12 */
+                const real_t S12 = det1*A12[el] +     pressure * E12 * vale;
+                const real_t S11 = det1*A11[el] + 0.5*pressure * (eps1 - delta + eps2*vale);
+                const real_t S22 = det1*A22[el] + 0.5*pressure * (eps1 - delta - eps2*vale);
+                A12[el] = S12; A11[el] = S11; A22[el] = S22;
+
+                const real_t a = EA[el];
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (gh && n < myDim) continue;
+                    Kokkos::atomic_add(&u_rhs_p[n], -(a * (S11*GS[g+k] + S12*GS[g+k+3]
+                                                           + S12*meancos)));
+                    Kokkos::atomic_add(&v_rhs_p[n], -(a * (S12*GS[g+k] + S22*GS[g+k+3]
+                                                           - S11*meancos)));
+                }
+            });
+       } else {
         /* inlined stress_tensor_m + stress2rhs_m: element loop (:689-792) */
         Kokkos::parallel_for("maevp_stress", Kokkos::RangePolicy<>(0, Eo),
             KOKKOS_LAMBDA(const int el) {
@@ -240,7 +788,13 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
                                          + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
                                          + (U0 + U1 + U2) * meancos );          /* metrics */
-                eps11(el) = E11; eps22(el) = E22; eps12(el) = E12;
+                /* M9 confound control (FESOM_SPEED_MEVPNOEPS): these three element stores are
+                 * never read in the mEVP path — only std EVP reads those arrays
+                 * (fesom_ice_evp.cpp:117-129) — and they cost about what the reformulation
+                 * saves, so they are measured on their OWN leg. Branching around pure STORES
+                 * cannot change any computed value: E11/E22/E12 are already in registers and
+                 * nothing downstream reads the arrays. */
+                if (!m9_noeps) { eps11(el) = E11; eps22(el) = E22; eps12(el) = E12; }
 
                 /* switch to eps1, eps2 (:708-709) */
                 const real_t eps1 = E11 + E22;
@@ -271,12 +825,358 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 }
             });
 
+        /* ══ M9 CELL ② — the GHOST element pass ══════════════════════════════════════════════
+         * TWIN of "maevp_stress" immediately above — EDIT BOTH OR NEITHER. Every expression is
+         * character-for-character the owned body with the views swapped for their _g twins; that
+         * textual identity inside the SAME TU is the whole byte-equality argument (same FMA
+         * contraction), exactly as std EVP's ghost twin at fesom_ice_evp.cpp:721.
+         *
+         * Two structural differences from the owned body, both forced:
+         *   - NO eps stores: eps11/12/22 are element-sized over OWNED elements only, and nothing
+         *     reads them in the mEVP path anyway (that is what MEVPNOEPS measures).
+         *   - NO scatter: a ghost element must not atomic_add into u_rhs, because the ghost
+         *     node's rhs is GATHERED in the owner's element order inside the node kernel. A
+         *     scatter here would double-count and would also destroy the ordering the byte
+         *     argument rests on.
+         * It is a SEPARATE LAUNCH rather than an appended range (which is what std EVP does)
+         * because the owned mEVP kernel must stay byte-identical and the two bodies index
+         * different arrays throughout; a fused `if (el < Eo)` would put both bodies' registers
+         * in one kernel and, per L103, that is not free on CUDA even when a branch is untaken. */
+        if (m9_wideK)
+            Kokkos::parallel_for("maevp_stress_w", Kokkos::RangePolicy<>(0, Weg),
+                KOKKOS_LAMBDA(const int eg) {
+                    if (!W.ice_el_g(eg)) return;
+
+                    const int eln[3] = { W.en_g(3*eg + 0), W.en_g(3*eg + 1), W.en_g(3*eg + 2) };
+                    const size_t g = (size_t)6 * eg;
+                    const real_t meancos = val3 * W.mf_g(eg);
+                    const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                    const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+
+                    const real_t E11 = W.gs_g(g+0)*U0 + W.gs_g(g+1)*U1 + W.gs_g(g+2)*U2
+                                     - (V0 + V1 + V2) * meancos;
+                    const real_t E22 = W.gs_g(g+3)*V0 + W.gs_g(g+4)*V1 + W.gs_g(g+5)*V2;
+                    const real_t E12 = 0.5 * ( W.gs_g(g+3)*U0 + W.gs_g(g+4)*U1 + W.gs_g(g+5)*U2
+                                             + W.gs_g(g+0)*V0 + W.gs_g(g+1)*V1 + W.gs_g(g+2)*V2
+                                             + (U0 + U1 + U2) * meancos );
+
+                    const real_t eps1 = E11 + E22;
+                    const real_t eps2 = E11 - E22;
+
+                    const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                    const real_t pressure = W.pfac_g(eg) / (delta + delta_min);
+
+                    /* trap 2 holds in the ghost zone too: the 0.5 is on 11/22, never on 12.
+                     * Locals-then-store keeps the expression text identical to the owned twin
+                     * (each line reads only its OWN old component, so it is also correct). */
+                    const real_t S12 = det1*W.s12_g(eg) +     pressure * E12 * vale;
+                    const real_t S11 = det1*W.s11_g(eg) + 0.5*pressure * (eps1 - delta + eps2*vale);
+                    const real_t S22 = det1*W.s22_g(eg) + 0.5*pressure * (eps1 - delta - eps2*vale);
+                    W.s12_g(eg) = S12; W.s11_g(eg) = S11; W.s22_g(eg) = S22;
+                });
+       }
+      } else {
+        /* ══ M9 DIVERGENCE FORM — element kernel ═════════════════════════════════════════════
+         * TWIN OF maevp_stress ABOVE — EDIT BOTH OR NEITHER. Everything through `pressure` is
+         * character-for-character the classic kernel; the difference is confined to the three
+         * stress lines and the absence of the sigma stores.
+         *
+         * Why a separate kernel rather than a branch inside the classic one: the classic path
+         * must stay BYTE-IDENTICAL with the knob off, and folding `det1*s11(el)` behind a
+         * ternary would let the compiler contract the FMA differently. Duplication is the
+         * cheaper of the two risks here.
+         *
+         * pfac already carries det2 (:213), so what this assembles into u_rhs/v_rhs is exactly
+         * det2*div(sigma~) — the increment the node recursion needs. No carried term, no store:
+         * 3 element loads and 3 element stores per element per subcycle disappear. */
+       if (m9_lean) {
+        /* ══ P5 CELL ④L — the FUSED element kernel of the divergence form ════════════════════
+         * Replaces BOTH "maevp_stress_div" and "maevp_gather_div_w", and the second of those is
+         * where the divergence form's lean variant earns more than the classic one does: the
+         * gather recomputed each incident element's stress ONCE PER (ghost node, element) pair,
+         * i.e. ~6x over, precisely because it could not scatter. Scattering computes it once.
+         * It also dissolves both L106 defects by construction — the recompute-after-the-solve
+         * timing hazard and the read-write race on u_aux — because an element kernel that scatters
+         * runs before any node kernel and writes no velocity. */
+        Kokkos::parallel_for("maevp_stress_div_lean", Kokkos::RangePolicy<>(0, Lelem),
+            KOKKOS_LAMBDA(const int idx) {
+                const bool gh = (idx >= Eo);
+                const int  el = gh ? idx - Eo : idx;
+                if (!gh && ulev_e_p[el] > 1) return;
+                if (!(gh ? iel_gp[el] : ice_el_p[el])) return;
+
+                const int    *const EN = gh ? en_gp   : en_p;
+                const real_t *const GS = gh ? gs_gp   : gsca_p;
+                const real_t *const EA = gh ? ea_gp   : ea_p;
+                const real_t *const MF = gh ? mf_gp   : mfac_p;
+                const real_t *const PF = gh ? pfac_gp : pfac_p;
+
+                const int eln[3] = { EN[3*el + 0], EN[3*el + 1], EN[3*el + 2] };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * MF[el];
+                const real_t U0 = u_aux_p[eln[0]], U1 = u_aux_p[eln[1]], U2 = u_aux_p[eln[2]];
+                const real_t V0 = v_aux_p[eln[0]], V1 = v_aux_p[eln[1]], V2 = v_aux_p[eln[2]];
+
+                const real_t E11 = GS[g+0]*U0 + GS[g+1]*U1 + GS[g+2]*U2
+                                 - (V0 + V1 + V2) * meancos;
+                const real_t E22 = GS[g+3]*V0 + GS[g+4]*V1 + GS[g+5]*V2;
+                const real_t E12 = 0.5 * ( GS[g+3]*U0 + GS[g+4]*U1 + GS[g+5]*U2
+                                         + GS[g+0]*V0 + GS[g+1]*V1 + GS[g+2]*V2
+                                         + (U0 + U1 + U2) * meancos );
+                if (!gh && !m9_noeps) { eps11_p[el] = E11; eps22_p[el] = E22; eps12_p[el] = E12; }
+
+                const real_t eps1 = E11 + E22;
+                const real_t eps2 = E11 - E22;
+
+                const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                const real_t pressure = PF[el] / (delta + delta_min);
+
+                const real_t S12 =     pressure * E12 * vale;
+                const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
+                const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
+
+                const real_t a = EA[el];
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (gh && n < myDim) continue;
+                    Kokkos::atomic_add(&u_rhs_p[n], -(a * (S11*GS[g+k] + S12*GS[g+k+3]
+                                                           + S12*meancos)));
+                    Kokkos::atomic_add(&v_rhs_p[n], -(a * (S12*GS[g+k] + S22*GS[g+k+3]
+                                                           - S11*meancos)));
+                }
+            });
+       } else {
+        Kokkos::parallel_for("maevp_stress_div", Kokkos::RangePolicy<>(0, Eo),
+            KOKKOS_LAMBDA(const int el) {
+                if (ulev_e(el) > 1) return;
+                if (!ice_el(el))    return;
+
+                const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                const size_t g = (size_t)6 * el;
+                const real_t meancos = val3 * mfac(el);
+                const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+
+                const real_t E11 = gsca(g+0)*U0 + gsca(g+1)*U1 + gsca(g+2)*U2
+                                 - (V0 + V1 + V2) * meancos;
+                const real_t E22 = gsca(g+3)*V0 + gsca(g+4)*V1 + gsca(g+5)*V2;
+                const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
+                                         + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
+                                         + (U0 + U1 + U2) * meancos );
+                if (!m9_noeps) { eps11(el) = E11; eps22(el) = E22; eps12(el) = E12; }
+
+                const real_t eps1 = E11 + E22;
+                const real_t eps2 = E11 - E22;
+
+                const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                const real_t pressure = pfac(el) / (delta + delta_min);
+
+                /* the VP stress itself — trap 2 still holds: the 0.5 is on 11/22, not on 12 */
+                const real_t S12 =     pressure * E12 * vale;
+                const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
+                const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
+
+                /* same assembly as the classic kernel, same owned-node guard (trap 6) */
+                const real_t a = ea(el);
+                for (int k = 0; k < 3; ++k) {
+                    const int n = eln[k];
+                    if (n < myDim) {
+                        Kokkos::atomic_add(&u_rhs(n), -(a * (S11*gsca(g+k) + S12*gsca(g+k+3)
+                                                             + S12*meancos)));
+                        Kokkos::atomic_add(&v_rhs(n), -(a * (S12*gsca(g+k) + S22*gsca(g+k+3)
+                                                             - S11*meancos)));
+                    }
+                }
+            });
+
+        /* ══ M9 CELL ④ — the GHOST GATHER pass for the divergence form ═══════════════════════
+         * TWIN of the assembly inside "maevp_stress_div" immediately above — EDIT BOTH OR
+         * NEITHER. It recomputes each incident element's stress and sums the contributions into
+         * u_rhs/v_rhs at the ghost slot, in the OWNER's element order.
+         *
+         * 🔴🔴 WHY THIS IS A SEPARATE PASS HERE AND NOT PART OF THE GHOST NODE SOLVE. It was
+         * inside the node kernel first, and the cell-④ byte gate failed while cell ② — same
+         * rings, same ship, same maps, same solve tail — was bit-identical (26711920/21). Two
+         * independent defects, both invisible on inspection and both fatal:
+         *
+         *   1. TIMING. The divergence form stores NO element stress, so the gather must
+         *      recompute it from u_aux. But the OWNED node solve runs first and OVERWRITES
+         *      u_aux at every owned node — so a gather placed after it recomputed the owned
+         *      elements' stress from POST-solve velocities, while the owner had assembled from
+         *      PRE-solve ones. Cell ② is immune by construction: its stress was computed and
+         *      STORED by the element pass, so reading it later is safe.
+         *   2. A READ-WRITE RACE. The recompute reads u_aux at OTHER slots (the element's other
+         *      two vertices, which can be other ghost slots). Inside a kernel that is itself
+         *      writing u_aux at ghost slots, that is a genuine race — benign-looking on Serial,
+         *      nondeterministic on CUDA.
+         *
+         * Placed HERE — after the owned element kernel, before any node update — no kernel is
+         * writing u_aux, so the reads are both correctly timed and race-free. The staged
+         * u_rhs/v_rhs are per-subcycle scratch: nothing element-shaped is carried or shipped,
+         * so cell ④'s 4*Ng-doubles window message is untouched. */
+        if (m9_wideK)
+            Kokkos::parallel_for("maevp_gather_div_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+                KOKKOS_LAMBDA(const int n) {
+                    const int q0 = W.gath_ptr(n), q1 = W.gath_ptr(n + 1);
+                    if (q0 == q1) return;             /* ring K: frozen until the refresh */
+                    real_t ur = 0.0, vr = 0.0;
+                    for (int q = q0; q < q1; ++q) {
+                        const int ue = W.gath_elem(q), kk = W.gath_k(q);
+                        real_t cu, cv;
+                        if (ue < Eo) {                /* an element I own: same skips as the owner */
+                            if (ulev_e(ue) > 1) continue;
+                            if (!ice_el(ue))    continue;
+                            const int eln[3] = { en(3*ue + 0), en(3*ue + 1), en(3*ue + 2) };
+                            const size_t g = (size_t)6 * ue;
+                            const real_t meancos = val3 * mfac(ue);
+                            const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                            const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+                            const real_t E11 = gsca(g+0)*U0 + gsca(g+1)*U1 + gsca(g+2)*U2
+                                             - (V0 + V1 + V2) * meancos;
+                            const real_t E22 = gsca(g+3)*V0 + gsca(g+4)*V1 + gsca(g+5)*V2;
+                            const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
+                                                     + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
+                                                     + (U0 + U1 + U2) * meancos );
+                            const real_t eps1 = E11 + E22;
+                            const real_t eps2 = E11 - E22;
+                            const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                            const real_t pressure = pfac(ue) / (delta + delta_min);
+                            const real_t S12 =     pressure * E12 * vale;
+                            const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
+                            const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
+                            const real_t a = ea(ue);
+                            cu = -(a * (S11*gsca(g+kk) + S12*gsca(g+kk+3) + S12*meancos));
+                            cv = -(a * (S12*gsca(g+kk) + S22*gsca(g+kk+3) - S11*meancos));
+                        } else {                      /* a ghost element: its _g twin */
+                            const int eg = ue - Eo;
+                            if (!W.ice_el_g(eg)) continue;
+                            const int eln[3] = { W.en_g(3*eg + 0), W.en_g(3*eg + 1), W.en_g(3*eg + 2) };
+                            const size_t g = (size_t)6 * eg;
+                            const real_t meancos = val3 * W.mf_g(eg);
+                            const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                            const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+                            const real_t E11 = W.gs_g(g+0)*U0 + W.gs_g(g+1)*U1 + W.gs_g(g+2)*U2
+                                             - (V0 + V1 + V2) * meancos;
+                            const real_t E22 = W.gs_g(g+3)*V0 + W.gs_g(g+4)*V1 + W.gs_g(g+5)*V2;
+                            const real_t E12 = 0.5 * ( W.gs_g(g+3)*U0 + W.gs_g(g+4)*U1 + W.gs_g(g+5)*U2
+                                                     + W.gs_g(g+0)*V0 + W.gs_g(g+1)*V1 + W.gs_g(g+2)*V2
+                                                     + (U0 + U1 + U2) * meancos );
+                            const real_t eps1 = E11 + E22;
+                            const real_t eps2 = E11 - E22;
+                            const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                            const real_t pressure = W.pfac_g(eg) / (delta + delta_min);
+                            const real_t S12 =     pressure * E12 * vale;
+                            const real_t S11 = 0.5*pressure * (eps1 - delta + eps2*vale);
+                            const real_t S22 = 0.5*pressure * (eps1 - delta - eps2*vale);
+                            const real_t a = W.ea_g(eg);
+                            cu = -(a * (S11*W.gs_g(g+kk) + S12*W.gs_g(g+kk+3) + S12*meancos));
+                            cv = -(a * (S12*W.gs_g(g+kk) + S22*W.gs_g(g+kk+3) - S11*meancos));
+                        }
+                        ur += cu; vr += cv;
+                    }
+                    u_rhs(n) = ur; v_rhs(n) = vr;
+                });
+       }
+
+        /* ── M9 selfcheck: the reference sigma path, in its OWN kernel ──────────────────────
+         * This used to be an `if (m9_selfcheck)` block INSIDE the kernel above. That was a
+         * measurement bug of the first order: on CUDA a never-taken branch still costs the
+         * registers its body needs, and the occupancy that buys. Fleet 1A measured the
+         * divergence form 30% slower on icedyn (GPU np8) and 39% slower at CPU np1 — a
+         * penalty that scaled with per-rank workload, i.e. per element, while the mask
+         * ablation showed the node kernel was innocent. The only remaining difference in the
+         * hot element kernel was this diagnostic. It is a separate launch now; it only ever
+         * runs in SELFCHECK mode, where speed is irrelevant, so it recomputes the strain
+         * rather than sharing registers with the path being timed.
+         * 🔴 LESSON: never leave a diagnostic branch inside a kernel you intend to time. */
+        if (m9_selfcheck) {
+            Kokkos::parallel_for("maevp_div_chk_elem", Kokkos::RangePolicy<>(0, Eo),
+                KOKKOS_LAMBDA(const int el) {
+                    if (ulev_e(el) > 1) return;
+                    if (!ice_el(el))    return;
+                    const int eln[3] = { en(3*el + 0), en(3*el + 1), en(3*el + 2) };
+                    const size_t g = (size_t)6 * el;
+                    const real_t meancos = val3 * mfac(el);
+                    const real_t U0 = u_aux(eln[0]), U1 = u_aux(eln[1]), U2 = u_aux(eln[2]);
+                    const real_t V0 = v_aux(eln[0]), V1 = v_aux(eln[1]), V2 = v_aux(eln[2]);
+                    const real_t E11 = gsca(g+0)*U0 + gsca(g+1)*U1 + gsca(g+2)*U2
+                                     - (V0 + V1 + V2) * meancos;
+                    const real_t E22 = gsca(g+3)*V0 + gsca(g+4)*V1 + gsca(g+5)*V2;
+                    const real_t E12 = 0.5 * ( gsca(g+3)*U0 + gsca(g+4)*U1 + gsca(g+5)*U2
+                                             + gsca(g+0)*V0 + gsca(g+1)*V1 + gsca(g+2)*V2
+                                             + (U0 + U1 + U2) * meancos );
+                    const real_t eps1 = E11 + E22, eps2 = E11 - E22;
+                    const real_t delta = Kokkos::sqrt(eps1*eps1 + vale*(eps2*eps2 + 4.0*E12*E12));
+                    const real_t pressure = pfac(el) / (delta + delta_min);
+                    /* the classic recursion, verbatim — this is the reference being compared */
+                    const real_t C12 = det1*s12(el) +     pressure * E12 * vale;
+                    const real_t C11 = det1*s11(el) + 0.5*pressure * (eps1 - delta + eps2*vale);
+                    const real_t C22 = det1*s22(el) + 0.5*pressure * (eps1 - delta - eps2*vale);
+                    s12(el) = C12; s11(el) = C11; s22(el) = C22;
+                    const real_t ac = ea(el);
+                    for (int k = 0; k < 3; ++k) {
+                        const int n = eln[k];
+                        if (n < myDim) {
+                            Kokkos::atomic_add(&Rchk_u(n), -(ac * (C11*gsca(g+k) + C12*gsca(g+k+3)
+                                                                   + C12*meancos)));
+                            Kokkos::atomic_add(&Rchk_v(n), -(ac * (C12*gsca(g+k) + C22*gsca(g+k+3)
+                                                                   - C11*meancos)));
+                        }
+                    }
+                });
+        }
+      }
+
         /* node solve (:795-819). ⚠️ TRAP 13: non-ice nodes are SKIPPED — there is NO else branch;
          * a non-ice node KEEPS its u_ice_aux value (std EVP zeroes here; mEVP must not).
          * ⚠️ TRAP 9: bc_index_nod2D multiplies det (:814).
          * ⚠️ TRAP 1: the drag CARRIES rdt; drag·u_w sits OUTSIDE the rdt·(…) group;
          *            +beta·u_aux closes the rhs (:806-811).
          * ⚠️ TRAP 3: NO theta_io rotation anywhere. */
+      if (!m9_div) {
+       if (m9_lean) {
+        /* ══ P5 CELL ②L — the FUSED node solve ═══════════════════════════════════════════════
+         * "maevp_node_solve" and "maevp_node_solve_w" in one launch. The owner-order gather is
+         * gone: `u_rhs` at a ghost slot was scattered into by the fused element kernel above,
+         * exactly as at an owned slot, so the body below is the owned twin verbatim with three
+         * substitutions that are provably no-ops on the owned range —
+         *   cor      -> corx  (evpw_build seeds corx from the local mesh for every slot < N and
+         *   bc_index -> bcx    overwrites only ghost slots >= myDim, so both agree bitwise
+         *                      below myDim; one array beats a branch)
+         *   ulev_n>1 -> dropped: maevp_node_pre zeroes ice_nod BEFORE its own cavity return, so
+         *                      `ice_nod` already implies `ulevels_nod2D == 1`. Dropping it also
+         *                      keeps this kernel off a mesh array that has no ghost extension. */
+        Kokkos::parallel_for("maevp_node_solve_lean", Kokkos::RangePolicy<>(0, Lnode),
+            KOKKOS_LAMBDA(const int n) {
+                /* ring K — and, at R=1, every halo slot — has an empty gather row and is frozen
+                 * between refreshes, exactly as in the exact path. `gath_ptr` is the one piece of
+                 * the CSR the lean path keeps: two loads, no traversal. */
+                if (n >= myDim && gptr_p[n] == gptr_p[n + 1]) return;
+                if (!ice_nod_p[n]) return;              /* trap 13: NO else — u_aux is kept */
+
+                const real_t urhs = u_rhs_p[n] * mass_p[n] + rhs_a_p[n];
+                const real_t vrhs = v_rhs_p[n] * mass_p[n] + rhs_m_p[n];
+
+                const real_t du   = u_aux_p[n] - u_w_p[n];
+                const real_t dv   = v_aux_p[n] - v_w_p[n];
+                const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                const real_t drag = rdt * cd * umod * rho0 * inv_th_p[n];
+
+                const real_t rhsu = u_ice_p[n] + drag*u_w_p[n]
+                                  + rdt*(inv_th_p[n]*sax_p[n] + urhs)
+                                  + beta_evp*u_aux_p[n];
+                const real_t rhsv = v_ice_p[n] + drag*v_w_p[n]
+                                  + rdt*(inv_th_p[n]*say_p[n] + vrhs)
+                                  + beta_evp*v_aux_p[n];
+
+                const real_t obd = 1.0 + beta_evp + drag;
+                const real_t rf  = rdt * corx_p[n];
+                const real_t det = bcx_p[n] / (obd*obd + rf*rf);
+
+                u_aux_p[n] = det * (obd*rhsu + rf*rhsv);
+                v_aux_p[n] = det * (obd*rhsv - rf*rhsu);
+            });
+       } else {
         Kokkos::parallel_for("maevp_node_solve", Kokkos::RangePolicy<>(0, myDim),
             KOKKOS_LAMBDA(const int i) {
                 if (ulev_n(i) > 1) return;                  /* (:797) */
@@ -307,27 +1207,369 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
                 v_aux(i) = det * (obd*rhsv - rf*rhsu);
             });
 
+        /* ══ M9 CELL ② — the GHOST node solve ════════════════════════════════════════════════
+         * TWIN of "maevp_node_solve" immediately above — EDIT BOTH OR NEITHER.
+         *
+         * The one structural difference is where the rhs comes from. The owned node reads
+         * u_rhs(i), which owned elements SCATTERED into it with atomic_add in element order. A
+         * ghost node cannot be scattered into (its elements are spread over several ranks and
+         * the order would not be the owner's), so it GATHERS instead — over the owner's own
+         * incident-element list, in the owner's order, which evpw_build shipped as the CSR
+         * (gath_ptr/gath_elem/gath_k). Replaying the owner's summation ORDER is what makes this
+         * exact rather than merely close: floating-point addition is not associative, and on
+         * Serial the owner's scatter IS that sequential order.
+         *
+         * ⚠️ Each contribution goes into an explicit temp and is then ADDED. Folding it into
+         *    the running sum would let the compiler contract an FMA there and change the bytes.
+         *    (Same rule, same reason, as std EVP's replay at fesom_ice_evp.cpp:876.)
+         *
+         * Slots with an EMPTY gather row are ring K — frozen between refreshes by contract.
+         * They keep the values the last window ship gave them, which is exactly right: the dirt
+         * their staleness would cause never reaches an owned read before the next refresh. */
+        if (m9_wideK)
+            Kokkos::parallel_for("maevp_node_solve_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+                KOKKOS_LAMBDA(const int n) {
+                    const int q0 = W.gath_ptr(n), q1 = W.gath_ptr(n + 1);
+                    if (q0 == q1) return;                 /* ring K: frozen until the refresh */
+                    if (!ice_nod(n)) return;              /* trap 13: NO else — u_aux is kept */
+
+                    real_t ur = 0.0, vr = 0.0;
+                    for (int q = q0; q < q1; ++q) {
+                        const int ue = W.gath_elem(q), kk = W.gath_k(q);
+                        if (ue < Eo) {                    /* an element I own: same skips as the owner */
+                            if (ulev_e(ue) > 1) continue;
+                            if (!ice_el(ue))    continue;
+                            const size_t g = (size_t)6 * ue;
+                            const real_t meancos = val3 * mfac(ue);
+                            const real_t a = ea(ue);
+                            const real_t cu = -(a * (s11(ue)*gsca(g+kk) + s12(ue)*gsca(g+kk+3)
+                                                     + s12(ue)*meancos));
+                            const real_t cv = -(a * (s12(ue)*gsca(g+kk) + s22(ue)*gsca(g+kk+3)
+                                                     - s11(ue)*meancos));
+                            ur += cu; vr += cv;
+                        } else {                          /* a ghost element: its _g twin */
+                            const int eg = ue - Eo;
+                            if (!W.ice_el_g(eg)) continue;
+                            const size_t g = (size_t)6 * eg;
+                            const real_t meancos = val3 * W.mf_g(eg);
+                            const real_t a = W.ea_g(eg);
+                            const real_t cu = -(a * (W.s11_g(eg)*W.gs_g(g+kk) + W.s12_g(eg)*W.gs_g(g+kk+3)
+                                                     + W.s12_g(eg)*meancos));
+                            const real_t cv = -(a * (W.s12_g(eg)*W.gs_g(g+kk) + W.s22_g(eg)*W.gs_g(g+kk+3)
+                                                     - W.s11_g(eg)*meancos));
+                            ur += cu; vr += cv;
+                        }
+                    }
+
+                    /* from here down: the owned twin verbatim, with the two ghost substitutions
+                     * cor -> W.corx and bc_index -> W.bcx (both owner bytes; bc_index is derived
+                     * from LOCAL edges, so a ghost slot has no correct local value at all). */
+                    const real_t urhs = ur * mass(n) + rhs_a(n);
+                    const real_t vrhs = vr * mass(n) + rhs_m(n);
+
+                    const real_t du   = u_aux(n) - u_w(n);
+                    const real_t dv   = v_aux(n) - v_w(n);
+                    const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                    const real_t drag = rdt * cd * umod * rho0 * inv_th(n);
+
+                    const real_t rhsu = u_ice(n) + drag*u_w(n)
+                                      + rdt*(inv_th(n)*sax(n) + urhs)
+                                      + beta_evp*u_aux(n);
+                    const real_t rhsv = v_ice(n) + drag*v_w(n)
+                                      + rdt*(inv_th(n)*say(n) + vrhs)
+                                      + beta_evp*v_aux(n);
+
+                    const real_t obd = 1.0 + beta_evp + drag;
+                    const real_t rf  = rdt * W.corx(n);
+                    const real_t det = W.bcx(n) / (obd*obd + rf*rf);
+
+                    u_aux(n) = det * (obd*rhsu + rf*rhsv);
+                    v_aux(n) = det * (obd*rhsv - rf*rhsu);
+                });
+       }
+      } else {
+        /* ══ M9 DIVERGENCE FORM — node solve ═════════════════════════════════════════════════
+         * TWIN OF maevp_node_solve ABOVE — EDIT BOTH OR NEITHER. Identical from the drag line
+         * down; the two differences are the R recursion and where it sits.
+         *
+         * 🔴🔴 THE M9 TRAP. The R recursion runs for EVERY owned node, OUTSIDE the ice_nod
+         * guard. The element mask is mean(m_ice) > 0.01 (trap 4, :210) and the node mask is
+         * a_ice >= 0.01 (:185) — DIFFERENT CRITERIA — so sigma genuinely evolves on elements
+         * whose vertices are not ice nodes. Put the recursion inside the guard and R freezes at
+         * those nodes, then hands the solve a stale divergence the moment they ice over. The
+         * classic form has no equivalent bug because sigma lives on the elements, which have
+         * their own mask. Only the VELOCITY solve stays masked, exactly as in the twin.
+         * (Cavity nodes are likewise updated: div(sigma) there is the sum over incident
+         * non-cavity ice elements, which is precisely what u_rhs already holds.) */
+       if (m9_lean) {
+        /* ══ P5 CELL ④L — the FUSED node solve of the divergence form ════════════════════════
+         * "maevp_node_solve_div" and "maevp_node_solve_div_w" in one launch. Same three
+         * substitutions as ②L, and the M9 trap still governs: the R recursion runs OUTSIDE the
+         * ice_nod guard, for every updatable slot, because the element mask (mean m_ice) and the
+         * node mask (a_ice) are different criteria. Only the velocity solve is masked. */
+        Kokkos::parallel_for("maevp_node_solve_div_lean", Kokkos::RangePolicy<>(0, Lnode),
+            KOKKOS_LAMBDA(const int n) {
+                if (n >= myDim && gptr_p[n] == gptr_p[n + 1]) return;   /* ring K: frozen */
+                if (!m9_nomask && !nod_el_p[n]) return;                 /* holds R == 0 */
+
+                const real_t Ru = det1*R_u_p[n] + u_rhs_p[n];
+                const real_t Rv = det1*R_v_p[n] + v_rhs_p[n];
+                R_u_p[n] = Ru; R_v_p[n] = Rv;
+
+                if (!ice_nod_p[n]) return;             /* trap 13: NO else — u_aux is kept */
+
+                const real_t urhs = Ru * mass_p[n] + rhs_a_p[n];
+                const real_t vrhs = Rv * mass_p[n] + rhs_m_p[n];
+
+                const real_t du   = u_aux_p[n] - u_w_p[n];
+                const real_t dv   = v_aux_p[n] - v_w_p[n];
+                const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                const real_t drag = rdt * cd * umod * rho0 * inv_th_p[n];
+
+                const real_t rhsu = u_ice_p[n] + drag*u_w_p[n]
+                                  + rdt*(inv_th_p[n]*sax_p[n] + urhs)
+                                  + beta_evp*u_aux_p[n];
+                const real_t rhsv = v_ice_p[n] + drag*v_w_p[n]
+                                  + rdt*(inv_th_p[n]*say_p[n] + vrhs)
+                                  + beta_evp*v_aux_p[n];
+
+                const real_t obd = 1.0 + beta_evp + drag;
+                const real_t rf  = rdt * corx_p[n];
+                const real_t det = bcx_p[n] / (obd*obd + rf*rf);
+
+                u_aux_p[n] = det * (obd*rhsu + rf*rhsv);
+                v_aux_p[n] = det * (obd*rhsv - rf*rhsu);
+            });
+       } else {
+        Kokkos::parallel_for("maevp_node_solve_div", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int i) {
+                /* Nodes with no incident ice element contribute nothing and hold R == 0 (reset
+                 * at step entry): div(sigma) there is exactly 0 in the classic form too. Skipping
+                 * them is what keeps this kernel's cost proportional to the ice-covered region
+                 * instead of the whole domain — see the banner above the mask construction. */
+                if (!m9_nomask && !nod_el(i)) return;
+
+                const real_t Ru = det1*R_u(i) + u_rhs(i);
+                const real_t Rv = det1*R_v(i) + v_rhs(i);
+                R_u(i) = Ru; R_v(i) = Rv;
+
+                if (ulev_n(i) > 1) return;                  /* (:797) */
+                if (!ice_nod(i))   return;                  /* skip if ice is absent — NO else */
+
+                /* the classic kernel writes the scaled value back into u_rhs; here u_rhs stays
+                 * the pure per-subcycle accumulator and R carries the state, so the scaling
+                 * lands in a local. `mass` is applied AT USE — R itself is stored unscaled. */
+                const real_t urhs = Ru * mass(i) + rhs_a(i);
+                const real_t vrhs = Rv * mass(i) + rhs_m(i);
+
+                const real_t du   = u_aux(i) - u_w(i);
+                const real_t dv   = v_aux(i) - v_w(i);
+                const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                const real_t drag = rdt * cd * umod * rho0 * inv_th(i);
+
+                const real_t rhsu = u_ice(i) + drag*u_w(i)
+                                  + rdt*(inv_th(i)*sax(i) + urhs)
+                                  + beta_evp*u_aux(i);
+                const real_t rhsv = v_ice(i) + drag*v_w(i)
+                                  + rdt*(inv_th(i)*say(i) + vrhs)
+                                  + beta_evp*v_aux(i);
+
+                const real_t obd = 1.0 + beta_evp + drag;
+                const real_t rf  = rdt * cor(i);
+                const real_t det = bc_index(i) / (obd*obd + rf*rf);
+
+                u_aux(i) = det * (obd*rhsu + rf*rhsv);
+                v_aux(i) = det * (obd*rhsv - rf*rhsu);
+            });
+
+        /* ══ M9 CELL ④ — the GHOST node solve for the divergence form ════════════════════════
+         * TWIN of "maevp_node_solve_div" immediately above — EDIT BOTH OR NEITHER — and the twin
+         * of cell ②'s "maevp_node_solve_w" for everything below the gather.
+         *
+         * The gather itself already happened, in "maevp_gather_div_w" before the owned solve —
+         * read the banner there for why it CANNOT live in this kernel (timing + a read-write
+         * race on u_aux). What is left here is the R recursion and the velocity solve.
+         *
+         * 🔴🔴 THE M9 TRAP applies here too: the R recursion runs OUTSIDE the ice_nod guard,
+         * for every updatable ghost slot, because the element mask (mean m_ice) and the node
+         * mask (a_ice) are DIFFERENT CRITERIA. Only the velocity solve is masked. */
+        if (m9_wideK)
+            Kokkos::parallel_for("maevp_node_solve_div_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+                KOKKOS_LAMBDA(const int n) {
+                    const int q0 = W.gath_ptr(n), q1 = W.gath_ptr(n + 1);
+                    if (q0 == q1) return;                 /* ring K: frozen until the refresh */
+                    if (!m9_nomask && !nod_el(n)) return; /* holds R == 0; see the owned twin */
+
+                    const real_t ur = u_rhs(n), vr = v_rhs(n);   /* staged by maevp_gather_div_w */
+
+                    const real_t Ru = det1*R_u(n) + ur;
+                    const real_t Rv = det1*R_v(n) + vr;
+                    R_u(n) = Ru; R_v(n) = Rv;
+
+                    if (!ice_nod(n)) return;              /* trap 13: NO else — u_aux is kept */
+
+                    const real_t urhs = Ru * mass(n) + rhs_a(n);
+                    const real_t vrhs = Rv * mass(n) + rhs_m(n);
+
+                    const real_t du   = u_aux(n) - u_w(n);
+                    const real_t dv   = v_aux(n) - v_w(n);
+                    const real_t umod = Kokkos::sqrt(du*du + dv*dv);
+                    const real_t drag = rdt * cd * umod * rho0 * inv_th(n);
+
+                    const real_t rhsu = u_ice(n) + drag*u_w(n)
+                                      + rdt*(inv_th(n)*sax(n) + urhs)
+                                      + beta_evp*u_aux(n);
+                    const real_t rhsv = v_ice(n) + drag*v_w(n)
+                                      + rdt*(inv_th(n)*say(n) + vrhs)
+                                      + beta_evp*v_aux(n);
+
+                    const real_t obd = 1.0 + beta_evp + drag;
+                    const real_t rf  = rdt * W.corx(n);
+                    const real_t det = W.bcx(n) / (obd*obd + rf*rf);
+
+                    u_aux(n) = det * (obd*rhsu + rf*rhsv);
+                    v_aux(n) = det * (obd*rhsv - rf*rhsu);
+                });
+       }
+
+        if (m9_selfcheck) {
+            /* intra-step drift: with both forms started from the same state at step entry, any
+             * gap here is roundoff or a bug. Reduced every subcycle, reported once per step. */
+            double dmax = 0.0;
+            Kokkos::parallel_reduce("maevp_div_chk_drift", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    const double du = Kokkos::fabs((double)R_u(i) - (double)Rchk_u(i));
+                    const double dv = Kokkos::fabs((double)R_v(i) - (double)Rchk_v(i));
+                    const double d  = du > dv ? du : dv;
+                    if (d > acc) acc = d;
+                }, Kokkos::Max<double>(dmax));
+            if (dmax > m9_drift) m9_drift = dmax;
+            /* Scale for the RELATIVE criterion, measured over the step rather than only at its
+             * entry: at step 1 the carried sigma is zero, so an entry-derived scale is 0 and the
+             * relative number degenerates into an absolute one exactly where the check matters
+             * most (the cold start is the one place the gap must be identically zero). */
+            double smax2 = 0.0;
+            Kokkos::parallel_reduce("maevp_div_chk_scale2", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i, double &acc) {
+                    const double au = Kokkos::fabs((double)Rchk_u(i));
+                    const double av = Kokkos::fabs((double)Rchk_v(i));
+                    const double a  = au > av ? au : av;
+                    if (a > acc) acc = a;
+                }, Kokkos::Max<double>(smax2));
+            if (smax2 > m9_scale) m9_scale = smax2;
+            Kokkos::parallel_for("maevp_div_chk_rezero", Kokkos::RangePolicy<>(0, myDim),
+                KOKKOS_LAMBDA(const int i) { Rchk_u(i) = 0.0; Rchk_v(i) = 0.0; });
+        }
+      }
+
         /* edge BC (:823-857): coastal boundary edges -> zero the aux velocity at both endpoints.
          * Expressed as the equivalent per-node mask (identical node set; all writes are 0 =>
          * idempotent => race-free). See maevp_coastal_mask above. */
+        if (m9_lean) {
+        /* ══ P5 — the FUSED edge BC ══════════════════════════════════════════════════════════
+         * The exact path needs TWO launches here because the two masks disagree on ring 1 and
+         * applying both would zero their UNION. A single launch with a per-slot SELECT applies
+         * exactly one mask per node, which is the same semantics at one third of the launch cost
+         * (this stage is the cheapest of the three and still 120 launches per step). */
+        Kokkos::parallel_for("maevp_edge_bc_lean", Kokkos::RangePolicy<>(0, Lnode),
+            KOKKOS_LAMBDA(const int n) {
+                if ((n < myDim) ? coastal_p[n] : coastx_p[n]) { u_aux_p[n] = 0.0; v_aux_p[n] = 0.0; }
+            });
+        } else if (!m9_wideK) {
         Kokkos::parallel_for("maevp_edge_bc", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int n) {
                 if (coastal(n)) { u_aux(n) = 0.0; v_aux(n) = 0.0; }
             });
+        } else {
+        /* Wide halo: the OWNED range keeps its own mask, the ghost zone takes the OWNER's.
+         * These are not the same set. `coastal` is built from MY myList_edge2D (:179), so at a
+         * ring-1 slot it reflects whether *I* own the boundary edge; the owner's decision is
+         * what its kernel applied, and replaying the owner means replaying its mask —
+         * W.coastx, the owner-parity GLOBAL-edge mask.
+         * ⚠️ NOT a single launch over [0, N+next) with a branch: applying BOTH masks to ring 1
+         *    would zero the UNION, i.e. nodes the owner never zeroed. Two disjoint ranges. */
+        Kokkos::parallel_for("maevp_edge_bc", Kokkos::RangePolicy<>(0, myDim),
+            KOKKOS_LAMBDA(const int n) {
+                if (coastal(n)) { u_aux(n) = 0.0; v_aux(n) = 0.0; }
+            });
+        Kokkos::parallel_for("maevp_edge_bc_w", Kokkos::RangePolicy<>(myDim, N + Wnext),
+            KOKKOS_LAMBDA(const int n) {
+                if (W.coastx(n)) { u_aux(n) = 0.0; v_aux(n) = 0.0; }
+            });
+        }
 
         /* halo exchange of (u_ice_aux, v_ice_aux). The Fortran overlaps exchange_nod_begin/end
          * around the rhs zeroing (:861-872); two blocking exchanges plus the zero loop are
          * result-identical (the zero loop touches only u_rhs/v_rhs, never the exchanged fields).
-         * Same-kind + adjacent => ONE fused message per neighbour (M5.23 L1, bit-id-neutral). */
-        fesom_halo_field2(ice->uice_aux_fld, ice->vice_aux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+         * Same-kind + adjacent => ONE fused message per neighbour (M5.23 L1, bit-id-neutral).
+         *
+         * ── M9 CELL ⑤ (FESOM_SPEED_MEVPLAG=K): the LAGGED single halo ──────────────────────
+         * Exchange only every K-th subcycle. Ghosts are never updated locally (the node solve
+         * runs over [0,myDim) and only this exchange and the coastal-BC kernel touch halo
+         * entries), so ring 1 simply goes up to K-1 subcycles stale and the owned elements that
+         * share it read slightly old velocities. That is the whole approximation — no rings, no
+         * ghost kernels, no extra fields — and it is form-agnostic, so it composes with MEVPDIV
+         * to give cells ⑤a and ⑤b.
+         *
+         * K must divide evp_rheol_steps (guarded at resolve): with shortstep running 1..steps,
+         * `shortstep % K == 0` then always fires on the LAST subcycle, which is what keeps the
+         * final u_ice = u_aux copy over myDim+eDim (trap 8) from publishing a stale halo into
+         * the ocean coupling. K=1 makes the condition identically true => byte-identical.
+         *
+         * ⚠️ This is an approximation by construction. It never gets a byte gate above K=1; it
+         *    gets the L3 trajectory comparison, and a measurable ice difference here is the
+         *    RESULT (it is what brackets the exact wide halo of cell ④). */
+        /* ── M9 CELLS ②/④ — the WIDE window refresh replaces the ring-1 exchange ────────────
+         * Same cadence rule as the lagged halo and for the same reason: K divides
+         * evp_rheol_steps (guarded at resolve), so the LAST subcycle always refreshes and the
+         * final u_ice = u_aux copy publishes a current halo into the ocean coupling (trap 8).
+         * The DIFFERENCE from cell ⑤ is that the ghost zone was not left to rot in between —
+         * rings 1..K-1 were solved locally each subcycle from state the ring-K freeze keeps
+         * clean, so this is EXACT, not an approximation. That is the whole point of ②/④, and
+         * it is why they need no accuracy argument where cell ⑤ does. */
+        if (m9_wideK) {
+            if (shortstep % m9_wideK == 0)
+                fesom_evpwide_mevp_window_exchange(ice, partit, m9_div ? 1 : 0);
+        } else if (shortstep % m9_lagK == 0) {
+            fesom_halo_field2(ice->uice_aux_fld, ice->vice_aux_fld, FESOM_HALO_NOD2D, 1, 1, partit);
+        }
 
-        Kokkos::parallel_for("maevp_rhs_uv_rezero", Kokkos::RangePolicy<>(0, myDim),
+        Kokkos::parallel_for("maevp_rhs_uv_rezero", Kokkos::RangePolicy<>(0, Lnode),
             KOKKOS_LAMBDA(const int row) { u_rhs(row) = 0.0; v_rhs(row) = 0.0; });
+    }
+
+    /* ── M9 SELFCHECK report (one line per ocean step, rank 0) ──────────────────────────────
+     * Two numbers with completely different meanings, which is exactly why they are reported
+     * separately rather than as one "error":
+     *   maskjump — |R - div(sigma)| at step ENTRY, relative. This IS non-equivalence (ii): the
+     *              ice_el mask changed between steps, so div(sigma) dropped a departing
+     *              element's contribution instantly while R decayed it over ~251 subcycles (and
+     *              on re-entry the classic form resumes from its FROZEN stale sigma, trap 12,
+     *              while R has decayed). A RESULT to be reported, not a failure.
+     *   drift    — max over this step's subcycles of |R - div(sigma)| AFTER the re-baseline,
+     *              relative. The masks are fixed within a step, so the two forms are
+     *              algebraically identical here: anything above roundoff is a BUG. This is the
+     *              number the L2 gate reads. Serial must stay ~1e-16..1e-13 relative. */
+    if (m9_div && m9_selfcheck) {
+        double loc[3] = { m9_jump, m9_drift, m9_scale }, glb[3] = { 0.0, 0.0, 0.0 };
+        MPI_Reduce(loc, glb, 3, MPI_DOUBLE, MPI_MAX, 0, partit->MPI_COMM_FESOM);
+        if (partit->mype == 0) {
+            const double s = glb[2] > 0.0 ? glb[2] : 1.0;
+            fprintf(stderr, "[m9-selfcheck] maskjump=%.3e drift=%.3e  (relative: %.3e / %.3e, "
+                            "scale=%.3e)\n",
+                    glb[0], glb[1], glb[0] / s, glb[1] / s, glb[2]);
+            fflush(stderr);
+        }
     }
 
     /* final copy over myDim+eDim (:876-881, ⚠️ TRAP 8) — NO extra exchange: the aux halo is
      * already current from the last substep's exchange. */
-    Kokkos::parallel_for("maevp_final_copy", Kokkos::RangePolicy<>(0, N),
+    /* Extended to the ghost zone under the wide halo: not for the ocean coupling (which reads
+     * [0,N) only) but so the NEXT step's prestep echo is meaningful. u_ice at an extended slot
+     * has no other writer, so without this it would keep last step's value and the echo — the
+     * one diagnostic that proves the ship is plumbed correctly — would report a spurious
+     * nonzero forever. Wnext == 0 with the knob off, so the range is unchanged. */
+    Kokkos::parallel_for("maevp_final_copy", Kokkos::RangePolicy<>(0, N + Wnext),
         KOKKOS_LAMBDA(const int row) {
             u_ice(row) = u_aux(row);
             v_ice(row) = v_aux(row);
@@ -339,6 +1581,15 @@ void fesom_ice_evp_dynamics_m_kk(struct fesom_ice    *ice,
     ice->work.eps22_fld.modify_device();
     ice->work.sigma11_fld.modify_device(); ice->work.sigma12_fld.modify_device();
     ice->work.sigma22_fld.modify_device();
+    /* M9: R_u/R_v are device-authoritative carried state — the same rail class as sigma, but
+     * with no host consumer, so they are marked dirty and never synced back. (When a restart
+     * path is eventually added, this is where it plugs in; the divergence form's restart set is
+     * these two node arrays instead of three element arrays, and R = div(sigma) is computable
+     * from a restored sigma but NOT the reverse.) */
+    if (m9_div) { ice->work.mevp_Ru_fld.modify_device(); ice->work.mevp_Rv_fld.modify_device(); }
+    if (m9_div && m9_selfcheck) {
+        ice->work.mevp_Rchk_u_fld.modify_device(); ice->work.mevp_Rchk_v_fld.modify_device();
+    }
     ice->uice_rhs_fld.modify_device();  ice->vice_rhs_fld.modify_device();
     ice->data[FESOM_ICE_AICE].values_rhs_fld.modify_device();
     ice->data[FESOM_ICE_MICE].values_rhs_fld.modify_device();

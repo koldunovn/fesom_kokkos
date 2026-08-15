@@ -96,6 +96,35 @@ typedef struct fesom_ice_work {
     real_t *mevp_pressure_fac;
     int    *mevp_ice_el;
 
+    /* --- M9 (FESOM_SPEED_MEVPDIV): the divergence form's carried state.
+     *   mevp_Ru/Rv       [myDim+eDim]  R = div(sigma) at NODES, carried across subcycles AND
+     *                                  across ocean steps exactly as sigma11/12/22 are in the
+     *                                  classic form. Stored UNSCALED (pure divergence; `mass` is
+     *                                  applied at use) — deliberately unlike Sergey's F90, which
+     *                                  folds inv_mass into R and thereby makes the carried state
+     *                                  remember a PREVIOUS step's mass scaling.
+     *                                  Sized myDim+eDim: only owned entries are read at K=1, but
+     *                                  the halo room is free and avoids a resize when the wide
+     *                                  halo lands (it then grows by fesom_evpwide_next()).
+     *   mevp_Rchk_u/v    [myDim+eDim]  DIAGNOSTIC ONLY — allocated only when
+     *                                  FESOM_MEVPDIV_SELFCHECK is set: div(sigma) reassembled
+     *                                  from the carried sigma, so R can be compared against it.
+     * mEVP-only, and here rather than shared for the same reason as the block above: so the two
+     * rheologies' state cannot be tidied into each other. */
+    real_t *mevp_Ru,     *mevp_Rv;
+    real_t *mevp_Rchk_u, *mevp_Rchk_v;
+
+    /*   mevp_nod_has_el [myDim+eDim]  M9: 1 where the node has >=1 incident ICE element.
+     * Measured need (Fleet 1A, GPU CORE2 np8): the classic node solve returns early for
+     * non-ice nodes, but the R recursion must run over EVERY owned node (the ice_nod trap), so
+     * on a global mesh with partial ice cover the divergence form turned a masked kernel into a
+     * full-domain one and cost +30% of icedyn. This mask restores the proportionality — and it
+     * is also MORE faithful: for a node with no incident ice element the classic assembly skips
+     * every contributing element, so div(sigma) there is EXACTLY 0, whereas an unmasked R
+     * decays geometrically instead. Set once per ocean step (the ice_el mask is fixed within a
+     * step); R is zeroed there at step entry and the recursion then skips those nodes. */
+    int    *mevp_nod_has_el;
+
     /* M1.4: Field owners; the raw ptrs above are non-owning aliases = field.h() (D12).
      * fct_massmatrix is alloc'd lazily in fesom_ice_mass_matrix_fill (sized stiff->nnz),
      * the others in fesom_ice_init. */
@@ -106,6 +135,9 @@ typedef struct fesom_ice_work {
     fesom::Field ice_strength_fld, inv_areamass_fld, inv_mass_fld;
     fesom::Field mevp_inv_thickness_fld, mevp_mass_fld, mevp_pressure_fac_fld;
     fesom::IntField mevp_ice_nod_fld, mevp_ice_el_fld;
+    fesom::Field mevp_Ru_fld, mevp_Rv_fld;               /* M9 divergence form */
+    fesom::Field mevp_Rchk_u_fld, mevp_Rchk_v_fld;       /* M9 selfcheck only */
+    fesom::IntField mevp_nod_has_el_fld;                 /* M9 ice-element node mask */
 } fesom_ice_work;
 
 /*

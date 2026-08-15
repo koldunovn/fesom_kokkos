@@ -185,10 +185,13 @@ void fesom_ice_init(fesom_ice           *ice,
     // kept verbatim.
     /* --- velocities (T_ICE:132-133, ice_init:719-740) --- */
     ice->uice_fld.alloc("ice.uice", nw);                      ice->uice            = ice->uice_fld.h();
-    ice->uice_rhs_fld.alloc("ice.uice_rhs", n);               ice->uice_rhs        = ice->uice_rhs_fld.h();
+    /* M9 cell ④: the wide-halo GHOST GATHER stages its assembled div(sigma~) per ghost slot in
+     * these two arrays, so they need the extended tail. It is per-subcycle scratch, NOT carried
+     * state and NOT shipped — cell ④'s window message stays (u,v,R_u,R_v) = 4*Ng doubles. */
+    ice->uice_rhs_fld.alloc("ice.uice_rhs", nw);              ice->uice_rhs        = ice->uice_rhs_fld.h();
     ice->uice_old_fld.alloc("ice.uice_old", n);               ice->uice_old        = ice->uice_old_fld.h();
     ice->vice_fld.alloc("ice.vice", nw);                      ice->vice            = ice->vice_fld.h();
-    ice->vice_rhs_fld.alloc("ice.vice_rhs", n);               ice->vice_rhs        = ice->vice_rhs_fld.h();
+    ice->vice_rhs_fld.alloc("ice.vice_rhs", nw);              ice->vice_rhs        = ice->vice_rhs_fld.h();
     ice->vice_old_fld.alloc("ice.vice_old", n);               ice->vice_old        = ice->vice_old_fld.h();
 
     /* --- stresses (T_ICE:136-137) --- */
@@ -205,13 +208,22 @@ void fesom_ice_init(fesom_ice           *ice,
      * (fesom_ice.c) and the Fortran (which allocates these only for whichEVP != 0). Under the
      * default (std EVP) nothing here is touched, so the knob-OFF byte gate is unaffected. */
     if (ice->whichEVP == 1) {
-        const size_t nn = (size_t)mesh->myDim_nod2D;
-        const size_t ne = (size_t)mesh->myDim_elem2D;
-        ice->uice_aux_fld.alloc("ice.uice_aux", n);  ice->uice_aux = ice->uice_aux_fld.h();
-        ice->vice_aux_fld.alloc("ice.vice_aux", n);  ice->vice_aux = ice->vice_aux_fld.h();
-        ice->work.mevp_inv_thickness_fld.alloc("ice.mevp_inv_thickness", nn);
-        ice->work.mevp_mass_fld.alloc          ("ice.mevp_mass",          nn);
-        ice->work.mevp_ice_nod_fld.alloc       ("ice.mevp_ice_nod",       nn);
+        const size_t ne = (size_t)mesh->myDim_elem2D;   /* element-side ghosts live in FesomEvpwideDev, not here */
+        /* M9 Task 12 — STORAGE AUDIT for the wide halo (cells ②/④).
+         * The ghost node solve indexes these at extended slots [N, N+next). std EVP never
+         * needed them, so nothing extended them before; three were sized myDim, i.e. they had
+         * no room even for the ORDINARY eDim halo. An out-of-bounds ghost read is SILENT
+         * GARBAGE on CUDA, not a crash, so this is a correctness prerequisite and not a
+         * tidy-up. `nw` == n when the knob is off, so knob-off allocations are unchanged in
+         * size for everything that was already `n`; the three myDim ones grow to n (+tail),
+         * which is behaviour-neutral (zero-init, and nothing reads past myDim today).
+         * Element-side ghosts (pressure_fac, ice_el) do NOT live here — they follow std EVP's
+         * istr_g precedent and are Dev-struct arrays sized [Eg], built in evpw_build. */
+        ice->uice_aux_fld.alloc("ice.uice_aux", nw);  ice->uice_aux = ice->uice_aux_fld.h();
+        ice->vice_aux_fld.alloc("ice.vice_aux", nw);  ice->vice_aux = ice->vice_aux_fld.h();
+        ice->work.mevp_inv_thickness_fld.alloc("ice.mevp_inv_thickness", nw);
+        ice->work.mevp_mass_fld.alloc          ("ice.mevp_mass",          nw);
+        ice->work.mevp_ice_nod_fld.alloc       ("ice.mevp_ice_nod",       nw);
         ice->work.mevp_pressure_fac_fld.alloc  ("ice.mevp_pressure_fac",  ne);
         ice->work.mevp_ice_el_fld.alloc        ("ice.mevp_ice_el",        ne);
         ice->work.mevp_inv_thickness = ice->work.mevp_inv_thickness_fld.h();
@@ -219,6 +231,28 @@ void fesom_ice_init(fesom_ice           *ice,
         ice->work.mevp_ice_nod       = ice->work.mevp_ice_nod_fld.h();
         ice->work.mevp_pressure_fac  = ice->work.mevp_pressure_fac_fld.h();
         ice->work.mevp_ice_el        = ice->work.mevp_ice_el_fld.h();
+
+        /* M9: the divergence form's carried state. Allocated unconditionally within the mEVP
+         * branch (2 node arrays; .alloc zero-inits, which is the correct cold start — sigma is
+         * cold-start-zero too and there is no ice restart path, fesom_ice.cpp:582). The
+         * SELFCHECK pair is allocated only when asked: on a large mesh two extra node arrays
+         * for a diagnostic that never runs in a timing leg is not free.
+         *
+         * ⚠️ M9 Task 12b: R_u/R_v and the node mask allocate at `nw`, NOT `n`. Cell ④ ships the
+         * ghost R_u/R_v INTO the extended slots and the ghost node solve recurses R there, so an
+         * `n`-sized R is a silent out-of-bounds write on the very field the cell exists to move.
+         * (Task 12a extended the other node-side mEVP arrays and stopped short of these three,
+         * because nothing indexed them past `n` until the ghost node kernel existed.) */
+        ice->work.mevp_Ru_fld.alloc("ice.mevp_Ru", nw);  ice->work.mevp_Ru = ice->work.mevp_Ru_fld.h();
+        ice->work.mevp_Rv_fld.alloc("ice.mevp_Rv", nw);  ice->work.mevp_Rv = ice->work.mevp_Rv_fld.h();
+        ice->work.mevp_nod_has_el_fld.alloc("ice.mevp_nod_has_el", nw);
+        ice->work.mevp_nod_has_el = ice->work.mevp_nod_has_el_fld.h();
+        if (getenv("FESOM_MEVPDIV_SELFCHECK")) {
+            ice->work.mevp_Rchk_u_fld.alloc("ice.mevp_Rchk_u", n);
+            ice->work.mevp_Rchk_v_fld.alloc("ice.mevp_Rchk_v", n);
+            ice->work.mevp_Rchk_u = ice->work.mevp_Rchk_u_fld.h();
+            ice->work.mevp_Rchk_v = ice->work.mevp_Rchk_v_fld.h();
+        }
     }
 
     /* --- surface ocean state (T_ICE:140-142, ice_init:758-767) --- */
@@ -749,29 +783,25 @@ void fesom_ice_step(int                            step,
             ice->stress_atmice_y_fld.modify_host(); ice->stress_atmice_y_fld.sync_device();
             ice->uice_fld.modify_host();    ice->uice_fld.sync_device();
             ice->vice_fld.modify_host();    ice->vice_fld.sync_device();
+            /* M9: sigma is DEAD under the divergence form (the carried state is R_u/R_v at
+             * nodes, which no host code reads and which therefore needs no rail at all). Skip
+             * its rail — not merely to save the copy, but because these rails execute INSIDE
+             * the icedyn phasestats bracket (marked at :676, above this branch), so railing
+             * sigma AND R would charge the reformulation extra PCIe inside its own metric.
+             * The fields above are host-produced and are railed regardless of form. */
+            if (!fesom_ice_maevp_div_active()) {
             ice->work.sigma11_fld.modify_host(); ice->work.sigma11_fld.sync_device();
             ice->work.sigma12_fld.modify_host(); ice->work.sigma12_fld.sync_device();
             ice->work.sigma22_fld.modify_host(); ice->work.sigma22_fld.sync_device();
             }
-            /* M7 E.EVP1 + L80: EVPWIDE's resolve lives in the std-EVP path, which this branch
-             * never reaches — without this line, FESOM_SPEED_EVPWIDE + mEVP would be a SILENT
-             * no-op (correct but mute; the dead-knob trap). Announce loudly, once. */
-            {
-                static int s_warned = 0;
-                if (!s_warned && fesom_evpwide_env_K() > 0) {
-                    s_warned = 1;
-                    if (partit->mype == 0) {
-                        fprintf(stderr, "[fesom_speed] !! FESOM_SPEED_EVPWIDE requested but "
-                                        "whichEVP=1 (mEVP has its own subcycle exchange) — the "
-                                        "lever is NOT running.\n");
-                        fflush(stderr);
-                    }
-                }
             }
             fesom_ice_evp_dynamics_m_kk(ice, partit, mesh);
             if (!icerails) {
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+            /* M9: the OUT half of the same decision — see the IN rail above. */
+            if (!fesom_ice_maevp_div_active()) {
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+            }
             }
         } else {
             fprintf(stderr, "fesom_ice: whichEVP=%d not supported (0=EVP, 1=mEVP)\n",
