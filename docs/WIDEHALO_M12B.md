@@ -727,7 +727,19 @@ more than the staging saves at large subdomains" was this instead.
 **Fix (lean staging):** a device kernel gathers the owned slots into a small buffer, only that
 buffer crosses the bus, MPI moves it, and a second kernel scatters the received values back.
 `Fbt` never leaves the device and the traffic is proportional to the multi-claimed count. The same
-values are moved, so the trajectory must be bitwise unchanged — which is the gate (job 26969407).
+values are moved, so the trajectory must be bitwise unchanged — and it is:
+
+| gate (job 26969407) | result |
+|---|---|
+| rung, 50 steps, old bin `4cc9eda4` vs lean `73c6cf29` | **ALL FIELDS BIT-IDENTICAL, rc=0** |
+| rung free-running drift, np128 × 25 steps, lean | **nonzero-steps = 0** |
+| knob-off null vs `base_np8`, lean | **rc=0** |
+
+Bins: serial `73c6cf29`, cuda `58ac143b`. **Re-measurement:** the lean row at dars 16N GPU is job
+26970050 and at NG5 16N GPU job 26970051; the NG5 pair also *measures* the fix, since its fat
+counterpart (26962397) ran the same arms today. CORE2 is unaffected either way (its round trip is
+134 KB at 16N, ~500 KB at 4N), so the queued CORE2 rows keep the fat binary rather than restarting
+their queue wait.
 
 **Audit result for the rest of the module.** Every other `sync_host()` on the SE per-step path is
 inside an env-gated diagnostic (`GEOCHK`/`SELFCHECK`, and `step_n ≤ 5` at that), and the H0e
