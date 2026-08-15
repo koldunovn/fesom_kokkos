@@ -81,6 +81,16 @@ clean_env () {
         while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
     done
     export FESOM_SPEED=1 FESOM_IC_EXTRAP=det      # both arms
+    # BASE_KNOBS applies to BOTH arms. It exists for two reasons, both experimental hygiene:
+    #  (1) a lever that REQUIRES a configuration (SE needs FESOM_ALE=zstar, the M9 ice lever needs
+    #      FESOM_WHICH_EVP=1) must have that configuration on BOTH sides, or the pair measures the
+    #      configuration change and the lever together;
+    #  (2) 🔴 on a Serial/CPU build EVERY FESOM_SPEED_* lever resolves to its DEFAULT unless
+    #      FESOM_SPEED_FORCE_SERIAL=1 (`src/fesom_speed.hpp:168-170`, "Serial stays legacy").
+    #      So FESOM_SPEED=1 above is a NO-OP on CPU, and any CPU pair testing a FESOM_SPEED_*
+    #      lever must put FORCE_SERIAL in BASE_KNOBS -- otherwise "best" silently turns on every
+    #      M7 lever as well as the one under test.
+    for kv in ${BASE_KNOBS:-}; do export "$kv"; done
 }
 
 leg () {                       # leg <arm> <index>
