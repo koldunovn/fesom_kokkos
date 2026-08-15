@@ -3454,3 +3454,31 @@ winner is **−3.9 %**, consistent with the legacy −3.6 %.
 ("both arms above a four-control temperature envelope, the winner 68 % above the ssh envelope,
 not recommended"); under det the winner has the lowest temperature deviation of any leg in its
 gate. Both halves of that verdict — the speed and the accuracy — were re-earned.
+
+## 🔴🔴 NG5 64 GPU, full 4-control gate (26972358): tier 3 EMPTIES — every accuracy objection in this campaign was the hole-filler
+
+| field | 4-control range | **`MINCONN`** (recommended) | +`CONTIG` | +`UFACTOR=30` |
+|---|--:|--:|--:|--:|
+| temp | 9.25e−8 – 1.64e−7 | **1.33e−7 — in class** | 1.07e−7 — in | 5.61e−7 (×3.4 the top) |
+| salt | 3.57 – 5.05e−8 | **3.89e−8 — in class** | 3.69e−8 — in | 5.15e−8 — at the top |
+| ssh  | 1.82 – 2.06e−9 | **2.04e−9 — in class** | 1.87e−9 — in | 2.69e−9 (+30 %) |
+
+Identical CG iteration paths on every leg, arms and controls, at all twenty steps.
+
+The legacy verdict was **tier 3 — "ssh rms +8.3 % above the envelope, mechanism ruled out; small
+and unexplained"**, and NG5 was the sole occupant of that tier. It is now in class on all three
+fields. With this the accounting is complete:
+
+| legacy verdict | point | under det |
+|---|---|---|
+| tier 4, withdrawn, "largest disturbance in the campaign" | dars 64 GPU u30 | **tier 1** — lowest temp deviation of any leg incl. controls |
+| tier 4, "FAILED on accuracy, not recommended" | fArc 16 GPU | **tier 1** — lowest temp deviation of any leg |
+| tier 4, removed from the recommendation (salt +24 %) | CORE2 864 CPU | **tier 1** — at or below all 5 controls |
+| tier 4, engine preferred on behaviour | dars 2048 CPU alternates | **tier 1** — no arm distinguishable from a re-roll |
+| tier 3, "small and unexplained" | NG5 64 GPU | **tier 1** — in class on all three fields |
+| tier 2, "stopping mechanism" | dars 64 GPU `MINCONN` | mechanism does not arise: identical CG paths |
+
+**Every accuracy objection this campaign raised traces to the partition-dependent initial
+condition.** Tiers 2, 3 and 4 have no occupants left among the recommended arms. The only leg
+still outside a control range anywhere is NG5's `+UFACTOR=30` (temp ×3.4, ssh +30 %), which is
+not a recommended arm at that point and is 3.8 pp slower than the winner.
