@@ -1,0 +1,64 @@
+#!/bin/bash
+#SBATCH --job-name=m14_dbuild
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task=144
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/dolpung_build.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/dolpung_build.%j.err
+#
+# Build the M14 integration branch on dolpung (GH200 / aarch64).
+#
+# Must build ON a node: the login nodes are x86 and dolpung is aarch64. env_dolpung.sh uses
+# absolute paths and NO modules, and it strips every /sw/spack-levante/ entry that srun inherits
+# from the x86 login environment (an x86 CMAKE_PREFIX_PATH hijacked netCDF; an x86 git broke the
+# Kokkos configure).
+#
+# Second GPU architecture for the M14 board, and — the practical reason it is worth doing now —
+# dolpung runs on account mh1571, so it is NOT subject to the ab0995 association limit that is
+# currently blocking every Levante GPU job.
+#
+# NB: use the SUBMODULE nvcc_wrapper. $DOLPUNG_NVCC_WRAPPER exists only in
+# env_dolpung_cuda13.sh (a custom sm90 wrapper, because CUDA 13 dropped Volta and
+# Kokkos 4.4's wrapper hardcodes sm_70). The 12.9 toolchain needs no such workaround.
+#
+# Usage: sbatch jobs/job_m14_dolpung_build
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source $ROOT/env_dolpung.sh || exit 1
+echo "=== M14 dolpung build ==="
+echo "host   : $(hostname)  $(uname -m)"
+echo "gcc    : $($DOLPUNG_GCC/bin/g++ --version | head -1)"
+echo "nvcc   : $(nvcc --version | grep release)"
+echo "HEAD   : $(cd $ROOT && git rev-parse HEAD)"
+
+B=$ROOT/build-dolpung-m14
+rm -rf $B
+cmake -S $ROOT -B $B -DCMAKE_BUILD_TYPE=Release \
+  -DKokkos_ENABLE_CUDA=ON -DKokkos_ENABLE_CUDA_LAMBDA=ON \
+  -DKokkos_ARCH_HOPPER90=ON -DKokkos_ARCH_NATIVE=ON \
+  -DBUILD_TESTING=ON \
+  -DNC_CONFIG=$DOLPUNG_NETCDF/bin/nc-config \
+  -DCMAKE_CXX_COMPILER=$ROOT/externals/kokkos/bin/nvcc_wrapper > /tmp/m14_dcfg.log 2>&1 \
+  || { echo "CONFIGURE FAILED:"; tail -30 /tmp/m14_dcfg.log; exit 1; }
+
+make -C $B -j 96 > /tmp/m14_dmk.log 2>&1 \
+  || { echo "BUILD FAILED:"; grep -iE 'error' /tmp/m14_dmk.log | head -20; exit 1; }
+
+echo "BUILD OK: $(ls -l $B/fesom_port | awk '{print $5}') bytes"
+md5sum $B/fesom_port
+
+# Freeze next to the Levante bins so a run can pin BIN= to an immutable path.
+D=/work/ab0995/a270088/port2/m14/bin/i1_dolpung
+mkdir -p $D
+cp $B/fesom_port $D/fesom_port_cuda
+{ echo "frozen: $(date -Is)"
+  echo "M14 integration rung 1, built ON dolpung (GH200, aarch64)"
+  echo "HEAD: $(cd $ROOT && git rev-parse HEAD)"
+  md5sum $D/fesom_port_cuda
+  echo "toolchain: gcc 14.2 + nvcc 12.9 (nvhpc-25.7) + CUDA-aware openmpi 4.1.8; Kokkos HOPPER90+NATIVE"
+  echo "PLATFORM FIX required at RUN time: FESOM_HALO_STAGE=1 (+UCX_TLS). NEVER FESOM_HOST_HALO=1."
+} > $D/PROVENANCE.txt
+cat $D/PROVENANCE.txt

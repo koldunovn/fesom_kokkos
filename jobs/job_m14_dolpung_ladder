@@ -1,0 +1,117 @@
+#!/bin/bash
+#SBATCH --job-name=m14_dlad
+#SBATCH -p dolpung
+#SBATCH -A mh1571
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -o /work/ab0995/a270088/port2/m14/dlad.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/dlad.%j.err
+#
+# M14 — one rung of a dolpung (GH200) GPU strong-scaling ladder.
+#
+# Second GPU architecture for the board, and it runs on account mh1571, so it is free of the
+# ab0995 association limit that blocks Levante GPU work.
+#
+# ⭐ PLATFORM FIX, MANDATORY: FESOM_HALO_STAGE=1 (+UCX_TLS). The fabric CANNOT register CUDA
+# memory (gdr_pin_buffer ret:22 intra-node, ibv_reg_mr(cuda) Bad address inter-node) => there is
+# no GPUDirect here. STAGE keeps device pack/unpack and puts only the PACKED bytes through pinned
+# host, so the CG levers stay live.
+# 🔴 NEVER FESOM_HOST_HALO=1 for performance: it is a debug fallback that does full-field GPU<->host
+# syncs AND silently kills CGPIPE+CGPOLY. That trap cost fleet v1 a factor ~2 and read as
+# "GH200 barely beats A100" for half a day.
+#
+# 🔴 EVPWIDE IS NOT A CANDIDATE HERE — already A/B'd on this machine and banked as a loss AND
+# fabric-incompatible. (It also loses on CPU: +14…+20 % measured today. The A100 win is specific
+# to a machine where a flat per-message staging cost dominates.)
+#
+# 🔴 A CUDA trajectory bitwise gate is INVALID on this transport: the device transport does not
+# reproduce itself run-to-run (dev-vs-dev = dev-vs-stage noise ~1e-4 at 10 steps). The valid
+# instruments are the per-exchange halo selfcheck and FESOM_CGPOLY_SELFCHECK, plus Serial byte
+# gates on Levante. Do not attempt diff_snap between two GPU runs here.
+#
+# Usage:
+#   sbatch --nodes=2 --ntasks=8 --time=00:40:00 --export=ALL,POINT=core2,ARMS=base jobs/job_m14_dolpung_ladder
+#   sbatch --nodes=4 --ntasks=16 --time=00:50:00 \
+#     --export=ALL,POINT=farc,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se" \
+#     jobs/job_m14_dolpung_ladder
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source $ROOT/env_dolpung.sh || exit 1
+
+N=$SLURM_NTASKS
+case "${POINT:?POINT required}" in
+  core2) MESH=/work/ab0995/a270088/port2/mesh/core2 ; DT=1800 ;;   # private mesh (L73)
+  farc)  MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc ; DT=900 ;;
+  dars)  MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars ; DT=120 ;;
+  ng5)   MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5  ; DT=180 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+MESH=${MESH_OVERRIDE:-$MESH}
+NSTEPS=${NSTEPS:-300}
+ARMS=${ARMS:-base}
+BASE_KNOBS=${BASE_KNOBS:-}
+BEST_KNOBS=${BEST_KNOBS:-}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i1_dolpung}/fesom_port_cuda
+
+[ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N missing"; exit 2; }
+
+if [ "$SLURM_NNODES" -gt 1 ]; then export UCX_TLS=self,sm,cuda_copy,cuda_ipc,dc_mlx5
+else                                export UCX_TLS=self,sm,cuda_copy,cuda_ipc; fi
+
+OUT=/work/ab0995/a270088/port2/m14/dlad_${POINT}_${N}_${SLURM_JOB_ID}
+mkdir -p "$OUT"; : > "$OUT/legs.txt"
+echo "=== M14 dolpung ladder — $POINT gpus=$N nodes=$SLURM_NNODES dt=$DT steps=$NSTEPS arms='$ARMS' ==="
+echo "mesh : $MESH/dist_$N"
+echo "nodes: $SLURM_JOB_NODELIST"
+echo "UCX_TLS=$UCX_TLS"
+md5sum "$BIN"
+[ -n "$BASE_KNOBS" ] && echo "base knobs: $BASE_KNOBS"
+[ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
+
+leg () {                        # leg <arm> <index>
+    local arm=$1 idx=$2
+    local out="$OUT/${idx}_${arm}"
+    local extra=""
+    mkdir -p "$out"
+    [ "$arm" = best ] && extra="$BEST_KNOBS"
+    srun -c72 --distribution=block:block bash -c "
+        export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_IC_EXTRAP=det
+        $(for kv in $BASE_KNOBS $extra; do printf 'export %s; ' "$kv"; done)
+        exec $BIN $MESH $out $DT $NSTEPS -1 $PHC 1958" > "$out/run.log" 2>&1
+    local rc=$?
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
+    local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$out/run.log" | tail -1)
+    local live=yes
+    [ -n "$last" ] || live=no
+    echo "$last" | grep -qiE 'nan|inf' && live=no
+    # HOST_HALO trap detector: if CGPIPE ever reports INACTIVE the transport is wrong and the
+    # timing is meaningless (that is the factor-~2 trap from fleet v1).
+    grep -q 'cgpipe.*INACTIVE' "$out/run.log" && { echo "  !! CGPIPE INACTIVE — wrong transport"; live=no; }
+    echo "leg $idx $arm: rc=$rc s/step=${t:-NA} live=$live"
+    [ "$live" = yes ] && [ "$rc" -eq 0 ] && [ -n "$t" ] && echo "$arm $t" >> "$OUT/legs.txt" \
+        || echo "  !! leg REJECTED"
+}
+
+echo; echo "--- warmup (discarded) ---"; leg warmup 0; : > "$OUT/legs.txt"
+set -- $ARMS
+if [ "$#" -eq 2 ]; then echo; echo "--- ABBA ---"; leg "$1" 1; leg "$2" 2; leg "$2" 3; leg "$1" 4
+else                    echo; echo "--- $1 x2 ---"; leg "$1" 1; leg "$1" 2; fi
+
+echo; echo "=== result ==="
+python3 - "$OUT/legs.txt" "$POINT" "$N" "${BASE_KNOBS:-}" <<'PY'
+import sys, collections
+d=collections.OrderedDict()
+for ln in open(sys.argv[1]):
+    k,v=ln.split(); d.setdefault(k,[]).append(float(v))
+if not d: print("NO ADMITTED LEGS"); raise SystemExit(1)
+for k,v in d.items():
+    print(f"  {k:5s} legs {v}  min={min(v):.4f}  spread={(max(v)-min(v))/min(v)*100:.2f}%")
+if 'base' in d and 'best' in d:
+    b,x=min(d['base']),min(d['best']); print(f"  GAIN = {(x-b)/b*100:+.2f}%")
+cfg=(sys.argv[4] or "prod").replace(" ","+") if len(sys.argv)>4 else "prod"
+print(f"DCSV {sys.argv[2]},{sys.argv[3]},cfg={cfg}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
+PY

@@ -35,8 +35,10 @@
 set -u
 ROOT=/home/a/a270088/port_kokkos_int
 source /sw/etc/profile.levante
-source "$ROOT/env.sh"
-module load nvhpc/24.7-gcc-11.2.0
+# 🔴 env_cuda.sh, NOT env.sh. CUDA-aware MPI needs openmpi/4.1.5-nvhpc; the env.sh
+# openmpi/4.1.2 is --without-cuda and SEGFAULTs on device pointers. NEVER source both (L77).
+# Sourcing env.sh + `module load nvhpc` here cost jobs 26984167/347/348: rc=139 on EVERY leg.
+source "$ROOT/env_cuda.sh"
 
 case "${POINT:?POINT required}" in
   dars) MESH=/work/ab0995/a270088/port2/mesh_m11/zoo/dars/a4u30 ; DT=120 ; ARM=a4u30  ; RECIPE=MINCONN+CONTIG+UFACTOR30 ;;

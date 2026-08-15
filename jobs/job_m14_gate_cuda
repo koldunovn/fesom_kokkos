@@ -31,8 +31,10 @@
 set -u
 ROOT=/home/a/a270088/port_kokkos_int
 source /sw/etc/profile.levante
-source "$ROOT/env.sh"
-module load nvhpc/24.7-gcc-11.2.0
+# 🔴 env_cuda.sh, NOT env.sh. CUDA-aware MPI needs openmpi/4.1.5-nvhpc; the env.sh
+# openmpi/4.1.2 is --without-cuda and SEGFAULTs on device pointers. NEVER source both (L77).
+# Sourcing env.sh + `module load nvhpc` here cost jobs 26984167/347/348: rc=139 on EVERY leg.
+source "$ROOT/env_cuda.sh"
 export OMPI_MCA_btl_vader_single_copy_mechanism=none
 
 MESH=/work/ab0995/a270088/port2/mesh/core2
@@ -65,12 +67,20 @@ echo "=== live FESOM_ env after the unsets (should be empty) ==="; env | grep -E
 
 echo; echo "--- leg 1: h17 (the pre-campaign reference) ---"
 srun -l "$REF_BIN" "$MESH" "$OUT_REF" 1800 20 10 "$PHC" 1958 > "$OUT_REF/run.log" 2> "$OUT_REF/run.err"
-echo "h17 rc=$?"; tail -1 "$OUT_REF/run.log"
+RC_REF=$?; echo "h17 rc=$RC_REF"; tail -1 "$OUT_REF/run.log"
 
 echo; echo "--- leg 2: m14-integrate, all new knobs unset ---"
 srun -l "$NEW_BIN" "$MESH" "$OUT_NEW" 1800 20 10 "$PHC" 1958 > "$OUT_NEW/run.log" 2> "$OUT_NEW/run.err"
-echo "m14 rc=$?"; tail -1 "$OUT_NEW/run.log"
+RC_NEW=$?; echo "m14 rc=$RC_NEW"; tail -1 "$OUT_NEW/run.log"
 
+# 🔴 A DIFF IS ONLY EVIDENCE IF BOTH RUNS LIVED. Jobs 26984167 segfaulted BOTH legs (rc=139) and
+# this gate printed "BYTE GATE PASS", because diff_snap compared two equally-empty outputs. That is
+# the same false-pass class as the NaN-blind solver guard (L106) -- guarded against on the CPU side
+# and missed here. Check the run first.
+if [ "$RC_REF" -ne 0 ] || [ "$RC_NEW" -ne 0 ]; then
+    echo "=== GATE VOID — a leg did not complete (h17 rc=$RC_REF, m14 rc=$RC_NEW). No diff is meaningful. ==="
+    exit 1
+fi
 echo; echo "=== diff_snap.py: m14 (knobs off) vs h17, CUDA vs CUDA, zero tolerance ==="
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 "$PY" "$ROOT/scripts/diff_snap.py" "$OUT_REF" "$OUT_NEW"
