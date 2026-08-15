@@ -355,6 +355,7 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 | dars 8192 CPU dt120 M=20 wsplit | 0.0976 | 0.0980 | **+0.4 % (wash)** | bt mpi/step 42→24, bt wait 3.1→2.8 ms — mechanism intact, but bt is ~6 % of a 98 ms step and the +28.2 % ring-1 redundant compute eats the rest, exactly as the census predicted. Job 26960157, legs healthy (η=4.08), off-rep spread 1.5 % > the delta |
 | **CORE2 16N GPU dt1800 M=50** | 0.0841 | 0.0744 | **−11.5 %** | the track's headline. bt 19.7 → 12.5 ms: busy **7.84 → 5.37 (−31 %)** and wait **11.82 → 7.15 (−40 %)**, exchanges/step 102 → 54. On GPU the exchange cost sits in *busy* (staging + launch, ~51 µs each here) and its rank-variation is most of the imbalance, so halving the exchanges takes both. Job 26962396, all legs end at η=2.02 / T[−2.06,30.05] / S[5.63,41.12], identical off and on |
 | **CORE2 4N GPU dt1800 M=50** | 0.0683 | 0.0617 | **−9.7 %** | the same mechanism at a third of the ranks: bt busy **6.92 → 4.80 (−30.6 %)**, wait 7.67 → 4.37 (−43 %), exchanges 102 → 54. Per-exchange staging **44 µs** here against 51 µs at 16N — a per-CALL cost, near-independent of subdomain size, which is why it dominates wherever the per-rank arithmetic is small. Job 26969116, on-arm reps 0.0617/0.0617/0.0617 |
+| **CORE2 16N GPU dt1800 M=100** | 0.1002 | 0.0855 | **−14.7 %** | the linearity test (job 26969145), predicted −12…−16 % ✅. Exchanges 202 → 104; bt busy 15.30 → 10.21, wait 23.30 → 13.66 |
 | **NG5 16N GPU dt180 M=20** (fat bin) | 0.2461 | 0.2469 | **+0.3 % (wash)** | busy **11.41 → 12.22 (+7.1 %)**, wait 5.40 → 5.44 (flat): with 115 670 nodes per rank the block is compute-bound, the ring work costs more than the staging saves. Job 26962397, all legs η=3.62 |
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
@@ -582,118 +583,53 @@ it 5 ms of a 70 ms step. The dars reasoning is weaker (its bt split is unmeasure
 on its position in the ordering, which is why the band is wide. **If dars lands outside −1…−3 %
 the law is not a clean function of per-rank size and needs the staging share measured per point.**
 
-## 🔴 7c. Deep K: the "no" is RETRACTED
+## 🔴 7c. Deep K: the "no" is RETRACTED — and the model behind the new estimate is now validated
 
-§7's verdict was built on the flat-busy model, which is now falsified. Rebuilding it on the
-measured law — staging ≈ 51 µs per exchange, arithmetic ≈ 2.6 ms, ring compute growing with the
-zone of §2 — gives, at CORE2 16N GPU (exchanges/step ≈ ⌈50/K⌉ + 4):
+§7's verdict was built on the flat-busy model, which §7b falsified. The replacement is a two-term
+law — per-exchange staging plus ring compute — and the **M=100 pair (job 26969145) was run to test
+its load-bearing assumption: that the saving is LINEAR in the exchanges removed.** It is, on three
+counts at once:
 
-| K | exchanges | staging (ms) | ring compute (ms) | bt busy (ms) | Δ step (extrapolated) |
+| CORE2 16N GPU | M=50 | M=100 |
+|---|---|---|
+| exchanges removed by the rung | 48 | 98 |
+| bt busy saved | 2.47 ms | 5.09 ms |
+| ⇒ **staging per exchange** | **51.5 µs** | **51.9 µs** |
+| bt wait saved | 4.67 ms | 9.64 ms |
+| ⇒ **wait amplification per ms of busy** | **1.89×** | **1.89×** |
+| ⇒ inferred arithmetic (busy − staging) | 2.59 ms | **4.81 ms** (≈2×, as M doubles) |
+| step | 0.0841 → 0.0744 (**−11.5 %**) | 0.1002 → 0.0855 (**−14.7 %**, predicted −12…−16 ✅) |
+
+The per-exchange cost is the same to 1 % across a doubling of M, the wait amplification is
+identical, and the arithmetic the fit backs out doubles when the substep count doubles — which it
+must. The barotropic block on GPU is **2.59 ms of arithmetic plus 5.29 ms of exchange staging** at
+M=50, and the rung takes half the staging.
+
+**Deep K on those constants** (exchanges/step ≈ ⌈M/K⌉+4; ring compute from §2's zone deltas
+against K=1, 0.08 / 0.24 / 0.60, applied to the 2.59 ms arithmetic; the 1.89× amplification
+applied to the net busy change):
+
+| K | exchanges | staging saved vs K=1 | ring compute added | net busy | **Δ step vs K=1** |
 |---|---|---|---|---|---|
-| certified | 102 | 5.25 | 0 | 7.84 | — |
-| 1 | 54 | 2.78 | +0.16 | **5.37 (measured)** | **−11.5 % (measured)** |
-| 2 | 29 | 1.49 | +0.36 | ~4.4 | ~−14 % |
-| 4 | 17 | 0.88 | +0.78 | ~4.3 | ~−15 % |
-| 8 | 11 | 0.57 | +1.71 | ~4.9 | ~−14 % |
+| 1 | 54 | — | — | — | — (measured −11.5 % vs certified) |
+| 2 | 29 | 1.29 ms | +0.21 ms | −1.08 ms | **≈ −2.4 %** |
+| 4 | 17 | 1.91 ms | +0.62 ms | −1.29 ms | **≈ −2.9 %** |
+| 8 | 11 | 2.22 ms | +1.55 ms | −0.67 ms | ≈ −1.5 % |
 
-So deep K plausibly adds **another ~3 points** at CORE2 16N, with the optimum around K=2–4 — the
-same shape as the original §7 table, for a completely different reason. 🔴 This is a two-point
-extrapolation, not a measurement: it assumes the wait keeps tracking the staging spread and that
-the K-ring exchange keeps the same partner count (measured flat in §7) and per-exchange cost.
-**The honest status is: reopened, with a measured case at small-per-rank-size GPU points and none
-at large ones.**
+So **K=2–4 would take CORE2 16N from −11.5 % to about −14 %**, with K=8 giving back most of it —
+the same optimum the original §7 table guessed, on constants that are now measured rather than
+assumed. ⚠️ Two honest bounds on this: the 1.89× amplification was measured for a *staging*
+change and must **saturate** as staging vanishes (at K=4 staging is 0.88 ms of a 4.09 ms busy, so
+the residual wait is increasingly the arithmetic's own imbalance), which makes these upper
+estimates; and the ring-compute term assumes the K-ring exchange keeps the same partner count
+(measured flat in §7) and per-exchange cost.
 
-⚠️ An earlier version of this paragraph proposed a "k-periodic η exchange" arm as the cheap way to
-trace the curve. **That was wrong and is withdrawn**: the rung already exchanges no η at all, so
-exchanging it every k substeps is a step *back* towards the certified path, not towards deep K.
-And there is no valid shortcut — K=2 needs Ū on element ring 3 (to get η on node ring 2, to get Ū
-on ring 1 for the second substep), which is exactly what the §4 extended mesh provides and what
-the local data cannot.
-
-**What can be tested cheaply is the extrapolation's load-bearing assumption: that the saving is
-LINEAR in the number of exchanges removed.** Running the same pair at **M=100** doubles the
-exchanges the rung removes (98 instead of 48) at an admissible substep count (the CFL guard only
-sets a lower bound, M_min=35 here). Pre-registered, from the measured 51 µs/exchange and the
-observed wait-to-busy saving ratio of ~1.9: **CORE2 16N GPU at M=100 lands in −12 % … −16 %**
-(job 26969145; the certified M=100 leg is already measured at 0.1007 s/step by the M-sweep). A
-saving that saturates instead would falsify the linear staging model and with it §7c's table.
-
-## 🔴 7b. The prediction was wrong by 4×, and the reason is where the pack cost lives
-
-Pre-registered: CORE2 16N in **−1.5 % … −2.9 %**, NG5 16N in **−0.35 % … −0.7 %**.
-Measured: CORE2 16N **−11.5 %**, NG5 16N **+0.3 %**. The NG5 magnitude is right and its sign is
-not; the CORE2 number is four times the top of its band. **The model was wrong, and specifically
-one term of it was wrong.**
-
-| CORE2 16N GPU | certified | rung K=1 | |
-|---|---|---|---|
-| exchanges/step | 102 | 54 | |
-| bt **busy** mean | 7.84 | **5.37** | **−31.4 %** ← the model said 0 % |
-| bt busy spread (max−min) | 9.20 | **5.20** | |
-| bt **wait** mean | 11.82 | 7.15 | −39.5 % |
-| wait elasticity dln(wait)/dln(exch) | — | **0.790** | the CPU measured 0.166 |
-| floor elasticity | — | 0.429 | the CPU measured 0.435 |
-| imbalance share φ | 55.9 % | 44.5 % | |
-
-**Where the error was.** The model took `bt_busy(K=1) = bt_busy_cert`, calibrated on the CPU pairs
-where busy was flat to 0.3 % because the removed exchange's pack (a memcpy) exactly paid for the
-ring compute. On GPU that cancellation does not hold in either direction: the pack/unpack and its
-staging are *kernels and copies*, they land in `busy`, and at 1 982 nodes per rank they dominate
-it — a two-point fit gives **~51 µs of busy per exchange** against ~2.6 ms of actual arithmetic.
-Halving the exchanges removed a third of the block's busy time outright.
-
-**And that is also why the wait fell.** The per-rank staging cost scales with halo size, which
-varies 11× across ranks at this point (corr(bt busy, halo elements) = **+0.63**, against +0.38 for
-owned elements). So a large part of what §7 classified as "imbalance" was **communication cost
-wearing an imbalance costume**: removing exchanges removed the spread too (9.20 → 5.20 ms), and
-with it the absorption. Hence the wait elasticity of 0.79 on GPU against 0.17 on CPU.
-
-**What survives.** The conservation argument of §7 is still true of *work* imbalance — but the
-decomposition's labels depend on which side of the timer the pack sits, and on GPU it sits in
-busy. L118's rule needs that caveat, and the practical instruction is sharper: **regress the
-phase's busy on the halo as well as the owned counts before deciding what its wait is made of.**
-
-**NG5 is the same mechanism with the sign flipped.** 115 670 nodes per rank, halo/owned ≈ 1.2 %:
-staging is a small part of an 11.4 ms busy, and the rung's wider element extent and its two extra
-per-step waves cost **+7.1 % busy** — more than it saves. The block is compute-bound, so there is
-nothing for the lever to take.
-
-## 🔴 7c. Deep K: the "no" is RETRACTED
-
-§7's verdict was built on the flat-busy model, which is now falsified. Rebuilding it on the
-measured law — staging ≈ 51 µs per exchange, arithmetic ≈ 2.6 ms, ring compute growing with the
-zone of §2 — gives, at CORE2 16N GPU (exchanges/step ≈ ⌈50/K⌉ + 4):
-
-| K | exchanges | staging (ms) | ring compute (ms) | bt busy (ms) | Δ step (extrapolated) |
-|---|---|---|---|---|---|
-| certified | 102 | 5.25 | 0 | 7.84 | — |
-| 1 | 54 | 2.78 | +0.16 | **5.37 (measured)** | **−11.5 % (measured)** |
-| 2 | 29 | 1.49 | +0.36 | ~4.4 | ~−14 % |
-| 4 | 17 | 0.88 | +0.78 | ~4.3 | ~−15 % |
-| 8 | 11 | 0.57 | +1.71 | ~4.9 | ~−14 % |
-
-So deep K plausibly adds **another ~3 points** at CORE2 16N, with the optimum around K=2–4 — the
-same shape as the original §7 table, for a completely different reason. 🔴 This is a two-point
-extrapolation, not a measurement: it assumes the wait keeps tracking the staging spread and that
-the K-ring exchange keeps the same partner count (measured flat in §7) and per-exchange cost.
-**The honest status is: reopened, with a measured case at small-per-rank-size GPU points and none
-at large ones.** What would settle it cheaply, before any extended-mesh build: a `k`-periodic η
-exchange arm (exchange every k substeps with the *existing* ring-1 data, accepting the drift the
-s3 measurement quantifies) would trace the staging curve at K=2 and 4 without the §4 layer.
-
-🔴 **So the W6 GPU pair is not only a performance row: it measures ε and φ on the fabric that
-matters.** Run `scripts/m12b_wait_anatomy.py off=<off_ph1_dir> on=<on_ph1_dir>` on its
-phasestats legs — the same two numbers, on GPU. The queued M-sweep (26952126/27) is the
-independent check on the baseline. **And with φ measured, the deep-K question is answered — "no".** The decision rule was: build the
-§4 extended-mesh layer only if the GPU floor elasticity is ≥0.7 *and* φ ≤ 0.3. φ is 0.56 at CORE2
-16N and 0.47 at 4N, so the rule already fails there, and the table shows why: at CORE2 16N, K=4
-returns **the same −2.9 %** as K=1 even in the latency-bound limit, because the 6.7 ms of
-imbalance in the wait is untouchable and the redundant compute grows into whatever the messages
-give back. NG5 passes the φ half of the rule (0.31) but its bt block is only 6.8 % of a 246 ms
-step, so deep K there moves −0.7 % to −1.0 %. **On this evidence the extended-mesh layer is not
-worth building for SE**, and the K=1 rung is where this line stops. The remaining bt wait is an
-imbalance problem — M11's territory, not the halo's. The W6 pairs test the K=1 half of the
-prediction; if they land in the band, this verdict stands as written.
+**Verdict for the decision:** deep K is worth **2–3 points on top of the rung** at CORE2-class
+per-rank size, for the cost of building the §4 extended-mesh layer. That is a real but modest
+return, and it should be weighed against the same effort spent elsewhere — the rung itself already
+delivers −9.7 % to −11.5 % at those points with no new mesh machinery. Note also what the M=100
+row is *not*: raising M is not an alternative route to the extra points, because the certified
+path pays for the extra substeps too (0.0841 → 0.1002).
 
 ## 🔴 7d. The rung was carrying an avoidable per-step cost — M9's lesson, again
 
