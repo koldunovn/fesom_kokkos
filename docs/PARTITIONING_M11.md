@@ -3300,3 +3300,48 @@ Jobs 26961645 / 26961646, repetition spreads 0.1–2.2 %. Every arm is slower th
 partition and every difference is inside the noise. The verdict "null" survives; the story
 attached to it — **"NG5 is the most partition-fragile mesh in the campaign"** — does not. There is
 no fragility. Repartitioning simply does not pay on NG5 at 2048 cores.
+
+## 🔴 I over-generalised from the dars screen — the shipped partitions are NOT lottery tickets, except at dars
+
+The dars 3,000-step screen showed a seed-only re-roll of the stock recipe as its fastest leg, and
+I proposed that the shipped partitions might simply be unlucky draws — which would have made
+"regenerate your partition" the campaign's headline and the knobs a second-order refinement.
+Raced at all five CPU points (26963427-31, min-of-2, det, ladder dt), that is **false everywhere
+except dars**:
+
+| point | stock-recipe seed re-rolls vs the SHIPPED partition | best knob/engine arm |
+|---|--:|--:|
+| fArc 2048 | **+3.3 / +7.3 / +8.1 %** (all slower) | Mt-KaHyPar −7.3 % |
+| CORE2 864 | **+8.1 / +13.3 / +15.5 %** (all slower) | KaMinPar −4.5 % |
+| CORE2 512 | −0.8 / −0.5 / +0.3 % (a wash) | KaHIP −3.9 %, slack −3.5 % |
+| NG5 2048 | +0.8 % | `MINCONN` +0.9 % (null point) |
+| **dars 2048** | **−4.55 / −4.77 / −4.86 %** (all faster) | `MINCONN` −3.9 % |
+
+So the shipped partitions are *good* draws at fArc and CORE2 864 — a fresh seed costs up to 15 %
+there — and the campaign's gains at those points are genuinely the knobs and the engines, not luck.
+
+**dars is the exception, and it is a real one.** Confirmed at min-of-3 in a matched race
+(26963431, spreads ≤1.0 %): a plain re-roll −4.61 %, `MINCONN` −4.27 %, KaMinPar −3.64 %, slack
+−2.91 %. The re-roll and `MINCONN` are tied inside the spread. The dars baseline is byte-identical
+to `/pool`'s `dist_2048`, so this is the shipped artefact, not a sandbox copy.
+
+⇒ **The dars 2048 CPU result is not "`MINCONN` is worth 4 %". It is "the shipped dars partition
+is a bad draw, and almost anything else — including re-running the stock partitioner with a
+different seed — recovers ~4.5 %."** That is a cheaper recommendation than the campaign's, and a
+different claim. It also retro-explains F45: `dars_seed660013` was labelled a "fragile" partition
+when it is in fact one of the *fast* ones (−4.53 % at 3,000 steps).
+
+Method note: seed controls existed all along, built for the accuracy envelopes, but were never
+raced. Under the legacy fill racing them would have been uninterpretable — each carried its own
+initial condition, so a timing difference could have been the partition or the transient. Making
+the initial condition partition-independent is what turned them into legitimate timing arms.
+
+## CORE2 4 GPU under det: the gain reproduces and the disturbance is tier 1
+
+Race 26961428 (min-of-2): `MINCONN` **−7.08 %** (legacy −8.06 %), `MINCONN`+`UFACTOR=30` −6.78 %,
+`MINCONN`+`CONTIG` −0.15 %, slack +1.18 %. The `CONTIG` penalty (Finding: it pushes the partner
+count back up) reproduces exactly.
+
+Gate 26961547, four seed controls: every arm at or below the control top on temp, salt and ssh,
+and **every leg — arms and controls — takes an identical CG iteration path for all twenty steps.**
+Tier 1, and now for a defensible reason rather than a wide envelope.
