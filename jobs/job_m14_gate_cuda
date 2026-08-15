@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH --job-name=m14_gate_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:12:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/gpugate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/gpugate.%j.err
+#
+# M14 CUDA HALF OF THE BYTE GATE (plan Task B1).
+#
+# CUDA is NOT bit-identical to Serial, so the Serial baseline cannot serve as the reference.
+# This job runs BOTH binaries back to back in ONE allocation — h17's frozen CUDA binary (the
+# main/pre-campaign reference) and the M14 CUDA binary with every new knob unset — and requires
+# byte-identical snapshots between them.
+#
+# -C a100_80 is mandatory: the gpu partition is heterogeneous (L94), and an unpinned pair could
+# land on different card models and differ for reasons that have nothing to do with the merge.
+# Both legs run inside this one allocation, so they see the same nodes and the same cards.
+#
+# Cheap on purpose: 2 nodes / 12 min, so the scheduler treats it as fill (a cheap gate must LOOK
+# cheap — a short walltime flips (Priority) to (None)).
+#
+# Usage: sbatch jobs/job_m14_gate_cuda
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+module load nvhpc/24.7-gcc-11.2.0
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+REF_BIN=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda      # md5 f8384e86...
+NEW_BIN=$ROOT/build-m14cuda/fesom_port
+
+# ALL knobs OFF — grep the environment rather than listing names, so a knob added later
+# cannot leak in silently.
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+
+TAG=${M14_TAG:-$SLURM_JOB_ID}
+BASE=/work/ab0995/a270088/port2/m14
+OUT_REF=$BASE/gpugate_${TAG}_h17
+OUT_NEW=$BASE/gpugate_${TAG}_m14
+rm -rf "$OUT_REF" "$OUT_NEW"; mkdir -p "$OUT_REF" "$OUT_NEW"
+
+echo "=== M14 CUDA byte gate — tag=$TAG ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+md5sum "$REF_BIN" "$NEW_BIN"
+( cd "$ROOT" && git rev-parse HEAD )
+echo "=== live FESOM_ env after the unsets (should be empty) ==="; env | grep -E '^FESOM_' | sort || true
+
+echo; echo "--- leg 1: h17 (the pre-campaign reference) ---"
+srun -l "$REF_BIN" "$MESH" "$OUT_REF" 1800 20 10 "$PHC" 1958 > "$OUT_REF/run.log" 2> "$OUT_REF/run.err"
+echo "h17 rc=$?"; tail -1 "$OUT_REF/run.log"
+
+echo; echo "--- leg 2: m14-integrate, all new knobs unset ---"
+srun -l "$NEW_BIN" "$MESH" "$OUT_NEW" 1800 20 10 "$PHC" 1958 > "$OUT_NEW/run.log" 2> "$OUT_NEW/run.err"
+echo "m14 rc=$?"; tail -1 "$OUT_NEW/run.log"
+
+echo; echo "=== diff_snap.py: m14 (knobs off) vs h17, CUDA vs CUDA, zero tolerance ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" "$OUT_REF" "$OUT_NEW"
+RC=$?
+echo "diff_snap rc=$RC"
+if [ "$RC" -eq 0 ]; then
+    echo "=== M14 CUDA BYTE GATE PASS — knobs-off returns to the pre-campaign state on GPU too ==="
+else
+    echo "=== M14 CUDA BYTE GATE FAIL — the merge perturbed the default path on the device ==="
+fi
+exit $RC
