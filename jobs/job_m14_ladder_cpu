@@ -1,0 +1,138 @@
+#!/bin/bash
+#SBATCH --job-name=m14_ladder
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH -o /work/ab0995/a270088/port2/m14/ladder.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/ladder.%j.err
+#
+# M14 — one rung of a CPU strong-scaling ladder (plan Task D3).
+#
+# One job = one mesh at one rank count, running every requested ARM inside ONE allocation on the
+# SAME nodes, in ABBA order when there are two. Same-day is not enough: the smallest gains this
+# campaign chases (-0.7 % at NG5 CPU) sit under the ~2 % baseline spread, and -C cannot pin node
+# identity on `compute`. ABBA makes linear drift over the allocation cancel instead of loading
+# onto whichever arm ran first.
+#
+# 🔴 The FIRST leg of an allocation is systematically slow (measured 2026-08-15 in the null-cost
+# pairs: leg 1 was slowest in BOTH jobs, 0.0607 vs 0.0590 at CORE2 512 and 0.0844 vs 0.0831 at
+# fArc 2048). A throwaway warmup leg runs first and is DISCARDED.
+#
+# ARMS:
+#   base = the state before these campaigns: no new knob, FESOM_SPEED=1 (M7 is already on main,
+#          so its gains belong to "before"), det on.
+#   best = base + the per-point lever recipe passed in BEST_KNOBS.
+# det is ON IN BOTH ARMS — a correctness fix, not a speed knob, so both arms start from bitwise
+# identical initial conditions on every partition. Budget its fill: it is startup, not per-step,
+# and the reported number is the model's own per-step timer, never walltime.
+#
+# Usage:
+#   sbatch --nodes=4 --ntasks=512 --time=00:40:00 \
+#          --export=ALL,POINT=core2,ARMS=base jobs/job_m14_ladder_cpu
+#   sbatch --nodes=16 --ntasks=2048 --time=01:00:00 \
+#          --export=ALL,POINT=dars,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
+#          jobs/job_m14_ladder_cpu
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+
+N=$SLURM_NTASKS
+# MESH= is per POINT *and per rank count* — the tree changes partway up several ladders.
+case "${POINT:?POINT required}" in
+  core2) DT=1800
+         if [ "$N" -le 864 ]; then MESH=/work/ab0995/a270088/port2/mesh/core2          # private (L73)
+         else                      MESH=/work/ab0995/a270088/port2/mesh/core2_bigpart; fi ;;
+  farc)  DT=900
+         if [ "$N" -le 2304 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+         else                       MESH=/work/ab0995/a270088/port2/mesh/farc_bigpart; fi ;;
+  dars)  DT=120
+         if [ "$N" -le 4096 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+         else                       MESH=/work/ab0995/a270088/port2/mesh/dars_bigpart; fi ;;
+  ng5)   DT=180
+         if [ "$N" -le 8192 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+         else                       MESH=/work/ab0995/a270088/port2/mesh/ng5_bigpart; fi ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+MESH=${MESH_OVERRIDE:-$MESH}
+NSTEPS=${NSTEPS:-300}
+ARMS=${ARMS:-base}
+BEST_KNOBS=${BEST_KNOBS:-}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i1}/fesom_port_serial
+
+[ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N does not exist"; exit 2; }
+
+# snap_every: -1 always for timing runs. Mandatory at >=4096 ranks anyway (ibv_reg_mr gather).
+SNAP=-1
+
+OUT=/work/ab0995/a270088/port2/m14/ladder_${POINT}_${N}_${SLURM_JOB_ID}
+mkdir -p "$OUT"; : > "$OUT/legs.txt"
+echo "=== M14 CPU ladder — $POINT ranks=$N nodes=$SLURM_NNODES dt=$DT steps=$NSTEPS arms='$ARMS' ==="
+echo "mesh : $MESH/dist_$N"
+echo "nodes: $SLURM_JOB_NODELIST"
+md5sum "$BIN"
+[ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
+
+clean_env () {
+    unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+    for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+        while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+    done
+    export FESOM_SPEED=1 FESOM_IC_EXTRAP=det      # both arms
+}
+
+leg () {                       # leg <arm> <index>
+    local arm=$1 idx=$2
+    local out="$OUT/${idx}_${arm}"
+    mkdir -p "$out"
+    clean_env
+    if [ "$arm" = best ] && [ -n "$BEST_KNOBS" ]; then
+        for kv in $BEST_KNOBS; do export "$kv"; done
+    fi
+    srun "$BIN" "$MESH" "$out" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    local rc=$?
+    local t;  t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
+    # ZOMBIE CHECK (M10 L106): rc=0 is not aliveness. A NaN-blind guard turns a broken run into a
+    # FAST clean exit -- a zombie leg measured 10.8 % faster than a healthy one. Require a final
+    # step line that is present, finite, and reporting a non-zero solver iteration count.
+    local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$out/run.log" | tail -1)
+    local live=yes
+    [ -n "$last" ] || live=no
+    echo "$last" | grep -qiE 'nan|inf' && live=no
+    echo "$last" | grep -qE 'it=0[^0-9]' && live=no
+    echo "leg $idx $arm: rc=$rc s/step=${t:-NA} live=$live"
+    [ "$live" = yes ] && [ "$rc" -eq 0 ] && [ -n "$t" ] && echo "$arm $t" >> "$OUT/legs.txt" \
+        || echo "  !! leg REJECTED (rc=$rc live=$live) — its timing is not admitted"
+}
+
+# --- warmup leg, discarded (see header) ---
+echo; echo "--- warmup (discarded) ---"
+leg warmup 0
+: > "$OUT/legs.txt"          # drop whatever the warmup recorded
+
+set -- $ARMS
+if [ "$#" -eq 2 ]; then
+    echo; echo "--- ABBA: $1 $2 $2 $1 ---"
+    leg "$1" 1; leg "$2" 2; leg "$2" 3; leg "$1" 4
+else
+    echo; echo "--- $1 x2 ---"
+    leg "$1" 1; leg "$1" 2
+fi
+
+echo; echo "=== result ==="
+python3 - "$OUT/legs.txt" "$POINT" "$N" <<'PY'
+import sys, collections
+d=collections.OrderedDict()
+for ln in open(sys.argv[1]):
+    k,v=ln.split(); d.setdefault(k,[]).append(float(v))
+if not d: print("NO ADMITTED LEGS"); raise SystemExit(1)
+for k,v in d.items():
+    sp=(max(v)-min(v))/min(v)*100
+    print(f"  {k:5s} legs {v}  min={min(v):.4f}  spread={sp:.2f}%")
+if 'base' in d and 'best' in d:
+    b,x=min(d['base']),min(d['best'])
+    print(f"  GAIN = {(x-b)/b*100:+.2f}%  (best vs base, min over legs)")
+print(f"CSV {sys.argv[2]},{sys.argv[3]}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
+PY
