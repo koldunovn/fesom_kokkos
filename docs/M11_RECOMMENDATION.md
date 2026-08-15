@@ -88,7 +88,7 @@ the shipped partition. "legacy" in brackets is the pre-det value for comparison.
 |---|---|--:|---|--:|---|---|
 | **dars** | GPU | 64 | **`MINCONN`+`CONTIG`+u30** | **−18.5 %** (legacy −18.6) | ✅ | **tier 1 — the LOWEST temp deviation of any leg incl. 5 controls; temp max below the class; identical CG paths.** The legacy "largest disturbance in the campaign" was the hole-filler |
 | dars | GPU | 64 | `MINCONN` alone | **−12.9 %** (legacy −13.6) | ✅ | temp/ssh in class, salt +12 % over a tight 5-control top — tier 1/2 boundary |
-| NG5 | GPU | 64 | **slack `UFACTOR=30` alone** | **−10.1 %** | ✅ | ⬜ gate running (26980859) — **new: the only GPU point where `MINCONN` does not win**; that arm was never raced here before, the legacy fill killed it |
+| NG5 | GPU | 64 | **slack `UFACTOR=30` alone** | **−10.1 %** | ✅ | **tier 1** — in class on temp/salt, ssh below all 3 controls, identical CG paths (26980859). **The only GPU point where `MINCONN` does not win**; the arm was never raced here before because the legacy fill killed it |
 | NG5 | GPU | 64 | `MINCONN` | **−9.5 %** (legacy −9.7) | ✅ | **tier 1 — in class on temp, salt AND ssh against 4 controls, identical CG paths.** The legacy tier-3 ssh excursion was the hole-filler |
 | CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | **−3.9 %** by median (legacy −3.6) | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
