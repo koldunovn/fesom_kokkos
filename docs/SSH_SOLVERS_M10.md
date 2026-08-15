@@ -2160,3 +2160,33 @@ show. ⇒ PASS on the house criterion (`diff_snap rc=1` is expected here — CUD
 not bit-identical; the script's "DIVERGENCE — block on Task 5" line is boilerplate tied to that
 exit code, not a verdict). GPU A/B fleet released: 26969006 (ng5 g16n), 26969007 (farc g16n),
 26969008 (core2 g1n).
+
+### ⭐ The GPU det rows (26969007, 26969008; NG5 re-queued as 26970298)
+
+| configuration | leg | legacy | **det** | iters legacy → det |
+|---|---|--:|--:|--:|
+| farc GPU 64 r / 16 N | `cg2` | −8.57 % | **−8.55 %** | 211.1 → 212.5 |
+| (26744537 → 26969007) | **`oati`** | **−10.36 %** | **−10.58 %** | 211.7 → 213.0 |
+| | `pcsi` | +6.37 % | **+6.01 %** | 376.4 → 375.1 |
+| CORE2 GPU 4 r / 1 N | `cg2` | −4.30 % | **−3.70 %** | 104.6 → 104.8 |
+| (26735864 → 26969008) | `oati` | −4.15 % | **−3.99 %** | 105.1 → 105.2 |
+| | **`pcsi`** | **−5.19 %** | **−3.11 %** | **121.5 → 133.0** |
+
+**The best GPU result in the campaign reproduces leg for leg** — farc 16 N, `oati` −10.58 %
+against −10.36 %, with `pcsi`'s loss (+6.0 %) intact and the 42.3 % SSH share unchanged.
+
+**CORE2 GPU carries the one genuine change on the whole board, and it is `pcsi`-specific.**
+`cg2` and `oati` reproduce inside 0.6 pp, but `pcsi` falls from −5.19 % to −3.11 % — and its
+iteration count rises **121.5 → 133.0 (+9.5 %)**. Iteration counts are deterministic, so this
+is not noise: P-CSI is a Chebyshev method whose work is set by the Lanczos eigenbound estimated
+at setup, the operator depends on the state, and a different (correct) IC moves the estimate.
+It is the same sensitivity the T8c sweep found when `m` went 30 → 120 — there the *old default
+was faster because it was wrong*. Consequence: **the best solver at CORE2 GPU 1 N changes from
+`pcsi` to `oati`**, and P-CSI's advantage at that rung was partly an artifact of the estimate
+it happened to get from the legacy IC. Note this is CORE2's eigenbound only: `pcsi` iterations
+are unchanged everywhere else under det (farc 376.4 → 375.1, dars 55.28 → 55.23).
+
+⚠️ **Walltime note.** NG5 GPU 16 N needs ~50 min for 8 runs (mesh read + det fill + 300 steps
+per run); the first attempt (26969006) hit a 35-min limit after 6 of 8 runs. Its completed legs
+were clean (`fallbacks=0`, baseline 0.2474 s/step at an 8.4 % SSH share, `cg2` 0.2437 = −1.5 %),
+but a partial job is not a row. Re-queued at `-t 01:00:00`.
