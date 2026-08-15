@@ -62,7 +62,7 @@ maximum number of neighbouring sub-domains — is **never set anywhere in `fort_
 partition produced by stock FESOM has ever had it active.
 
 We measure `MINCONN` as the single most valuable partitioning knob available on GPU: it is the
-best or near-best arm at every GPU point measured. The largest gain is **−18.5 %** (dars 64 GPU,
+best or near-best arm at four of the five GPU points measured. The largest gain is **−18.5 %** (dars 64 GPU,
 `MINCONN`+`CONTIG`+`UFACTOR=30`), and under the deterministic initial condition that arm is also
 **tier 1** — its temperature deviation is the smallest of any leg in its gate, controls included.
 `MINCONN` alone is −12.9 % there. Switching the call to `PartGraphKway` is a few lines.
@@ -103,7 +103,8 @@ those still carrying legacy numbers are marked.
 | **dars** | GPU | 64 | **`MINCONN`+`CONTIG`+u30** | **−18.5 %** (legacy −18.6) | ✅ | **tier 1 — the LOWEST temp deviation of any leg incl. 5 controls; temp max below the class; identical CG paths.** The legacy "largest disturbance in the campaign" was the hole-filler |
 | dars | GPU | 64 | `MINCONN` alone | **−12.9 %** (legacy −13.6) | ✅ | temp/ssh in class, salt +12 % over a tight 5-control top — tier 1/2 boundary |
 | CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
-| NG5 | GPU | 64 | `MINCONN` | **−9.6 %** (legacy −9.7) | ✅ | **tier 1 — in class on temp, salt AND ssh against 4 controls, identical CG paths.** The legacy tier-3 ssh excursion was the hole-filler |
+| NG5 | GPU | 64 | **slack `UFACTOR=30` alone** | **−10.1 %** | ✅ | ⬜ gate running (26980859) — **new: the only GPU point where `MINCONN` does not win**; that arm was never raced here before, the legacy fill killed it |
+| NG5 | GPU | 64 | `MINCONN` | **−9.5 %** (legacy −9.7) | ✅ | **tier 1 — in class on temp, salt AND ssh against 4 controls, identical CG paths.** The legacy tier-3 ssh excursion was the hole-filler |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | **−3.9 %** by median (legacy −3.6) | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.8 %** at length | ✅ 3,000 steps | in class on all three (3 controls) — tier 1 |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.4 %** at length | ✅ 3,000 steps | in class — tier 1 |
@@ -216,7 +217,8 @@ Two caveats that Finding 37 established and that must travel with this claim:
   speed (median ρ −0.19, range straddling zero). On CPU you have to race.
 
 **2. There is no single recipe.** The best setting is mesh- and rank-dependent. What generalises
-is `MINCONN` on GPU (best or within a point of best at every GPU point measured) and *some* slack
+is `MINCONN` on GPU (best or within a point of best at four of five GPU points — at NG5 64 the
+plain slack arm is 0.5 pp ahead of it) and *some* slack
 on CPU.
 
 **Cross-architecture status (GH200, Findings 42/44):** the GPU lever reproduces on GH200 at
