@@ -7,14 +7,14 @@ free-running rung is BITWISE-exact (drift ≡ 0.0 — np8 ×25, np128 ×300, far
 CPU board reads farc −1.8 % / dars +0.4 % (§5) — the CPU latency share bounds the payoff, as
 Sergey predicted. GPU (W2 gate + W6 pairs) queued behind the maintenance window.**
 **🔴 s4 (2026-08-15): THE GPU BOARD IS IN, and it is the track's headline — CORE2 16N GPU
-−11.5 %** (0.0841 → 0.0744 s/step, min-of-2, all legs η=2.02), **NG5 16N GPU +0.3 % (wash)**. The
+−9.1 %** (0.0815 → 0.0741 s/step, all legs η=2.02), **NG5 16N GPU −0.65 %**. The
 W2 CUDA gate passed first (drift 0.000000e+00 every step on GPU). The mechanism is not the one
 this document predicted: on GPU the exchange cost sits in `busy` (~51 µs each at CORE2 16N), so
 halving the exchanges cut bt busy 31 % and, because that cost varies with halo size across ranks,
 the wait fell 40 % too. **The pre-registered band (−1.5…−2.9 %) was wrong by 4× and §7b says
 exactly which term of the model failed; the deep-K "no" of §7 is RETRACTED in §7c.** The board is
-a **per-rank-size law**: the rung pays where the subdomain is small (1 982 nodes/rank → −11.5 %)
-and is a wash where it is large (115 670 → +0.3 %). s4 also CLOSED the `elem_nodes(-1)` hygiene
+a **per-rank-size law**: the rung pays where the subdomain is small (1 982 nodes/rank → −9.1 %,
+7 928 → −10.7 %) and shrinks to −2.0 % / −0.65 % where it is large (49 380 / 115 670). s4 also CLOSED the `elem_nodes(-1)` hygiene
 item (§6) and measured deep-K partner growth (§7).** Plan + full gate record: `docs/plans/20260814-m12b-widehalo.md`. SE
 reference: `docs/SSH_SE_M12.md`.
 
@@ -367,10 +367,25 @@ T[−2.06,30.05] S[5.63,41.12]; NG5 η=3.62), off and on alike.
 16N. That came from `min-of-2` over the two un-instrumented legs, and **the certified arm at this
 point is too noisy for two reps to converge**: across the six legs of two independent pairs it
 spans 0.0814…0.0854 (**4–5 %**), while the rung arm spans 0.0741…0.0760 (**0.4 % in the lean job**).
-Taking the min over all three legs of each arm — the phasestats leg's instrumentation is not
-measurable here, 0.0816 against 0.0815 — the two pairs agree at **−8.7 % and −9.1 %**, whereas
-min-of-2 gave −11.5 % and −9.1 %. The rows above use min-over-all-legs. **The honest CORE2 16N
-number is ≈ −9 %, not −11.5 %.**
+The estimator was then chosen by which one *reproduces across the two independent pairs*, rather
+than by convention — the certified arm's six legs are bimodal (three near 0.0815, three near
+0.0847), so this matters:
+
+| certified arm | fat pair | lean pair | jobs differ by |
+|---|---|---|---|
+| min over all legs | 0.0814 | 0.0815 | **0.1 %** |
+| mean | 0.0834 | 0.0828 | 0.7 % |
+| median | 0.0841 | 0.0816 | 3.1 % |
+
+Only the min reproduces (the phasestats leg's instrumentation is not measurable here — 0.0816
+against 0.0815 — so including it is legitimate). On that estimator the two pairs agree at
+**−8.7 % and −9.1 %**, whereas min-of-2 gave −11.5 % and −9.1 %. **The honest CORE2 16N number is
+≈ −9 %, not −11.5 %.**
+
+⚠️ M11's trap list already carries this — *"min-of-N biased when the base is noisier"* — and I
+walked into it anyway by taking two reps on the noisier of the two arms. The general form: **when
+the two arms have different noise, the number of reps has to be set by the noisier arm, and the
+estimator has to be justified by cross-pair reproducibility, not by protocol habit.**
 
 That noise asymmetry is itself a result worth keeping: **the rung does not only make the step
 faster, it makes it more reproducible** — 102 exchanges per step exposes the certified path to
@@ -553,14 +568,16 @@ latency-bound bound, ε_f = 0.45 the CPU-measured one; exchanges/step 101 → 53
 | NG5 16N GPU | 4 | −1.0 % | −0.5 % |
 
 🔴 **The table above is SUPERSEDED — it was the pre-registration, and the measurement refuted it**
-(§7b: CORE2 16N came in at −11.5 %, four times the top of its band). It is kept because the
+(§7b: CORE2 16N came in far outside it — −11.5 % as first estimated, −9.1 % on the corrected
+estimator of §5, either way multiples of the band's top). It is kept because the
 refutation is the finding: the term it got wrong was `bt_busy`, and §7b names why. The deep-K
 conclusion that followed from it is retracted in §7c. Read on; do not quote this table.
 
 ## 🔴 7b. The prediction was wrong by 4×, and the reason is where the pack cost lives
 
 Pre-registered: CORE2 16N in **−1.5 % … −2.9 %**, NG5 16N in **−0.35 % … −0.7 %**.
-Measured: CORE2 16N **−11.5 %**, NG5 16N **+0.3 %**. The NG5 magnitude is right and its sign is
+Measured: CORE2 16N **−9.1 %** (−11.5 % as first quoted, before the §5 estimator correction),
+NG5 16N **+0.3 %** on the fat binary and **−0.65 %** once its own overhead was removed (§7d). The NG5 magnitude is right and its sign is
 not; the CORE2 number is four times the top of its band. **The model was wrong, and specifically
 one term of it was wrong.**
 
@@ -609,14 +626,14 @@ So the rung reduces barotropic busy at **every** GPU point once its own overhead
 points — **44 µs (CORE2 4N) · 51 µs (CORE2 16N) · 68 µs (dars 16N) · 60 µs (NG5 16N)** — a fixed
 per-call cost that rises only slightly with payload. **The lever's saving is therefore roughly the
 same everywhere; what differs is the step it is divided by.** NG5's bt block is 6.8 % of a 246 ms
-step, so a 1.6 ms saving is 0.65 %; CORE2 16N's is 23 % of an 84 ms step, so 9.7 ms is 11.5 %.
+step, so a 1.6 ms saving is 0.65 %; CORE2 16N's is 23 % of an 82 ms step, so 7.4 ms is 9.1 %.
 That is a share argument, not a compute-cost argument, and it is the honest form of the law.
 
 ### 7b-bis. Pre-registration for the two rows that complete the law
 
 The law says the payoff is set by nodes per rank, through the staging share of the barotropic
-busy. Two GPU points fill the gap between 1 982 (CORE2 16N, −11.5 %) and 115 670 (NG5 16N,
-+0.3 %), and their predictions are written down before they run:
+busy. Two GPU points fill the gap between 1 982 (CORE2 16N) and 115 670 (NG5 16N), and their
+predictions are written down before they run:
 
 | point | nodes/rank | bt busy / wait (certified, measured) | **predicted Δ step** | **measured** |
 |---|---|---|---|---|
@@ -644,7 +661,7 @@ counts at once:
 | bt wait saved | 4.67 ms | 9.64 ms |
 | ⇒ **wait amplification per ms of busy** | **1.89×** | **1.89×** |
 | ⇒ inferred arithmetic (busy − staging) | 2.59 ms | **4.81 ms** (≈2×, as M doubles) |
-| step | 0.0841 → 0.0744 (**−11.5 %**) | 0.1002 → 0.0855 (**−14.7 %**, predicted −12…−16 ✅) |
+| step (min over all legs) | 0.0815 → 0.0741 (**−9.1 %**) | 0.1002 → 0.0855 (**−14.7 %**, predicted −12…−16 ✅) |
 
 The per-exchange cost is the same to 1 % across a doubling of M, the wait amplification is
 identical, and the arithmetic the fit backs out doubles when the substep count doubles — which it
@@ -657,12 +674,12 @@ applied to the net busy change):
 
 | K | exchanges | staging saved vs K=1 | ring compute added | net busy | **Δ step vs K=1** |
 |---|---|---|---|---|---|
-| 1 | 54 | — | — | — | — (measured −11.5 % vs certified) |
+| 1 | 54 | — | — | — | — (measured **−9.1 %** vs certified) |
 | 2 | 29 | 1.29 ms | +0.21 ms | −1.08 ms | **≈ −2.4 %** |
 | 4 | 17 | 1.91 ms | +0.62 ms | −1.29 ms | **≈ −2.9 %** |
 | 8 | 11 | 2.22 ms | +1.55 ms | −0.67 ms | ≈ −1.5 % |
 
-So **K=2–4 would take CORE2 16N from −11.5 % to about −14 %**, with K=8 giving back most of it —
+So **K=2–4 would take CORE2 16N from −9.1 % to about −12 %**, with K=8 giving back most of it —
 the same optimum the original §7 table guessed, on constants that are now measured rather than
 assumed. ⚠️ Two honest bounds on this: the 1.89× amplification was measured for a *staging*
 change and must **saturate** as staging vanishes (at K=4 staging is 0.88 ms of a 4.09 ms busy, so
@@ -673,7 +690,7 @@ estimates; and the ring-compute term assumes the K-ring exchange keeps the same 
 **Verdict for the decision:** deep K is worth **2–3 points on top of the rung** at CORE2-class
 per-rank size, for the cost of building the §4 extended-mesh layer. That is a real but modest
 return, and it should be weighed against the same effort spent elsewhere — the rung itself already
-delivers −9.7 % to −11.5 % at those points with no new mesh machinery. Note also what the M=100
+delivers −9 % to −11 % at those points with no new mesh machinery. Note also what the M=100
 row is *not*: raising M is not an alternative route to the extra points, because the certified
 path pays for the extra substeps too (0.0841 → 0.1002).
 
