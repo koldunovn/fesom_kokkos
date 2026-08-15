@@ -33,6 +33,12 @@ W=$MESH/_partwork
 case "$MESHNAME" in
   dars) TARGETS="6144 8192 10240" ;;
   ng5)  TARGETS="16384 20480 24576" ;;
+  # M14 2026-08-15 (user: "generate additional farc partitions"). fArc is 638387 verts, so the
+  # 300-500 v/core rule puts its knee near 1280-2130 ranks — and the largest partition that
+  # existed anywhere was 2304 (277 v/core), i.e. AT the knee. fArc CPU therefore could not show
+  # a turnover at all, which is what the campaign's past-the-knee points are for.
+  #   3072 -> 208 v/core | 4096 -> 156 | 8192 -> 78 (deep past the rule of thumb)
+  farc) TARGETS="3072 4096 8192" ;;
   *)    echo "unknown mesh $MESHNAME"; exit 2 ;;
 esac
 TARGETS=${TARGETS_OVERRIDE:-$TARGETS}

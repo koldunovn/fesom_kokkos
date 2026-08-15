@@ -64,7 +64,11 @@ md5sum "$REF" "$NEW"
 echo "config: knobs OFF + FESOM_SPEED=1 (det NOT set — h17 predates M13)"
 
 leg () {                      # leg <name> <binary> <index>
-    local nm=$1 bin=$2 idx=$3 out="$BASE/${idx}_${nm}"
+    # NB: keep `out` on its OWN line. Bash expands the whole `local` command line BEFORE any
+    # of its assignments take effect, so `local idx=$3 out="…${idx}…"` reads an unbound idx
+    # and dies under `set -u`. Cost: two jobs, 11 s each.
+    local nm=$1 bin=$2 idx=$3
+    local out="$BASE/${idx}_${nm}"
     mkdir -p "$out"
     srun "$bin" "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
     local rc=$?

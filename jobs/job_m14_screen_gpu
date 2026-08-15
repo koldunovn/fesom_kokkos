@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH --job-name=m14_screen
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=16
+#SBATCH --ntasks=64
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH -o /work/ab0995/a270088/port2/m14/screen.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/screen.%j.err
+#
+# M14 — 3,000-STEP SCREEN at a GPU partition candidate, to earn a promotion.
+#
+# WHY THIS EXISTS. M11 recommends two GPU partitions that were never packaged:
+#   dars 64 GPU  `MINCONN`+`CONTIG`+u30   = zoo/dars/a4u30   -18.5 %
+#   NG5  64 GPU  slack `UFACTOR=30` alone = zoo/ng5/a5_u30   -10.1 %
+# `m11_promote` REFUSES any dist_N whose evidence lacks `run=<jobid> steps>=3000 rc=0` at that
+# rank count, and neither arm has one: M11's GPU rows carry a bare stability tick while only the
+# CPU rows say "3,000 steps". The NG5 arm in particular "was never raced here before because the
+# legacy fill killed it", so it cannot have an older screen. This job produces the missing
+# evidence rather than waving the requirement through.
+#
+# 🔴 The winners CHANGED under det. Pre-det notes call both of these "the MINCONN winners"; the
+# det re-run made a4u30 the dars winner and a5_u30 the NG5 winner (NG5 is the ONLY GPU point
+# where MINCONN does not win). Screen the arms that actually win NOW.
+#
+# 64 ranks = 16 nodes = exactly the standing GPU cap. Do not raise it here.
+# Budget the det fill: ~7 min at NG5/64 ranks against the compute, and it has killed jobs before.
+#
+# Usage: sbatch --export=ALL,POINT=dars jobs/job_m14_screen_gpu
+#        sbatch --export=ALL,POINT=ng5  jobs/job_m14_screen_gpu
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+module load nvhpc/24.7-gcc-11.2.0
+
+case "${POINT:?POINT required}" in
+  dars) MESH=/work/ab0995/a270088/port2/mesh_m11/zoo/dars/a4u30 ; DT=120 ; ARM=a4u30  ; RECIPE=MINCONN+CONTIG+UFACTOR30 ;;
+  ng5)  MESH=/work/ab0995/a270088/port2/mesh_m11/zoo/ng5/a5_u30 ; DT=180 ; ARM=a5_u30 ; RECIPE=slack_UFACTOR30 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+NSTEPS=${NSTEPS:-3000}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i1}/fesom_port_cuda
+
+# det is ON: every M11 row was re-measured under it, and both M14 campaign arms carry it.
+export FESOM_IC_EXTRAP=det
+export FESOM_SPEED=1
+
+OUT=/work/ab0995/a270088/port2/m14/screen_${POINT}_${ARM}_${SLURM_JOB_ID}
+mkdir -p "$OUT"
+echo "=== M14 GPU screen — $POINT arm=$ARM ($RECIPE) ==="
+echo "mesh   : $MESH   dist_64"
+echo "nodes  : $SLURM_NNODES ($SLURM_JOB_NODELIST)   ranks=$SLURM_NTASKS"
+echo "steps  : $NSTEPS at dt=$DT (the mesh's cold-start ladder dt)"
+md5sum "$BIN"
+ls -d "$MESH/dist_64" >/dev/null || { echo "REFUSE: $MESH/dist_64 missing"; exit 2; }
+
+srun -l "$BIN" "$MESH" "$OUT" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+RC=$?
+echo "run rc=$RC"
+tail -3 "$OUT/run.log"
+
+# A screen is only evidence if the run was ALIVE. rc=0 is not enough: a NaN-blind guard can turn a
+# dead run into a fast clean exit (M10's L106), so check the diagnostics are finite and moving.
+echo; echo "=== liveness of the final step line ==="
+last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$OUT/run.log" | tail -1)
+echo "$last"
+if [ "$RC" -eq 0 ] && [ -n "$last" ] && ! echo "$last" | grep -qiE 'nan|inf'; then
+    echo "=== SCREEN PASS — $POINT/$ARM ran $NSTEPS steps at dt=$DT with finite diagnostics ==="
+    echo "dist_64 run=$SLURM_JOB_ID steps=$NSTEPS rc=0 dt=$DT ranks=64gpu arm=$ARM recipe=$RECIPE" \
+         > "$OUT/EVIDENCE_LINE.txt"
+    cat "$OUT/EVIDENCE_LINE.txt"
+else
+    echo "=== SCREEN FAIL — rc=$RC, or non-finite/absent diagnostics. Do NOT promote. ==="
+    exit 1
+fi
