@@ -133,6 +133,22 @@ for out in sorted(glob.glob(os.path.join(args.root, "ab*.out"))):
             d["rep_spread_pct"] = 100.0 * (max(reps) - min(reps)) / min(reps)
     runs.append(dict(jobid=jobid, backend=backend, **meta, legs=legs))
 
+# 🔴 A resubmitted point leaves TWO ab*.out files under the same TAG -- the superseded job and
+# its replacement -- and every consumer of this JSON picks by tag. make_icecost_fig.py takes the
+# FIRST match, so without this it can plot a timed-out job that produced three of five legs while
+# the complete rerun sits later in the list. A superseded job is not part of the fleet: keep only
+# the highest job id per tag. (The dropped ones stay on disk; nothing is destroyed here.)
+_by_tag = {}
+for r in runs:
+    t = r.get("tag")
+    if t and (t not in _by_tag or int(r["jobid"]) > int(_by_tag[t]["jobid"])):
+        _by_tag[t] = r
+_dropped = len(runs) - len(_by_tag)
+runs = [r for r in runs if r is _by_tag.get(r.get("tag"))]
+if _dropped:
+    print(f"[m9_collect] dropped {_dropped} superseded run(s) — kept the newest job per tag",
+          file=sys.stderr)
+
 # derive per-run cell deltas against the reference leg (leg order = insertion order)
 for r in runs:
     legs = r["legs"]
