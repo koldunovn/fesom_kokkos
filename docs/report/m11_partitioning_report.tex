@@ -35,9 +35,8 @@ measurements on CPU and GPU, and a procedure for adopting a new partition}
 
 \subsection*{TL;DR}
 \begin{itemize}\itemsep1pt
-\item \textbf{GPU: a better mesh partition makes the model step 8--14\,\% faster} on three of
-the four meshes tested (3.6\,\% on the fourth), and up to $19.7\,\%$ on DARS if a larger
-change of the solution is accepted (Section~6). One factor dominates: the largest number of
+\item \textbf{GPU: a better mesh partition makes the model step 7--18\,\% faster} on three of
+the four meshes tested (3.9\,\% on the fourth). One factor dominates: the largest number of
 neighbour subdomains any process exchanges halo data with. METIS can minimise it (option
 \minconn), but FESOM calls METIS through \texttt{PartGraphRecursive}, which ignores that
 option; calling \texttt{PartGraphKway} instead is a few-line change.
@@ -47,11 +46,19 @@ newer partitioning programs (KaMinPar, Mt-KaHyPar) in place of METIS. The best C
 partitions of the same mesh differ.
 \item Partitions built with identical settings but different random seeds already give
 slightly different solutions. We use the size of that scatter as the yardstick for every
-recommended partition: most stay inside it; the exceptions are quantified in Section~6.
-\item \textbf{Some new partitions crash the model} after hundreds of steps --- eight cases
-here, one of them built with FESOM's current settings, and no property of the partition
-predicts them. A new partition must complete 3{,}000 steps at its target process count before
-use; if it fails, regenerate it with a different seed.
+recommended partition, and \textbf{every recommended partition stays inside it} on temperature,
+salinity and sea-surface height (Section~6).
+\item \textbf{Cold starts must use the deterministic climatology fill}
+(\texttt{FESOM\_IC\_EXTRAP=det}). The routine that fills gaps in the initial temperature and
+salinity fields does so in an order that depends on the decomposition, so two partitions of one
+mesh start from \emph{different oceans} --- 27 salinity units apart on all four meshes here.
+That, not any property of the partitions, produced the eight model crashes and every accuracy
+objection in the first version of this report (Section~5). A new partition should still complete
+3{,}000 steps at its target process count before use.
+\item \textbf{On DARS, simply regenerating the shipped partition with a different random seed
+is worth $-4.6\,\%$} --- as much as any option we tested. This is specific to that mesh: on
+CORE2 at 864 processes and on fArc a fresh seed is 3--15\,\% \emph{slower} than the shipped
+partition, so elsewhere the gains come from the options, not from luck.
 \item Renumbering the mesh nodes along a Hilbert curve pays only on CORE2 ($-5.8\,\%$
 together with repartitioning); the other meshes are already well ordered.
 \end{itemize}
@@ -79,13 +86,14 @@ because \texttt{METIS\_PartGraphRecursive} accepts the option and ignores it. Th
 gains 4--8\,\%, from imbalance tolerance and from newer partitioning programs rather than from
 \minconn; the two backends are best served by different partitions of the same mesh.
 
-A partition change also perturbs the solution, and two properties of that perturbation
-matter. It is usually no larger than the difference between two partitions built with the same
-settings and different random seeds (Section~6). But in a minority of cases it is fatal: eight
-of the partitions generated here make the model diverge after tens to hundreds of steps, one
-of them built with FESOM's current settings, and no property computable from a partition
-identifies them in advance (Section~5). Every new partition therefore has to be run before it
-is trusted.
+A partition change also perturbs the solution, and under a decomposition-independent
+initial condition that perturbation is no larger than the difference between two partitions
+built with the same settings and different random seeds --- at every point measured here
+(Section~6). Eight partitions did make the model diverge during this work, but the cause was the
+initial condition rather than the partitions: the routine that fills gaps in the initial
+temperature and salinity fields does so in a decomposition-dependent order, and under the
+deterministic alternative all eight run to completion (Section~5). Running a new partition
+before trusting it remains sound practice.
 
 Meshes: CORE2 (127k surface nodes, 1$^\circ$), fArc (638k), DARS (3.16M), NG5 (7.40M, $\approx$5\,km).
 All experiments are cold starts under JRA55 (1958) forcing from PHC climatology, at the largest
@@ -158,18 +166,15 @@ recorded clean 3{,}000-step run at exactly $N$ processes.
 
 Figure~\ref{fig:board} and Table~\ref{tab:board} give the best candidate at each mesh and
 process count, with the setting that produced it. Every gain re-measured over 3{,}000 steps
-came back equal to or larger than its 300-step value (Fig.~\ref{fig:mech}b; $-18.6$ to
-$-19.7\,\%$ on DARS GPU is the largest change), so the short timing runs do not overstate the
-effect.
+came back equal to or larger than its 300-step value, so the short timing runs do not overstate
+the effect.
 
 \begin{figure}[t]\centering
 \includegraphics[width=\textwidth]{fig_m11_board.pdf}
 \caption{\small Best candidate partitions per mesh and process count, as a percentage faster
 than the shipped partition. Gray text under each label is the setting that produced the
-candidate. All candidates shown completed the 3{,}000-step run. The fill codes the size of
-their solution change against the seed-partition scatter of Section~6: solid = within it,
-single-hatched = larger in sea-surface height only, cross-hatched = larger in temperature or
-salinity. Mesh colors recur in Figs.~\ref{fig:mech}, \ref{fig:gh200} and \ref{fig:dist}.}
+candidate. All candidates shown completed the 3{,}000-step run. Every candidate shown also lies inside the
+seed-partition scatter in temperature, salinity and sea-surface height (Section~6). Mesh colors recur in Figs.~\ref{fig:mech} and \ref{fig:gh200}.}
 \label{fig:board}
 \end{figure}
 
@@ -179,17 +184,18 @@ salinity. Mesh colors recur in Figs.~\ref{fig:mech}, \ref{fig:gh200} and \ref{fi
 \toprule
 mesh & processes & gain & setting & 3{,}000 steps & solution change vs seed scatter \\
 \midrule
-DARS  & 64 GPU   & $\mathbf{-19.7\,\%}$ & \minconn+\contig+\texttt{UF=30} & clean & T rms $+13\,\%$, T max 16.2 vs 6.4--8.8 \\
-DARS  & 64 GPU   & $\mathbf{-14.3\,\%}$ & \minconn            & clean & ssh rms $+11\,\%$; T, S within \\
-NG5   & 64 GPU   & $\mathbf{-9.8\,\%}$  & \minconn             & clean & ssh rms $+8\,\%$; T, S within \\
-CORE2 & 4 GPU     & $\mathbf{-8.1\,\%}$  & \minconn             & clean & below every seed partition \\
-fArc  & 16 GPU   & $-3.6\,\%$           & \minconn+\contig     & clean & T rms $+33\,\%$, ssh $+68\,\%$ \\
+DARS  & 64 GPU   & $\mathbf{-18.5\,\%}$ & \minconn+\contig+\texttt{UF=30} & clean & \textbf{within} (smallest T change of any leg) \\
+DARS  & 64 GPU   & $\mathbf{-12.9\,\%}$ & \minconn            & clean & within (T, ssh); S at the edge \\
+NG5   & 64 GPU   & $\mathbf{-9.6\,\%}$  & \minconn             & clean & \textbf{within} on T, S and ssh \\
+CORE2 & 4 GPU     & $\mathbf{-7.1\,\%}$  & \minconn             & clean & below every seed partition \\
+fArc  & 16 GPU   & $-3.9\,\%$           & \minconn+\contig     & clean & \textbf{within} (smallest T change of any leg) \\
 \midrule
-fArc  & 2048 CPU & $\mathbf{-7.5\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & clean & within (4 seeds) \\
-CORE2 & 512 CPU  & $\mathbf{-5.8\,\%}$  & Hilbert renumbering + KaHIP & clean & within \\
-DARS  & 2048 CPU & $\mathbf{-4.2\,\%}$  & KaMinPar $w{=}100{+}\mathrm{nlev}$ & clean & below every seed partition (T, S) \\
-CORE2 & 864 CPU  & $-4.9\,\%$           & KaMinPar             & clean & salinity rms $+24\,\%$ \\
-CORE2 & 512 CPU  & $-3.8\,\%$           & \texttt{UFACTOR=30} & clean & within \\
+fArc  & 2048 CPU & $\mathbf{-7.8\,\%}$  & Mt-KaHyPar $w{=}100{+}\mathrm{nlev}$ & clean & within \\
+CORE2 & 512 CPU  & $\mathbf{-5.4\,\%}$  & Hilbert renumbering + KaHIP & clean & within \\
+CORE2 & 864 CPU  & $\mathbf{-5.1\,\%}$  & KaMinPar             & clean & \textbf{at or below all five seed partitions} \\
+DARS  & 2048 CPU & $\mathbf{-4.6\,\%}$  & \textbf{a fresh seed of the stock recipe} & clean & within \\
+DARS  & 2048 CPU & $-4.3\,\%$           & \minconn             & clean & within \\
+CORE2 & 512 CPU  & $-3.7\,\%$           & \texttt{UFACTOR=30} & clean & within \\
 NG5   & 2048 CPU & none                 & ---                  & --- & --- \\
 \bottomrule
 \end{tabular}
@@ -270,91 +276,97 @@ measured noise level.}
 \label{fig:gh200}
 \end{figure}
 
-\section{Some repartitioned meshes crash the model}
+\section{Why some repartitioned meshes appeared to crash the model}
 
-Eight of the partitions generated here make the model diverge: on NG5, \minconn\ candidates at
+Eight of the partitions generated here made the model diverge: on NG5, \minconn\ candidates at
 2{,}048 and at 64 processes and a \texttt{UFACTOR=30} candidate at 64; on DARS, \minconn\
 candidates at 2{,}048; and, also on DARS at 2{,}048, one partition built with FESOM's current
 settings and nothing changed but the METIS random seed, which diverged within fourteen steps.
-The failure is local in every case: salinity runs away at one location --- 41 to 57 over four
-steps in the seed case --- while the global diagnostics stay normal and the mean sea level even
-decreases.
+The failures were local: salinity ran away at one location while the global diagnostics stayed
+normal.
 
-Three properties of these failures matter in practice.
+\textbf{None of them was a property of the partition.} The cause is the routine that fills gaps
+in the initial temperature and salinity fields (\texttt{extrap\_nod3D}, a port of upstream
+\texttt{gen\_support.F90}). It fills each gap from whichever neighbouring values a process has
+already computed, running to local exhaustion between halo exchanges, so \emph{which} water
+mass reaches a gap depends on where the subdomain boundaries fall. In marginal seas separated
+from the open ocean by a narrow strait --- the Sea of Marmara, Gibraltar --- an unlucky
+decomposition writes water of the wrong salinity across a single element. The resulting density
+step drives a constant pressure-gradient force, velocity ramps linearly from the first step, and
+the run dies on the CFL limit. Every scheme dies on such a partition; the stock solver is only
+the one that dies loudly.
 
-They have no signature in the partition. In the NG5 group, the partitions that later diverged
-scored better than the survivors on every quantity we computed, including imbalance, edge cut,
-the number of disconnected pieces and the number of isolated nodes.
+The size of the effect, measured directly by writing the initial state for three partitions of
+each mesh and differencing them:
 
-Short tests do not find them. A five-step run passes on a partition that diverges at step 71,
-and the 150-step timing runs passed on a partition that diverged before step 3{,}000. The
-3{,}000-step run of Section~3 caught every failure listed above; nothing shorter would have.
+\begin{center}\footnotesize
+\begin{tabular}{lrrr}
+\toprule
+mesh (processes) & salinity & temperature & after one step (salinity) \\
+\midrule
+CORE2 (512)  & 27.4 & 7.0\,$^\circ$C & 27.4 \\
+fArc (2048)  & 26.0 & 9.0\,$^\circ$C & 26.0 \\
+DARS (2048)  & 27.0 & 7.6\,$^\circ$C & 27.0 \\
+NG5 (2048)   & 27.0 & 8.6\,$^\circ$C & 27.0 \\
+\midrule
+all four, deterministic fill & \textbf{0} & \textbf{0} & $10^{-14}$--$10^{-13}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-The failure belongs to the individual partition, not to the settings. On both meshes where a
-winning candidate diverged, rebuilding it with the same settings and a different METIS seed
-gave a partition that ran --- the full 3{,}000 steps on DARS, the 150-step timing run on NG5
---- in one case with a worse edge cut than the partition that had failed. Conversely, the
-settings of the fastest DARS GPU candidate give a sound partition at 64 processes and a fatally unstable
-one at 2{,}048.
+Two partitions of the same mesh started about 27 salinity units apart --- roughly the Black
+Sea/Mediterranean contrast --- on every mesh, coarse and fine alike. With the deterministic fill
+(\texttt{FESOM\_IC\_EXTRAP=det}) the initial state is identical to the last bit across
+partitions, and \emph{all eight partitions complete the 3{,}000-step run}, including the one
+built with FESOM's current settings, which is in fact among the fastest at its point.
 
-Because FESOM's current settings produced one of the eight, the partitions now in production
-are not safer by construction; they have simply been run. The 3{,}000-step test is therefore
-the price of adopting \emph{any} new partition, not a surcharge on the options recommended
-here.
+Two practical consequences survive the correction. Short tests still do not substitute for long
+ones. And a cold-start comparison between two partitions is only meaningful under the
+deterministic fill: without it, the two runs are integrating different problems, which affects
+timings as well as solutions.
 
 \section{How much the solution changes}
 
-A new partition changes the solution. The question is how much, relative to what a user
-already accepts without knowing it: rebuilding the same partition with a different METIS seed
-changes the solution too. Figure~\ref{fig:dist} places every candidate on that scale, field by
-field. The scale is not transferable between meshes --- the seed partitions themselves span a
-factor 1.05 in salinity rms on DARS at 2{,}048 processes and a factor 3.9 on CORE2 at 864 ---
-so a fixed rms threshold would be meaningless. Four cases occur.
+A new partition changes the solution. The question is how much, relative to what a user already
+accepts without knowing it: rebuilding the same partition with a different METIS seed changes
+the solution too. Every recommended candidate was re-measured under the deterministic
+initial-condition fill against at least three such seed partitions, twenty steps, field by field.
 
-\begin{figure}[t]\centering
-\includegraphics[width=0.92\textwidth]{fig_m11_disturbance.pdf}
-\caption{\small Twenty-step rms difference from the reference for each candidate, by field,
-divided by the largest difference the seed partitions of that same point produce (dashed line;
-shaded region below it). Filled markers exceed the seed scatter. Every candidate shown
-completed the 3{,}000-step run. At DARS 2{,}048 processes the scale uses the four seed
-partitions that ran, the fifth being the step-14 divergence of Section~5; the
-Hilbert-renumbered CORE2 candidate is compared under its own numbering and is not shown.}
-\label{fig:dist}
-\end{figure}
+\textbf{Every recommended candidate lies inside the seed scatter, on all three fields, at every
+point.} Two of them --- the fastest DARS 64-GPU candidate and the fastest fArc 16-GPU candidate
+--- produce the \emph{smallest} temperature difference of any run in their own comparison,
+seed partitions included. In every comparison the candidates and the seed partitions also
+follow an identical barotropic-solver iteration path, step for step.
 
-\emph{Within the seed scatter.} Most recommended candidates. At CORE2 on 4 GPU processes the
-fastest candidate lies below every seed partition in all three fields; KaMinPar at DARS 2{,}048 lies
-below every seed partition in temperature and salinity; Mt-KaHyPar at fArc and both CORE2 512
-settings lie inside. These candidates are not distinguishable from the partition change a user
-makes by rebuilding with a new seed.
+This replaces the graded assessment of the first version of this report, in which four
+candidates exceeded the seed scatter and two were withdrawn. Those excursions were the
+decomposition-dependent initial condition of Section~5, not the model's response to the
+partition: the differences they were built from were $10^{-1}$--$10^{-2}$ in the affected
+fields, and the same comparisons under the deterministic fill give $10^{-7}$--$10^{-8}$, five
+to six orders of magnitude smaller. Concretely:
 
-\emph{Sea-surface height only, with a known cause.} The fastest DARS 64-GPU candidate ($-14.3\,\%$)
-exceeds the seed scatter in sea-surface height alone, by 11\,\%. The barotropic solver stops
-when the residual has fallen by a fixed factor, so a partition on which it converges faster
-performs fewer iterations and stops at a different point inside the same tolerance. That is
-what happens here: at DARS all three candidates need fewer iterations than any of the seed
-partitions, and at CORE2 the candidate with the fewest iterations has the largest sea-surface
-height difference. Both runs meet the tolerance the solver was asked for, and a tighter
-tolerance would reduce the difference.
+\begin{center}\footnotesize
+\begin{tabular}{lll}
+\toprule
+first version & candidate & re-measured \\
+\midrule
+withdrawn, ``largest solution change measured'' & DARS 64 GPU, \minconn+\contig+UF30 & within; smallest T change of any run \\
+not recommended, on accuracy & fArc 16 GPU, \minconn+\contig & within; smallest T change of any run \\
+salinity rms $+24\,\%$ & CORE2 864 CPU, KaMinPar & at or below all five seed partitions \\
+sea-surface height $+11\,\%$, solver cause & DARS 64 GPU, \minconn & within; identical iteration path \\
+sea-surface height $+8\,\%$, cause unknown & NG5 64 GPU, \minconn & within, all three fields \\
+\bottomrule
+\end{tabular}
+\end{center}
 
-\emph{Sea-surface height only, cause unknown.} The fastest NG5 64-GPU candidate ($-9.8\,\%$) exceeds the
-scatter by 8\,\% in sea-surface height, but its iteration counts match the seed partitions
-step for step, so the mechanism above does not apply. We have no explanation for it.
+The one candidate still outside the seed scatter anywhere is NG5's
+\minconn+\contig+\texttt{UFACTOR=30} (temperature 3.4 times the largest seed difference), which
+is not recommended at that point and is 3.8 percentage points slower than \minconn\ there.
 
-\emph{Temperature or salinity.} Three candidates differ from the reference by more than the
-seed partitions do in temperature or salinity: the $-19.7\,\%$ DARS candidate (temperature rms
-$+13\,\%$, and a temperature maximum of 16.2 against 6.4--8.8 for the seed partitions), the
-fArc GPU candidates (temperature rms $+18$ to $+33\,\%$), and KaMinPar at CORE2 864 (salinity
-rms $+24\,\%$, temperature below every seed partition). Temperature and salinity carry the
-model's long-term state, and an isolated maximum well outside the seed range is the same
-pattern as the local runaways of Section~5 at an earlier stage. Before using one of these in
-production, run it against the shipped partition for long enough to compare climatologies.
-
-All numbers here come from twenty steps of a cold start. They show whether a partition change
-is detectable against the change a new seed already makes; they say nothing about a
-multi-decade integration. The cheap next test is to compare the model state after the
-3{,}000-step run against the same seed partitions; the conclusive one is a multi-year pair of
-integrations.
+All numbers here come from twenty steps of a cold start. They show whether a partition change is
+detectable against the change a new seed already makes; they say nothing about a multi-decade
+integration. The cheap next test is to compare the model state after the 3{,}000-step run
+against the same seed partitions; the conclusive one is a multi-year pair of integrations.
 
 \section{Recommendations}
 
