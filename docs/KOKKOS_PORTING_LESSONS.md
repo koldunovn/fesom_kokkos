@@ -1540,3 +1540,20 @@ negligible at exactly the small-subdomain point the design was tuned and profile
 inflating the large-subdomain points that the board then reported as "the rung does not pay here".
 **When a lever's measured payoff varies along an axis, audit the lever's own overheads along that
 same axis before believing the mechanism.**
+
+## L122 (M12b): set the rep count by the NOISIER arm, and justify the estimator by cross-pair reproducibility
+
+The M12b GPU headline was quoted as **−11.5 %** and is really **−9.1 %**. Nothing was wrong with
+the runs: the *certified* arm at CORE2 16N GPU is bimodal across repetitions (six legs of two
+independent pairs span 0.0814…0.0854, **4–5 %**) while the *rung* arm spans 0.4 %, and `min-of-2`
+over two legs of a 5 %-noisy arm does not converge — the two pairs disagreed by 2.4 points on that
+estimator while agreeing on the underlying measurement. Choosing the estimator by which one
+*reproduces across the two pairs* settles it: min over all legs agrees to **0.1 %**, mean to 0.7 %,
+median to 3.1 %. ⚠️ **M11's trap list already carries "min-of-N biased when the base is noisier"**
+— the lesson existed and was walked into anyway, because the protocol ("min-of-2, same-day, pinned
+pairs") was followed as a habit rather than checked against this arm's spread. **Two rules: the
+number of repetitions is set by the noisier arm, not by the protocol's default; and when two
+independent pairs exist, let cross-pair agreement pick the statistic.** A useful side observation
+fell out of the same data — a lever that removes exchanges also removes the step's exposure to
+network variation, so the treated arm is often the quiet one (spread 4.8 % → 0.4 % here); the arm
+that needs the reps is the untreated one.
