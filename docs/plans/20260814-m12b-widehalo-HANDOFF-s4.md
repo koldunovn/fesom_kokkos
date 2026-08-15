@@ -38,12 +38,12 @@ and end at the same physical state per point. **The rung ships as a GPU recommen
 small-per-rank-size points** — the payoff is a per-rank-size law, not a mesh law, and it sits at
 the strong-scaling limit.
 
-🔴 **The rung carried an avoidable per-step cost until 2026-08-15** — the s3 F-reconcile bracketed
-its tiny exchange with whole-array `Fbt` host/device syncs (7.5 MB/step at NG5 16N GPU, ~37 % of
-its busy regression; 134 KB at CORE2 16N). Fixed by lean device gather/scatter staging, gated
-bitwise (job 26969407). **So the NG5 and dars rows above are the FAT measurement and are a lower
-bound**; the lean re-measurement is jobs 26970050 (dars) / 26970051 (NG5). Bins: serial
-`73c6cf29`, cuda `58ac143b` — use these from now on. §7d, lesson L121.
+**Binaries: serial `73c6cf29`, cuda `58ac143b`.** These are the only ones to use. The reconcile's
+device gather/scatter staging is the sole implementation — there is no knob and no alternative
+path; the earlier whole-array-sync version exists only inside the older frozen binaries, and is
+kept in the record purely as an implementation trap (§7d, lesson L121: a dirty-flag `sync_host()`
+is a whole-array copy, invisible on CPU because the mirrors alias, and it hides at exactly the
+small-subdomain point you tune on).
 
 ### FIRST ACTIONS
 

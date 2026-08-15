@@ -353,11 +353,28 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 |---|---|---|---|---|
 | farc 2048 CPU dt900 M=90 wsplit | 0.0731 | 0.0718 | **−1.8 %** | bt mpi/step 182→94 (halved, as designed), bt wait 5.2→4.7 ms; bt is only ~16 % of the 73 ms step here — the latency share bounds the CPU payoff (Sergey's "on CPU it is just better scaling", now as a number). Job 26960156, all four legs healthy (η=3.47, T sane), reps within 0.4 % |
 | dars 8192 CPU dt120 M=20 wsplit | 0.0976 | 0.0980 | **+0.4 % (wash)** | bt mpi/step 42→24, bt wait 3.1→2.8 ms — mechanism intact, but bt is ~6 % of a 98 ms step and the +28.2 % ring-1 redundant compute eats the rest, exactly as the census predicted. Job 26960157, legs healthy (η=4.08), off-rep spread 1.5 % > the delta |
-| **CORE2 16N GPU dt1800 M=50** | 0.0841 | 0.0744 | **−11.5 %** | the track's headline. bt 19.7 → 12.5 ms: busy **7.84 → 5.37 (−31 %)** and wait **11.82 → 7.15 (−40 %)**, exchanges/step 102 → 54. On GPU the exchange cost sits in *busy* (staging + launch, ~51 µs each here) and its rank-variation is most of the imbalance, so halving the exchanges takes both. Job 26962396, all legs end at η=2.02 / T[−2.06,30.05] / S[5.63,41.12], identical off and on |
-| **CORE2 4N GPU dt1800 M=50** | 0.0683 | 0.0617 | **−9.7 %** | the same mechanism at a third of the ranks: bt busy **6.92 → 4.80 (−30.6 %)**, wait 7.67 → 4.37 (−43 %), exchanges 102 → 54. Per-exchange staging **44 µs** here against 51 µs at 16N — a per-CALL cost, near-independent of subdomain size, which is why it dominates wherever the per-rank arithmetic is small. Job 26969116, on-arm reps 0.0617/0.0617/0.0617 |
-| **CORE2 16N GPU dt1800 M=100** | 0.1002 | 0.0855 | **−14.7 %** | the linearity test (job 26969145), predicted −12…−16 % ✅. Exchanges 202 → 104; bt busy 15.30 → 10.21, wait 23.30 → 13.66 |
-| **dars 16N GPU dt120 M=20** (lean) | 0.1422 | 0.1394 | **−2.0 %** | predicted −1…−3 % ✅ (job 26970050) |
-| **NG5 16N GPU dt180 M=20** (lean) | 0.2463 | 0.2447 | **−0.65 %** | job 26970051. Its **fat** twin the same day gave 0.2461 → 0.2469 = **+0.3 %**, with the off arms equal to 0.1 % — so removing the whole-array `Fbt` round trip (§7d) is worth **2.2 ms/step here, nearly 3× my 0.30 ms estimate**: the copies cost more than bandwidth arithmetic suggests, because they also fence the device twice per step |
+| **CORE2 4N GPU dt1800 M=50** | 0.0684 | 0.0611 | **−10.7 %** | job 26982690 |
+| **CORE2 16N GPU dt1800 M=50** | 0.0815 | 0.0741 | **−9.1 %** | job 26982689 |
+| **CORE2 16N GPU dt1800 M=100** | 0.1002 | 0.0855 | **−14.7 %** | job 26969145 — the rung's gain grows with M, because it removes half of a per-substep cost |
+| **dars 16N GPU dt120 M=20** | 0.1422 | 0.1394 | **−2.0 %** | job 26970050 |
+| **NG5 16N GPU dt180 M=20** | 0.2463 | 0.2447 | **−0.65 %** | job 26970051 |
+
+All GPU rows are on the lean binary `58ac143b` (M=100 on `674a53bc`, where the difference is
+0.2 ms — see §7d). Every leg ends at the same physical state per point (CORE2 η=2.02
+T[−2.06,30.05] S[5.63,41.12]; NG5 η=3.62), off and on alike.
+
+🔴 **Estimator note, and a correction to this table's first version.** It read −11.5 % for CORE2
+16N. That came from `min-of-2` over the two un-instrumented legs, and **the certified arm at this
+point is too noisy for two reps to converge**: across the six legs of two independent pairs it
+spans 0.0814…0.0854 (**4–5 %**), while the rung arm spans 0.0741…0.0760 (**0.4 % in the lean job**).
+Taking the min over all three legs of each arm — the phasestats leg's instrumentation is not
+measurable here, 0.0816 against 0.0815 — the two pairs agree at **−8.7 % and −9.1 %**, whereas
+min-of-2 gave −11.5 % and −9.1 %. The rows above use min-over-all-legs. **The honest CORE2 16N
+number is ≈ −9 %, not −11.5 %.**
+
+That noise asymmetry is itself a result worth keeping: **the rung does not only make the step
+faster, it makes it more reproducible** — 102 exchanges per step exposes the certified path to
+network variation that 54 exchanges largely removes (spread 4.8 % → 0.4 % in the same allocation).
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
 
@@ -365,10 +382,13 @@ The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest 
 
 | nodes per rank | point | Δ |
 |---|---|---|
-| 1 982 | CORE2 16N GPU | **−11.5 %** |
-| 7 928 | CORE2 4N GPU | **−9.7 %** |
+| 1 982 | CORE2 16N GPU | **−9.1 %** |
+| 7 928 | CORE2 4N GPU | **−10.7 %** |
 | 49 380 | dars 16N GPU | **−2.0 %** |
 | 115 670 | NG5 16N GPU | **−0.65 %** |
+
+(The two CORE2 points are equal within the certified arm's noise; the law's content is the drop
+to −2 % and −0.65 % at the large-subdomain points, which are measured to 0.1 %.)
 
 Monotone in per-rank size, because the barotropic exchange costs a fixed ~50 µs per call
 (§7c) while the arithmetic grows with the subdomain: the rung pays where the block is
