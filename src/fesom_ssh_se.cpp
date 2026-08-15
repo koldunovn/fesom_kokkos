@@ -325,6 +325,52 @@ void fesom_se_mode_init(void)
                         "se replaces\n");
         exit(1);
     }
+
+    /* M14 A6 — the SI SOLVER knobs are inert under se, because se removes the implicit
+     * solve outright. Abort so a campaign leg cannot silently measure "oati" while
+     * running the split-explicit barotropic loop instead.
+     *
+     * 🔴 The abort is deliberately narrow: it fires ONLY on an EXPLICITLY SET per-lever
+     * knob, never on the FESOM_SPEED=1 master. CGPIPE was ADOPTED into the blessed set
+     * on 2026-07-16 (fesom_ssh.cpp, E.CG1), so `FESOM_SPEED=1` implies CGPIPE — and
+     * FESOM_SPEED=1 is carried by BOTH arms of the M14 campaign. Aborting on the master
+     * would kill every best-arm leg that uses se: CORE2 GPU, fArc CPU+GPU, dars GPU and
+     * NG5 GPU. Master-implied levers are force-resolved off with a NOTE instead, which
+     * is the fesom_sshrails_on() precedent (fesom_step.cpp:105-125).
+     *
+     * A per-lever `=0` is an explicit DISABLE and is harmless — only a non-zero request
+     * is a contradiction. */
+    const char *slv = getenv("FESOM_SSH_SOLVER");
+    if (slv && *slv && strcmp(slv, "cg") != 0) {
+        fprintf(stderr, "FESOM_SSH_MODE=se is INCOMPATIBLE with FESOM_SSH_SOLVER=%s: "
+                        "split-explicit REPLACES the implicit SSH solve, so the M10 solvers "
+                        "(cg2|pipecg|oati|pcsi) never run. Pick one or the other.\n", slv);
+        exit(1);
+    }
+    if (slv && !strcmp(slv, "cg"))
+        fprintf(stderr, "[ssh_se] NOTE: FESOM_SSH_SOLVER=cg is IGNORED under FESOM_SSH_MODE=se "
+                        "(no implicit solve exists to select a solver for).\n");
+
+    static const char *const kCG[] = { "FESOM_SPEED_CGPIPE", "FESOM_SPEED_CGPOLY" };
+    for (size_t i = 0; i < sizeof(kCG)/sizeof(kCG[0]); ++i) {
+        const char *e = getenv(kCG[i]);
+        if (e && *e && atoi(e) != 0) {
+            fprintf(stderr, "FESOM_SSH_MODE=se is INCOMPATIBLE with %s=%s: that lever "
+                            "accelerates the implicit CG, which se removes. (Unset it — "
+                            "FESOM_SPEED=1 alone is fine and does NOT trigger this.)\n", kCG[i], e);
+            exit(1);
+        }
+    }
+
+    /* P-CSI's Chebyshev parameters are meaningless without the CG they tune. */
+    extern char **environ;
+    for (char **p = environ; p && *p; ++p)
+        if (!strncmp(*p, "FESOM_PCSI_", 11)) {
+            fprintf(stderr, "FESOM_SSH_MODE=se is INCOMPATIBLE with %.*s: the P-CSI "
+                            "parameters tune the implicit solve, which se removes\n",
+                            (int)(strchr(*p, '=') - *p), *p);
+            exit(1);
+        }
 }
 
 /*===========================================================================

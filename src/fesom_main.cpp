@@ -262,6 +262,71 @@ static void print_sanity(const fesom_mesh *m)
     }
 }
 
+/* ==============================================================================================
+ * M14 A6 — one startup line naming every ACTIVE integration knob.
+ *
+ * The M14 branch merges five campaigns (M9 ice, M10 SSH solvers, M11 partitions, M12b
+ * split-explicit + wide halo, M13 deterministic IC), each behind its own env knobs, all
+ * defaulting OFF. A scaling board is only trustworthy if every archived log states which
+ * configuration produced it, so this prints the configuration into the log unconditionally.
+ *
+ * It scans `environ` rather than naming knobs in a list. A hand-written list goes stale the
+ * moment someone adds a knob, and a summary that silently omits a live knob is worse than no
+ * summary at all — it reads as authoritative. Scanning reports whatever is actually set.
+ *
+ * ⚠️ This writes to stderr and prints on rank 0 only. It must NEVER touch the snapshot path:
+ * the M14 acceptance gate is byte identity of the SNAPSHOTS against main, and diff_snap
+ * compares NetCDF files, not logs. Keep it that way — do not be tempted to record the config
+ * inside the snapshot without re-earning the byte gate.
+ * ============================================================================================== */
+static void fesom_m14_knob_summary(const fesom_mpi *mpi)
+{
+    if (mpi && mpi->mype != 0) return;
+
+    /* Families introduced by the M14 merge, in merge order. FESOM_SPEED_* is deliberately
+     * NOT swept wholesale: most of it is M7, already on main and part of the baseline. Only
+     * the ice levers M9 added are M14's. */
+    static const char *const kPrefix[] = {
+        "FESOM_IC_EXTRAP",          /* M13 deterministic IC hole fill          */
+        "FESOM_SSH_MODE",           /* M12  split-explicit selector            */
+        "FESOM_SE_",                /* M12  + M12b wide halo                   */
+        "FESOM_SSH_SOLVER",         /* M10  solver selector                    */
+        "FESOM_PCSI_",              /* M10  P-CSI parameters                   */
+        "FESOM_SSH_STALL_WINDOW",   /* M10  stall guard                        */
+        "FESOM_SSH_SYMPRE",         /* M10  symmetrised preconditioner         */
+        "FESOM_SPEED_EVPWIDE",      /* M9   wide-halo mEVP (incl. _LEAN/_FUSE) */
+        "FESOM_SPEED_MEVP",         /* M9   mEVP variants                      */
+        "FESOM_EVPWIDE_",           /* M9   ring/selfcheck controls            */
+        "FESOM_WHICH_EVP",          /* scheme choice the M9 levers require     */
+    };
+
+    extern char **environ;
+    char line[2048];
+    size_t used = 0;
+    int n = 0;
+    for (char **p = environ; p && *p; ++p) {
+        for (size_t i = 0; i < sizeof(kPrefix)/sizeof(kPrefix[0]); ++i) {
+            if (strncmp(*p, kPrefix[i], strlen(kPrefix[i]))) continue;
+            const size_t len = strlen(*p);
+            if (used + len + 2 < sizeof(line)) {
+                if (n) { line[used++] = ' '; }
+                memcpy(line + used, *p, len); used += len;
+            }
+            ++n;
+            break;                       /* one family per variable */
+        }
+    }
+    line[used] = '\0';
+
+    if (n == 0) {
+        fprintf(stderr, "[m14] no M14 knobs active — default path (this is the configuration "
+                        "the knob-off byte gate certifies against main)\n");
+    } else {
+        fprintf(stderr, "[m14] %d knob(s) active: %s\n", n, line);
+    }
+    fflush(stderr);
+}
+
 int main(int argc, char **argv)
 {
     /* Force line buffering so SLURM-redirected stdout/stderr show progress
@@ -348,6 +413,7 @@ int main(int argc, char **argv)
     fesom_ale_mode_init();   // M6.3: read FESOM_ALE once; must precede every ALE branch
     fesom_se_mode_init();    // M12: read FESOM_SSH_MODE once; se=>zstar + incompat guards
                              //      (needs fesom_ale_mode_init first)
+    fesom_m14_knob_summary(&mpi);   // M14 A6: one line naming every active integration knob
     /* Rank 0 reads global mesh files; others fill via Bcast then extract
      * their slice using partit->myList_*. For npes==1 this is identity. */
     /* But we need partit->myDim_* etc set first. For npes>1 it's populated
