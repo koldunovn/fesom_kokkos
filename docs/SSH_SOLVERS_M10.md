@@ -2119,3 +2119,32 @@ is not a paradox and not a solver failure: ~90 % of the measured solve cost at s
 wait (see the phase-budget section), so at a 2–4 % share the phase timer is measuring where
 the wait sits, not how fast the solver is. Iteration counts — the wait-free quantity — show
 parity. Do not quote `d_SSH` from a low-share configuration.
+
+### ✅ CUDA det fidelity gate (26961454) — the device path validated here first
+
+M13's own CUDA leg (`bg64det` 26960226) was cancelled in the queue, so nothing had run the
+deterministic fill on the device before this. Gate = CORE2, 20 steps, `FESOM_IC_EXTRAP=det`,
+CUDA vs Serial with the same knobs.
+
+**`snap_000000.nc` shows ZERO differing fields** — the det IC is bitwise identical between the
+CUDA and the Serial build, so the fill itself is backend-independent and any later drift is
+ordinary accumulation. Step-20 maxima against the archived legacy gates of the same shape:
+
+| field | det (26961454) | legacy `cg` (26723551) | legacy `cg2` (26723550) | legacy `oati` (26723856) |
+|---|--:|--:|--:|--:|
+| Kv | 1.98e-4 | 9.84e-2 | 8.20e-4 | 8.33e-4 |
+| T | 1.22e-3 | 4.35e-3 | 2.33e-3 | 2.44e-3 |
+| S | **3.58e-3** | 9.37e-4 | 5.74e-4 | 4.56e-4 |
+| density | **2.93e-3** | 5.74e-4 | 3.65e-4 | 3.27e-4 |
+| h_ice | 2.30e-3 | 3.85e-3 | 6.22e-3 | 3.68e-3 |
+| u | 3.99e-4 | 6.53e-3 | 6.77e-5 | 8.95e-5 |
+| uice | 5.01e-4 | 6.17e-4 | 4.39e-4 | 5.07e-4 |
+
+Most fields come in BELOW the legacy references; `S` and `density` are ~5× larger but stay in
+the 1e-3 class — inside the same envelope as legacy `h_ice` (6.2e-3) and far below the Kv/Av
+floor (~1e-1). Both concentrate at one flat index (96725, shared by S/T/density/bvfreq), i.e.
+a single node in a re-filled region, which is where a different-but-valid water mass would
+show. ⇒ PASS on the house criterion (`diff_snap rc=1` is expected here — CUDA is climate-close,
+not bit-identical; the script's "DIVERGENCE — block on Task 5" line is boilerplate tied to that
+exit code, not a verdict). GPU A/B fleet released: 26969006 (ng5 g16n), 26969007 (farc g16n),
+26969008 (core2 g1n).
