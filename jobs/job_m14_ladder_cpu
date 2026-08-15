@@ -132,7 +132,7 @@ else
 fi
 
 echo; echo "=== result ==="
-python3 - "$OUT/legs.txt" "$POINT" "$N" <<'PY'
+python3 - "$OUT/legs.txt" "$POINT" "$N" "${BASE_KNOBS:-}" <<'PY'
 import sys, collections
 d=collections.OrderedDict()
 for ln in open(sys.argv[1]):
@@ -144,5 +144,9 @@ for k,v in d.items():
 if 'base' in d and 'best' in d:
     b,x=min(d['base']),min(d['best'])
     print(f"  GAIN = {(x-b)/b*100:+.2f}%  (best vs base, min over legs)")
-print(f"CSV {sys.argv[2]},{sys.argv[3]}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
+# The CSV must be SELF-DESCRIBING. Two rows for the same mesh+ranks are not duplicates if the
+# shared configuration differs: farc 4096 measured 0.0686 on the paper config (linfs+std EVP) and
+# 0.0626 on the production config (zstar+mEVP) -- 8.7% apart, and indistinguishable without this.
+cfg = (sys.argv[4] or "paper").replace(" ", "+") if len(sys.argv) > 4 else "paper"
+print(f"CSV {sys.argv[2]},{sys.argv[3]},cfg={cfg}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
 PY
