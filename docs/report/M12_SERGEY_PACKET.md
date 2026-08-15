@@ -117,8 +117,40 @@ implement this, but any Fortran adoption of the SM variant will need it (your no
 
 Actions taken: (a) per-mesh M is automated by the startup CFL guard (this packet §4) and the
 ladder already runs per-mesh M; (b) following "50 is already a lot", CORE2 M=40 arms (guard
-minimum 35) submitted at 4N/16N GPU + 2048 CPU; (c) the wide-halo phase (M12b) is scoped
+minimum 35) were run at 4N/16N GPU + 2048 CPU; (c) the wide-halo phase (M12b) is scoped
 GPU-first, with the CPU variant framed as a scaling play — exactly this guidance.
+
+**Results on (b), and an interaction with (c) that we did not anticipate.** M=40 runs clean at
+CORE2 16N GPU and reaches the same 300-step state as M=50 (η=2.02, T[−2.06, 30.05], S[5.63,
+41.12] — identical to the printed digits), for **0.0801 s/step against 0.0841 at M=50**. So your
+"50 is already a lot" holds, on physics and on time.
+
+But M and the wide halo are **the same lever applied twice**, and the wide halo made that
+measurable. The barotropic block's GPU cost is dominated by a **fixed ~50 µs per halo exchange**
+(a per-call cost: 44 µs at CORE2 4N, 51 µs at 16N, 68/60 µs on our two large meshes), and both
+levers work by removing exchanges — M by having fewer substeps, the rung by halving the exchanges
+each substep does. Measured at CORE2 16N GPU, same day, same binary: one extra substep costs
+**0.322 ms** of step time on the certified path and only **0.222 ms** with the rung, because the
+rung has already taken half of what a substep pays for. Consequences:
+
+* the rung's *relative* gain **grows with M** — −11.5 % at M=50 and −14.7 % at M=100 — so a
+  configuration with many substeps is exactly where it pays;
+* lowering M shrinks that gain slightly but the two still **compose in the right direction**:
+  M=40 with the rung should land near 0.0722 s/step against 0.0841 for M=50 without it, i.e.
+  **≈ −14 %** from applying both. We are measuring that pair now rather than quoting the
+  extrapolation.
+
+**Question 9: is there a reason to prefer one over the other where they overlap?** Lowering M
+changes the barotropic solution (it is a discretisation choice); the wide halo does not (it is
+bitwise-exact against the exchanged path). If both buy the same ~4 ms, we would rather take it
+from the halo and keep M where the CFL guard and your stability analysis want it — unless you see
+an accuracy reason to prefer the smaller M in its own right.
+
+**On "30 may work on uniform meshes":** our startup guard agrees with the spirit of it. It derives
+M_min from the mesh (dtbt ≤ 0.5·res/√(gH), min over the mesh) and returns **15 for dars and 17 for
+NG5** — where we run 20 — against **35 for CORE2**, whose bound is set by its own
+shallow-and-coarse spots rather than by its average resolution. So the meshes closest to uniform
+are already running near your number; CORE2 cannot go to 30 without forcing the guard.
 
 ## Addendum 2 — M12b wide halo (K=1): what it took to make it exact, and two findings that stand on their own
 
