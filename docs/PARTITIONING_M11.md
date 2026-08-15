@@ -3482,3 +3482,22 @@ fields. With this the accounting is complete:
 condition.** Tiers 2, 3 and 4 have no occupants left among the recommended arms. The only leg
 still outside a control range anywhere is NG5's `+UFACTOR=30` (temp ×3.4, ssh +30 %), which is
 not a recommended arm at that point and is 3.8 pp slower than the winner.
+
+## ★★★ NG5 64 GPU final (26975543): the SLACK arm wins, and it is a new result
+
+min-of-2, arms at **0.0 % spread**, base 0.2 % — the tightest race of the campaign:
+
+| arm | det | legacy |
+|---|--:|--:|
+| **slack `UFACTOR=30` alone** | **−10.05 %** | never measured — it was one of the "diverging" arms |
+| `MINCONN` | −9.51 % | −9.71 / −9.76 % ✔ reproduces |
+
+**This is the only GPU point in the campaign where something other than the `MINCONN` family
+wins.** It was invisible before because that arm was among the ones the legacy fill killed, so
+it never completed a race here. It slightly weakens the campaign's own generalisation —
+"`MINCONN` is best or within a point of best at every GPU point measured" is still true at four
+of five points, but at NG5 the plain slack arm is 0.5 pp ahead of it.
+
+⇒ NG5 64 GPU's recommended arm should be re-checked against `a5_u30` before promotion: same
+gain class, and the gate (26972358) covered `MINCONN`, `MINCONN`+`CONTIG` and
+`MINCONN`+`UFACTOR=30` but NOT the plain slack arm. One gate leg would settle it.
