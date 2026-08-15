@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=m14_crepro
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2 --ntasks=8 --ntasks-per-node=4
+#SBATCH --gres=gpu:4 --gpu-bind=none -C a100_80
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/crepro.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/crepro.%j.err
+#
+# THE CONTROL THE CUDA BYTE GATE NEEDS: is a CUDA run reproducible against ITSELF?
+#
+# The gate says m14(knobs off) != h17 on CUDA by ~1e-4 at step 10. That is only evidence of a
+# merge defect if the SAME binary reproduces itself. The dolpung work recorded the opposite for
+# its transport: "dev-vs-dev = dev-vs-stage noise ~1e-4 @10 steps" -- the same magnitude we see.
+# So run h17 TWICE, identical everything, and diff. If h17-vs-h17 also differs, a CUDA-vs-CUDA
+# trajectory byte gate is an invalid instrument here and the acceptance evidence must come from
+# the Serial byte gate plus the halo/CGPOLY selfchecks.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda
+NEW=/work/ab0995/a270088/port2/m14/bin/i3/fesom_port_cuda
+B=/work/ab0995/a270088/port2/m14/crepro_$SLURM_JOB_ID
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+run () { local o=$B/$1; mkdir -p $o; srun -l "$2" "$MESH" "$o" 1800 20 10 "$PHC" 1958 > $o/log 2>&1; echo "  $1 rc=$?"; }
+run h17_a "$REF"
+run h17_b "$REF"
+run m14_a "$NEW"
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo; echo "=== CONTROL: h17 vs h17 (same binary, same job) ==="
+"$PY" "$ROOT/scripts/diff_snap.py" $B/h17_a $B/h17_b; echo "  rc=$?"
+echo; echo "=== TEST: h17 vs m14 (knobs off) ==="
+"$PY" "$ROOT/scripts/diff_snap.py" $B/h17_a $B/m14_a; echo "  rc=$?"

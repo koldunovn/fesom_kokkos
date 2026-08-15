@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --job-name=m14_crep2
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2 --ntasks=8 --ntasks-per-node=4
+#SBATCH --gres=gpu:4 --gpu-bind=none -C a100_80
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/crep2.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/crep2.%j.err
+#
+# WHERE does CUDA run-to-run non-determinism enter, and how big is it really?
+#   A) np4 on ONE node   — intra-node only, no inter-node MPI
+#   B) np8 across 2 nodes — adds inter-node exchanges + cross-node allreduce
+# Three h17 legs per case give three pairwise CONTROL diffs (a noise RANGE, not one draw);
+# two m14 legs give the TEST diffs. The acceptance claim is then honest: the merge's effect must
+# lie inside the range the SAME binary produces.
+# This matters beyond M14: M9/M11 both made CUDA bit-identity claims, which are only possible if
+# CUDA is reproducible under the conditions they used.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda
+NEW=/work/ab0995/a270088/port2/m14/bin/i3/fesom_port_cuda
+B=/work/ab0995/a270088/port2/m14/crep2_$SLURM_JOB_ID
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+
+case_run () {              # case_run <tag> <ntasks> <nodes>
+  local tag=$1 nt=$2 nn=$3
+  echo "############ CASE $tag : ntasks=$nt nodes=$nn ############"
+  for leg in h17_1 h17_2 h17_3 m14_1 m14_2; do
+    local bin=$REF; case $leg in m14*) bin=$NEW;; esac
+    local o=$B/$tag/$leg; mkdir -p $o
+    srun -n $nt -N $nn --ntasks-per-node=4 -l "$bin" "$MESH" "$o" 1800 20 10 "$PHC" 1958 > $o/log 2>&1
+    echo "  $leg rc=$?"
+  done
+  echo "--- CONTROL pairs (same binary) ---"
+  for p in "h17_1 h17_2" "h17_1 h17_3" "h17_2 h17_3"; do
+    set -- $p; echo "  [$1 vs $2]"; "$PY" "$ROOT/scripts/diff_snap.py" $B/$tag/$1 $B/$tag/$2 2>&1 | grep -E 'max-abs-diff|^== ' | sed 's/^/    /'
+  done
+  echo "--- TEST pairs (h17 vs m14) ---"
+  for p in "h17_1 m14_1" "h17_2 m14_2"; do
+    set -- $p; echo "  [$1 vs $2]"; "$PY" "$ROOT/scripts/diff_snap.py" $B/$tag/$1 $B/$tag/$2 2>&1 | grep -E 'max-abs-diff|^== ' | sed 's/^/    /'
+  done
+}
+case_run intra 4 1
+case_run inter 8 2

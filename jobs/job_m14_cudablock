@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=m14_cblk
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1 --ntasks=4 --ntasks-per-node=4
+#SBATCH --gres=gpu:4 --gpu-bind=none -C a100_80
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/cblk.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/cblk.%j.err
+# CUDA_LAUNCH_BLOCKING=1 makes every kernel synchronous, so a device fault is reported AT the
+# offending kernel instead of at the next sync point. The unblocked run blames the halo exchange
+# at fesom_bulk.cpp:727; if the real fault is an earlier async kernel, this moves the blame there.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=/work/ab0995/a270088/port2/m14/bin/i2/fesom_port_cuda
+O=/work/ab0995/a270088/port2/m14/cblk_$SLURM_JOB_ID; mkdir -p $O
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+export CUDA_LAUNCH_BLOCKING=1
+srun -l "$BIN" "$MESH" "$O" 1800 2 -1 "$PHC" 1958 > $O/log 2>&1
+echo "rc=$?"
+echo "=== backtrace frames ==="
+grep -E '0x[0-9a-f]{6,}' $O/log | head -14

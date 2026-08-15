@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=m14_cbis
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/cbis.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/cbis.%j.err
+#
+# Bisect the M14 CUDA segfault across ALREADY-FROZEN binaries — no rebuilds needed.
+# m13 det1 is the merge BASE; m12b 58ac143b passed its own CUDA gate (26960090). If those run and
+# only i2 dies, the defect is in the merge; if the base dies too, it predates M14 entirely.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+O=/work/ab0995/a270088/port2/m14/cbis_$SLURM_JOB_ID; mkdir -p $O
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+try () {
+  local tag=$1 bin=$2 o=$O/$1; mkdir -p $o
+  if [ ! -f "$bin" ]; then echo "  $tag: MISSING $bin"; return; fi
+  srun -l "$bin" "$MESH" "$o" 1800 2 -1 "$PHC" 1958 > "$o/log" 2>&1
+  echo "  $tag rc=$? ($(md5sum $bin | cut -c1-8))  last=$(grep -cE 'it=' $o/log) step-lines"
+}
+echo "=== M14 CUDA bisect over frozen binaries ==="
+try h17_main   /work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda
+try m12b_gated /work/ab0995/a270088/port2/m12b/bin/fesom_port_cuda_58ac143b
+try m13_base   /work/ab0995/a270088/port2/m13/bin/fesom_port_cuda_det1
+try m14_i2     /work/ab0995/a270088/port2/m14/bin/i2/fesom_port_cuda

@@ -1,0 +1,62 @@
+#!/bin/bash
+#SBATCH --job-name=m14_cdiag
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/cdiag.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/cdiag.%j.err
+#
+# Localise the M14 CUDA segfault. With every knob unset the merged binary dies INSIDE STEP 1 on
+# CUDA (rc=139), while h17 completes and while the Serial binary is byte-identical to the certified
+# baseline at every merge. So the defect is CUDA-only and on the DEFAULT path.
+#
+# Strategy: run the smallest possible case with the per-phase profiler on, so the last phase
+# printed before the crash names the component. Then re-run with the suspect subsystems disabled
+# (FESOM_NO_ICE_DYN / NO_ICE_ADV / NO_TRADV) to bracket it.
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env_cuda.sh"          # L77
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i2}/fesom_port_cuda
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda
+O=/work/ab0995/a270088/port2/m14/cdiag_$SLURM_JOB_ID; mkdir -p $O
+
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+
+probe () {   # probe <tag> <binary> [extra env...]
+    local tag=$1 bin=$2; shift 2
+    local o=$O/$tag; mkdir -p $o
+    echo "=================== $tag ${*:-（no extra env)} ==================="
+    ( for kv in "$@"; do export "$kv"; done
+      srun -l "$bin" "$MESH" "$o" 1800 2 -1 "$PHC" 1958 ) > "$o/log" 2>&1
+    echo "rc=$?"
+    echo "--- last 6 lines ---"; tail -6 "$o/log"
+}
+
+# 1. Is the reference fine on this exact allocation? (controls the environment)
+probe h17_ref   "$REF"
+# 2. Baseline reproduction of the crash, with the phase profiler naming the last phase reached.
+probe m14_prof  "$BIN" FESOM_STEP_PROFILE=1
+# 3. Bracket by subsystem — whichever one makes it survive is where the defect lives.
+probe m14_noice "$BIN" FESOM_NO_ICE_DYN=1 FESOM_NO_ICE_ADV=1 FESOM_NO_ICE_THERMO=1
+probe m14_notra "$BIN" FESOM_NO_TRADV=1
+probe m14_nogm  "$BIN" FESOM_NO_GMREDI=1
+
+echo; echo "=== SUMMARY ==="
+for t in h17_ref m14_prof m14_noice m14_notra m14_nogm; do
+    printf "  %-10s rc=%s  last=%s\n" "$t" \
+      "$(grep -c 'Segmentation' $O/$t/log 2>/dev/null | sed 's/^0$/0(no segv)/')" \
+      "$(grep -E '^[0-9]+:.*(it=|phase|\[fesom)' $O/$t/log 2>/dev/null | tail -1 | cut -c1-90)"
+done
