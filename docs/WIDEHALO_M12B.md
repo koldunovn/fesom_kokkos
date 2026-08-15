@@ -572,10 +572,25 @@ decomposition's labels depend on which side of the timer the pack sits, and on G
 busy. L118's rule needs that caveat, and the practical instruction is sharper: **regress the
 phase's busy on the halo as well as the owned counts before deciding what its wait is made of.**
 
-**NG5 is the same mechanism with the sign flipped.** 115 670 nodes per rank, halo/owned ≈ 1.2 %:
-staging is a small part of an 11.4 ms busy, and the rung's wider element extent and its two extra
-per-step waves cost **+7.1 % busy** — more than it saves. The block is compute-bound, so there is
-nothing for the lever to take.
+**🔴 What I first wrote about NG5 here was wrong, and my own defect caused it.** The original text
+read: "115 670 nodes per rank, halo/owned ≈ 1.2 %: staging is a small part of an 11.4 ms busy, and
+the rung's wider element extent and its two extra per-step waves cost **+7.1 % busy** — more than
+it saves. The block is compute-bound, so there is nothing for the lever to take." The lean
+re-measurement (§7d) falsifies it: **that +7.1 % was the whole-array `Fbt` round trip, not the ring
+compute.**
+
+| NG5 16N GPU, bt busy | off arm | on arm | |
+|---|---|---|---|
+| fat reconcile (26962397) | 11.41 | **12.22 (+7.1 %)** | the rung appeared to *cost* busy |
+| lean reconcile (26970051) | 11.42 | **10.34 (−9.5 %)** | the rung *saves* busy, as everywhere else |
+
+So the rung reduces barotropic busy at **every** GPU point once its own overhead is gone: CORE2
+−31 %, dars −20 %, NG5 −9.5 %. And the per-exchange staging cost is consistent across all four
+points — **44 µs (CORE2 4N) · 51 µs (CORE2 16N) · 68 µs (dars 16N) · 60 µs (NG5 16N)** — a fixed
+per-call cost that rises only slightly with payload. **The lever's saving is therefore roughly the
+same everywhere; what differs is the step it is divided by.** NG5's bt block is 6.8 % of a 246 ms
+step, so a 1.6 ms saving is 0.65 %; CORE2 16N's is 23 % of an 84 ms step, so 9.7 ms is 11.5 %.
+That is a share argument, not a compute-cost argument, and it is the honest form of the law.
 
 ### 7b-bis. Pre-registration for the two rows that complete the law
 
