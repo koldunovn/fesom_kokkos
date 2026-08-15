@@ -1,0 +1,70 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_lean
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/lean_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/lean_%j.err
+#
+# M12b — gate the LEAN F-reconcile (M9's lesson applied to M12b).
+#
+# The first reconcile bracketed its tiny owner-wins exchange with
+# Fbt.sync_host() ... Fbt.sync_device(). se_forcing marks Fbt device-modified
+# every step, so those copied the WHOLE array both ways every step to patch a
+# few hundred elements — 3.75 MB each way at NG5 16N GPU. The lean version
+# gathers/scatters only the claimed slots on the device.
+#
+# It must move exactly the same values, so the gate is BITWISE:
+#   rung_old  WIDE=1, 50 steps + snaps, bin OLD  (BIN_OLD)
+#   rung_new  WIDE=1, 50 steps + snaps, bin LEAN (BIN)
+#   -> diff_snap rc=0
+#   drift     WIDE=1 SELFCHECK=2, 25 steps, LEAN -> 0.000000e+00 every step
+#   null      WIDE=0 XCHG=0, 50 steps, LEAN      -> diff_snap vs base_np8 rc=0
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the LEAN binary}
+BIN_OLD=${BIN_OLD:?pin the pre-lean binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+sha256sum "$BIN" "$BIN_OLD"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+export FESOM_PRINT_EVERY=100
+
+run () {   # $1 tag  $2 bin  $3 np  $4 nsteps  $5 snap  rest env
+  local tag=$1 bin=$2 np=$3 nst=$4 snap=$5; shift 5
+  local OUT=$BASE/lean_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== $tag (np=$np, $*) ==================="
+  env "$@" srun -n "$np" -l "$bin" "$MESH" "$OUT" 1800 "$nst" "$snap" "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h " it=" "$OUT/run.log" | tail -1
+}
+
+# 1. BITWISE: the rung's own trajectory must not move
+run rungold "$BIN_OLD" 8 50 25 FESOM_SE_WIDE=1
+run rungnew "$BIN"     8 50 25 FESOM_SE_WIDE=1
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/lean_rungold_${SLURM_JOB_ID}" "$BASE/lean_rungnew_${SLURM_JOB_ID}"
+echo "diff_snap rung old-vs-lean rc=$?  (gate: 0)"
+
+# 2. the rung still runs bitwise-free
+run drift "$BIN" 128 25 999999 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+NZ=$(grep -h "wide-drift" "$BASE/lean_drift_${SLURM_JOB_ID}/run.err" | grep -cv "= 0.000000e+00$" || true)
+echo "drift nonzero-steps=$NZ (gate: 0)"
+
+# 3. knob-off inertness (untouched path)
+run null "$BIN" 8 50 25 FESOM_SE_H0E_XCHG=0
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/base_np8" "$BASE/lean_null_${SLURM_JOB_ID}"
+echo "diff_snap null rc=$?  (gate: 0)"
+echo "=== lean gate done ==="

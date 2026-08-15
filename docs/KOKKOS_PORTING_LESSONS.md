@@ -1523,3 +1523,20 @@ wait is made of; and never carry a busy-side calibration across backends — the
 The same lever is a **wash (+0.3 %)** at NG5 16N GPU, where 115 670 nodes per rank make staging a
 rounding error and the ring compute a real cost: **the board is a per-rank-size law, not a mesh
 law**, and the payoff sits at the strong-scaling limit.
+
+## L121 (M12b): a dirty-flag `sync_host()` is a WHOLE-ARRAY copy — a tiny scattered update must be staged, not bracketed
+
+The SE rung's owner-wins F-reconcile moves a few hundred doubles between the claimants of the
+0.55 % of elements that more than one rank owns. It was written the obvious way — `Fbt.sync_host()`
+… tiny MPI … `Fbt.modify_host(); Fbt.sync_device();` — and because `se_forcing` marks `Fbt`
+device-modified every step, the dirty flag fired every step: **two whole-array copies plus two
+device fences, sized by the mesh per rank rather than by the update.** 7.5 MB per step at NG5 16N
+GPU (~0.30 ms, about 37 % of the rung's measured busy regression there), 134 KB at CORE2 16N. The
+fix is the M9 LEAN pattern: gather the wanted slots into a small buffer with a device kernel, move
+only that, scatter it back with a second kernel, and never sync the big array. **Two properties
+made this invisible for a whole campaign**: on CPU the host and device mirrors alias, so the syncs
+are free and no CPU pair can see it; and it costs in proportion to per-rank size, so it was
+negligible at exactly the small-subdomain point the design was tuned and profiled on, while
+inflating the large-subdomain points that the board then reported as "the rung does not pay here".
+**When a lever's measured payoff varies along an axis, audit the lever's own overheads along that
+same axis before believing the mechanism.**

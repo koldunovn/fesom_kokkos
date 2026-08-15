@@ -390,6 +390,14 @@ struct fesom_se_state {
     std::vector<int> rec_r_rank, rec_r_off, rec_r_slot;   /* my recvs  */
     long             rec_global = 0;                      /* announce  */
 
+    /* LEAN staging for the reconcile (M9's lesson): the first version
+     * sync_host()'d and sync_device()'d the WHOLE Fbt array every step to
+     * patch a few hundred elements — 3.75 MB each way at NG5 16N GPU, where it
+     * cost about half of the rung's measured +7.1 % busy. These small Fields
+     * carry only the claimed slots, so Fbt never leaves the device. */
+    fesom::IntField rec_sidx, rec_ridx;   /* element slots, device-resident */
+    fesom::Field    rec_sval, rec_rval;   /* 2 doubles per slot            */
+
     fesom::Field Tchk;          /* FESOM_SE_CHECK scratch: T(⟨⟨Ū⟩⟩) [Nown] —
                                  * module-owned so it dies BEFORE Kokkos::finalize
                                  * (a function-local static Field aborts at exit). */
@@ -1197,6 +1205,24 @@ static void se_wide_reconcile_build(const struct fesom_mesh *mesh,
     flatten(sends, s_se.rec_s_rank, s_se.rec_s_off, s_se.rec_s_slot);
     flatten(recvs, s_se.rec_r_rank, s_se.rec_r_off, s_se.rec_r_slot);
 
+    /* LEAN staging: device-resident slot lists + small value buffers, so the
+     * per-step reconcile never touches the rest of Fbt (see the struct note). */
+    {
+        const size_t nS = s_se.rec_s_slot.size(), nR = s_se.rec_r_slot.size();
+        if (nS) {
+            s_se.rec_sidx.alloc("se.rec.sidx", nS);
+            s_se.rec_sval.alloc("se.rec.sval", 2 * nS);
+            std::copy(s_se.rec_s_slot.begin(), s_se.rec_s_slot.end(), s_se.rec_sidx.h());
+            s_se.rec_sidx.modify_host(); s_se.rec_sidx.sync_device();
+        }
+        if (nR) {
+            s_se.rec_ridx.alloc("se.rec.ridx", nR);
+            s_se.rec_rval.alloc("se.rec.rval", 2 * nR);
+            std::copy(s_se.rec_r_slot.begin(), s_se.rec_r_slot.end(), s_se.rec_ridx.h());
+            s_se.rec_ridx.modify_host(); s_se.rec_ridx.sync_device();
+        }
+    }
+
     long nmc = 0;
     for (long g = 0; g < GE; ++g) if (cnt[(size_t)g] >= 2) ++nmc;
     s_se.rec_global = nmc;
@@ -1205,49 +1231,75 @@ static void se_wide_reconcile_build(const struct fesom_mesh *mesh,
                         "owner-wins pairs wired (tag 2303, 1 tiny wave per step)\n", nmc);
 }
 
-/* Per step: owner's (Fx,Fy) overwrites every other claimant's copy. Host-side
- * point-to-point over the tiny lists; F is then re-synced to the device. Ranks
- * with no multi-claimed elements do nothing (no collective here). */
+/* Per step: owner's (Fx,Fy) overwrites every other claimant's copy. Ranks with
+ * no multi-claimed elements do nothing (no collective here).
+ *
+ * 🔴 LEAN (M9's lesson, and the reason it matters here): the first version
+ * bracketed this with `Fbt.sync_host()` … `Fbt.sync_device()`. `se_forcing`
+ * marks Fbt device-modified every step, so those two calls copied the WHOLE
+ * array both ways on every step — 3.75 MB each way at NG5 16N GPU — to patch a
+ * few hundred elements, and they fence the device twice on top. Now a device
+ * kernel gathers the owned slots into a small buffer, only that buffer crosses
+ * the bus, and a second kernel scatters the received values back: Fbt stays
+ * device-resident and the traffic is proportional to the multi-claimed count,
+ * not to the mesh. Bitwise identical by construction — the same values are
+ * moved, only fewer bytes travel with them. */
 static void se_wide_reconcile_F(struct fesom_partit *p)
 {
     const size_t nS = s_se.rec_s_rank.size(), nR = s_se.rec_r_rank.size();
     if (nS == 0 && nR == 0) return;
-    s_se.Fbt.sync_host();
-    real_t *F = s_se.Fbt.h();
 
-    std::vector<std::vector<double>> sbuf(nS), rbuf(nR);
+    /* gather my owned pairs on the DEVICE (raw pointers, L109) */
+    if (!s_se.rec_s_slot.empty()) {
+        const int      ns  = (int)s_se.rec_s_slot.size();
+        const real_t  *F   = s_se.Fbt.d().data();
+        const int     *idx = s_se.rec_sidx.d().data();
+        real_t        *out = s_se.rec_sval.d().data();
+        Kokkos::parallel_for("se_rec_gather", Kokkos::RangePolicy<>(0, ns),
+            KOKKOS_LAMBDA(const int j) {
+                const int e = idx[j];
+                out[2*j + 0] = F[2*e + 0];
+                out[2*j + 1] = F[2*e + 1];
+            });
+        s_se.rec_sval.modify_device();
+        s_se.rec_sval.sync_host();          /* 16 bytes per multi-claimed element */
+    }
+
+    const real_t *sv = s_se.rec_s_slot.empty() ? nullptr : s_se.rec_sval.h();
+    real_t       *rv = s_se.rec_r_slot.empty() ? nullptr : s_se.rec_rval.h();
+
     std::vector<MPI_Request> req;
     req.reserve(nS + nR);
     for (size_t k = 0; k < nR; ++k) {
-        const int n = s_se.rec_r_off[k + 1] - s_se.rec_r_off[k];
-        rbuf[k].assign((size_t)(2 * n), 0.0);
+        const int o = s_se.rec_r_off[k], n = s_se.rec_r_off[k + 1] - o;
         req.push_back(MPI_REQUEST_NULL);
-        MPI_Irecv(rbuf[k].data(), 2 * n, MPI_DOUBLE, s_se.rec_r_rank[k], 2303,
+        MPI_Irecv(rv + 2 * o, 2 * n, MPI_DOUBLE, s_se.rec_r_rank[k], 2303,
                   p->MPI_COMM_FESOM, &req.back());
     }
     for (size_t k = 0; k < nS; ++k) {
-        const int n = s_se.rec_s_off[k + 1] - s_se.rec_s_off[k];
-        sbuf[k].resize((size_t)(2 * n));
-        for (int j = 0; j < n; ++j) {
-            const int e = s_se.rec_s_slot[(size_t)(s_se.rec_s_off[k] + j)];
-            sbuf[k][(size_t)(2*j) + 0] = (double)F[2*e + 0];
-            sbuf[k][(size_t)(2*j) + 1] = (double)F[2*e + 1];
-        }
+        const int o = s_se.rec_s_off[k], n = s_se.rec_s_off[k + 1] - o;
         req.push_back(MPI_REQUEST_NULL);
-        MPI_Isend(sbuf[k].data(), 2 * n, MPI_DOUBLE, s_se.rec_s_rank[k], 2303,
-                  p->MPI_COMM_FESOM, &req.back());
+        MPI_Isend(const_cast<real_t *>(sv) + 2 * o, 2 * n, MPI_DOUBLE,
+                  s_se.rec_s_rank[k], 2303, p->MPI_COMM_FESOM, &req.back());
     }
     if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
-    for (size_t k = 0; k < nR; ++k) {
-        const int n = s_se.rec_r_off[k + 1] - s_se.rec_r_off[k];
-        for (int j = 0; j < n; ++j) {
-            const int e = s_se.rec_r_slot[(size_t)(s_se.rec_r_off[k] + j)];
-            F[2*e + 0] = (real_t)rbuf[k][(size_t)(2*j) + 0];
-            F[2*e + 1] = (real_t)rbuf[k][(size_t)(2*j) + 1];
-        }
+
+    /* scatter the owners' values back on the DEVICE; Fbt never went to host */
+    if (!s_se.rec_r_slot.empty()) {
+        s_se.rec_rval.modify_host();
+        s_se.rec_rval.sync_device();
+        const int      nr  = (int)s_se.rec_r_slot.size();
+        real_t        *F   = s_se.Fbt.d().data();
+        const int     *idx = s_se.rec_ridx.d().data();
+        const real_t  *in  = s_se.rec_rval.d().data();
+        Kokkos::parallel_for("se_rec_scatter", Kokkos::RangePolicy<>(0, nr),
+            KOKKOS_LAMBDA(const int j) {
+                const int e = idx[j];
+                F[2*e + 0] = in[2*j + 0];
+                F[2*e + 1] = in[2*j + 1];
+            });
+        s_se.Fbt.modify_device();
     }
-    s_se.Fbt.modify_host();
-    s_se.Fbt.sync_device();
 }
 
 /* Integer hash -> [-1,1], a pure function of the GLOBAL element id: the test

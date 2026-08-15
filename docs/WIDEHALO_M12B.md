@@ -694,6 +694,50 @@ worth building for SE**, and the K=1 rung is where this line stops. The remainin
 imbalance problem — M11's territory, not the halo's. The W6 pairs test the K=1 half of the
 prediction; if they land in the band, this verdict stands as written.
 
+## 🔴 7d. The rung was carrying an avoidable per-step cost — M9's lesson, again
+
+Prompted by the M9 recollection (the wide-halo EVP got much better once the recomputation that
+was not needed came out), the SE rung's per-step path was audited for the same shape. There was
+exactly one offender, and it is in the s3 fix rather than in the rung itself.
+
+`se_wide_reconcile_F` sends the owner's `(Fx, Fy)` to the other claimants of the ~0.55 % of
+elements that more than one rank owns — a few hundred values. It bracketed that exchange with:
+
+```
+s_se.Fbt.sync_host();     …tiny MPI…     s_se.Fbt.modify_host(); s_se.Fbt.sync_device();
+```
+
+`se_forcing` marks `Fbt` device-modified every step, so the dirty flag fires every time: **two
+whole-array copies per step, plus two device fences, to patch a few hundred elements.** `Fbt` is
+`2 × Ne` doubles, so the traffic scales with the mesh per rank, not with the thing being fixed:
+
+| point | elements/rank | Fbt round trip per step | ≈ cost at ~25 GB/s |
+|---|---|---|---|
+| CORE2 16N GPU | 4 180 | 134 KB | negligible |
+| dars 16N GPU | ~98 000 | 3.1 MB | ~0.13 ms |
+| **NG5 16N GPU** | ~234 000 | **7.5 MB** | **~0.30 ms** |
+
+That is about **37 % of the +0.81 ms busy regression** measured at NG5 — the point where the rung
+came out a wash. **The defect hid in exactly the place that made the rung look bad**: it is
+invisible on CPU (host and device alias, so the syncs are no-ops), and negligible at CORE2 16N,
+the small-subdomain point the design was tuned on. It bites in proportion to per-rank size, which
+is the axis §5's law is drawn on — so part of what that law attributes to "the ring compute costs
+more than the staging saves at large subdomains" was this instead.
+
+**Fix (lean staging):** a device kernel gathers the owned slots into a small buffer, only that
+buffer crosses the bus, MPI moves it, and a second kernel scatters the received values back.
+`Fbt` never leaves the device and the traffic is proportional to the multi-claimed count. The same
+values are moved, so the trajectory must be bitwise unchanged — which is the gate (job 26969407).
+
+**Audit result for the rest of the module:** every other `sync_host()` on the SE per-step path is
+inside an env-gated diagnostic (`GEOCHK`/`SELFCHECK`, and `step_n ≤ 5` at that). The H0e coherence
+exchange uses `fesom_halo_field`, the certified packed-halo path, which stays device-resident.
+One live offender, now fixed.
+
+⚠️ **The GPU board rows in §5 and the three queued rows were all measured with the fat version**,
+so they are a lower bound wherever the mesh per rank is large. The lean re-measurement at NG5 and
+dars is the pair that quantifies it.
+
 ## 8. Where the barotropic imbalance comes from (s4) — and why it is worth more than the halo on CPU
 
 §7 measured that a quarter to a half of the bt "wait" is the block's own imbalance. That part is
