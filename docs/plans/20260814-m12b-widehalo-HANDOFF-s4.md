@@ -38,6 +38,13 @@ and end at the same physical state per point. **The rung ships as a GPU recommen
 small-per-rank-size points** — the payoff is a per-rank-size law, not a mesh law, and it sits at
 the strong-scaling limit.
 
+🔴 **The rung carried an avoidable per-step cost until 2026-08-15** — the s3 F-reconcile bracketed
+its tiny exchange with whole-array `Fbt` host/device syncs (7.5 MB/step at NG5 16N GPU, ~37 % of
+its busy regression; 134 KB at CORE2 16N). Fixed by lean device gather/scatter staging, gated
+bitwise (job 26969407). **So the NG5 and dars rows above are the FAT measurement and are a lower
+bound**; the lean re-measurement is jobs 26970050 (dars) / 26970051 (NG5). Bins: serial
+`73c6cf29`, cuda `58ac143b` — use these from now on. §7d, lesson L121.
+
 ### FIRST ACTIONS
 
 1. **Read §7b before quoting anything from §7.** The pre-registered band was −1.5…−2.9 % at
@@ -49,7 +56,10 @@ the strong-scaling limit.
    extended-mesh build, run the cheap test: a **k-periodic η exchange arm** (exchange every k
    substeps using the existing ring-1 data) traces the staging curve at K=2 and 4 with no new
    mesh layer. That is the highest-value next job in this track.
-3. **CORE2 4N GPU is the obvious missing row** (census says +2.0 % ring cost, bt is 21 % of the
+3. **Harvest the four queued GPU rows** — 26970051 (NG5 lean; also measures the fix against its
+   fat twin 26962397), 26970050 (dars lean, predicted −1…−3 %), 26969116 (CORE2 4N, predicted
+   −6…−9 %), 26969145 (CORE2 16N at M=100, predicted −12…−16 %, the linearity test §7c rests on).
+4. *(done — see 3)* **CORE2 4N GPU was the obvious missing row** (census says +2.0 % ring cost, bt is 21 % of the
    step, 7 928 nodes/rank — between the two measured points). `sbatch --nodes=4 --ntasks=16
    --export=ALL,POINT=core2,BIN=/work/ab0995/a270088/port2/m12b/bin/fesom_port_cuda_674a53bc
    jobs/job_m12b_w6_gpu` would place the per-rank-size law on a third GPU point.
