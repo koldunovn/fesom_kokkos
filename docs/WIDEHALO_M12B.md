@@ -356,19 +356,30 @@ maps once per step, no scheduler. The certified ice EVPWIDE does **not** migrate
 | **CORE2 16N GPU dt1800 M=50** | 0.0841 | 0.0744 | **−11.5 %** | the track's headline. bt 19.7 → 12.5 ms: busy **7.84 → 5.37 (−31 %)** and wait **11.82 → 7.15 (−40 %)**, exchanges/step 102 → 54. On GPU the exchange cost sits in *busy* (staging + launch, ~51 µs each here) and its rank-variation is most of the imbalance, so halving the exchanges takes both. Job 26962396, all legs end at η=2.02 / T[−2.06,30.05] / S[5.63,41.12], identical off and on |
 | **CORE2 4N GPU dt1800 M=50** | 0.0683 | 0.0617 | **−9.7 %** | the same mechanism at a third of the ranks: bt busy **6.92 → 4.80 (−30.6 %)**, wait 7.67 → 4.37 (−43 %), exchanges 102 → 54. Per-exchange staging **44 µs** here against 51 µs at 16N — a per-CALL cost, near-independent of subdomain size, which is why it dominates wherever the per-rank arithmetic is small. Job 26969116, on-arm reps 0.0617/0.0617/0.0617 |
 | **CORE2 16N GPU dt1800 M=100** | 0.1002 | 0.0855 | **−14.7 %** | the linearity test (job 26969145), predicted −12…−16 % ✅. Exchanges 202 → 104; bt busy 15.30 → 10.21, wait 23.30 → 13.66 |
-| **NG5 16N GPU dt180 M=20** (fat bin) | 0.2461 | 0.2469 | **+0.3 % (wash)** | busy **11.41 → 12.22 (+7.1 %)**, wait 5.40 → 5.44 (flat): with 115 670 nodes per rank the block is compute-bound, the ring work costs more than the staging saves. Job 26962397, all legs η=3.62 |
+| **dars 16N GPU dt120 M=20** (lean) | 0.1422 | 0.1394 | **−2.0 %** | predicted −1…−3 % ✅ (job 26970050) |
+| **NG5 16N GPU dt180 M=20** (lean) | 0.2463 | 0.2447 | **−0.65 %** | job 26970051. Its **fat** twin the same day gave 0.2461 → 0.2469 = **+0.3 %**, with the off arms equal to 0.1 % — so removing the whole-array `Fbt` round trip (§7d) is worth **2.2 ms/step here, nearly 3× my 0.30 ms estimate**: the copies cost more than bandwidth arithmetic suggests, because they also fence the device twice per step |
 
 The s2 farc "−8.9 %" remains RETRACTED (all-NaN legs); −1.8 % is the honest CPU number.
 
-**The board's shape is a per-rank-size law, not a mesh law.** Ordered by nodes per rank: CORE2 16N
-GPU **1 982 → −11.5 %** · CORE2 np8 CPU 15 857 · farc 2048 CPU 5 700 → −1.8 % · dars 8192 CPU
-5 100 → +0.4 % · NG5 16N GPU **115 670 → +0.3 %**. The rung pays where the subdomain is small
-enough that the barotropic block is dominated by per-exchange overhead rather than arithmetic —
-i.e. exactly at the strong-scaling limit where a model runs out of speedup. The baseline M-sweep
-(jobs 26952126/27) says the same thing independently: one extra substep costs **0.33 ms** of step
-time at CORE2 16N GPU, of which ~0.20 ms is one of its two exchanges (from the rung's own delta,
-9.7 ms over 48 removed exchanges), while at NG5 16N a substep costs **0.455 ms** and its exchange
-is worth ~0.
+**On GPU the board is a clean per-rank-size law, and with the §7d fix every GPU point is a gain:**
+
+| nodes per rank | point | Δ |
+|---|---|---|
+| 1 982 | CORE2 16N GPU | **−11.5 %** |
+| 7 928 | CORE2 4N GPU | **−9.7 %** |
+| 49 380 | dars 16N GPU | **−2.0 %** |
+| 115 670 | NG5 16N GPU | **−0.65 %** |
+
+Monotone in per-rank size, because the barotropic exchange costs a fixed ~50 µs per call
+(§7c) while the arithmetic grows with the subdomain: the rung pays where the block is
+overhead-dominated, i.e. at the strong-scaling limit where a model runs out of speedup. 🔴 **The
+CPU points are NOT on this curve** and should not be read as part of it — farc 2048 CPU has 5 700
+nodes per rank and gives −1.8 %, where a GPU point of that size gives about −10 %. On CPU the pack
+is a memcpy and there is no staging term at all (§7b), so the CPU mechanism is the much weaker
+latency one and its own ordering is flat. The baseline M-sweep (jobs 26952126/27) agrees
+independently: one extra substep costs **0.33 ms** of step time at CORE2 16N GPU, of which
+~0.20 ms is one of its two exchanges, while at NG5 16N a substep costs **0.455 ms** and its
+exchange is worth ~0.
 
 ## 6. s4: the `elem_nodes(-1)` audit — one real defect, and the invariant is now checked
 
@@ -575,7 +586,7 @@ busy. Two GPU points fill the gap between 1 982 (CORE2 16N, −11.5 %) and 115 6
 | point | nodes/rank | bt busy / wait (certified, measured) | **predicted Δ step** | **measured** |
 |---|---|---|---|---|
 | CORE2 4N GPU (job 26969116) | 7 928 | 6.88 / 7.69 ms of a 70.3 ms step | **−6 % … −9 %** | **−9.7 %** — just outside, the model still slightly conservative on the wait side (it assumed the imbalance term would hold, and the busy spread fell 4.5 → 3.3 ms with the staging) |
-| dars 16N GPU (job 26970050, lean bin) | 49 380 | not yet measured | **−1 % … −3 %** | pending |
+| dars 16N GPU (job 26970050, lean bin) | 49 380 | not yet measured | **−1 % … −3 %** | **−2.0 %** — inside the band, so the law survives its own falsification test |
 
 The CORE2 4N reasoning: at 102 exchanges and ~51 µs each, staging is ~5.2 ms of that 6.88 ms
 busy, so the rung should take ~2.5 ms of busy plus a proportional slice of the 7.69 ms wait — call
