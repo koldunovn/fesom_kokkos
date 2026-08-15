@@ -1,0 +1,49 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_screen
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=01:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/screen_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/screen_%j.err
+#
+# M12b stability screen — the gate that REPLACES the byte gate W1, now that the
+# rung is certified as rounding-class rather than bitwise (the SE module computes
+# ~0.55 % of elements redundantly across ranks and never reconciles them, so the
+# node owner's η is not reproducible from local copies; see the plan's FINDING).
+#
+# 3000 steps at CORE2 dt1800, rung ON vs rung OFF, same binary, same allocation.
+# Rule 0.41: a stability verdict is only as long as its measurement window.
+# CORE2 at 128 ranks is a GATE, not a scaling run (the ≤128r exemption).
+#
+# Expected: η endpoint ≈ 1.89 (the SE reference in docs/SSH_SE_M12.md).
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+export FESOM_PRINT_EVERY=500
+
+for ARM in off on; do
+  OUT=$BASE/screen_${ARM}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  if [ "$ARM" = "on" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
+  echo "=================== ARM wide=$ARM ==================="
+  srun -n 128 -l "$BIN" "$MESH" "$OUT" 1800 3000 999999 "$PHC" 1958 \
+       > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h "wide halo: K=1" "$OUT/run.err" | head -1
+  grep -h " it=" "$OUT/run.log" | tail -2
+done
+echo "=== screen done (compare the eta endpoints; SE reference is 1.89) ==="

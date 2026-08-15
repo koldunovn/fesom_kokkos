@@ -500,8 +500,10 @@ static void build_nod_in_elem2D(fesom_mesh *m)
      * the Fortran does a multi-pass scheme with exchange_nod on global elem
      * IDs to fill nod_in_elem2D for halo nodes too. We do it directly: since
      * scatter_mesh now fills elem_nodes for myDim+eDim+eXDim with local node
-     * IDs (or -1 for outer-halo unmappable), we can just iterate every local
-     * element and build the adjacency.
+     * IDs (or -1 where the vertex is not in the local node list — which
+     * happens for eDim edge-neighbour elements too, not only eXDim; see the
+     * scatter_mesh note), we can just iterate every local element and build
+     * the adjacency.
      *
      * This is critical for the compute_areas pipeline: a partition-boundary
      * node's area is the sum of (1/3 * elem_area) over ALL surrounding
@@ -543,6 +545,68 @@ static void build_nod_in_elem2D(fesom_mesh *m)
         }
     }
     free(cursor);
+}
+
+/*--- elem_nodes(-1) census + the containment invariant consumers rely on -----
+ * scatter_mesh leaves elem_nodes = -1 at HALO elements whose vertex is not in
+ * the local node list — for eDim edge-neighbours as well as the eXDim tail
+ * (M12b s3, job 26959760: reading eta at such a vertex made halo H0e
+ * eta-class wrong, docs/WIDEHALO_M12B.md §3).
+ *
+ * Every other consumer in the model loops either over OWNED elements or over
+ * nod_in_elem2D rows of OWNED nodes, and both are -1-free *if* an element
+ * incident to an owned node always has all three vertices in the local node
+ * list. That is an assumption about the partition, so it is measured here
+ * rather than believed (rule: always measure). Startup-only: one pass over
+ * the elements, one over the owned CSR rows.
+ */
+static void audit_elem_nodes_unmappable(const fesom_mesh *m, fesom_partit *p)
+{
+    const int Eown  = m->myDim_elem2D;
+    const int EeD   = m->eDim_elem2D;
+    const int E     = Eown + EeD + m->eXDim_elem2D;
+    const int Nown  = m->myDim_nod2D;
+
+    /* [0] refs at owned elements, [1] at eDim, [2] at eXDim,
+     * [3] owned-node CSR entries pointing at an element with a -1 vertex. */
+    long c[4] = { 0, 0, 0, 0 };
+    for (int e = 0; e < E; ++e) {
+        int bad = 0;
+        for (int k = 0; k < 3; ++k) if (m->elem_nodes[3*e + k] < 0) ++bad;
+        if (!bad) continue;
+        if      (e < Eown)       c[0] += bad;
+        else if (e < Eown + EeD) c[1] += bad;
+        else                     c[2] += bad;
+    }
+    for (int n = 0; n < Nown; ++n) {
+        for (int k = m->nod_in_elem2D_offsets[n]; k < m->nod_in_elem2D_offsets[n + 1]; ++k) {
+            const int e = m->nod_in_elem2D[k];
+            if (m->elem_nodes[3*e + 0] < 0 || m->elem_nodes[3*e + 1] < 0
+                                           || m->elem_nodes[3*e + 2] < 0) ++c[3];
+        }
+    }
+
+    long g[4];
+    if (p && p->npes > 1) {
+        MPI_CHECK(MPI_Allreduce(c, g, 4, MPI_LONG, MPI_SUM, p->MPI_COMM_FESOM));
+    } else {
+        for (int i = 0; i < 4; ++i) g[i] = c[i];
+    }
+
+    FESOM_CHECK(g[0] == 0,
+                "elem_nodes: %ld unmappable (-1) vertex refs at OWNED elements — "
+                "partition file inconsistency", g[0]);
+    FESOM_CHECK(g[3] == 0,
+                "elem_nodes: %ld nod_in_elem2D entries of OWNED nodes point at an element with "
+                "an unmappable (-1) vertex. The containment invariant every unguarded "
+                "elem_nodes read relies on does not hold on this partition — those reads are "
+                "out of bounds (see the scatter_mesh note and docs/WIDEHALO_M12B.md §3)", g[3]);
+
+    if (p && p->mype == 0) {
+        printf("[fesom_mesh] elem_nodes(-1) census: %ld refs at eDim + %ld at eXDim halo "
+               "elements; 0 at owned elements, 0 reachable from owned nod_in_elem2D rows "
+               "(containment invariant holds)\n", g[1], g[2]);
+    }
 }
 
 /*--- K_v⁻ and ulevels (Phase 1: no cavity, ulevels = 1 everywhere) ----------
@@ -1206,17 +1270,24 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
                             "partition file inconsistency",
                             p->mype, i, gid + 1, g_node + 1);
             } else if (l_node < 0) {
-                /* Halo element vertex not in our node list — only happens for
-                 * eXDim elements 2+ rings out. SSH stiffness only reads first-
-                 * ring halo (eDim) elements; mark and skip. */
+                /* Halo element vertex not in our node list. 🔴 This happens for
+                 * eDim elements TOO, not only eXDim: com_elem2D's ring 1 is the
+                 * EDGE-neighbour halo, and an edge-neighbour's far vertex is
+                 * routinely a ring-2 node (measured, M12b s3 job 26959760 —
+                 * reading eta at a -1 vertex made halo H0e eta-class wrong).
+                 * Every consumer of elem_nodes at HALO elements must guard
+                 * v < 0 (nod_in_elem2D below skips them; fesom_ssh_se guards). */
                 ++halo_elem_unmappable;
             }
             new_elem_nodes[3*i + k] = l_node;        /* may be -1 for outer halo */
         }
     }
     if (halo_elem_unmappable > 0 && p->mype == 0) {
+        /* 🔴 M12b s3: NOT only the outer eXDim ring — an eDim edge-neighbour's
+         * far vertex is routinely a ring-2 node and is unmappable too. The
+         * per-class census is printed by fesom_mesh_compute_metrics. */
         printf("[fesom_mesh] scatter: %d halo-element vertex refs unmappable "
-               "(outer eXDim ring) — left as -1\n", halo_elem_unmappable);
+               "(eDim and eXDim) — left as -1\n", halo_elem_unmappable);
     }
 
     /* Per-edge arrays — extract by myList_edge2D[i]-1; translate node ids to
@@ -1392,6 +1463,7 @@ static void mesh_sync_geometry_device(fesom_mesh *m)
 void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
 {
     build_nod_in_elem2D(m);
+    audit_elem_nodes_unmappable(m, partit);
     compute_vertical_levels_aux(m);
 
     /* Fortran order (oce_mesh.F90:2213-2266):

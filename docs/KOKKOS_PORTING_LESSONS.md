@@ -1399,3 +1399,161 @@ step 1, confirming the bound is real, not conservative theater. Every explicit s
 option needs this shape: derive the limit from the mesh at startup, print the admissible
 minimum, abort unless forced. The per-mesh M values it produced (CORE2 50 · farc 90 ·
 dars 20 · NG5 20) became the ladder protocol directly.
+
+## L114 (M12b): a halo entry that is COMPUTED instead of RECEIVED must be provably the owner's bytes
+
+`se_forcing` recomputed `H0e` locally over owned+halo elements. At halo elements that
+computation is not well defined: an eDim edge-neighbour's far vertex is routinely a ring-2
+node, absent from the local node list, where `scatter_mesh` stores `-1` — so the η-mean read
+`eta0[-1]`, out of bounds. 1334 halo copies were wrong by up to **1.0e-1 m** (η-class), and it
+had never mattered, because in the certified path Ū at halo elements is *received*: the wrong
+values were dead state. They went live the instant the wide-halo rung computed instead of
+received, and the ×5.35/step amplification of L115 turned them into a NaN by step 30.
+Invisible at step 1 in the Z7 shape (H0e is η-independent at cold start), so the first-step
+gate passed. **Before any compute-instead-of-communicate lever: enumerate every input the
+kernel reads at halo slots and prove each is owner bytes — a probe that compares only myDim
+copies, or only one component, certifies nothing about the bytes actually read.**
+
+## L115 (M12b): a small seed is not a small error — the free barotropic interface amplifies exponentially
+
+With the L114 seed cut by NINE orders of magnitude (5.2e-17 instead of 3.0e-8 at step 2), the
+free-running rung still blew up — the drift grew **×5.35 per step at farc 2048 (M=90)** and
+×1.056 per step at CORE2 np128 (M=50), reaching 49 m by step 30. The rate tracks the ring-1
+fraction of the subdomain (6.1 % of owned at np64, 13.2 % at np128, 19.7 % at farc 2048), so it
+is a property of the scheme — each side integrates its own version of the interface once the
+coupling exchange is gone. **No seed reduction suffices; the acceptance criterion for a lever
+that replaces communication with local computation is bitwise-zero drift, not small drift.**
+Reaching it needed every substep input single-valued: the L114 exchange plus owner-wins
+reconciliation of the one field (`Fbt`) the 3-D model leaves ulp-different across the ~0.55 %
+multi-claimed elements. Then the redundant copies stay locked by induction — drift
+0.000000e+00 at every step, np8/np128/farc-2048.
+
+## L116 (M12b): a diagnostic that repairs the thing it measures cannot certify it
+
+`FESOM_SE_WIDE_SELFCHECK=1` compares the locally computed ring against the exchanged value —
+by stashing, **exchanging**, and diffing. It therefore restores the certified data path every
+substep: it validates the ring COMPUTATION and hides what the lever does when it runs free.
+Every clean run of the rung for two sessions was either 20 steps or ran under that selfcheck;
+the first free 3000-step screen was NaN by step 500, and a retracted −8.9 % performance number
+came from legs that had run to all-NaN (a NaN run's wall-clock is not a measurement — and NaN
+comparisons leave a min/max reduction's sentinels untouched, so the diagnostic print read
+`T[1e30,-1e30]` rather than obviously dying, cf. L110). Twice in one session. **Check whether
+a diagnostic restores the invariant it is testing, and run the lever free before believing any
+of its numbers — including its timings.**
+
+## L117 (M12b s4): turn "this index is always valid" into a startup census, not a comment
+
+`elem_nodes` carries `-1` at halo elements whose vertex is not in the local node list. Every
+other consumer in the model is safe only because it loops over owned elements or over
+`nod_in_elem2D` rows of owned nodes — i.e. because an element incident to an owned node always
+has all three vertices local. That is an assumption about the partitioner, and the audit of all
+203 references / 45 read sites found exactly one place that violated the discipline
+(`fesom_forcing_analytical.cpp`, looping the full element extent, reading `geo_coord_nod2D` at
+a `-1` vertex). The fix is a one-pass startup census that reports the `-1` refs by halo class
+and **aborts** if any owned-node CSR row reaches an element with a `-1` vertex. Measured at
+seven points: pi np2 → 35 eDim + 94 eXDim refs; CORE2 np128 → 15 483 + 37 802; farc 2048 →
+128 585 + 321 078; dars 8192 → 858 207 + 1 902 795 — and **0 owned-reachable everywhere**.
+Cost 0.08 node-hours to prove at the production partition. **A convention
+that consumers silently rely on should be checked where it is established, not documented
+where it is used** — the same defect class as L114 costs an entire session to find later.
+
+## L118 (M12b s4): an MPI wait is not a latency pool — measure its elasticity before sizing a communication lever
+
+The wide halo was motivated by a share: at CORE2 16N GPU the barotropic block is 7.8 ms busy and
+**11.8 ms MPI wait** of an 84 ms step, so halving its exchanges looked like a large lever. The
+W6 CPU pairs measure what that assumption is worth, because they halve the exchange count at
+unchanged compute: farc 2048 bt wait 5.23 → 4.69 ms for 182 → 94 exchanges — elasticity
+**dln(wait)/dln(exchanges) = 0.17**; dars 8192 3.09 → 2.75 for 42 → 24 — **0.21**. Per-rank
+phasestats say why (`scripts/m12b_wait_anatomy.py`): a rank's bt wait correlates with its own bt
+busy at **−0.6**, and regressing wait on the busy deficit gives `wait ≈ 2.0 × (busy_max − busy) +
+floor`, so 24–48 % of the mean wait is load imbalance being absorbed at the exchange. Even the
+floor — what the busiest rank still waits — has elasticity only 0.44–0.46. **A wait attributed to
+a phase is the sum of a latency term and the phase's own imbalance; only the first responds to a
+communication lever, and the split is measurable from per-rank timers you already collect.**
+⚠️ **Read this together with L120: on GPU the pack lands in `busy`, so part of what this
+decomposition calls "imbalance" is communication cost, and the elasticity came out at 0.79 rather
+than 0.17.** The algebra below is sound; the labels depend on which side of the timer the pack
+sits. The reason is structural, not empirical: **imbalance-driven *work* wait is conserved under
+any communication lever** — the time difference between a fast and a slow rank must be absorbed
+somewhere, and removing an exchange relocates it to the next synchronisation point rather than
+removing it. So a lever sized against a phase's *total* wait is oversized by exactly the
+imbalance share.
+Corollary from the same pair: the rung's +20…28 % ring-1 redundant compute cost **nothing** (bt
+busy unchanged to 0.3 %) because the exchange it removed took its pack/unpack out of `busy` with
+it — so a "redundant compute" census is an upper bound on the price, not the price.
+
+## L119 (M12b s4): when a phase's imbalance is the lever, find the entity the phase is proportional to — the partitioner may be balancing a different one
+
+Having measured that a quarter to a half of the barotropic block's MPI wait is its own imbalance
+(L118), the next question is what that imbalance is proportional to. Correlating each rank's bt
+busy against its `my_list` contents answers it in one pass: **r = +0.96 (farc 2048) and +0.85
+(dars 8192) against owned ELEMENTS, and +0.02 / +0.23 against owned NODES.** The partitioner
+balances nodes — owned node counts are equal to 1 % — while owned element counts vary by 47 %
+and 22 %, because the element-to-node ratio depends on where a subdomain sits (coastline, domain
+shape). The barotropic subcycle is per-element work (Ū, viscosity, the element pack); η is its
+only per-node half. **Sizing it needs care, and the first attempt was wrong:** the estimate
+"remove the imbalance and its absorbed wait goes with it" gave 2.6 % of the step, and a
+pre-registered test on a partition with 2.3× the element imbalance refuted it — the bt busy
+imbalance grew as predicted, but the bt *wait* FELL, because on that partition the wait is set by
+the skew ranks arrive with from the 3-D phase (corr(busy, wait) collapsed −0.61 → −0.26).
+**Phase-local wait decompositions are not additive across phases; the currency that works is the
+critical path, TOTAL busy max**, in which the effects are additive with the right signs (element
+imbalance +0.6 ms, 3-D rebalancing −6.4 ms, step 72.9 → 67.7 ms as measured). Revised size:
+~1.0–1.5 ms, 1.5–2.2 %. The same analysis shows the 3-D `ocean` phase is NOT
+explained by 2-D counts (R² 0.21; its 1.62× spread is bathymetry, cf. M10), so the phases want
+different constraints and the fix is a *multi-constraint* partition, not a re-weighting.
+**Before optimizing a phase's communication, regress its per-rank busy time on the per-rank entity
+counts you already have on disk — it costs nothing and it can redirect the whole lever.**
+
+## L120 (M12b s4): which side of the timer the halo pack sits on decides what a phase's wait is made of — and it differs between CPU and GPU
+
+L118 measured that halving the barotropic exchanges moved the bt wait by an elasticity of only
+0.17 on CPU, and attributed the rest to load imbalance. The same experiment on GPU returned
+**0.79**, and the step gain was **−11.5 %** against a pre-registered **−1.5…−2.9 %**. The term
+that failed was `bt_busy`, which the CPU had said was invariant: there the removed exchange's pack
+is a memcpy that exactly paid for the ring compute (busy flat to 0.3 %). On GPU the pack/unpack
+and its staging are kernels and copies — they land in **`busy`**, and at 1 982 nodes per rank they
+dominate it (~51 µs of busy per exchange against ~2.6 ms of arithmetic), so bt busy fell **31 %**.
+And because staging scales with halo size, which varies 11× across ranks (corr(bt busy, halo
+elements) **+0.63** vs +0.38 for owned elements), removing the exchanges removed the busy *spread*
+too (9.2 → 5.2 ms) and with it the absorption. **A large part of what the CPU decomposition
+labelled "imbalance" was communication cost wearing an imbalance costume.** Two rules follow:
+regress a phase's busy on the **halo** counts as well as the owned ones before deciding what its
+wait is made of; and never carry a busy-side calibration across backends — the pack changes sides.
+The same lever is a **wash (+0.3 %)** at NG5 16N GPU, where 115 670 nodes per rank make staging a
+rounding error and the ring compute a real cost: **the board is a per-rank-size law, not a mesh
+law**, and the payoff sits at the strong-scaling limit.
+
+## L121 (M12b): a dirty-flag `sync_host()` is a WHOLE-ARRAY copy — a tiny scattered update must be staged, not bracketed
+
+The SE rung's owner-wins F-reconcile moves a few hundred doubles between the claimants of the
+0.55 % of elements that more than one rank owns. It was written the obvious way — `Fbt.sync_host()`
+… tiny MPI … `Fbt.modify_host(); Fbt.sync_device();` — and because `se_forcing` marks `Fbt`
+device-modified every step, the dirty flag fired every step: **two whole-array copies plus two
+device fences, sized by the mesh per rank rather than by the update.** 7.5 MB per step at NG5 16N
+GPU (~0.30 ms, about 37 % of the rung's measured busy regression there), 134 KB at CORE2 16N. The
+fix is the M9 LEAN pattern: gather the wanted slots into a small buffer with a device kernel, move
+only that, scatter it back with a second kernel, and never sync the big array. **Two properties
+made this invisible for a whole campaign**: on CPU the host and device mirrors alias, so the syncs
+are free and no CPU pair can see it; and it costs in proportion to per-rank size, so it was
+negligible at exactly the small-subdomain point the design was tuned and profiled on, while
+inflating the large-subdomain points that the board then reported as "the rung does not pay here".
+**When a lever's measured payoff varies along an axis, audit the lever's own overheads along that
+same axis before believing the mechanism.**
+
+## L122 (M12b): set the rep count by the NOISIER arm, and justify the estimator by cross-pair reproducibility
+
+The M12b GPU headline was quoted as **−11.5 %** and is really **−9.1 %**. Nothing was wrong with
+the runs: the *certified* arm at CORE2 16N GPU is bimodal across repetitions (six legs of two
+independent pairs span 0.0814…0.0854, **4–5 %**) while the *rung* arm spans 0.4 %, and `min-of-2`
+over two legs of a 5 %-noisy arm does not converge — the two pairs disagreed by 2.4 points on that
+estimator while agreeing on the underlying measurement. Choosing the estimator by which one
+*reproduces across the two pairs* settles it: min over all legs agrees to **0.1 %**, mean to 0.7 %,
+median to 3.1 %. ⚠️ **M11's trap list already carries "min-of-N biased when the base is noisier"**
+— the lesson existed and was walked into anyway, because the protocol ("min-of-2, same-day, pinned
+pairs") was followed as a habit rather than checked against this arm's spread. **Two rules: the
+number of repetitions is set by the noisier arm, not by the protocol's default; and when two
+independent pairs exist, let cross-pair agreement pick the statistic.** A useful side observation
+fell out of the same data — a lever that removes exchanges also removes the step's exposure to
+network variation, so the treated arm is often the quiet one (spread 4.8 % → 0.4 % here); the arm
+that needs the reps is the untreated one.

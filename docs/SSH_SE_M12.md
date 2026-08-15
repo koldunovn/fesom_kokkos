@@ -26,6 +26,8 @@ anywhere in the module — SASS-audited).
 | `FESOM_SE_CHI` | **0.1** | **measured, not guessed**: 0.05 dies on CORE2 real forcing by step ~300 (Antarctic-shelf setdown → vertical-CFL tracer death); 0.1 saturates at the SI η class; 0.15 indistinguishable |
 | `FESOM_SE_VISC` | 1 | live two-term harmonic viscosity; `FESOM_SE_VISC_GAMMA0/GAMMA1` (Zenodo defaults 10 / 2750) |
 | `FESOM_SE_CHECK` | off | invariant suite (η-compatibility, trim consistency, layer-sum, volume window; NaN-loud) |
+| `FESOM_SE_WIDE` | 0 | **M12b**: `1` = the K=1 wide-halo rung (η computed on the ring-1 nodes from shipped owner rows; Ū over `ELEM2D_FULL`) ⇒ 2 → 1 exchanges per substep. `≥2` aborts. See `docs/WIDEHALO_M12B.md` |
+| `FESOM_SE_H0E_XCHG` | **1** | **s3 coherence fix (2026-08-14)**: per-STEP H0e exchange — halo H0e = the owner's bytes. The local halo recompute read `eta0[-1]` (unmappable ring-2 vertices) and was η-class wrong, seeding rank-dependent Ū on multi-claimed elements. `0` = legacy, diagnostic A/B only. Changes the SE trajectory at rounding class vs pre-fix binaries |
 | `FESOM_SE_DUMP` | off | per-rank barotropic-state dump (determinism gates) |
 
 Interplay: `FESOM_SPEED_SSHRAILS` force-off under `se` (announced); `FESOM_DIAG_SSHSLV/SPREAD`
@@ -37,6 +39,16 @@ and `FESOM_KK_VERIFY=ssh` abort; wsplit composes (3000-step screen green).
   fidelity gate PASS — at T1, after T4/T5, and at T6.
 - **G1** (machine-precision invariants, CORE2 1000 steps): η-compatibility ≤ 2e-14 m ·
   trim ≤ 3.4e-13 m²/s · layer-sum 1.5e-11 m · volume drift ≡ 18 nm of mean sea level.
+- ⚠️→✅ **Rank-redundancy caveat (2026-08-14, RESOLVED s3):** `myDim_elem2D` is not a partition —
+  1341 of 244659 CORE2 dist_8 elements (0.55 %) are claimed by more than one rank, computed
+  redundantly, and reconciled by no exchange. The s2 observation that their Ū diverges from step 2
+  (529 elements, max 5.2e-07) was **root-caused to the halo-H0e incoherence** (se_forcing read
+  `eta0[-1]` at unmappable halo vertices; k3's viscosity reads `H0e[nb]` at halo slots) and is
+  FIXED by `FESOM_SE_H0E_XCHG=1` (default): with it the copies stay bitwise-locked until the 3-D
+  model's own last-bit redundancy reaches them through `Fbt` (first at step 4, one element, one
+  ulp — the model-wide property, not an SE defect). Full story + probes:
+  `docs/WIDEHALO_M12B.md` §3/§3e. 🔴 Pre-fix SE binaries (`se0`) differ from fixed ones at
+  rounding class on the certified SE path — same-binary pairing rules apply.
 - **G2**: serial same-binary byte-determinism (CORE2 dist_8); 0 atomic/RED SASS instructions
   in all SE kernels; CUDA coupled floor recorded in `docs/REFERENCE_RUNS.md` (η ~1e-3 —
   judge SE-CUDA runs against that row, not the SI one).

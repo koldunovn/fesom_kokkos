@@ -1,0 +1,54 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_seed4
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:10:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/seed4_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/seed4_%j.err
+#
+# M12b s3 — name the residual step-4 ulp seed.
+#
+# With the H0e fix the rung is EXACT through step 3 and the free drift plateaus
+# at ~1.3e-15 (np8, 25 steps). A one-ulp seed enters at step 4. The widened
+# GEOCHK=2 probes (steps <= 5) catch its first appearance: if Fbt-own or
+# H0e-own goes nonzero at step 4 while the SE state is still coherent, the seed
+# is 3-D-born (the model's own multi-claimed redundancy) — a module property,
+# not an SE defect.
+#
+# Arms (np8 CORE2, 6 steps):
+#   wide  WIDE=1 SELFCHECK=2 GEOCHK=2  — the rung, free-running
+#   cert  WIDE=0 GEOCHK=2              — the FIXED certified path's own coherence
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50 FESOM_SE_WIDE_GEOCHK=2
+
+run_arm () {   # $1 tag, rest env
+  local tag=$1; shift
+  local OUT=$BASE/seed4_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== ARM $tag ($*) ==================="
+  env "$@" srun -n 8 -l "$BIN" "$MESH" "$OUT" 1800 6 999999 "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h "ssh_se-gk\]\|wide-drift" "$OUT/run.err" \
+    | grep -v " 0 (max 0.000e+00)  y 0 (max 0.000e+00)\|: 0 (max 0.000e+00)\|halo-vs-owner: 0\|Fbt    all\|meta   all" | head -50
+  echo "--- (all-zero lines and the two known-dead-state probes suppressed)"
+}
+
+run_arm wide FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+run_arm cert
+echo "=== seed4 done ==="

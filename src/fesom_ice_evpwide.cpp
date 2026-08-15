@@ -394,6 +394,11 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     own_g2l.reserve((size_t)myDim * 2);
     for (int i = 0; i < myDim; ++i) own_g2l.emplace(p->myList_nod2D[i], i);
     std::vector<int> adj_ptr((size_t)myDim + 1, 0);
+    /* NB `n < myDim` also admits n == -1 (unmappable halo-element vertex,
+     * M12b s3). Safe here ONLY because E == myDim_elem2D — owned elements
+     * never carry a -1 (asserted at scatter, censused in compute_metrics).
+     * Widening E would need an explicit `n >= 0` guard: at n == -1 pass 1
+     * would corrupt adj_ptr[0] and pass 2 would index cur[(size_t)-1]. */
     for (int e = 0; e < E; ++e)
         for (int k = 0; k < 3; ++k) {
             const int n = m->elem_nodes[3*e + k];

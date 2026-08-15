@@ -39,6 +39,16 @@ int    fesom_se_m(void);
 double fesom_se_chi(void);
 int    fesom_se_check_on(void);   /* FESOM_SE_CHECK diagnostic family (unset/0 = off) */
 
+/* M12b wide halo. FESOM_SE_WIDE=K: 0/unset = off (the certified per-substep
+ * path); 1 = the K=1 rung — η is computed on the ring-1 (eDim) nodes from the
+ * OWNER's div-CSR rows instead of being exchanged, and Ū is exchanged over
+ * com_elem2D_full (element rings 1-2) once per substep instead of twice.
+ * Messages/substep 2 -> 1 (measured ×0.500-0.513: com_elem2D_full reaches the
+ * SAME partner ranks as com_elem2D), doubles/substep ×1.34-1.49, result BITWISE
+ * identical. K >= 2 aborts: the deep-K rungs need the extended-mesh layer
+ * (docs/plans/20260814-m12b-widehalo.md, Technical Details §D). */
+int    fesom_se_wide(void);
+
 /* Parse-time guards (zstar requirement, incompatible diagnostics). Call once,
  * right after fesom_ale_mode_init() — needs no mesh. */
 void fesom_se_mode_init(void);

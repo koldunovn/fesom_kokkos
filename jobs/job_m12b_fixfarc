@@ -1,0 +1,55 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_fixfarc
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=16
+#SBATCH --ntasks=2048
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:50:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/fixfarc_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/fixfarc_%j.err
+#
+# M12b s3 — the H0e-coherence fix at farc 2048 (dt900, M=90), the point where
+# the unfixed rung went NaN by step 300 and drifted 115 m by step 30.
+#
+# Arms:
+#   drift   WIDE=1 SELFCHECK=2, 50 steps  — free-running drift must be 0 per step
+#           (the s2 instrument read 3.0e-8 at step 2, 1.15e+02 at step 30)
+#   son     WIDE=1 free, 3000 steps       — the W5 stability screen, knob ON
+#   soff    WIDE=0 XCHG=1, 3000 steps     — same-binary fixed control
+# Check the final it= line of every arm (trap 6: NaN runs still "finish").
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=90
+export FESOM_WSPLIT=1                        # as on the M12 G4 board for farc
+export FESOM_PRINT_EVERY=500
+
+run_leg () {   # $1 tag  $2 nsteps  rest env
+  local tag=$1 nst=$2; shift 2
+  local OUT=$BASE/fixfarc_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== ARM $tag ($*) ==================="
+  env "$@" srun -l "$BIN" "$MESH" "$OUT" 900 "$nst" -1 "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h " it=" "$OUT/run.log" | tail -1
+}
+
+run_leg drift 50 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+grep -h "wide-drift" "$BASE/fixfarc_drift_${SLURM_JOB_ID}/run.err" | tail -4
+NZ=$(grep -h "wide-drift" "$BASE/fixfarc_drift_${SLURM_JOB_ID}/run.err" | grep -cv "= 0.000000e+00$" || true)
+echo "drift nonzero-steps=$NZ (must be 0)"
+
+run_leg son 3000 FESOM_SE_WIDE=1
+run_leg soff 3000
+echo "=== fixfarc done — compare the eta endpoints of son/soff ==="

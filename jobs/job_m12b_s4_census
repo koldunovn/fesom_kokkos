@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_cens
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:12:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/cens_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/cens_%j.err
+#
+# M12b s4 — run the elem_nodes(-1) census + containment invariant at the two
+# BIG production partitions (the W6 CPU points), so the new startup abort is
+# proven not to fire where the board's numbers were earned. 3 steps: this is a
+# startup check, the time is mesh read + partition.
+#
+#   sbatch --nodes=16 --ntasks=2048 --export=ALL,POINT=farc,BIN=... jobs/job_m12b_s4_census
+#   sbatch --nodes=64 --ntasks=8192 --export=ALL,POINT=dars,BIN=... jobs/job_m12b_s4_census
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+POINT=${POINT:-farc}
+BIN=${BIN:?pin the binary}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+
+case "$POINT" in
+  farc) MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+        DT=900; M=90 ;;
+  dars) MESH=/work/ab0995/a270088/port2/mesh/dars_bigpart
+        DT=120; M=20 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=$M FESOM_WSPLIT=1
+export FESOM_PRINT_EVERY=100
+sha256sum "$BIN"
+echo "=== M12b s4 census $POINT: nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS ==="
+
+OUT=$BASE/cens_${POINT}_${SLURM_JOB_ID}
+rm -rf "$OUT"; mkdir -p "$OUT"
+# snap_every=-1: mandatory at >=4096 ranks (ibv_reg_mr gather trap), harmless below.
+srun "$BIN" "$MESH" "$OUT" "$DT" 3 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit=$?"
+grep -h "elem_nodes(-1) census\|halo-element vertex refs" "$OUT/run.log" | head -4
+grep -h " it=" "$OUT/run.log" | tail -1
+echo "=== census $POINT done ==="

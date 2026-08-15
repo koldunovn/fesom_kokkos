@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_census
+#SBATCH -p shared
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=96G
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port2/m12b/census.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/census.%j.err
+
+# M12b ring census across every operating point of the SE board (CPU and GPU).
+# Pure analysis of mesh + partition files; no model run.
+set -u
+mkdir -p /work/ab0995/a270088/port2/m12b
+cd /home/a/a270088/port_kokkos_wh || exit 1
+
+POOL=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1
+PRIV=/work/ab0995/a270088/port2/mesh
+PY=scripts/m12b_ring_census.py
+export CENSUS_OUT=/work/ab0995/a270088/port2/m12b/census_$SLURM_JOB_ID.txt
+
+# CORE2 = the private mesh (user rule: never /pool core2). GPU points only.
+python3 $PY $PRIV/core2 $PRIV/core2/dist_16 $PRIV/core2/dist_64 $PRIV/core2/dist_128 \
+        --rings 9 --sample 16
+
+# farc: 16N GPU (64) + the 2048-rank CPU point that beat the M10 solvers.
+python3 $PY $POOL/farc $POOL/farc/dist_64 $POOL/farc/dist_2048 --rings 9 --sample 16
+
+# dars: GPU 64 + CPU 2048 + the 64-node CPU point (8192).
+python3 $PY $POOL/dars $POOL/dars/dist_64 $POOL/dars/dist_2048 --rings 9 --sample 16
+python3 $PY $PRIV/dars_bigpart $PRIV/dars_bigpart/dist_8192 --rings 9 --sample 16
+
+# NG5: 64 GPU (the 32%-wait point) + the large CPU counts.
+python3 $PY $POOL/ng5 $POOL/ng5/dist_64 $POOL/ng5/dist_4096 $POOL/ng5/dist_8192 \
+        --rings 9 --sample 16
+
+echo "[m12b] census done -> $CENSUS_OUT"

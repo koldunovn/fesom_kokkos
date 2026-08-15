@@ -1,0 +1,73 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_fix128
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/fix128_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/fix128_%j.err
+#
+# M12b s3 — the H0e-coherence fix at np128, the rank count where the rung died.
+#
+# Arms:
+#   null    np8  WIDE=0 XCHG=0, 50 steps + snaps  — diff_snap vs base_np8 rc=0
+#                (all new code is knob-gated: byte inertness)
+#   g1      np64 WIDE=0 XCHG=1 SE_CHECK, 100 steps — the M12 invariants on the
+#                FIXED certified path (G1a/b eta-compat + trim, Serial-abort armed)
+#   sc      np128 WIDE=1 SELFCHECK=1, 100 steps    — exact 0.0 per step, no abort
+#   free    np128 WIDE=1 SELFCHECK=2, 300 steps    — FREE drift must be 0 per step
+#   offctl  np128 WIDE=0 XCHG=1, 300 steps         — fixed certified control (eta ref)
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+sha256sum "$BIN"
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=50
+export FESOM_PRINT_EVERY=100
+
+run_leg () {   # $1 tag  $2 np  $3 nsteps  $4 snap  rest env
+  local tag=$1 np=$2 nst=$3 snap=$4; shift 4
+  local OUT=$BASE/fix128_${tag}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  echo "=================== ARM $tag np=$np ($*) ==================="
+  env "$@" srun -n $np -l "$BIN" "$MESH" "$OUT" 1800 "$nst" "$snap" "$PHC" 1958 \
+      > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h " it=" "$OUT/run.log" | tail -1
+}
+
+# 1. byte-inertness null (np8, both knobs off, legacy H0e)
+run_leg null 8 50 25 FESOM_SE_H0E_XCHG=0
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASE/base_np8" "$BASE/fix128_null_${SLURM_JOB_ID}"
+echo "diff_snap null rc=$?"
+
+# 2. M12 G1 invariants on the FIXED certified path
+run_leg g1 64 100 999999 FESOM_SE_CHECK=1
+grep -h "G1a\|G1b\|G1c\|G1d" "$BASE/fix128_g1_${SLURM_JOB_ID}/run.err" | tail -6
+
+# 3. selfcheck exactness at np128 (0.0 bar; selfcheck=1 aborts on nonzero)
+run_leg sc 128 100 999999 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=1
+grep -h "wide-chk\] step" "$BASE/fix128_sc_${SLURM_JOB_ID}/run.err" | tail -3
+NZ=$(grep -h "wide-chk\] step" "$BASE/fix128_sc_${SLURM_JOB_ID}/run.err" | grep -cv "= 0$" || true)
+echo "sc nonzero-steps=$NZ (must be 0)"
+
+# 4. FREE-RUNNING drift at np128
+run_leg free 128 300 999999 FESOM_SE_WIDE=1 FESOM_SE_WIDE_SELFCHECK=2
+grep -h "wide-drift" "$BASE/fix128_free_${SLURM_JOB_ID}/run.err" | tail -3
+NZ=$(grep -h "wide-drift" "$BASE/fix128_free_${SLURM_JOB_ID}/run.err" | grep -cv "= 0.000000e+00$" || true)
+echo "free nonzero-drift-steps=$NZ (must be 0)"
+
+# 5. fixed certified control (eta endpoint reference at np128)
+run_leg offctl 128 300 999999
+echo "=== fix128 done ==="

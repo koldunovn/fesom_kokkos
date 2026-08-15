@@ -1,0 +1,101 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_w6
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --nodes=16
+#SBATCH --ntasks=64
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/w6_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/w6_%j.err
+#
+# M12b W6 — the paired performance board for the K=1 rung, GPU first (Sergey:
+# "на GPU переход на wide halo должен принести преимущества, на CPU это просто
+# лучшее скалирование").
+#
+# Same binary, same allocation, knob OFF vs ON, min-of-2 — so the delta is the
+# scheduling change and nothing else. This is ALSO the unconfounded version of
+# the Task-0 question (does the bt wait track the exchange count?): at fixed M
+# the rung halves the exchanges and changes nothing else, whereas the M sweep
+# doubles the busy work alongside the exchanges.
+#
+# Ring-1 redundant compute at these points (census): CORE2 16N GPU +6.1 %,
+# NG5 16N GPU +1.2 % — so on GPU the rung is close to free in arithmetic.
+#
+# Submit:  sbatch --export=ALL,POINT=core2 jobs/job_m12b_w6_gpu
+#          sbatch --export=ALL,POINT=ng5   jobs/job_m12b_w6_gpu
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source "$ROOT/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+
+POINT=${POINT:-core2}
+BIN=${BIN:?pin the binary}                    # 🔴 frozen copy under /work, never the build tree
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+
+case "$POINT" in
+  core2) MESH=/work/ab0995/a270088/port2/mesh/core2       # private mesh (L73)
+         DT=1800; M=50; WSPLIT=0 ;;
+  ng5)   MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
+         DT=180;  M=20; WSPLIT=1 ;;
+  dars)  MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+         DT=120;  M=20; WSPLIT=1 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+
+# M override: the rung's saving should be LINEAR in the number of exchanges it
+# removes, which is what the deep-K extrapolation of §7c rests on. Running the
+# same pair at 2M tests that directly, and is physically admissible (the startup
+# CFL guard only sets a lower bound on M).
+M=${M_OVERRIDE:-$M}
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=$M
+export FESOM_SPEED=1
+export FESOM_PRINT_EVERY=500                  # the 41 %-of-step diagnostic-print trap
+[ "$WSPLIT" = "1" ] && export FESOM_WSPLIT=1
+
+sha256sum "$BIN"
+echo "=== M12b W6 $POINT: nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=$DT M=$M on $SLURM_JOB_NODELIST ==="
+
+leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats(0|1)
+  local arm=$1 rep=$2 ph=$3
+  local OUT=$BASE/w6_${POINT}m${M}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  if [ "$arm" = "on" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
+  if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1; else unset FESOM_SPEED_PHASESTATS; fi
+  srun "$BIN" "$MESH" "$OUT" "$DT" 300 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "--- arm=$arm rep=$rep ph=$ph exit=$?"
+  grep -h "loop timing" "$OUT/run.log" | tail -1
+  # 🔴 trap 6: a NaN leg's wall-clock is not a measurement, and NaN comparisons
+  # leave a min/max reduction's sentinels untouched (L110) — print the final
+  # diagnostic line so every timing leg can be checked for a live ocean.
+  grep -h " it=" "$OUT/run.log" | tail -1 | cut -c1-120
+  [ "$arm" = "on" ] && grep -h "ssh_se-wire" "$OUT/run.err" | head -2
+  [ "$ph" = "1" ] && grep -hE "phasestat|\bbt\b" "$OUT/run.err" "$OUT/run.log" | tail -12
+  return 0
+}
+
+# interleaved reps so a drifting node cannot masquerade as a knob effect
+leg off 1 0;  leg on 1 0
+leg off 2 0;  leg on 2 0
+leg off 1 1;  leg on 1 1
+
+# 🔴 The phasestats legs are not only for attribution: this pair halves the exchange
+# count at fixed compute, so it MEASURES the elasticity of the bt wait to the message
+# count and the imbalance share phi — the two numbers the deep-K decision turns on
+# (WIDEHALO_M12B §7). Run the analysis here so it exists even if the harvest is late.
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIST=$MESH/dist_$SLURM_NTASKS
+echo "=== wait anatomy (elasticity + imbalance share) ==="
+"$PY" "$ROOT/scripts/m12b_wait_anatomy.py" \
+      off=$BASE/w6_${POINT}m${M}_off_r1_ph1_${SLURM_JOB_ID} \
+      on=$BASE/w6_${POINT}m${M}_on_r1_ph1_${SLURM_JOB_ID} || true
+echo "=== bt imbalance vs the partition ($DIST) ==="
+"$PY" "$ROOT/scripts/m12b_bt_imbalance.py" "$DIST" \
+      $BASE/w6_${POINT}m${M}_off_r1_ph1_${SLURM_JOB_ID} || true
+
+echo "=== W6 $POINT done — quote min-of-2, both currencies (step and bt phase) ==="

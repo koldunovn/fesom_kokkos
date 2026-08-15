@@ -1,0 +1,73 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_w6c
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/w6c_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/w6c_%j.err
+#
+# M12b W6 (CPU half) — the honest half of the board.
+#
+# On CPU the rung buys half the messages with 20-28 % MORE barotropic arithmetic
+# (census ring-1 cost: farc 2048 +19.7 %, dars 8192 +28.2 %), which is Sergey's
+# "on CPU it is just better scaling" as a number. Report whichever way it lands:
+# a CPU loss is the result that decides whether the rung ships as a CPU
+# recommendation or a GPU-only one.
+#
+# Same binary, same allocation, knob OFF vs ON, interleaved reps, min-of-2.
+#
+# Submit:
+#   sbatch --nodes=16 --ntasks=2048 --export=ALL,POINT=farc  jobs/job_m12b_w6_cpu
+#   sbatch --nodes=64 --ntasks=8192 --export=ALL,POINT=dars  jobs/job_m12b_w6_cpu
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+POINT=${POINT:-farc}
+BIN=${BIN:?pin the binary}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+
+case "$POINT" in
+  farc) MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+        DT=900; M=90 ;;                     # per-mesh M from the CFL probe
+  dars) MESH=/work/ab0995/a270088/port2/mesh/dars_bigpart
+        DT=120; M=20 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=$M
+export FESOM_WSPLIT=1                        # as on the M12 G4 board for these points
+export FESOM_PRINT_EVERY=500                 # the 41 %-of-step diagnostic-print trap
+
+sha256sum "$BIN"
+echo "=== M12b W6-CPU $POINT: nodes=$SLURM_NNODES ntasks=$SLURM_NTASKS dt=$DT M=$M ==="
+
+leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats
+  local arm=$1 rep=$2 ph=$3
+  local OUT=$BASE/w6c_${POINT}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  if [ "$arm" = "on" ]; then export FESOM_SE_WIDE=1; else unset FESOM_SE_WIDE; fi
+  # 🔴 On the Serial backend the FESOM_SPEED family resolves OFF unless
+  # FORCE_SERIAL is set (rule 0.24), so a bare PHASESTATS=1 produces NOTHING and
+  # says so. Phase attribution therefore rides its own legs; the timing legs stay
+  # lever-free so the CPU absolutes remain comparable to the M12 board.
+  if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1 FESOM_SPEED_FORCE_SERIAL=1
+  else unset FESOM_SPEED_PHASESTATS FESOM_SPEED_FORCE_SERIAL; fi
+  # 🔴 snap_every=-1 is MANDATORY at >=4096 ranks (ibv_reg_mr gather trap) and
+  # harmless below, so it is stated here rather than inherited.
+  srun "$BIN" "$MESH" "$OUT" "$DT" 300 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "--- arm=$arm rep=$rep ph=$ph exit=$?"
+  grep -h "loop timing" "$OUT/run.log" | tail -1
+  [ "$arm" = "on" ] && grep -h "ssh_se-wire" "$OUT/run.err" | head -2
+  [ "$ph" = "1" ] && grep -hE "phasestat|\bbt\b" "$OUT/run.err" "$OUT/run.log" | tail -12
+  return 0
+}
+
+leg off 1 0;  leg on 1 0
+leg off 2 0;  leg on 2 0
+leg off 1 1;  leg on 1 1
+echo "=== W6-CPU $POINT done — min-of-2, both currencies ==="

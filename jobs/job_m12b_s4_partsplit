@@ -1,0 +1,89 @@
+#!/bin/bash
+#SBATCH --job-name=m12b_psplit
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=16
+#SBATCH --ntasks=2048
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:35:00
+#SBATCH -o /work/ab0995/a270088/port2/m12b/psplit_%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m12b/psplit_%j.err
+#
+# M12b s4 — test §8's mechanism on a partition that already exists.
+#
+# §8: the barotropic block's imbalance is an owned-ELEMENT effect (corr +0.96 at
+# farc 2048) that the node-balanced stock partition does not control. M11's
+# certified farc partition is the same mesh BYTE FOR BYTE (md5 of nod2d/elem2d
+# match /pool) with a different partition — Mt-KaHyPar weighted by nlev, i.e.
+# balancing 3-D column work — and it is measurably WORSE in the 2-D currencies:
+#
+#            owned nodes max/min   owned elems max/mean   owned elems max/min
+#   stock            1.010                 1.062                 1.468
+#   M11-certified    1.857                 1.233                 2.275
+#
+# 🔴 PRE-REGISTERED PREDICTIONS (write them down before the run, cf. rule 8):
+#   P1  bt busy max/mean rises from the measured 1.146 (stock) toward ~1.23, and
+#       the bt WAIT rises with it — the §8 mechanism, on a partition chosen for a
+#       different reason.
+#   P2  the 3-D `ocean` phase's busy imbalance FALLS (1.62 max/mean at stock) —
+#       that is what the nlev weighting buys, and it is why M11 measured -7.52 %.
+#   P3  net under SE the M11 partition still wins, but by LESS than -7.52 %,
+#       because SE moves work out of the implicit solver (which the weighting
+#       helps) into bt (which it hurts). A wash or a loss would say the barotropic
+#       penalty is the same size as the 3-D gain at this point.
+# A failure of P1 falsifies §8's mechanism and the M11 handover goes with it.
+set -u
+ROOT=/home/a/a270088/port_kokkos_wh
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+ulimit -s 204800
+
+BIN=${BIN:?pin the binary}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port2/m12b
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+STOCK=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc
+M11=/work/ab0995/a270088/port2/mesh_m11_certified/farc_v1
+
+# SOLVER=se (default) or si — P3 needs BOTH, measured the same day on the same
+# allocation: the claim is that the nlev-weighted partition wins by LESS under SE
+# than under the implicit solver, and a cross-study comparison against M11's
+# -7.52 % (different protocol, different day) cannot test that.
+SOLVER=${SOLVER:-se}
+export FESOM_ALE=zstar FESOM_WSPLIT=1
+if [ "$SOLVER" = "se" ]; then export FESOM_SSH_MODE=se FESOM_SE_M=90
+else unset FESOM_SSH_MODE; fi
+export FESOM_PRINT_EVERY=500
+sha256sum "$BIN"
+echo "=== M12b s4 partition split, farc 2048 CPU dt900 SOLVER=$SOLVER ==="
+
+leg () {   # $1 arm(stock|m11)  $2 rep  $3 phasestats(0|1)
+  local arm=$1 rep=$2 ph=$3
+  local MESH=$STOCK; [ "$arm" = "m11" ] && MESH=$M11
+  local OUT=$BASE/psplit_${SOLVER}_${arm}_r${rep}${ph:+_ph$ph}_${SLURM_JOB_ID}
+  rm -rf "$OUT"; mkdir -p "$OUT"
+  # 🔴 on Serial the FESOM_SPEED family needs FORCE_SERIAL (rule 0.24), so the
+  # phasestats legs are separate and the timing legs stay lever-free.
+  if [ "$ph" = "1" ]; then export FESOM_SPEED_PHASESTATS=1 FESOM_SPEED_FORCE_SERIAL=1
+  else unset FESOM_SPEED_PHASESTATS FESOM_SPEED_FORCE_SERIAL; fi
+  srun "$BIN" "$MESH" "$OUT" 900 300 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "--- arm=$arm rep=$rep ph=$ph exit=$?"
+  grep -h "loop timing" "$OUT/run.log" | tail -1
+  grep -h " it=" "$OUT/run.log" | tail -1          # trap 6: a NaN leg is not a measurement
+  return 0
+}
+
+leg stock 1 0;  leg m11 1 0
+leg stock 2 0;  leg m11 2 0
+leg stock 1 1;  leg m11 1 1
+
+for arm in stock m11; do
+  D=$STOCK/dist_2048; [ "$arm" = "m11" ] && D=$M11/dist_2048
+  PHASES_OF_INTEREST="bt ocean"; [ "$SOLVER" = "si" ] && PHASES_OF_INTEREST="cg ocean"
+  for PH in $PHASES_OF_INTEREST; do
+    echo "=== $arm / phase $PH ==="
+    "$PY" "$ROOT/scripts/m12b_bt_imbalance.py" "$D" \
+          "$BASE/psplit_${SOLVER}_${arm}_r1_ph1_${SLURM_JOB_ID}" --phase $PH || true
+  done
+done
+echo "=== partition split done — min-of-2 on the timing legs ==="
