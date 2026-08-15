@@ -103,8 +103,8 @@ those still carrying legacy numbers are marked.
 | **dars** | GPU | 64 | **`MINCONN`+`CONTIG`+u30** | **−18.5 %** (legacy −18.6) | ✅ | **tier 1 — the LOWEST temp deviation of any leg incl. 5 controls; temp max below the class; identical CG paths.** The legacy "largest disturbance in the campaign" was the hole-filler |
 | dars | GPU | 64 | `MINCONN` alone | **−12.9 %** (legacy −13.6) | ✅ | temp/ssh in class, salt +12 % over a tight 5-control top — tier 1/2 boundary |
 | CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
-| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −4.3 % *(rep 1; race completing)* | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
-| NG5 | GPU | 64 | `MINCONN` | *(legacy −9.8 %; det race+gate running)* | ✅ | partial gate: temp rms 1.3e−7 (legacy 1e−2 class) |
+| NG5 | GPU | 64 | `MINCONN` | **−9.6 %** (legacy −9.7) | ✅ | partial gate: below both controls on temp, in class on ssh — the legacy tier-3 ssh excursion is gone (4-control gate running) |
+| fArc | GPU | 16 | `MINCONN`+`CONTIG` | **−3.9 %** by median (legacy −3.6) | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.8 %** at length | ✅ 3,000 steps | in class on all three (3 controls) — tier 1 |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.4 %** at length | ✅ 3,000 steps | in class — tier 1 |
 | CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | **−5.1 %** at length | ✅ 3,000 steps | **at or below every one of 5 controls** — tier 1 (the legacy salt +24 % was the hole-filler) |
