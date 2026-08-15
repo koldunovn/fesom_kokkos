@@ -1,0 +1,72 @@
+#!/bin/bash
+#SBATCH --job-name=m10_gpugate
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH -C a100_80
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:12:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/gpugate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/gpugate.%j.err
+#
+# M10 CUDA fidelity gate — the house shape: a short CORE2 CUDA run under the requested
+# knobs, compared field-by-field against the SAME configuration on the Serial backend.
+# CUDA-vs-Serial isolates the backend (D22 scatter/reduce drift); the known floors are
+# ~1e-1 on Kv/Av, O(1e-4) ocean scalars, O(1e-3) ice.
+#
+# R9-hardened (M10_ROOT + md5 of BOTH binaries into the log).
+#
+# Usage: M10_TAG=t5b_cg2 KNOBS="FESOM_SSH_SOLVER=cg2" sbatch jobs/job_m10_gpu_gate
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+TAG=${M10_TAG:-$SLURM_JOB_ID}
+BASE=/work/ab0995/a270088/port2/m10/gates
+OUTC=$BASE/gpugate_${TAG}_cuda
+OUTS=$BASE/gpugate_${TAG}_serial
+rm -rf "$OUTC" "$OUTS"; mkdir -p "$OUTC" "$OUTS"
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NSTEPS=${NSTEPS:-20}
+
+echo "=== M10 CUDA fidelity gate — tag=$TAG  knobs='${KNOBS:-none}' ==="
+md5sum "$ROOT/build-m7cuda/fesom_port" "$ROOT/build-m7serial/fesom_port"
+
+# --- CUDA leg (4 ranks, 4 GPUs) ---
+(
+  source "$ROOT/env_cuda.sh"
+  export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+  export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0
+  export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+  while read -r v; do unset "$v"; done \
+      < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\)[A-Za-z0-9_]*\)=.*/\1/p')
+  if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+  export FESOM_SSH_STATS=1 FESOM_SSH_VERIFY=1
+  srun -n 4 "$ROOT/build-m7cuda/fesom_port" "$MESH" "$OUTC" 1800 "$NSTEPS" 10 "$PHC" 1958 \
+      > "$OUTC/run.log" 2> "$OUTC/run.err"
+)
+echo "cuda rc=$?"; grep -E "ssh-wire. AGG|ssh-verify. AGG|FALLBACK" "$OUTC/run.err" | tail -3
+
+# --- Serial leg, SAME knobs, 4 ranks on the same allocation ---
+(
+  source "$ROOT/env.sh"
+  export OMPI_MCA_btl_vader_single_copy_mechanism=none
+  while read -r v; do unset "$v"; done \
+      < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\)[A-Za-z0-9_]*\)=.*/\1/p')
+  if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+  export FESOM_SSH_STATS=1 FESOM_SSH_VERIFY=1
+  srun -n 4 "$ROOT/build-m7serial/fesom_port" "$MESH" "$OUTS" 1800 "$NSTEPS" 10 "$PHC" 1958 \
+      > "$OUTS/run.log" 2> "$OUTS/run.err"
+)
+echo "serial rc=$?"; grep -E "ssh-wire. AGG|ssh-verify. AGG|FALLBACK" "$OUTS/run.err" | tail -3
+
+echo
+echo "=== CUDA vs Serial, same knobs (fidelity: worst field ~1e-1 = the Kv/Av floor) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" "$OUTS" "$OUTC"
+echo "diff_snap rc=$? (non-zero expected — CUDA is climate-close, not bit-identical; judge by the per-field maxima above)"

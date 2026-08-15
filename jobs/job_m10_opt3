@@ -1,0 +1,65 @@
+#!/bin/bash
+#SBATCH --job-name=m10_opt3
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/opt3.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/opt3.%j.err
+#
+# M10 options ×3 gate (L91): a solver variant must hold the solution-class bounds under
+# each physics option, not just at the default. TKE / mEVP / zstar, serial CORE2 np8,
+# each option run BOTH with the variant and with baseline cg in the same job, then diffed.
+#
+# zstar is the important one: the matrix VALUES change every step, which stresses both the
+# frozen pr_values and (later) the frozen pcsi eigenbounds.
+# mEVP: a formal FAIL via near-freezing T flips at O(tens) of ice-edge cells is the KNOWN
+# CGPOLY pattern (job 26313392) — see the P-L2 pre-registration for the exoneration probe.
+#
+# Usage: M10_TAG=t5b_cg2 KNOBS="FESOM_SSH_SOLVER=cg2" sbatch jobs/job_m10_opt3
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${M10_TAG:-$SLURM_JOB_ID}
+BASE=/work/ab0995/a270088/port2/m10/gates
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+BIN=$ROOT/build-m7serial/fesom_port
+echo "=== M10 options x3 — tag=$TAG knobs='${KNOBS:?KNOBS required}' ==="
+md5sum "$BIN"
+
+run() {  # run <label> <option-env ';'-joined or -> <variant|base>
+    local lbl=$1 opt=$2 leg=$3
+    local out=$BASE/opt3_${TAG}_${lbl}_${leg}
+    rm -rf "$out"; mkdir -p "$out"
+    (
+      while read -r v; do unset "$v"; done \
+          < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\|ALE\|MIX_SCHEME\|WHICH_EVP)[A-Za-z0-9_]*\)=.*/\1/p')
+      unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+      if [ "$opt" != "-" ]; then IFS=';' read -ra OV <<< "$opt"; for kv in "${OV[@]}"; do export "$kv"; done; fi
+      if [ "$leg" = "variant" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+      export FESOM_SSH_STATS=1 FESOM_SSH_VERIFY=1
+      srun -l "$BIN" "$MESH" "$out" 1800 20 10 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    )
+    echo "  $lbl/$leg rc=$?  $(grep 'ssh-wire. AGGREGATE' "$out/run.err" | tail -1 | sed 's/.*AGGREGATE/AGG/')"
+    grep -E "FALLBACK" "$out/run.err" | tail -1
+    echo "$out"
+}
+
+for opt in "tke:FESOM_MIX_SCHEME=TKE" "mevp:FESOM_WHICH_EVP=1" "zstar:FESOM_ALE=zstar"; do
+    lbl=${opt%%:*}; env=${opt#*:}
+    echo "--- option $lbl ($env) ---"
+    ob=$(run "$lbl" "$env" base   | tail -1)
+    ov=$(run "$lbl" "$env" variant | tail -1)
+    echo "=== $lbl: variant vs baseline cg (bounds: SSH_SOLVERS_M10.md sec P-L2) ==="
+    "$PY" "$ROOT/scripts/diff_snap.py" "$ob" "$ov"
+    echo "(diff_snap rc=$? — non-zero expected for a solver-class change; judge by the maxima)"
+done
+echo "=== options x3 done ==="

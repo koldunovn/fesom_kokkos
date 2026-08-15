@@ -1,0 +1,187 @@
+% Short note: response on the SSH preconditioner symmetry + suggested solver.F90 fix.
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=24mm,top=20mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{titlesec}
+\usepackage{listings}
+
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection.}{0.6em}{}
+\titlespacing*{\section}{0pt}{12pt}{5pt}
+\pagestyle{plain}
+
+\definecolor{codebg}{gray}{0.96}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{codebg},
+  frame=single, framesep=4pt, rulecolor=\color{gray},
+  breaklines=true, columns=fullflexible, keepspaces=true,
+  xleftmargin=0pt, aboveskip=6pt, belowskip=6pt,
+}
+
+\newcommand{\Mi}{M^{-1}}
+
+\begin{document}
+
+\begin{center}
+{\Large\bfseries The FESOM SSH preconditioner is not symmetric}\\[1mm]
+{\large Response, and a suggested fix for \texttt{solver.F90}}
+\end{center}
+
+\vspace{1mm}\hrule\vspace{1.5mm}
+\begin{tabbing}
+\hspace{1.9cm}\=\kill
+\textbf{Date}  \> 6 August 2026\\
+\textbf{Re}    \> ``the MITgcm preconditioner is symmetric by construction --- and this ought to
+                  destroy plain CG in FESOM too''\\
+\textbf{Detail}\> \texttt{docs/plans/20260805-m10-ssh-derivations.md} \S0.4, branch
+                  \texttt{m10-ssh-solvers}
+\end{tabbing}
+\vspace{-1mm}\hrule\vspace{3mm}
+
+\section{Short answer}
+
+Two questions were raised. Both have answers, and the second one is the interesting one.
+
+\begin{enumerate}
+  \item \textbf{Is it the Kokkos port's bug?} No --- the port reproduces \texttt{solver.F90}
+        term for term. The asymmetry is in the Fortran.
+  \item \textbf{Should this not destroy plain CG as well?} No, and for a specific reason:
+        plain PCG never uses the identity that fails. It loses optimality, not soundness ---
+        measured cost \textbf{$\approx$7\,\% more iterations}, not divergence. The
+        communication-avoiding variants have no such protection and diverge outright.
+\end{enumerate}
+
+\section{Where the asymmetry is}
+
+\texttt{src/solver.F90}, in \texttt{ssh\_solve\_preconditioner}:
+
+\begin{lstlisting}[language=Fortran]
+pr_values(offset+1) = 1.0_WP/ssh_stiff%values(offset+1)
+DO n=2, nend
+   node = cind(offset+n)
+   pr_values(n+offset) = -0.5_WP*(ssh_stiff%values(n+offset)/ssh_stiff%values(1+offset))/ &
+                          (ssh_stiff%values(1+offset) + diag_values(node))
+END DO
+\end{lstlisting}
+
+That is
+\begin{equation}
+  \mathrm{pr}[i,i]=\frac{1}{d_i},\qquad
+  \mathrm{pr}[i,j]=-\frac{1}{2}\,\frac{a_{ij}/d_i}{d_i+d_j}
+  =-\frac{1}{2}\,\frac{a_{ij}}{d_i\,(d_i+d_j)},\qquad d_i\equiv A_{ii}.
+\end{equation}
+The factor $(d_i+d_j)$ is symmetric and $a_{ij}=a_{ji}$, so \textbf{the only asymmetric part is
+the leading $1/d_i$}: the transpose entry carries $1/d_j$ instead, giving
+$\mathrm{pr}[i,j]/\mathrm{pr}[j,i]=d_j/d_i$.
+
+Writing $\Mi=D^{-1}C$ with $D=\operatorname{diag}(A)$, $C_{ii}=1$ and
+$C_{ij}=-\tfrac12 a_{ij}/(d_i+d_j)$: the matrix $C$ \emph{is} symmetric. The asymmetry sits
+entirely in the left factor $D^{-1}$.
+
+Measured on CORE2: $\max|M_{ij}-M_{ji}| / \max|M_{ij}| = \mathbf{0.638}$. The same measurement
+on $A$ gives $1.4\times10^{-13}$, so the instrument is sound --- $A$ is symmetric, $\Mi$ is not.
+
+\section{Why plain CG survives}
+
+Plain PCG computes
+\[
+  \alpha_i=\frac{\gamma_i}{(p_i,Ap_i)}
+\]
+with an \textbf{explicit} dot product, and the orthogonality it actually depends on,
+$(r_i,p_{i-1})=0$, holds \emph{whatever} $\Mi$ is. By induction, assuming
+$(r_{i-1},p_{i-2})=0$:
+\[
+  (r_{i-1},p_{i-1}) = (r_{i-1},\,u_{i-1}+\beta_{i-1}p_{i-2}) = \gamma_{i-1},
+  \qquad
+  (r_i,p_{i-1}) = \gamma_{i-1} - \alpha_{i-1}(p_{i-1},Ap_{i-1}) = 0,
+\]
+with base case $p_0=u_0$. So $\alpha_i$ is always the exact line-search minimiser along $p_i$,
+and PCG remains a monotone descent method: it cannot diverge. What symmetry of $\Mi$ buys is
+\emph{full} conjugacy --- $r_i$ orthogonal to \emph{all} previous directions, not just the last
+--- i.e.\ the optimality of the short recurrence. Without it, convergence is slower, not absent.
+
+Measured, plain reference PCG on a real CORE2 system ($n_{\mathrm{nz}}=870\,146$), run to
+convergence with each preconditioner:
+
+\begin{center}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+preconditioner & plain-PCG iterations & $\sigma$-recurrence drift\\
+\midrule
+as built (non-symmetric)               & \textbf{126} & $2.4\times10^{-1}$\\
+symmetrised $D^{-1/2}CD^{-1/2}$        & \textbf{117} & $1.2\times10^{-13}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+\textbf{So the asymmetry costs the existing solver about 7\,\% in iterations} --- small enough
+to have gone unnoticed, and nothing like a failure.
+
+The Chronopoulos--Gear family is different. It \emph{replaces} the explicit $(p_i,Ap_i)$ with
+the recurrence $\sigma_i=\delta_i-\beta_i^2\sigma_{i-1}$, whose derivation needs
+$(r_i,M^{-\top}r_{i-1})=0$ --- i.e.\ exactly the symmetry that is missing. The error then
+accumulates (21.8\,\% by iteration 60 on CORE2) with no line search to absorb it. In the model,
+\texttt{cg2} on the as-built preconditioner triggers the fallback guard on \textbf{18 of 20
+solves}, the residual growing to $2.9\times10^{4}$; with the symmetrised one it is clean.
+
+\section{Suggested fix}
+
+Keep the diagonal (already $1/d_i$, which is what $D^{-1/2}CD^{-1/2}$ gives) and scale each
+off-diagonal by $\sqrt{d_i/d_j}$:
+\begin{equation}
+  \boxed{\ \mathrm{pr}[i,j]=-\frac{1}{2}\,\frac{a_{ij}}{\sqrt{d_i d_j}\,(d_i+d_j)}\ }
+\end{equation}
+
+\begin{lstlisting}[language=Fortran]
+DO n=2, nend
+   node = cind(offset+n)
+   ! symmetric form: -0.5*a_ij / ( sqrt(d_i*d_j) * (d_i+d_j) )
+   pr_values(n+offset) = -0.5_WP*ssh_stiff%values(n+offset)/                        &
+                          ( sqrt(ssh_stiff%values(1+offset)*diag_values(node))      &
+                            *(ssh_stiff%values(1+offset) + diag_values(node)) )
+END DO
+\end{lstlisting}
+
+\noindent Three properties worth noting:
+
+\begin{itemize}
+  \item \textbf{Symmetric} by inspection ($a_{ij}=a_{ji}$, and both $\sqrt{d_id_j}$ and
+        $d_i+d_j$ are symmetric).
+  \item \textbf{Same spectrum.} $D^{-1/2}CD^{-1/2}=D^{1/2}(D^{-1}C)D^{-1/2}$ is a similarity
+        transform of the present operator, so the eigenvalues are unchanged --- this is not a
+        different preconditioner, it is the self-adjoint representative of the same one.
+        (Checked numerically: $\lambda_{\max}$ agrees to ten significant figures.)
+  \item \textbf{Free.} Same sparsity, built once at setup, no per-iteration cost. Nothing
+        downstream changes; \texttt{diag\_values} is already halo-exchanged above.
+\end{itemize}
+
+\section{Caveats}
+
+\begin{itemize}
+  \item This is a \textbf{solver-class change to the production path}: the iterates differ
+        within tolerance, so it deserves the usual convergence and climate check rather than a
+        silent swap. We are holding our own variants to the same bar.
+  \item $\sqrt{d_i d_j}$ is safe for realistic magnitudes here ($d\sim10^8$, so the product is
+        $\sim10^{16}$, far inside double range). If that ever became a concern,
+        $\sqrt{d_i}\sqrt{d_j}$ is equivalent and cannot overflow.
+  \item The similarity argument is about $\Mi$ itself. The \emph{preconditioned} operator
+        $\Mi A$ is not similar to the symmetrised one, and its extreme eigenvalue moves
+        slightly (0.23\,\% on a variable-diagonal test problem) --- same convergence class, not
+        the identical operator.
+  \item If the intended MITgcm construction is symmetric, the discrepancy entered at the
+        leading $1/d_i$ above, and it is worth checking against the original derivation ---
+        the form suggested here is the minimal spectrum-preserving repair, not necessarily the
+        one originally intended.
+\end{itemize}
+
+\end{document}

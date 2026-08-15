@@ -36,3 +36,10 @@ __pycache__/
 # redistribute from a public repo): Sergey's double-halo mEVP Fortran + its note.
 ice_sergey/
 ssh_sergey/
+
+# M10 LaTeX report: track the .tex + Makefile + the built PDF (it is the forwardable
+# artefact); ignore only the TeX intermediates.
+docs/report/*.aux
+docs/report/*.log
+docs/report/*.out
+docs/report/*.toc

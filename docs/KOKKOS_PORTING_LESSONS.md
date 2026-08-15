@@ -1873,3 +1873,196 @@ local-memory kernels fell from 5.47 µs to **1.31 µs**, below even the build th
 ghost kernel at all (4.38 µs). The constant-memory staging blocks the launch stream, so the cost
 lands partly on whatever is dispatched next. Consequence for measurement: you cannot bound the
 damage by counting the slow kernels and multiplying by their own gap — that undercounts.
+
+> **M14 renumbering note (2026-08-15), continued.** M10 assigned `L103`-`L106` independently.
+> `L103` was already `main`'s dolpung lesson and `L104`/`L105` were already M9's, so **M10's three
+> move to `L129`-`L131`** (bathymetric load imbalance, `FESOM_SPEED_FORCE_SERIAL`, bad-partition
+> blow-ups). M10's `L106` — *a guard blind to NaN turns a broken run into a fast wrong number* —
+> was free and keeps its number. Pre-merge M10 documents may still cite the old numbers.
+
+### L129 — THE OCEAN-PHASE LOAD IMBALANCE IS BATHYMETRIC, AND VERTEX WEIGHTING CANNOT BUY IT BACK: balancing the vertical costs a ~90× worse edgecut, which GPUs punish 30 %. Partition track CLOSED. (M10, 2026-08-06)
+
+**The imbalance is real and large.** Per-rank `ocean` busy spans 4.8× (farc 2048 ranks:
+8.8 / 26.6 / 42.5 ms; CORE2 864: 3.8 / 13.0 / 18.2). A bulk-synchronous phase costs its
+maximum, so the tax is **11 % of the CORE2 step and 19 % of the fArc step** — comparable to
+the entire barotropic solve.
+
+**1. It is BATHYMETRY, not ice, and not the horizontal partition.** Correlating per-rank ocean
+compute against per-rank mesh content over all 2048 fArc ranks:
+
+| correlation with per-rank ocean compute | r |
+|---|--:|
+| **3D nodes owned** (Σ `nlvls` over owned columns) | **0.967** |
+| 2D nodes owned | 0.003 |
+| solver **wait** vs 3D nodes owned | **−0.771** |
+
+The partition balances *surface* nodes to 1.01× while the work is per water column, and 3D
+nodes span **9.4×**. Fit: `ocean_busy = 2.24 ms per 1000 3D nodes + 10.2 ms`. The negative
+correlation for solver wait is the causal closure: **deep-column ranks wait LEAST because they
+are the stragglers** — the ranks everyone waits for are the deep ones, not the icy ones, which
+is why an ice-based hypothesis tests negative.
+
+**2. A null result on this lever is worthless unless the partition actually CHANGED.** The
+M7-era conclusion rested on regenerating NG5 with 3D weighting — but /pool NG5 was *already*
+dual-weighted (3D spread 1.04×), so the regenerated dists came out **byte-identical** and the
+A/B compared a partition against itself. That is L80 at partition scale. **Check the 3D
+balance of the partition you are "fixing" before believing any repartitioning null.**
+
+**3. Measured properly on a mesh that IS imbalanced, it still loses — and the reason is not
+the halo node count.** CORE2, one binary with runtime-selectable weighting (the knob matters:
+it is a compile-time `#ifdef PART_WEIGHTED` in `fort_part.c`, so 2D-only and dual otherwise
+require two binaries), all arms byte-identical on the mesh definition:
+
+| backend / rung | vertices/core | dual vs 2D-only |
+|---|--:|--:|
+| CPU 256 r | 495 | **−4.62 %** ✅ |
+| CPU 512 r | 248 | 0.00 % (crossover) |
+| CPU 864 r | 146 | +8.71 % |
+| **GPU 8 r (2 nodes)** | 15857 | **+29.74 %** ❌ |
+
+**4. Halo NODES understate the damage by two orders of magnitude — use EDGECUT.** Dual
+weighting grows halo nodes ~40 %, which predicts a ~1 % compute penalty. Measured penalty:
+**+13 % CPU, +20 % GPU** on ocean compute *mean*. The reason is in the cut, not the surface:
+
+| CORE2 ranks | edgecut 2D-only | edgecut dual | ratio |
+|--:|--:|--:|--:|
+| 8 | 1 335 | 120 883 | **91×** |
+| 16 | 2 549 | 217 791 | 85× |
+| 32 | 4 307 | 375 211 | 87× |
+
+Balancing the vertical forces METIS to fragment subdomains. That is a locality collapse, and
+**the GPU punishes it far harder than the CPU** (memory-access sensitivity): even the
+regenerated *2D-only* partition is +4.18 % against the shipped one on GPU, versus +0.68 % on
+CPU. **Any regenerated decomposition must be measured on GPU before use, not merely checked
+for balance.**
+
+**5. Some partitions simply do not work — this is known FESOM behaviour, not a port defect
+(user, 2026-08-06; L99 again).** A regenerated 2D-only `dist_128` made baseline CG diverge at
+iteration 1 (`residual=5.49698e+45`) where the shipped and dual-weighted partitions at the
+same rank count both ran clean. **Do not debug this.** A freshly generated decomposition can
+be unusable for reasons that have nothing to do with the port, so the rule is operational, not
+diagnostic: **smoke-test every new partition for a few steps before it is used for anything,
+and discard the ones that fail.** Budget for a fraction of generated partitions being thrown
+away.
+
+**VERDICT — the partition track is CLOSED.** The imbalance is genuine and worth ~6 ms of a
+45 ms step, but vertex weighting trades a 1.2–1.5× compute spread for a ~90× worse cut and
+loses everywhere that matters: it wins only on CPU below ~250 vertices/core, has no GPU
+counterpart, and the production point sits on the crossover. Do not re-derive this. If the
+imbalance is ever attacked again it must be by a method that does **not** cost edgecut —
+which vertex weighting inherently does.
+
+### L130 — ON A SERIAL BUILD EVERY `FESOM_SPEED_*` LEVER IS INERT WITHOUT `FESOM_SPEED_FORCE_SERIAL=1`. Setting the knob is not the same as the knob acting. (M10, 2026-08-06)
+
+`fesom_speed.hpp:111-113`:
+
+```c
+#ifndef KOKKOS_ENABLE_CUDA
+  if (on && !fesom_speed_force_serial()) on = 0;   /* Serial stays legacy */
+#endif
+```
+
+The lever resolves to **OFF** on a Serial/CPU build unless `FESOM_SPEED_FORCE_SERIAL=1` is
+also set. This is deliberate (the Serial backend is the bit-identical oracle and must stay
+legacy), and `job_m10_ab_cpu` sets it correctly. **It bit twice in one session in hand-written
+jobs:**
+
+1. `FESOM_SPEED_PHASESTATS=1` produced no phase table at all in two 7-node runs.
+2. A NG5 diagnosis job set `FESOM_SPEED=1` without it, so the "speed" and "legacy" legs were
+   **the same run twice** — they returned byte-identical fields (`uv=2.56e+00`, `eta=1.35e+00`)
+   and reproduced none of the failure being investigated.
+
+**Both were silent.** The resolver does warn (`!! … WAS REQUESTED BUT RESOLVES TO OFF`) but on
+*stderr*, which a job that redirects per-leg output will not surface, and case-sensitive greps
+for "phasestats" miss a message naming `FESOM_SPEED_PHASESTATS`.
+
+**Rules.** (i) Any hand-written CPU job exercising a `FESOM_SPEED_*` lever must export
+`FESOM_SPEED_FORCE_SERIAL=1`, or copy the knob block from `job_m10_ab_cpu`. (ii) **Assert the
+lever ANNOUNCED itself** before trusting any A/B — the announce is the only sound test.
+
+🔴 **CORRECTION (same day): the tempting third rule — "identical field diagnostics prove the
+knob did not fire" — is WRONG, and I used it to reach a false conclusion.** Most of the
+`FESOM_SPEED=1` set is *certified bit-identical* (CGPIPE et al.), so identical output across
+that boundary is exactly what a correctly-firing knob produces. In the run that provoked this
+lesson the knob HAD fired (`FESOM_SPEED_FORCEDEV/ROTCACHE/IOACC/BULKTAIL = ON` in the log)
+while the fields matched to the last digit. Conversely **silence is not proof of absence**:
+`FESOM_VISC_OPT` (`fesom_step.cpp:658`) changes the viscosity scheme and announces NOTHING, so
+grepping for it and finding nothing says only that it is a quiet knob. Judge a knob by its
+announce, or by an observable it is *designed* to move — never by field equality.
+
+### L131 — A MESH SHIPS PARTITIONS OF DIFFERENT QUALITY, AND A BAD ONE BLOWS THE MODEL UP. Check the partition before blaming the timestep. (M10, 2026-08-06)
+
+**Measured (26749650):** NG5, 4096 ranks, dt180, cold start, one allocation, one binary, only
+the decomposition differing:
+
+| partition at 4096 ranks | 3-D balance | 300 steps |
+|---|--:|---|
+| /pool, as shipped | **13.89×** | **BLOWUP at step 175** (`uv` 5.76 and climbing) |
+| freshly generated, our partitioner | **1.05×** | **completed**, `uv` 3.25, 0.6205 s/step |
+
+**The /pool NG5 partitions are not homogeneous, and the split predicts the failure exactly:**
+
+| shipped | 3-D balance | outcome |
+|---|--:|---|
+| `dist_1024` | 1.03× | completes |
+| `dist_2048` | 1.04× | completes |
+| `dist_4096` | **13.89×** | blows up |
+| `dist_8192` | **13.98×** | blows up |
+
+The small counts were built with dual 2-D+3-D weighting; the large ones were not. Four for
+four, balance predicts survival.
+
+🔴 **This RETRACTS the M10 reading that "NG5 at dt180 cold is a physics limit shared with
+Fortran", and it undermines the M7 evidence it rested on.** M7 recorded the same death at step
+200 (port) / 203 (Fortran) — but only ever on `dist_4096`, i.e. on one of the two anomalous
+partitions. Fortran dying there too proves only that Fortran also dislikes that decomposition.
+**Neither campaign varied the partition, so both read a property of one bad decomposition as a
+property of the configuration.**
+
+**Rules.** (i) When a high-resolution mesh blows up, **measure the partition's 3-D balance
+before touching dt, viscosity or the solver** — it is minutes of analysis against hours of
+node time chasing physics. (ii) Do not assume the partitions shipped with a mesh were all
+built the same way; check, per rank count. (iii) A regenerated decomposition is not
+automatically worse — here it was strictly better, and it unblocked measurements that had
+looked physically impossible. (iv) Balance is a *marker*, not the mechanism: skewed work costs
+time, not accuracy, so what actually breaks the model is whatever else is wrong with a
+badly-formed partition (elongated or fragmented subdomains). The mechanism is untested.
+
+*(Consistent with the standing user observation that some FESOM partitions simply do not work
+— L129 §5. The difference here is that the failure is not random: it tracks a measurable
+property of the partition, so it can be screened for in advance.)*
+
+### L106 — A GUARD THAT IS BLIND TO NaN TURNS A BROKEN RUN INTO A WIN. The failure mode is not a crash, it is a *fast* number. (M10/M13, 2026-08-14)
+
+The three M10 solver variants entered their iteration loop under `if (resid >= rtol)`.
+**`NaN >= rtol` is false**, so a solve entered with a non-finite state skipped the loop
+entirely and returned "converged, 0 iterations" — at zero cost. A run whose state had gone
+NaN therefore did not crash: it completed all 300 steps, printed a state row of `it=0`,
+`uv=0` and inverted ±1e30 T/S sentinels, and reported a *timing*.
+
+Measured, on the one partition where both behaviours could be produced side by side
+(`core2_wgt0/dist_128`, 1 node, job 26961492):
+
+| | s/step |
+|---|--:|
+| zombie (NaN state, campaign binary) | **0.1838** |
+| healthy run, same config, fixed IC | **0.2060** |
+
+**The zombie is 10.8 % faster** — indistinguishable in magnitude from the wins the campaign
+was measuring. Four of 77 archived A/B runs contained such legs (all already void for other
+reasons; no quoted row was affected, but that was luck, not process).
+
+Three transferable rules:
+
+1. **Every convergence/stall test must have an explicit non-finite branch.** A comparison
+   with NaN is false, so *any* `if (bad) fail;` guard silently passes NaN. Write the criterion
+   the way the reference implementation does — baseline `cg` here has always died on
+   `residual != residual || residual > 1e30`, which is exactly why stock CG was the only
+   scheme that failed loudly and why "SE and oati run clean" was an exit-code illusion.
+2. **A completed run is not a valid measurement.** The harness already refused to quote a leg
+   with `fallbacks>0`; it had no test for a leg that finished at zero cost. Terminal-state
+   sanity (finite `uv`, physical T/S range) belongs in the harvest, next to the fallback count.
+3. **The cheapest reproduction wins.** The zombie was first seen on NG5 at 64 nodes. The same
+   phenomenon lives on a 1-node CORE2 partition that the load-balance study had already flagged
+   as unusable — before/after in three minutes instead of an hour of 64-node time. When a
+   failure is a property of the *initial condition*, mesh size is not part of the mechanism.

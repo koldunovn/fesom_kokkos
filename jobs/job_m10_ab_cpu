@@ -1,0 +1,145 @@
+#!/bin/bash
+#SBATCH --job-name=m10_abcpu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/ab/abcpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/ab/abcpu.%j.err
+#
+# M10 same-allocation solver A/B — the house protocol (M7 job_m7_ab_gpu shape).
+#
+# Inter-allocation noise on Levante is ~±10 %, larger than most levers, so EVERY leg runs
+# back-to-back in ONE allocation on the SAME nodes with the SAME binary; only
+# FESOM_SSH_SOLVER (and its companions) differ. min-of-2 reps per leg.
+#
+# ⭐ µs/iteration is harvested next to s/step: it separates "cheaper iteration" from
+# "different iteration count", which is the distinction the crossover claim rests on.
+# The [ssh-wire] aggregate supplies iters/solve; the loop timer supplies s/step.
+#
+# env: MESH, DT, TAG, LEGS, NSTEPS (default 300 — the pinned-pair standard),
+#      BIN (default build-m7serial).
+#
+# ⚠️ LEGS SYNTAX: legs are ';'-separated; knobs WITHIN a leg are '+'-separated. NOT commas.
+#    `sbatch --export` treats COMMAS as its own separator, so a comma inside LEGS is eaten by
+#    sbatch and the leg list is silently TRUNCATED — job 26723783 ran two identical
+#    `FESOM_SPEED=1` legs for exactly this reason and produced a +0.11 % "result" that was
+#    really the same configuration twice. The per-leg knob echo below is the guard.
+# Submit: sbatch -N 4 --ntasks=16 --export=ALL,MESH=$NG5,DT=180,TAG=ab_ng5_4n,\
+#           LEGS="cg;FESOM_SSH_SOLVER=cg2;FESOM_SPEED=1+FESOM_SSH_SOLVER=pcsi" jobs/job_m10_ab
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=999
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+# ⚠️ The job id is part of the path ON PURPOSE. Two jobs sharing a TAG previously shared
+# this directory, and since each starts with `rm -rf`, concurrent runs wiped and
+# interleaved each other's logs — silently producing two different "results" for the
+# same configuration (jobs 26734774/80 at 1536 and 26734776/81 at 2048).
+OUT=/work/ab0995/a270088/port2/m10/ab/${TAG}_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+clear_knobs() { while read -r v; do unset "$v"; done \
+                  < <(env | sed -n 's/^\(FESOM_\(SPEED\|SSH\|PCSI\)[A-Za-z0-9_]*\)=.*/\1/p'); }
+
+echo "=== M10 A/B  $TAG  mesh=$(basename "$MESH") nodes=$SLURM_NNODES ntasks=$NPES dt=${DT:?} nsteps=${NSTEPS:-300} ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+
+declare -a NAMES TIMES ITERS CGSH CGMS
+IFS=';' read -ra LEGARR <<< "${LEGS:?LEGS required}"
+li=0
+for leg in "${LEGARR[@]}"; do
+    clear_knobs
+    name="$leg"
+    if [ "$leg" != "cg" ]; then
+        IFS='+' read -ra KV <<< "$leg"; for kv in "${KV[@]}"; do export "$kv"; done
+    fi
+    export FESOM_SSH_STATS=1          # counts + iters/solve; no VERIFY (it costs an SpMV)
+    # 🔴 On a Serial/CPU build fesom_speed_resolve() forces every FESOM_SPEED lever OFF
+    # unless FORCE_SERIAL is set ("Serial stays legacy", fesom_speed.hpp). Without this the
+    # baseline leg would be LEGACY cg (2 exch + 2 AR/iter) while the variants ring-compose
+    # internally — i.e. the variants would be credited with the CGPIPE saving. Same error
+    # class as the LEGS comma truncation. The CGPIPE-announce assertion below proves it fired.
+    export FESOM_SPEED_FORCE_SERIAL=1
+    export FESOM_CG_PROFILE=1         # SSH-phase wall + ms/iteration (2 fences per SOLVE)
+    echo "--- leg $li: $name ---"
+    # L80 guard: show the knobs this leg ACTUALLY has. Two legs printing the same set means
+    # the leg list was truncated (see the LEGS syntax warning above) — the numbers are then
+    # the same configuration measured twice, not an A/B.
+    echo -n "    knobs: "; env | grep -E '^FESOM_(SPEED|SSH|PCSI)' | sort | tr '\n' ' '; echo
+    best=""; iters=""; share=""; cgms=""
+    for rep in a b; do
+        srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-300}" -1 "$PHC" 1958 \
+            > "$OUT/log_${li}_$rep.txt" 2> "$OUT/err_${li}_$rep.txt"
+        t=$(grep -a 'loop timing' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*-> +([0-9.]+) s\/step/\1/')
+        it=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
+             | sed -E 's/.*iters\/solve=([0-9.]+).*/\1/')
+        # ⚠️ CERTIFICATION CRITERION: a leg with ANY fallback firing is NOT a valid A/B point —
+        # it is a mixture of variant and baseline solves. This was not harvested at first, and
+        # every farc run (both backends) turned out to be contaminated while being reported as
+        # a win. Never quote a timing without this number.
+        fb=$(grep -a 'ssh-wire. AGGREGATE' "$OUT/err_${li}_$rep.txt" | tail -1 \
+             | sed -E 's/.*fallbacks=([0-9]+).*/\1/')
+        # "CG share: A s (B% of loop), N iters total (K/step, Z ms/iter)"
+        sh=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*\(([0-9.]+)% of loop.*/\1/')
+        mi=$(grep -a 'CG share' "$OUT/log_${li}_$rep.txt" | tail -1 | sed -E 's/.*, ([0-9.]+) ms\/iter.*/\1/')
+        echo "    rep $rep: ${t:-NA} s/step, ${it:-NA} iters/solve, SSH ${sh:-NA}% of step, ${mi:-NA} ms/iter, fallbacks=${fb:-?}"
+        [ "${fb:-0}" != "0" ] && echo "    [!! ] leg $li fired ${fb} FALLBACKS — this leg is a variant/baseline MIXTURE, not a valid A/B point"
+        # L80 assertion: on CPU the whole comparison is void unless CGPIPE actually fired in
+        # the baseline. Prove it from the model's own announce rather than assuming.
+        if [ "$li" = "0" ] && [ "$rep" = "a" ]; then
+            if grep -aq "cgpipe. built" "$OUT/err_${li}_$rep.txt"; then
+                echo "    [ok] baseline leg: CGPIPE announce present — the production path IS active"
+            else
+                echo "    [!! ] baseline leg: NO CGPIPE announce — FORCE_SERIAL did not take."
+                echo "    [!! ] This A/B would compare legacy cg against ring-composed variants. VOID."
+            fi
+        fi
+        # min-of-2 on the TOTAL; carry that rep's SSH numbers so the pair stays consistent
+        if [ -n "$t" ] && { [ -z "$best" ] || [ "$(python3 -c "print(1 if $t<$best else 0)")" = "1" ]; }; then
+            best=$t; share=$sh; cgms=$mi
+        fi
+        [ -n "$it" ] && iters=$it
+    done
+    NAMES[$li]="$name"; TIMES[$li]="${best:-nan}"; ITERS[$li]="${iters:-nan}"
+    CGSH[$li]="${share:-nan}"; CGMS[$li]="${cgms:-nan}"
+    li=$((li+1))
+done
+
+echo
+/work/ab0995/a270088/mambaforge/envs/nereus/bin/python - "$TAG" "${NAMES[*]}" "${TIMES[*]}" "${ITERS[*]}" "${CGSH[*]}" "${CGMS[*]}" <<'PY'
+import sys
+tag = sys.argv[1]
+names = sys.argv[2].split(); times = sys.argv[3].split(); iters = sys.argv[4].split()
+share = sys.argv[5].split(); cgms = sys.argv[6].split()
+f = lambda x: float(x) if x not in ("nan", "") else float("nan")
+print("=" * 104)
+print(f"A/B RESULT — {tag}   (min-of-2, same allocation, same binary)")
+print("=" * 104)
+print(f"  {'leg':<40} {'s/step':>9} {'d_total':>9} | {'SSH ms/st':>10} {'d_SSH':>9} {'SSH%':>6} "
+      f"{'iters':>7} {'ms/iter':>8}")
+t0 = f(times[0]); s0 = f(share[0]); c0 = t0 * s0 * 10.0   # ms/step in the SSH phase
+for n, t, k, s, m in zip(names, times, iters, share, cgms):
+    t, k, s, m = f(t), f(k), f(s), f(m)
+    c = t * s * 10.0                                       # s/step * (%/100) * 1000 ms
+    dt = 100.0 * (t - t0) / t0
+    dc = 100.0 * (c - c0) / c0 if c0 == c0 and c0 > 0 else float("nan")
+    print(f"  {n:<40} {t:9.4f} {dt:+8.2f}% | {c:10.2f} {dc:+8.2f}% {s:6.1f} {k:7.2f} {m:8.3f}")
+print("=" * 104)
+print("  d_total = whole-step speed-up (what the model user feels; diluted by everything else)")
+print("  d_SSH   = the SOLVER's own speed-up  <-- the number that says whether the method works")
+print("  SSH%    = share of the step spent in the SSH solve on THIS mesh/rung; d_total ~ d_SSH * SSH%/100")
+print("  ms/iter = true solver time per CG iteration (from FESOM_CG_PROFILE, not a whole-step proxy)")
+PY
+rm -f "$OUT"/*.monthly.nc 2>/dev/null || true

@@ -1,0 +1,312 @@
+% M10 SSH-solver campaign — interim report with figures.
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=22mm,top=18mm,bottom=18mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{microtype}
+\usepackage{parskip}
+\usepackage{multirow}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+
+\titleformat{\section}{\normalfont\large\bfseries}{\thesection.}{0.6em}{}
+\titlespacing*{\section}{0pt}{13pt}{5pt}
+\titleformat{\subsection}{\normalfont\bfseries}{\thesubsection.}{0.5em}{}
+\titlespacing*{\subsection}{0pt}{9pt}{3pt}
+\setlength{\tabcolsep}{5pt}
+
+\title{\vspace{-12mm}\large\bfseries Communication-avoiding solvers for the sea-surface-height
+system in FESOM2/Kokkos}
+\author{\normalsize Interim report}
+\date{\normalsize 6 August 2026 --- Levante (128-core CPU nodes, A100 GPU nodes)}
+
+\begin{document}
+\maketitle
+\vspace{-6mm}
+
+\section{Scope}
+
+The barotropic sea-surface-height (SSH) solve is the model's synchronisation bottleneck.
+Preconditioned conjugate gradients perform two global reductions and two halo exchanges per
+iteration, and their cost grows as a mesh is spread over more cores. We implemented four
+alternatives behind a runtime switch --- Chronopoulos--Gear CG (\texttt{cg2}), pipelined CG
+(\texttt{pipecg}), PIPECG-OATI (\texttt{oati}) and Chebyshev P-CSI (\texttt{pcsi}) --- and
+measured them on four meshes and both backends. The certified baseline remains bit-identical
+when the switch is unset, which two byte-level gates confirm.
+
+Every timing reported here comes from a same-allocation A/B against the baseline solver,
+minimum of two repetitions, 300 steps, with all four legs verified to have fired no fallback.
+A leg that falls back is a mixture of the variant and the baseline and is not an A/B point;
+this is the criterion under which an earlier set of fArc results was withdrawn.
+
+\section{Two defects had to be repaired first}
+
+\subsection{The preconditioner is not symmetric}
+
+The preconditioner inherited from FESOM's \texttt{solver.F90} is $D^{-1}C$ with $C$ symmetric.
+The leading $1/d_i$ breaks symmetry, with a measured defect ratio of 0.62--0.74 across three
+meshes. Every CG--CG variant replaces the explicit inner product $(p,Ap)$ with a recurrence
+that is valid only for a symmetric preconditioner, so the step length came out wrong by
+21.8\,\% and most solves diverged. Symmetrising to $D^{-1/2}CD^{-1/2}$ removes the error.
+
+The same repair shortens the \emph{existing} solver by about 7\,\% in iterations (126 to 117
+on CORE2), so correcting \texttt{solver.F90} would benefit the Fortran model independently of
+anything else here.
+
+\subsection{The fallback guard was aborting healthy solves}
+
+Our own guard declares failure after 20 consecutive iterations without a 0.1\,\% residual
+drop. On fArc it fired at iteration 107 of solves that the baseline completes in 212, and it
+was the reason every fArc result was withdrawn. Re-running the identical dumped system with
+the guard widened, \texttt{cg2} converges at iteration 205 --- six \emph{fewer} than the
+baseline's 211. The residual falls again three iterations after the point where the guard had
+given up.
+
+The threshold is below what the reference method itself requires: baseline CG's own longest
+plateau on fArc is 21 iterations. Residual non-monotonicity is ordinary CG behaviour, since
+only the $A$-norm of the error decreases monotonically, and on a system with condition number
+843 a 20-iteration plateau is unremarkable. Baseline CG never reported a fallback for a
+simpler reason than robustness: it carries no guard at all, so its counter cannot increment.
+
+\section{Results}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{/work/ab0995/a270088/port2/m10/figs/fig_m10_payoff.png}
+\caption{\small \textbf{(a)} Whole-step speed-up against the share of the step spent in the
+SSH solve, one point per configuration, best solver at that configuration. Filled circles are
+CPU, open triangles GPU. \textbf{(b)} The speed-up of the solve phase itself for \texttt{oati};
+hatched bars are GPU. The two backends separate in (b), which is what makes them separate in
+(a): on CORE2 and fArc the solve is 46--47\,\% faster on CPU but only 18--21\,\% faster on GPU.
+On DARS, where the solve is a small share of the step, it is 27\,\% faster on CPU and 12\,\%
+\emph{slower} on GPU.}
+\label{fig:payoff}
+\end{figure}
+
+\subsection{The payoff tracks the SSH share of the step}
+
+Figure~\ref{fig:payoff}(a) collects every valid configuration. The whole-step gain follows the
+share of the step the solve occupies, which varies from 0.8\,\% (DARS at 512 CPU ranks) to
+42.2\,\% (fArc on 16 GPU nodes). Below roughly 5\,\% the effect is within measurement noise;
+above it the gain grows steadily.
+
+That share is not a property of the mesh but of how thinly it is spread. On CORE2 it rises
+from 2.5\,\% at 128 ranks to 18.9\,\% at 864. The solve is also the only part of the model
+that anti-scales: from 128 to 864 ranks everything else speeds up $5.40\times$ (79\,\% parallel
+efficiency) while the solve becomes 41\,\% \emph{slower} in absolute terms. The solvers
+therefore pay most exactly where the model stops scaling, and on CORE2 they move the
+parallel-efficiency knee out by a factor of 1.26--1.29.
+
+\begin{center}\small
+\begin{tabular}{llrrrr}
+\toprule
+& configuration & vertices/rank & SSH\,\% & best solver & whole-step \\
+\midrule
+\multirow{4}{*}{CPU}
+& CORE2, 512 ranks (production) & 248 & 9.9 & \texttt{pcsi} & $-6.30$\,\% \\
+& CORE2, 864 ranks & 146 & 18.9 & \texttt{pcsi} & $-13.10$\,\% \\
+& fArc, 2048 ranks & 312 & 22.8 & \texttt{oati} & $-13.28$\,\% \\
+& DARS, 8192 ranks & 385 & 6.4 & \texttt{pcsi} & $-4.04$\,\% \\
+\midrule
+\multirow{4}{*}{GPU}
+& CORE2, 2 nodes & 15857 & 25.8 & \texttt{oati} & $-5.32$\,\% \\
+& CORE2, 16 nodes & 1982 & 30.5 & \texttt{oati} & $-6.73$\,\% \\
+& fArc, 16 nodes & 9975 & 42.2 & \texttt{oati} & $-10.36$\,\% \\
+& DARS, 16 nodes & 49380 & 7.4 & \texttt{oati} & $-1.00$\,\% \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Which solver}
+
+\texttt{oati} wins at every configuration measured in range on both backends and tracks the
+baseline's iteration count everywhere, which makes it the safer default. \texttt{pcsi}
+converges faster where its Chebyshev interval is accurate --- it is the best solver on CORE2
+CPU --- but that interval rests on an eigenvalue estimate that was poor on fArc, where
+\texttt{pcsi} costs 8--10\,\% on both backends while needing 376 iterations against 212.
+\texttt{pipecg} is indistinguishable from \texttt{cg2} on this machine, because no
+\texttt{MPI\_Iallreduce} progression is available on any Levante stack we tested.
+
+P-CSI performs no reduction per iteration at all, its only global communication being the
+convergence test every $K$ iterations. Raising $K$ from 1 to the shipped default of 5 more than
+doubles the whole-step gain, from $-4.86$\,\% to $-11.11$\,\% at CORE2 864 ranks. Beyond 5 the
+return flattens and reappears as wasted work: $K=20$ buys 1.2 percentage points more while
+overshooting the tolerance by 6.7\,\% more iterations.
+
+\subsection{How much of this depends on the initial condition}
+
+Because the fill defect above changes every cold-start trajectory, nine of the configurations
+were re-measured with the deterministic fill in place. The comparison is between ratios, each
+of which is internally consistent --- all four legs of a comparison share one allocation and
+one initial condition --- so it asks whether the conclusions survive a different, correct
+starting state rather than whether the timings repeat.
+
+\begin{center}\small
+\begin{tabular}{llrrr}
+\toprule
+configuration & solver & legacy fill & deterministic fill & iterations \\
+\midrule
+fArc, 2048 CPU ranks  & \texttt{oati} & $-13.28$\,\% & $-12.90$\,\% & $211 \to 213$ \\
+fArc, 1024 CPU ranks  & \texttt{oati} & $-5.60$\,\%  & $-5.29$\,\%  & $212 \to 213$ \\
+fArc, 16 GPU nodes    & \texttt{oati} & $-10.36$\,\% & $-10.58$\,\% & $212 \to 213$ \\
+DARS, 8192 CPU ranks  & \texttt{oati} & $-3.94$\,\%  & $-3.32$\,\%  & $36.7 \to 36.7$ \\
+DARS, 6144 CPU ranks  & \texttt{oati} & $-3.01$\,\%  & $-1.69$\,\%  & $36.6 \to 36.6$ \\
+CORE2, 1 GPU node     & \texttt{pcsi} & $-5.19$\,\%  & $-3.11$\,\%  & $121 \to 133$ \\
+NG5, 16 GPU nodes     & \texttt{pcsi} & $-2.32$\,\%  & $-1.70$\,\%  & $78 \to 87$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The headline results stand: fArc reproduces on both backends, including the campaign's best
+figure of $-10.4$ against $-10.6$\,\% at 16 GPU nodes. Two effects are worth stating plainly.
+
+On DARS the gain shrinks, and the reason is visible in the per-iteration cost. The variants are
+unchanged in absolute terms, while the baseline solve becomes 14--19\,\% cheaper at an unchanged
+iteration count --- that is, it waits less. Since roughly nine tenths of the measured solve cost
+at these scales is time spent waiting at collectives, and the baseline is the most synchronous
+of the four methods, a clean initial condition removes imbalance that was penalising it
+specifically. The low-synchronisation solvers did not get worse; the method they are measured
+against got better.
+
+The second effect is confined to P-CSI and is a caution about how its numbers travel. Chebyshev
+iteration counts are fixed by a spectral estimate made at setup from the operator, which depends
+on the state; where that estimate moved, so did the result --- 9.5\,\% more iterations at CORE2
+GPU and 11.5\,\% at NG5 GPU, enough to cost P-CSI first place at the former and most of its lead
+at the latter --- while at fArc and DARS, where the estimate did not move, its numbers are
+unchanged. This is the same sensitivity that made a deliberately truncated Lanczos run look
+fast earlier in the campaign. It does not weaken P-CSI as an option, but a P-CSI figure should
+be quoted together with the state its interval was estimated on, in a way a \texttt{cg2} or
+\texttt{oati} figure need not be.
+
+\section{Where the step actually goes}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{/work/ab0995/a270088/port2/m10/figs/fig_m10_budget.png}
+\caption{\small Per-phase compute and MPI wait, baseline against the best solver, from
+per-rank wall clocks with wait captured inside MPI by PMPI interposition. About half of each
+step is wait. The SSH bar is almost entirely wait, and the variant also shortens the wait in
+forcing and ice dynamics, phases whose own MPI call counts are unchanged.}
+\label{fig:budget}
+\end{figure}
+
+Figure~\ref{fig:budget} resolves the step into compute and MPI wait. Wait accounts for 51\,\%
+of the step on CORE2 at 864 ranks and 53\,\% on fArc at 2048: the model is
+synchronisation-bound at these rank counts. The SSH solve is the single largest source of
+wait, but roughly 90\,\% of the solve's own cost \emph{is} wait --- its arithmetic is 1.0\,ms
+on CORE2 and 2.5\,ms on fArc.
+
+Compute is unchanged between baseline and variant (23.5 to 23.1\,ms on CORE2), so the variants
+buy nothing arithmetically and the entire gain is synchronisation. Only 5.8 of the 9.5\,ms
+saved lies inside the solver: 3.7\,ms, or 39\,\%, appears in phases whose MPI call counts and
+compute times are identical. Removing synchronisation points lets neighbouring phases stop
+absorbing skew, which is why the whole-step gain exceeds the solve's own share of the step
+rather than merely matching it.
+
+\section{Load imbalance}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\textwidth]{/work/ab0995/a270088/port2/m10/figs/fig_m10_balance.png}
+\caption{\small \textbf{(a)} Ocean-phase compute against the number of 3-D nodes each rank
+owns, all 2048 fArc ranks. \textbf{(b)} Step time with a vertically balanced partition
+relative to a surface-balanced one, at the same rank count in the same allocation.}
+\label{fig:balance}
+\end{figure}
+
+The ocean phase is the largest block of real computation, and its per-rank cost varies by a
+factor of 4.8. A bulk-synchronous phase costs its slowest rank, so this is a direct tax:
+5.2\,ms of a 48.2\,ms step on CORE2 and 15.9\,ms of 84.7\,ms on fArc.
+
+Figure~\ref{fig:balance}(a) identifies the cause. Ocean compute correlates with the number of
+3-D nodes a rank owns at $r=0.967$, and with the number of 2-D nodes at $r=0.003$. The
+partition balances surface nodes to within 1\,\%, but the work is per water column, and 3-D
+nodes span a factor of 9.4. The imbalance is bathymetric. Solver wait correlates with 3-D
+nodes at $-0.771$: deep-column ranks wait least because they are the stragglers, so the ranks
+everyone waits for are the deep ones, not the ice-covered ones.
+
+Balancing the vertical distribution does not pay. Weighting the partitioner by 3-D as well as
+2-D nodes removes the imbalance completely (spread $9.6\times \to 1.05\times$) but forces the
+partitioner to cut about ninety times more edges. The resulting fragmentation costs more
+compute than the balance recovers: on CPU it is worth $-4.6$\,\% at 495 vertices per core,
+breaks even near 250 and costs $+8.7$\,\% at 146; on GPU it costs $+29.7$\,\%, since the device
+is far more sensitive to memory-access locality. Note that halo node counts understate the
+damage --- they grow 40\,\% where the edge cut grows ninetyfold --- so the cut, not the halo,
+is the quantity to watch.
+
+\subsection{A mesh's shipped partitions are not all built the same way}
+
+The partitions distributed with a mesh can differ in quality, and a poor one is not merely
+slow: it can destabilise the model. NG5 illustrates both halves. Its shipped decompositions at
+1024 and 2048 pieces balance 3-D nodes to within 4\,\%, while those at 4096 and 8192 pieces
+are skewed by a factor of 13.9 --- the small counts were built with dual 2-D+3-D weighting and
+the large ones were not.
+
+That split predicts the model's behaviour exactly. Holding mesh, timestep, cold start, binary
+and rank count fixed and varying only the decomposition, the shipped partition at 4096 pieces
+reaches the model's blow-up guard at step 175 with velocities still climbing, while a freshly
+generated one completes all 300 steps at 0.6205\,s/step:
+
+\begin{center}\small
+\begin{tabular}{lrl}
+\toprule
+NG5, 4096 ranks, dt 180, cold & 3-D balance & 300 steps \\
+\midrule
+shipped partition & $13.89\times$ & blow-up at step 175 \\
+freshly generated & $1.05\times$ & completed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+We had previously read this blow-up as a stability limit of the timestep, following an earlier
+campaign that measured the same death at step 200 in this port and step 203 in Fortran. That
+evidence came from the same shipped partition, so both readings attributed to the
+configuration what belongs to one decomposition; Fortran failing there as well shows only that
+Fortran dislikes it too.
+
+The mechanism has since been identified, and it is not the balance. The climatology
+hole-filling routine that supplies initial temperature and salinity where the 1$^\circ$
+climatology has no data --- the entire Sea of Marmara, and most straits and marginal seas ---
+fills each dummy node from its already-valid neighbours in local numbering order, running each
+rank to exhaustion before the next halo exchange. The result therefore depends on the
+decomposition. On an unlucky partition it writes a density front of order
+10\,kg\,m$^{-3}$ across a single element in a strait separating water masses that differ by
+some 20\,PSU; the resulting pressure-gradient force is constant, drives a linear velocity ramp
+from the first step, and reaches the CFL limit a few hundred steps later. Every scheme dies on
+such a partition. Balance was a marker only in the accidental sense that the same partitions
+were built by different recipes. A deterministic fill --- ring-filling followed by relaxation,
+with neighbour sums accumulated in global-index order --- removes the dependence: initial
+conditions become bitwise identical across decompositions, and all four previously fatal NG5
+partitions complete 300 steps. The same defect exists upstream in Fortran, where cold starts on
+unlucky partitions inherit the same fragility (restarts are immune, which is why it is rarely
+seen).
+
+The practical rule is unchanged in form but now has a cause behind it: a cold-start blow-up
+that appears on one decomposition and not another is an initial-condition artifact, not a
+property of the timestep, the viscosity scheme or the solver.
+
+\section{Status and limitations}
+
+CPU and GPU coverage is complete for CORE2, fArc and DARS. NG5 now has two CPU rows as well,
+measured with the deterministic fill described above: at 4096 ranks the solve is 1.9\,\% of the
+step and the best variant returns $-0.69$\,\%, at 8192 ranks 3.6\,\% and $-1.93$\,\%. Both are
+honest negatives and both sit where the share law puts them; NG5 is simply a mesh on which the
+barotropic solve is a small part of the step at the rank counts we can reach. The in-range
+partitions (16384, 20480 and 24576 pieces --- 451, 361 and 301 vertices per core) are generated
+and usable, and the smallest of them needs 128 nodes; those rungs are left to the
+split-explicit campaign, which is measuring the same ladder. NG5 on GPU rests on a single
+16-node configuration.
+
+All numbers come from one machine and a 300-step window. The default solver is unchanged: the
+switch selects a variant only when set, and which variant to adopt --- together with the value
+the widened guard threshold should ship with --- remains open.
+
+\end{document}

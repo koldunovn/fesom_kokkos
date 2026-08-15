@@ -1,0 +1,136 @@
+% M10 load-balance study: what the ocean-phase imbalance is, and what balancing it costs.
+% Build:  module load texlive/live2025-gcc-13.3.0 && make
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[margin=17mm,top=14mm,bottom=12mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{microtype}
+\usepackage{parskip}
+\setlength{\parskip}{2pt plus 1pt}
+\setlength{\tabcolsep}{5pt}
+\pagestyle{empty}
+
+\begin{document}
+
+{\large\bfseries Load imbalance in FESOM2/Kokkos: its origin, and the cost of removing it}\\[1pt]
+{\small 6 August 2026 --- Levante, 128-core CPU nodes. Per-rank per-phase wall clocks;
+MPI wait measured inside MPI by PMPI interposition.}
+
+\textbf{The problem.} At production rank counts the model spends about half of each step
+waiting inside MPI (51\,\% on CORE2 at 864 ranks, 53\,\% on fArc at 2048). The largest block
+of real computation is the ocean phase, and its per-rank cost varies by a factor of 4.8. A
+bulk-synchronous phase costs its slowest rank rather than its mean, so this spread is a direct
+tax on the step: 5.2\,ms of a 48.2\,ms step on CORE2 (11\,\%) and 15.9\,ms of 84.7\,ms on fArc
+(19\,\%), comparable to the entire barotropic solve.
+
+\textbf{What the imbalance is.} Correlating per-rank ocean compute time against per-rank mesh
+content over all 2048 fArc ranks identifies it unambiguously:
+
+\begin{center}\vspace{-4pt}\footnotesize
+\begin{tabular}{lr}
+\toprule
+correlation with per-rank ocean compute time & $r$ \\
+\midrule
+3D nodes owned ($\sum$ levels over owned columns) & \textbf{0.967} \\
+2D nodes owned & 0.003 \\
+solver wait vs.\ 3D nodes owned & $-0.771$ \\
+\bottomrule
+\end{tabular}\vspace{-4pt}
+\end{center}
+
+\noindent
+The imbalance is vertical. The partition balances \emph{surface} nodes almost exactly (310--313
+per rank, a spread of 1.01), but the work is per water column, and 3D nodes span
+\textbf{1550 to 14571, a factor of 9.4}. Ocean compute follows as
+$2.24\,\mathrm{ms}$ per 1000 3D nodes, which reproduces the measured 8.8--42.5\,ms range. The
+negative correlation for solver wait completes the picture: deep-column ranks wait least
+because they are the stragglers, and the shallow ranks idle at the solve's first reduction.
+The imbalance is bathymetry, not sea ice.
+
+Vertical balance depends on how the partition was weighted, and it varies across the meshes in
+use: NG5 and DARS are dual-weighted (3D spread 1.04--1.05), fArc and CORE2 are not (9.40, 9.60).
+
+\textbf{The test.} CORE2 partitions were regenerated under 2D-only and dual 2D+3D vertex
+weighting from a single partitioner binary, and run in one allocation with one model binary,
+so the decomposition is the only variable. All arms are byte-identical on the mesh definition;
+only the partition files differ.
+
+\begin{center}\vspace{-4pt}\footnotesize
+\begin{tabular}{lrrrr}
+\toprule
+partition & 3D balance & halo (nodes/rank) & s/step & vs.\ shipped \\
+\midrule
+shipped & 9.60 & 42 & 0.0440 & --- \\
+2D-only weighting & 9.32 & 42 & 0.0443 & $+0.68$\,\% \\
+dual 2D+3D weighting & \textbf{1.05} & \textbf{59} & 0.0482 & $\mathbf{+9.55}$\,\% \\
+\bottomrule
+\end{tabular}\vspace{-4pt}
+\end{center}
+
+\noindent
+The 2D-only arm reproduces the shipped partition's imbalance and runtime, so the partitioner
+contributes nothing and the 9.55\,\% is the weighting alone.
+
+\textbf{The result.} Dual weighting removes the imbalance and still costs more than it saves:
+
+\begin{center}\vspace{-4pt}\footnotesize
+\begin{tabular}{lrrr}
+\toprule
+ms/step, 864 ranks & 2D-only & dual & $\Delta$ \\
+\midrule
+ocean compute, min / mean / max & 3.8 / 13.0 / 19.4 & 10.1 / 14.7 / 17.5 & spread $5.1\to1.73$ \\
+ocean imbalance tax (max $-$ mean) & 6.4 & 2.8 & $-3.6$ \\
+ocean wait & 6.7 & 4.9 & $-1.8$ \\
+total compute & 22.9 & 25.6 & $+2.7$ \\
+solver wait & 9.0 & 10.2 & $+1.2$ \\
+ice-dynamics wait & 4.0 & 5.1 & $+1.1$ \\
+\midrule
+total & 45.2 & 48.1 & $\mathbf{+2.9}$ \\
+\bottomrule
+\end{tabular}\vspace{-4pt}
+\end{center}
+
+\noindent
+The balancing behaves as intended --- previously idle ranks take on real work and ocean wait
+drops 1.8\,ms --- but balancing the vertical requires cutting more edges, and the halo grows
+40\,\% (42 to 59 nodes per rank). That adds 2.7\,ms of compute and raises wait in the two
+communication-heavy phases, together exceeding the 1.8\,ms recovered.
+
+\textbf{The outcome depends on decomposition, and the sign changes.} The halo penalty is a
+constant $+40\,\%$ at every rank count, but its weight in the step is not: halo rises from
+9\,\% of owned nodes at 128 ranks to 29\,\% at 864, while the imbalance being removed stays
+roughly constant. Repeating the A/B across the ladder (min-of-2, one allocation per rung;
+rep-to-rep spread $\le0.3\,\%$):
+
+\begin{center}\vspace{-4pt}\footnotesize
+\begin{tabular}{rrrrr}
+\toprule
+ranks & vertices/core & 2D-only & dual & dual vs.\ 2D-only \\
+\midrule
+256 & 495 & 0.1060 & 0.1011 & $\mathbf{-4.62}$\,\% \\
+512 & 248 & 0.0593 & 0.0593 & $0.00$\,\% \\
+864 & 146 & 0.0448 & 0.0487 & $+8.71$\,\% \\
+\bottomrule
+\end{tabular}\vspace{-4pt}
+\end{center}
+
+\textbf{Conclusion.} The imbalance is real, bathymetric, and worth 6.4\,ms of a 45\,ms step at
+864 ranks. Whether removing it pays depends on how finely the mesh is decomposed: dual
+weighting is worth $-4.6\,\%$ at 495 vertices per core, breaks even near 250, and costs
+$+8.7\,\%$ at 146. The crossover sits close to the production point, and the gain falls inside
+the 300--500 vertices per core at which the model is normally run, so vertex weighting is
+worth applying there and worth avoiding beyond it. Both endpoints of the
+edgecut-against-balance trade are now measured at each rung; the dual weighting already
+softens its 3D criterion, so an intermediate weight remains unexplored.
+
+\textbf{One caveat.} A regenerated 2D-only partition at 128 ranks made the barotropic solver
+diverge at the first iteration (residual $5.5\times10^{45}$) where the shipped and
+dual-weighted partitions at the same rank count both ran normally. Partition-marginal
+instability of this kind is a known hazard, and any new decomposition needs a stability check
+before use.
+
+\end{document}

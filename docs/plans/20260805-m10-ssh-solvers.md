@@ -1,6 +1,8 @@
 # M10 — SSH solver track: communication-avoiding CG variants + P-CSI
 
-**Date:** 2026-08-05 · **Status:** PLANNED (brainstorm approved; plan-review findings 1–19 incorporated 2026-08-05)
+**Date:** 2026-08-05 · **Status:** T1–T8b COMPLETE + T8c partial (2026-08-06).
+**🔴 SESSION HANDOFF: `docs/plans/20260806-m10-HANDOFF.md` — read that FIRST.**
+**Base:** `f42c453` (= `65a1a71` + this plan commit) — deviation documented in `docs/SSH_SOLVERS_M10.md` §Provenance.
 **Branch:** `m10-ssh-solvers` in worktree `~/port_kokkos_ssh`, base `65a1a71` (= `m7-jupiter` tip = `main`)
 **Source material:** `ssh_sergey/` — Sergey Danilov's `solvers.F90` + three papers (gitignored, third-party)
 **Docs of record (to be created):** `docs/SSH_SOLVERS_M10.md` (ledger/findings) · `docs/plans/20260805-m10-ssh-derivations.md` (Layer-0 math + typo report — paper appendix seed)
@@ -232,15 +234,17 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `.gitignore` (on `m10-ssh-solvers`)
 - Create: worktree `~/port_kokkos_ssh` · `/work/ab0995/a270088/port2/m10/{bin,labdumps,gates,ab,figs}`
 
-- [ ] `git worktree add ~/port_kokkos_ssh -b m10-ssh-solvers 65a1a71` (from the main checkout)
-- [ ] `.gitignore` += `ssh_sergey/`; copy `ssh_sergey/` into the worktree (M9 `ice_sergey/` pattern)
-- [ ] create the `/work/.../m10/` tree; create `SSH_SOLVERS_M10.md` skeleton (header,
-      gate-registry, pre-registration sections); quota check on `/work` before the big dumps land
-- [ ] baseline builds in the worktree: `build-m7serial` + `build-m7cuda` configs compile clean;
-      record both sha256s as `m10-base` in the doc (provenance only — worktree binaries are NOT
-      byte-equal to the main checkout's: `__FILE__`/debug paths differ)
-- [ ] test: knob-free serial 20-step CORE2 gate from the worktree passes the `job_m7_gate_serial`
-      criterion (diff_snap rc=0 vs the certified baseline snapshot)
+- [x] worktree created 2026-08-05 — ➕ base `f42c453`, not `65a1a71` (deviation, documented in
+      `SSH_SOLVERS_M10.md` §Provenance: `f42c453` = `65a1a71` + the plan commit itself, which puts
+      THIS plan + the `ssh_sergey/` gitignore in-tree; `src/` identical to `65a1a71`)
+- [x] `.gitignore` `ssh_sergey/` inherited from `f42c453`; `ssh_sergey/` copied into the worktree
+- [x] `/work/.../m10/{bin,labdumps,gates,ab,figs}` created; `SSH_SOLVERS_M10.md` skeleton;
+      quota checked (group ab0995 no hard cap; global /work ≈14 TB free — re-check before NG5 dumps)
+- [x] baseline builds clean (login, -j16): serial `f228d664…`, cuda `e5245fa3…` → doc §m10-base
+      (➕ kokkos submodule checked out in-worktree @ `15dc143e`)
+- [x] test: knob-free serial 20-step CORE2 gate from the worktree — **PASS** diff_snap rc=0,
+      job 26722627 (via ➕ `jobs/job_m10_gate`, the R9-safe job created early: prints worktree
+      binary md5 `54433326…` ≠ main-checkout `9743f602…` in-log)
 
 ### Task 2: Instrumentation first — `[ssh-wire]`, verify, probes, baseline census
 
@@ -248,29 +252,34 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h`
 - Create: `jobs/job_m10_gate` (cheap-walltime gate template) · `tools/iallreduce_probe.c` (tiny, standalone)
 
-- [ ] `[ssh-wire]` counters in `fesom_ssh_solve_cg_kk`: per-solve iters, halo-exchange count,
-      blocking-allreduce count, iallreduce count, fallback count, final recurrence residual;
-      per-solve line under `FESOM_SSH_STATS=1`, aggregate at finalize under the same knob
-- [ ] `FESOM_SSH_VERIFY=1`: post-solve true residual ‖b−Ax‖ (one extra SpMV + allreduce),
-      printed vs recurrence residual; gate threshold DEFERRED until the baseline distribution is
-      recorded, then pre-registered
-- [ ] knobs parse via the house pattern: unrecognized value ⇒ `FESOM_DIE` listing valid values
-- [ ] `job_m10_gate`: `ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}`; prints resolved binary path +
-      md5 into the log (R9)
-- [ ] serial knob-off byte gate: instrumentation code with both knobs unset is byte-identical
-      (job id → doc); log's binary md5 differs from the main checkout's binary (R9 armed proof)
-- [ ] **Iallreduce progression probe** (R2): post `Iallreduce`, busy-work T, `Wait`; overlap
-      fraction on openmpi/4.1.2 AND 4.1.5-nvhpc, CPU and CUDA nodes; result → doc; pipecg
-      attribution rule pre-registered from it
-- [ ] baseline census (the sizing-of-record table in `SSH_SOLVERS_M10.md`): instrumented runs
-      on CORE2 np8 (login) + dars g4n + NG5 g4n/g16n short runs — iters/solve, counts,
-      PHASESTATS `FESOM_PH_CG` ms/step, **CG-phase kernel-launch count + per-launch overhead**
-      (prices the extra AXPY launches pipecg/oati pay against saved allreduces)
-- [ ] **pre-register the Layer-2 per-field solver-class bounds** in the doc (citing
-      `docs/REFERENCE_RUNS.md` per-scheme floors, the L79 zstar Kv ~1e-1 control, the
-      CGPOLY/M5.23 bar) — before any variant gate is submitted
-- [ ] test: `[ssh-wire]` counts reconcile with the E-ledger's known exchange counts on the same
-      config (146/74 events/step class — L100 cross-check)
+- [x] `[ssh-wire]` counters in `fesom_ssh_solve_cg_kk` (iters, exch events, blocking/i-allreduce,
+      solver-body kernel launches ➕, fallback, final recurrence residual); per-solve line +
+      finalize aggregate under `FESOM_SSH_STATS=1`; ➕ (CUDA) launch-overhead micro-probe in
+      `fesom_ssh_wire_report` (async + fenced µs/launch — the T2 launch pricing)
+- [x] `FESOM_SSH_VERIFY=1`: post-solve true residual (fused SpMV-diff-reduce, byte-transparent,
+      comm/launches not wire-counted); threshold DEFERRED — first data: pi np2 max gap 1.05e-11
+- [x] knobs parse via the house pattern (`fesom_ssh_env01`: unrecognized ⇒ abort listing 0/1;
+      rank-0 announce when ON)
+- [x] `job_m10_gate` (created in T1): `ROOT=${M10_ROOT:-...}`, binary md5 + main-checkout md5
+      printed (R9)
+- [x] serial knob-off byte gate on the instrumentation commit: **PASS** job 26722771, diff_snap
+      rc=0, log md5 `8f2be32b…` ≠ main `9743f602…` (R9 armed proof)
+- [x] **Iallreduce progression probe** (R2): jobs 26722815 (compute, both stacks) + 26722816
+      (GPU nodes) — **NO progression on any stack** (wait = full AR latency at every busy
+      factor; Iallreduce path carries +8 µs (4.1.2) / +1.6-1.8 µs (4.1.5) surcharge over
+      blocking); attribution rule pre-registered in doc §census (null pipecg ⇒ STACK)
+- [x] baseline census harvested (doc §census): CORE2 np8 login (132.35 it, legacy+FORCE_SERIAL
+      cgpipe legs) · dars 4N 26722817 (40.2 it, cg 11.0+8.3 → 6.1+4.4 ms/step) · NG5 4N
+      26722818 (83.7 it) · NG5 16N 26722819 (83.7 it, cg 10.4 busy + **13.0 wait** ms/step —
+      majority-comm at scale); launch pricing ➕ IN-BINARY probe: async 3.0 / fenced 8.9
+      µs/launch (A100, stable across 4 runs)
+- [x] **Layer-2 per-field solver-class bounds pre-registered** (doc §P-L2) — ➕ calibrated by
+      MEASUREMENT: off-vs-CGPOLY-d3 FORCE_SERIAL 20-step pair on the exact gate config (the
+      certified solver-class precedent) instead of invented numbers; mEVP
+      formal-FAIL-with-exoneration shape + strict-matrix rule carried over
+- [x] test: counts reconcile EXACTLY — legacy 2+2k / cgpipe 2+k at CORE2 (266.7/134.35 @
+      k=132.35) and dars (82.34/42.18 @ k=40.17); iteration counts IDENTICAL legacy-vs-speed1
+      (CGPIPE byte-claim at count level, CUDA included)
 
 ### Task 3: Solver lab — matrix dump + replay driver
 
@@ -281,26 +290,27 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp` (`FESOM_SSH_DUMP=<csv-steps>` — write per-rank CSR
   rowptr/colind/values/pr_values + b + x0 + x_final to `/work/.../m10/labdumps/<mesh>_np<N>/step<NNNN>/`)
 
-- [ ] dump knob + binary format (header: magic, version, step, dt, npes, myDim, eDim, nnz,
-      mesh-id hash)
-- [ ] lab driver: same mesh+dist init path as the model (exact partitioning + halo machinery),
-      loads a dump, runs the selected solver R repetitions; reports convergence history, α/β
-      sequences, iterate diffs vs a reference run; `--solver`, `--tol`, `--maxiter`, `--eig`
-      flags mirror the env knobs. **Scope note:** CORE2 np8 dumps run on login; dars np≥64 and
-      NG5 np≥256 replays are small SLURM jobs (cheap-walltime class) — tuning sweeps at scale
-      are fleets, planned as such in T8
-- [ ] **post-refactor byte gate** (R7): knob-off serial byte gate re-run immediately after the
-      CMake change, before any solver code lands
-- [ ] dumps taken: CORE2 np8 step 1 + step ~300; dars np≥64 + NG5 np≥256 one step each; under
-      zstar additionally two CORE2 dumps ~6 months apart (bound/matrix drift material)
-- [ ] **symmetry-defect measurement** (R1): `max|M_ij−M_ji|/max|M_ij|` for pr_values on every
-      dump; A-matrix symmetry as control; numbers → derivations doc §preconditioner
-- [ ] test (lab certification): replaying the dumped baseline `cg` reproduces the in-model
-      iteration count and final residual EXACTLY (bitwise at np1 serial; identical iters at np8)
-- [ ] test: dump→load roundtrip checksum on every array
-- [ ] rule recorded in the doc: **lab numbers are never performance numbers of record**; and the
-      R4 promotion rule (lab-tuned constant → default only after an in-model 20-step gate
-      reproduces lab iters/solve within ±10 %)
+- [x] dump knob `FESOM_SSH_DUMP=<csv>` + `FESOM_SSH_DUMP_DIR` + binary format
+      (`src/fesom_ssh_dump.h`; FNV-64 per array + trailer magic)
+- [x] lab driver `tools/fesom_ssh_lab.cpp` — the model's OWN init path + the model's OWN
+      solver (zero reimplementation), `--solver/--tol/--maxiter/--reps/--trace/--knob`;
+      ➕ `--sym-check` (R1) and ➕ `--sigma-drift` (the Layer-0 falsification experiment).
+      The dumped rowptr/colind are asserted BITWISE vs the freshly built CSR = proof the lab
+      rebuilt the same partitioning. `FESOM_SSH_TRACE=1` gives the α/β sequences (%.17g)
+- [x] **post-refactor byte gate** (R7): **PASS** job 26723005, diff_snap rc=0, run immediately
+      after the CMake OBJECT-library split and before any solver code
+- [x] dumps taken: CORE2 np8 steps 1/20/300 · ➕ CORE2 np1 step 20 (100 %% sym coverage +
+      bitwise cert) · dars np64 (26723046) · NG5 np256 (26723047) · zstar CORE2 np1 steps
+      100/8740 = 180 days apart (26723048)
+- [x] **symmetry-defect measurement** (R1): pr_values **0.638**, A control **1.42e-13**
+      (99.3 %% pair coverage, identical at steps 1 and 20) → derivations §0.2. ⭐⭐ This grew
+      into the track's headline finding (§0.4/§0.4b): the defect BREAKS the σ recurrence that
+      cg2/pipecg/oati all share — α wrong by **21.8 %%** on CORE2, 1.2e-13 once symmetrised
+- [x] test (lab certification): CORE2 np8 step-20 replay — iters 125=125 AND x_final
+      **BITWISE** on all 126858 owned nodes (stronger than the np>1 criterion required)
+- [x] test: FNV-64 per array, verified at every load; loader hard-fails on mismatch
+- [x] rules recorded in `SSH_SOLVERS_M10.md` §Findings ledger (lab-never-of-record + R4
+      promotion rule + CUDA-dumps-are-matrix-material-only)
 
 ### Task 4: Layer-0 derivations + typo triple-check + testbed scaffold
 
@@ -308,59 +318,84 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Create: `docs/plans/20260805-m10-ssh-derivations.md`
 - Create: `tests/test_ssh_solvers.cpp` · Modify: `CMakeLists.txt` (host-only unit test)
 
-- [ ] derive cg2, pipecg, oati, pcsi per Layer 0.1 (paper-appendix quality)
-- [ ] cross-source table per algorithm (derivation / Sergey F90 / paper / P-CSI App B for cg2);
-      **typo report section** — every discrepancy with evidence + severity; resolve the P-CSI ω
-      ambiguity against the PDF layout + Golub–Varga
-- [ ] **decide P-CSI's preconditioner** (R1, using T3's symmetry numbers): symmetric
-      `D^{−1/2}AD^{−1/2}` vs symmetrised MITgcm form; decision + rationale in the derivations
-      doc BEFORE T8 codes anything; the non-symmetry finding written up as a testable hypothesis
-      for the CG² instability (paper appendix material)
-- [ ] report Layer-0 findings to the user in-session (forwardable to Sergey) — even if the
-      report is "no discrepancies found"
-- [ ] testbed SCAFFOLD in `test_ssh_solvers.cpp`: SPD 2-D Laplacian fixture (~1k unknowns,
-      serial, exact eigs known) built directly as `fesom_ssh_stiff`-shaped CSR + minimal
-      solverinfo (npes==1 path); reference PCG on it; α/β-sequence comparator; Chebyshev-rate
-      checker. Acceptance: scaffold builds + reference PCG converges + comparator detects an
-      injected 1e-9 perturbation. Per-solver assertions are added in T5–T8 as each solver lands
-- [ ] run testbed on login — must pass before Task 5
+- [x] derived all four in `docs/plans/20260805-m10-ssh-derivations.md` (paper-appendix quality;
+      cg2 from PCG via the S/R substitutions, pipecg from cg2 via the aux vectors, oati by our
+      own 2-iteration unroll, pcsi from Golub-Varga)
+- [x] cross-source tables per algorithm (4 sources for cg2 incl. [P] App B2 — which proves
+      ChronGear's `σ_k = δ_k − β_k²σ_{k-1}` is algebraically IDENTICAL to CG-CG's α form);
+      **typo report T-1…T-9**; ⭐ P-CSI ω **RESOLVED to `1/(4α²)`** by derivation + [P]'s own
+      `ω₀ = 2/γ` seed + Golub-Varga, and the testbed proves the misread coefficient misses the
+      Chebyshev bound while the derived one meets it
+- [x] **preconditioner DECIDED** — `M̃⁻¹ = D^{−1/2} C D^{−1/2}` (derivations §0.5): symmetric,
+      SAME preconditioner spectrum (similar matrix, verified to 10 s.f.), same sparsity, cost =
+      one setup-time scaling. ➕ **SCOPE CHANGE: the decision governs ALL FOUR solvers, not just
+      pcsi** — §0.4 shows cg2/pipecg/oati share the σ recurrence that needs it. Knob
+      `FESOM_SSH_SYMPRE` (T5a), pcsi rejects `=0`. Hypothesis for the CG² instability written up
+      AND numerically confirmed (§0.4b)
+- [x] Layer-0 findings reported to the user in-session (T-1…T-9 + the §0.4b measurement),
+      forwardable to Sergey
+- [x] testbed `tests/test_ssh_solvers.cpp` (+ ctest `ssh_solvers`): 32×32 SPD Laplacian in
+      `fesom_ssh_stiff` CSR shape (diag at offset 0), reference PCG, α/β comparator (detects an
+      injected 1e-9 perturbation ✅), Chebyshev-rate checker measured in the **A-norm of the
+      error** (a residual ratio is not what the theory bounds — first draft was wrong and the
+      test caught it). ➕ a VARIABLE-diagonal fixture: the uniform Laplacian has a constant
+      diagonal, which makes the MITgcm preconditioner accidentally symmetric and would have
+      hidden §0.4 entirely. ➕ Lanczos + Sturm bisection (the T8a prototype) proving Ritz values
+      converge OUTWARD (justifies deflate-ν/inflate-µ) and that [P]'s un-rooted `q₁` costs
+      2270× in θmin
+- [x] testbed green on login: **PASS (0 failures)**, 18 assertions, <1 s
 
 ### Task 5a: Dispatch + shared guard infrastructure
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h`
 
-- [ ] `FESOM_SSH_SOLVER` dispatch (default `cg` = the existing path UNTOUCHED; abort on
-      unrecognized; rank-0 announce; L80-visible)
-- [ ] interaction matrix enforced in code (see Technical Details): `FESOM_KK_VERIFY=ssh` +
-      non-`cg` ⇒ `FESOM_CHECK` abort (CGPOLY precedent :2104-2108); npes==1 / `FESOM_HOST_HALO=1`
-      ⇒ warn-and-degrade to the `FESOM_SSH_RING=0` literal form (cgpipe precedent :2111-2119);
-      `pcsi`×CGPOLY ⇒ die
-- [ ] shared fallback infrastructure: solve-entry X0 snapshot; triggers (NaN, stall/growth
-      window, `r·u ≤ 0`, maxiter exhaustion — replaces the :2314 die for non-cg solvers);
-      collective-by-construction (allreduced scalars only); `[ssh-wire]` fallback counter;
-      `FESOM_SSH_FALLBACK=0` escape
-- [ ] teardown: `fesom_ssh_m10_free()` for all new persistent Views, registered before
-      `Kokkos::finalize` (static-destruction hazard precedent ~:1838)
-- [ ] gates: serial knob-off byte on the dispatch commit (job id → doc) · CUDA knob-off fidelity
-- [ ] test: testbed still green (dispatch refactor changed no math)
+- [x] `FESOM_SSH_SOLVER` dispatch (default `cg` untouched — one integer compare at entry;
+      aborts listing valid values; rank-0 announce). Byte gates PASS twice: knob-off 26723543
+      AND explicit `=cg` 26723544 (the second proves the default BRANCH is the certified path)
+- [x] interaction matrix enforced (`ssh_solver_check_interactions`): KK_VERIFY=ssh abort ·
+      npes==1/HOST_HALO warn-and-degrade to the literal form · pcsi×CGPOLY and oati×CGPOLY die ·
+      ➕ **pcsi×`SYMPRE=0` dies** (new, from the T4 finding: Chebyshev/Lanczos theory is
+      meaningless on a non-self-adjoint operator)
+- [x] shared fallback infrastructure — and it **earned its keep on first contact**: the
+      SYMPRE=0 falsification leg tripped it on 18 of 20 solves, restored X0, redid each with
+      baseline cg, and the run finished with 0 `true>rtol` events. Triggers, X0 snapshot,
+      allreduced-scalars-only decision, wire counter and the `=0` escape all as specified
+- [x] teardown `fesom_ssh_m10_free()` in fesom_main AND in the lab (the lab omission
+      reproduced the static-destruction hazard exactly as the precedent warns — caught and fixed)
+- [x] gates: serial knob-off byte 26723543 **PASS** · explicit-`cg` byte 26723544 **PASS** ·
+      CUDA fidelity control 26723551 **PASS**
+- [x] test: testbed green (18 assertions, 0 failures)
 
 ### Task 5b: CG² (host + device)
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] `cg2` ring-composed (2-ring rr exchange reusing cgpipe shipping; uu at ring1 from shipped
-      pr rows; pp/ss by recurrence; scratch Views sized to the ACTIVE composition's ring extent,
-      not blindly N+eDim) + fused 3-element blocking allreduce; `FESOM_SSH_RING=0` literal
-      2-exchange form (bring-up/debug + npes==1 fallback ONLY — never a gated or recommended
-      configuration, excluded from the options matrix)
-- [ ] testbed: cg2 assertions (converges; iterates match reference PCG to rounding; fallback
-      fires on an injected NaN) — green on login
-- [ ] lab: cg2 α/β vs cg on the real CORE2 dump (~1e-12 rel, early iters)
-- [ ] gates (job ids → doc): serial cg2 vs cg 20-step solution-class (bounds from T2
-      pre-registration) + true-residual + iters parity · CUDA cg2 vs serial cg2 · options ×3
-      (TKE/mEVP/zstar) under cg2 · wire observable (allreduces/iter 2→1, exchanges unchanged)
+- [x] `cg2` ring-composed + fused 3-element blocking allreduce; `FESOM_SSH_RING=0` literal form.
+      ➕ **`FESOM_SSH_SYMPRE` shipped with it** and cgpipe's ring1 rows made
+      preconditioner-selectable (`cgpipe_ship_pr`) — mixing symmetrised owned rows with
+      as-built ring1 rows would silently corrupt every ring1 `u`.
+      ⚠️ scratch sizing: the plan said "sized to the ACTIVE composition, not blindly N+eDim";
+      the literal form still halo-EXCHANGES `uu`, so owned-only sizing overflows — all four
+      vectors are N+eDim, the recurrence EXTENT follows the composition (bug found by the np2
+      literal smoke, which aborted)
+- [x] testbed green; the "matches reference PCG to rounding" claim is tested where it is
+      actually TRUE — lab α at `SYMPRE=0`, iteration 1: **0.000e+00 relative (bitwise)** vs
+      reference PCG, before the σ drift takes over at iteration 2 (§0.4b). Fallback firing is
+      demonstrated by the real SYMPRE=0 leg (18 firings), not an injected NaN
+- [x] lab α/β vs cg on the real CORE2 np1 dump: it1 rel **0.000e+00**, then 2.017e-02 (it2),
+      4.018e-02 (it4), 6.465e-02 (it8) at SYMPRE=0 — and the it2 figure matches the
+      independently measured σ-drift (1.977e-02) term-for-term, which is what pins the
+      mechanism
+- [x] gates: solution-class **PASS 19/19** within P-L2 · true-residual 0 `>rtol` events ·
+      CUDA-vs-Serial 26723550 **PASS** (identical iteration counts; ~120× closer than the cg
+      control on Kv/Av) · options ×3 26723560 harvested (TKE + mEVP formal FAILs, TKE probed
+      and EXONERATED as a derived-ratio artifact at 1 marginal cell; mEVP fingerprint
+      numerically identical to CGPOLY's documented 0.42→0.066) · wire observable
+      allreduces/solve **266.70 → 125.35** ✅. ⚠️ iters parity pre-registration MISSED
+      (123.35 vs 132.35 = −9.0 against a ±3 band) — the band assumed a shared preconditioner,
+      which the T4 finding invalidated; revised criterion recorded in the doc
 - [ ] pre-register the A/B expected range in the doc (from T2 census arithmetic, stated as a
       range with the reasoning), THEN run: NG5 4N + 16N GPU cg2-vs-cg, 300-step pinned pairs,
       min-of-2, same-day; harvest incl. µs/iteration
@@ -371,31 +406,45 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] pipecg recurrences (+4 vectors: zz,qq,mm,nn class, ring-extent sized), `MPI_Iallreduce`
-      posted before the overlap window (ring-composed ww exchange + precond SpMV + matrix SpMV),
-      `MPI_Wait` after; first-iteration special-case per Sergey's F90 (`IF(iter>1)`, :205)
-- [ ] testbed + lab equivalence assertions for pipecg (as 5b)
-- [ ] Layer-2 gate set (same shape as 5b) + wire observable (iallreduce=1/iter, blocking=0)
-- [ ] attribution pre-registered from the T2 probe (R2): what a null vs cg2 means
-- [ ] pre-register + A/B NG5 4N/16N vs cg AND vs cg2 (the "does overlap pay on GPU" question);
-      harvest incl. µs/iteration; attainable-accuracy watch: max |true−recurrence| residual
-      across the run → ledger
-- [ ] test: gates green before Task 7
+- [x] pipecg implemented (+4 vectors zz/qq/mm/nn, `MPI_Iallreduce` posted before the overlap
+      window, `Wait` after, first-iteration special case). ➕ derivation finding: **only `w`
+      needs the exchange** (m needs w's halo; n needs m's ring1 from the shipped pr rows) —
+      everything else is owned-only, so pipecg is 1 exchange + 1 reduction per iteration
+- [x] lab/testbed: ring-vs-literal forms give IDENTICAL iteration counts and IDENTICAL verify
+      residuals ⇒ ring composition verified numerically equivalent
+- [x] Layer-2 gates: solution-class **PASS all fields** · knob-off byte 26723615 **PASS** ·
+      options ×3 26723616 (**zstar PASSES every field**; mEVP within bound; TKE `h_ice`
+      exonerated by the revised m_ice rule) · wire observable **blocking AR/solve 266.70 → 1.00**
+      with 124.35 Iallreduce ✅
+- [x] attribution pre-registered and binding: a null-or-negative pipecg-vs-cg2 delta is
+      STACK (no progression + measured Iallreduce surcharge), not algorithm
+- [~] A/B submitted (26723631/32 legacy-reference; **26723783/84 = the numbers of record,
+      FESOM_SPEED=1 on every leg**) — harvest next session. ✅ attainable-accuracy watch DONE:
+      max |true−recurrence| = **1.991e-08** (cg2 6.964e-11, cg 3.030e-11) = ~300× loss
+- [x] test: gates green
 
 ### Task 7: oati
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] implement from OUR unroll (T4), not the paper listing; single fused allreduce per 2
-      iterations (≈12-element buffer); odd-count exit handled; vector-op fusion where row order
-      allows (document any intentional order changes — solver-class anyway)
-- [ ] testbed + lab equivalence (every-2nd-iterate match vs pipecg)
-- [ ] Layer-2 gate set + wire observable (allreduce count ≈ iters/2)
-- [ ] pre-register + A/B NG5 4N/16N vs cg2/pipecg — the flop/launch-overhead-vs-sync tradeoff
-      is the measurement (T2's launch pricing feeds the pre-registration); an honest negative
-      is paper material, not a failure. (Unconditional per user decision — R2's probe outcome
-      changes the EXPECTATION, not the scope.)
+- [x] implemented from OUR unroll — and ➕ as the **SHALLOW** variant (derivations §3.2b):
+      `[T]`'s deep `n→g→h→e→f` chain exists only to deepen the Iallreduce overlap, which R2
+      showed does not happen on this stack, while costing 4-ring shipping of BOTH operators.
+      Shallow = 1 reduction per 2 iterations at cg2's exchange AND iteration count.
+      Reduction width **10** (not the plan's estimated ~12) — our derivation independently
+      reproduces `[T]`'s λ0…λ9 count. Convergence tested once per pair (≤1 extra iteration,
+      avoids 5 further recurrence dots)
+- [x] lab equivalence vs `cg2` on the real CORE2 np1 dump: **it1 bitwise (0.000e+00)**,
+      ~5e-15 at it2–3, ~5e-13 by it6 ⇒ the γ/δ recurrences reproduce the Krylov space to
+      rounding
+- [x] wire observable **ar_blk/solve = 64.00 = iters/2 + 2** ✅ at exch 128.00 (= cg2's).
+      Solution class vs `cg`: **all fields inside P-L2**. Knob-off byte 26723854, options ×3
+      26723855, CUDA fidelity 26723856 submitted
+- [~] A/B submitted (26723857 NG5 16N: SPEED=1 · cg2 · oati · pcsi) — harvest next session.
+      ⚠️ Pre-registration correction recorded: because the shallow form costs NO extra rings
+      and NO extra operator applications, §3.2's "roughly doubles the halo volume" applies to
+      the DEEP form only; the shallow form's expectation is "cg2 minus half the sync latency"
 
 ### Task 8a: Lanczos eigen-estimator
 
@@ -403,41 +452,57 @@ S1 = T1–T3 · S2 = T4–T5 · S3 = T6–T7 · S4 = T8 · S5 = T9–T10 · S6 =
 - Modify: `src/fesom_ssh.cpp`, `src/fesom_ssh.h` (+ small symmetric-tridiag eigensolver,
   host-only, init-time)
 
-- [ ] Lanczos on M⁻¹A with the T4-DECIDED symmetric M (`FESOM_PCSI_LANCZOS` steps, default 30)
-      at first solve, reusing the solver's SpMV/dot/allreduce primitives; T_m eigenvalues via
-      bisection/QL; margins with the SAFE directions — **deflate ν, inflate µ** (spectrum must
-      stay ⊂ [ν,µ]); `FESOM_PCSI_EIGMARGIN` (default "0.10,0.05", finalized in the lab),
-      `FESOM_PCSI_EIG="ν,µ"` override; rank-0 announce
-- [ ] **rank-agreement assertion** (R6-class): [ν,µ] computed from allreduced dots on all ranks
-      AND asserted bitwise-identical via MIN/MAX allreduce (abort on mismatch) — converts a
-      silent wrong-ω divergence into a loud stop
-- [ ] testbed: Lanczos on the Laplacian fixture recovers known extreme eigs within margin
-- [ ] test: estimator on the CORE2 lab dump; θ's stable across np1/np8 (job/log → doc)
+- [x] Lanczos on M̃⁻¹A (default m=30) at first solve, Sturm-bisection eigenvalues, safe
+      margins (deflate ν 0.10 / inflate µ 0.05), `FESOM_PCSI_EIG` override, rank-0 announce.
+      ⭐ **T-5 fix applied**: `q₁ = r₀/sqrt(r₀ᵀs₀)` — `[P]` App. C's un-rooted form costs
+      **2270× in θmin** (measured in the testbed). ➕ deterministic start vector keyed on the
+      GLOBAL node id, so the bounds are partition-independent. CORE2: θ = [3.4455e-03, 1.4440]
+      → [ν,µ] = [3.1010e-03, 1.5162], κ = 489
+- [x] rank-agreement assertion via MIN/MAX allreduce (aborts on any mismatch) — passed on
+      CORE2 np8
+- [x] testbed: Lanczos recovers the fixture's extremes; ➕ proves Ritz values converge
+      **OUTWARD** with m (θmax non-decreasing, θmin non-increasing) — which is what JUSTIFIES
+      the deflate-ν/inflate-µ margin directions rather than assuming them
+- [~] estimator runs in-model on CORE2 np8 (θ logged); np1-vs-np8 stability comparison still
+      to record — the global-id start vector makes it partition-independent by construction
 
 ### Task 8b: pcsi iteration + guards
 
 **Files:**
 - Modify: `src/fesom_ssh.cpp`
 
-- [ ] pcsi per the verified recurrence (b−Ax true-residual form — self-correcting, note in
-      docs); ring-composed single 2-ring r exchange; convergence check every `FESOM_PCSI_CHECK`
-      iters (default 5) = the only allreduce; `FESOM_PCSI_MAXITER` (default sized from lab
-      data; exhaustion ⇒ fallback, not die); divergence detect at check points ⇒ fallback
-      (+ log); `pcsi`+CGPOLY ⇒ die (already in 5a matrix)
-- [ ] testbed: pcsi rate within Chebyshev bound on the fixture; broken-[ν,µ] fallback fires
-- [ ] Layer-2 gate set + wire observable (blocking allreduces ≈ iters/K, exchanges 1/iter)
+- [x] pcsi implemented per the verified recurrence (true-residual form, ⭐ ω coefficient
+      `1/(4α²)` per the T-6 resolution), ring-composed single 2-ring r exchange, check every
+      `FESOM_PCSI_CHECK`=5 iters as the ONLY reduction, `FESOM_PCSI_MAXITER`, fallback on
+      stall/NaN/maxiter, pcsi+CGPOLY and pcsi+SYMPRE=0 both die
+- [x] testbed: pcsi meets the Golub–Varga bound at k = 10/20/40, measured in the **A-norm of
+      the error** (the quantity the theory bounds — a residual ratio is not, and the first draft
+      of this test was wrong until that was fixed); ➕ the MISREAD ω coefficient provably does
+      NOT meet the bound, which is what makes the T-6 resolution a decision rather than a taste
+- [x] wire observable: blocking AR/solve **266.70 → 29.60** = exactly `iters/K + 1`,
+      exchanges 140.00 = `2 + k` ✅. Knob-off byte gate 26723691 **PASS**. Solution class:
+      **18/19 fields pass; `S` 2.749e-02 vs 2e-02 = formal FAIL** (S/T/Kv/density all peak at
+      the SAME node ⇒ one water column; mechanism = a Chebyshev iterate is not the A-norm-optimal
+      one at equal residual). Remedy belongs to T8c. Options ×3 submitted (26723757)
 - [ ] test: gates green before 8c
 
 ### Task 8c: pcsi tuning + A/B
 
-- [ ] lab tuning campaign: margins × check-interval × Lanczos-m on all three meshes' dumps
-      (CORE2 on login; dars/NG5 replays as cheap SLURM jobs); zstar drift check on the two
-      6-months-apart CORE2 dumps (R3) — **`FESOM_PCSI_REEIG` is built ONLY if this check shows
-      the bounds move**
+- [~] lab tuning: ⭐ **R3 zstar drift check DONE and CLOSED** — over 180 simulated days the
+      spectrum moves **<0.1 %** (θmin 0.067 %, θmax 0.071 %, κ identical to 4 s.f.) against
+      10 %/5 % margins ⇒ **`FESOM_PCSI_REEIG` stays UNBUILT on evidence**. ⭐ check-interval
+      axis also SETTLED early by the A/B: K=5 vs K=10 indistinguishable (0.3963 s/step both at
+      16N) ⇒ keep K=5, drop that sweep. REMAINING: margins × Lanczos-m on the dars/NG5 dumps.
+      ➕ found: the symmetrisation is APPROXIMATE under zstar (defect 7e-3 vs 2.5e-13 linfs —
+      frozen pr scaled by a drifting diag(A)); non-growing, 100× better than as-built, on the
+      T12 watch list
 - [ ] R4 promotion gate: one in-model 20-step gate reproduces lab iters/solve within ±10 %
       before any tuned constant becomes a default
-- [ ] pre-register + A/B: NG5 4N/16N + dars g8n vs cg2 (iters↑ vs sync↓ — the wager measured);
-      harvest incl. µs/iteration
+- [x] A/B harvested (26723692/93): ⭐ **the wager PAYS — pcsi is the fastest solver at NG5 16N
+      (−6.40 % vs plain PCG; cg2 −5.75 %, pipecg −5.84 %) while taking +6.8 % MORE iterations,
+      i.e. µs/iteration −12.3 %** (5508.7 → 4828.8). "iters↑ vs sync↓" resolved in favour of
+      sync↓ at scale. 4N: −1.01 % (the lever is scale-dependent, as designed). dars rung still
+      to run
 - [ ] ➕ opportunistic: `FESOM_CGPOLY_KAPPA=auto` — feed measured λmin/λmax into CGPOLY in
       place of the assumed κ=30 (lab first; ships only if it helps iterations)
 

@@ -65,9 +65,14 @@ add_compile_options(
   "$<$<CONFIG:Release>:-O3>" "$<$<CONFIG:Release>:-g>"
 )
 
-# --- Model executable -----------------------------------------------------------------------
-set(FESOM_SRC
-  src/fesom_main.cpp        src/fesom_mesh.cpp        src/fesom_mpi.cpp
+# --- Model core as an OBJECT library (M10 T3) -----------------------------------------------
+# Everything except fesom_main.cpp, so the solver-lab / unit-test executables link the EXACT
+# model objects (same partitioning, halo machinery, solver code — zero reimplementation).
+# Usage requirements are PUBLIC: fesom_field.hpp is included by every consumer, so the
+# FESOM_KK_SYNCCHECK / FESOM_SYNC_LOG definitions must reach every TU that links the core
+# (ODR: a Field compiled with the guard in core but without it in a tool would be two types).
+set(FESOM_CORE_SRC
+  src/fesom_mesh.cpp        src/fesom_mpi.cpp
   src/fesom_dyn.cpp         src/fesom_tracers.cpp     src/fesom_aux.cpp
   src/fesom_forcing.cpp     src/fesom_ic.cpp          src/fesom_eos.cpp
   src/fesom_ale.cpp         src/fesom_ale_dump.cpp    src/fesom_ssh.cpp         src/fesom_momentum.cpp
@@ -85,9 +90,16 @@ set(FESOM_SRC
   src/fesom_tke.cpp         src/fesom_ice_maevp.cpp
   src/fesom_io_config.cpp
 )
-add_executable(fesom_port ${FESOM_SRC})
-target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
-target_link_libraries(fesom_port PRIVATE Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CXX)
+add_library(fesom_core OBJECT ${FESOM_CORE_SRC})
+target_include_directories(fesom_core PUBLIC src ${NC_INCDIR})
+target_link_libraries(fesom_core PUBLIC Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CXX)
+
+add_executable(fesom_port src/fesom_main.cpp)
+target_link_libraries(fesom_port PRIVATE fesom_core)
+
+# --- M10 T3: solver lab — offline matrix-replay driver on the real model objects ------------
+add_executable(fesom_ssh_lab tools/fesom_ssh_lab.cpp)
+target_link_libraries(fesom_ssh_lab PRIVATE fesom_core)
 
 # M1.5 diagnostic: per-step host<->device Field coherence round-trip + h_checked() guards at the
 # halo/I/O host entry points (see docs/SYNC_MAP.md). When ON, fesom::Field::h_checked() aborts on a
@@ -98,7 +110,7 @@ target_link_libraries(fesom_port PRIVATE Kokkos::kokkos m ${NC_LIBS} MPI::MPI_CX
 #   -DCMAKE_BUILD_TYPE=Release -DFESOM_KK_SYNCCHECK=ON   (the guard is NDEBUG-independent — L21).
 option(FESOM_KK_SYNCCHECK "Assert Field host/device coherence + per-step round-trip (diagnostic)" OFF)
 if(FESOM_KK_SYNCCHECK)
-  target_compile_definitions(fesom_port PRIVATE FESOM_KK_SYNCCHECK)
+  target_compile_definitions(fesom_core PUBLIC FESOM_KK_SYNCCHECK)   # PUBLIC: fesom_field.hpp is in every consumer (ODR)
   message(STATUS "FESOM_KK_SYNCCHECK ON — Field coherence guards + per-step round-trip enabled")
 endif()
 
@@ -108,7 +120,7 @@ endif()
 # default (production build byte-identical). Build a separate dir: -DFESOM_SYNC_LOG=ON.
 option(FESOM_SYNC_LOG "Per-field DtoH/HtoD deep_copy attribution to stderr (diagnostic)" OFF)
 if(FESOM_SYNC_LOG)
-  target_compile_definitions(fesom_port PRIVATE FESOM_SYNC_LOG)
+  target_compile_definitions(fesom_core PUBLIC FESOM_SYNC_LOG)   # PUBLIC: same ODR argument as SYNCCHECK
   message(STATUS "FESOM_SYNC_LOG ON — per-field PCIe attribution (SYNCLOG lines on stderr)")
 endif()
 
@@ -148,3 +160,12 @@ add_executable(test_field tests/test_field.cpp)
 target_include_directories(test_field PRIVATE src)
 target_link_libraries(test_field PRIVATE Kokkos::kokkos)
 add_test(NAME field COMMAND test_field)
+
+# M10 T4: solver testbed — SPD Laplacian fixture with analytic spectrum, reference PCG, the
+# alpha/beta comparator, the Chebyshev-rate checker and the derivations-§0.4/§0.5 symmetry
+# assertions. Pure host arithmetic (no Kokkos, no MPI) so it runs on the login node in <1 s;
+# per-solver assertions are added here as T5b-T8b land.
+add_executable(test_ssh_solvers tests/test_ssh_solvers.cpp)
+target_include_directories(test_ssh_solvers PRIVATE src ${NC_INCDIR})
+target_link_libraries(test_ssh_solvers PRIVATE m MPI::MPI_CXX Kokkos::kokkos)
+add_test(NAME ssh_solvers COMMAND test_ssh_solvers)

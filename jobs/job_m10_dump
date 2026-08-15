@@ -1,0 +1,45 @@
+#!/bin/bash
+#SBATCH --job-name=m10_dump
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/gates/dump.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/gates/dump.%j.err
+#
+# M10 T3 — at-scale lab dump run (CPU serial binary): NSTEPS steps, dumping the solves in
+# DUMPSTEPS to /work/.../m10/labdumps/$TAG. R9-hardened (M10_ROOT + md5).
+#
+# Submit: sbatch -N 2 --ntasks=64 --export=ALL,MESH=<mesh>,DT=120,TAG=dars_np64 jobs/job_m10_dump
+#         sbatch -N 8 --ntasks=256 --export=ALL,MESH=<ng5>,DT=180,TAG=ng5_np256 jobs/job_m10_dump
+
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+
+MESH=${MESH:?MESH required}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:?TAG required}
+DD=/work/ab0995/a270088/port2/m10/labdumps/$TAG
+OUT=/work/ab0995/a270088/port2/m10/gates/dumprun_$TAG
+rm -rf "$OUT"; mkdir -p "$OUT" "$DD"
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+m7_provenance "$OUT" "$FESOM"
+cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+export FESOM_SSH_DUMP=${DUMPSTEPS:-1}
+export FESOM_SSH_DUMP_DIR=$DD
+export FESOM_SSH_STATS=1
+export FESOM_PRINT_EVERY=999
+
+echo "=== M10 dump  $TAG  mesh=$(basename "$MESH") ntasks=$NPES dt=${DT:?} nsteps=${NSTEPS:-1} dumps=$FESOM_SSH_DUMP ==="
+srun "$FESOM" "$MESH" "$OUT" "$DT" "${NSTEPS:-1}" -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+grep "ssh-dump" "$OUT/run.err" | tail -4
+grep "ssh-wire.*AGGREGATE" "$OUT/run.err" | tail -2
+du -sh "$DD"

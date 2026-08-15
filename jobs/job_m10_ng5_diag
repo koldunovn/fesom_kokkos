@@ -1,0 +1,76 @@
+#!/bin/bash
+#SBATCH --job-name=ng5diag
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m10/ab/ng5diag.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m10/ab/ng5diag.%j.err
+#
+# M10 — why NG5 CPU dies at >=4096 ranks. THE FACTS FIRST:
+#   256 r  : OOM (28918 nodes/rank — too few ranks for a 7.4M-node mesh)
+#   1024 r : all 8 legs complete
+#   2048 r : all 8 legs complete (baseline 1.1909 s/step, SSH 1.6 %)
+#   4096 r : cg, cg2, oati abort at step ~2; pcsi completes
+#   8192 r : cg, cg2 abort; oati, pcsi complete
+# The aborts are REPRODUCIBLE PER LEG (both reps identical), so this is deterministic, not a
+# transient or a first-run-in-allocation effect. The state is SANE at step 1
+# (uv=6.8e-01 eta=8.8e-01 T[-2.08,30.17]) and nan by the next solve, so the blow-up is in the
+# DYNAMICS and the SSH solve is merely where it is detected (s_old=nan at iteration 1).
+#
+# Three candidate causes, discriminated in one allocation. It dies by step ~2, so 30 steps is
+# plenty and the job stays cheap to the scheduler.
+#   A  FESOM_SPEED=1, dt=180   reproduce (every failing leg had FESOM_SPEED=1)
+#   B  legacy (SPEED off), dt=180   -> survives => a FESOM_SPEED lever is the culprit
+#   C  FESOM_SPEED=1, dt=90    -> survives => marginal stability at dt=180 (L99/RULE 0.41)
+#
+# Submit: sbatch -N 32 --ntasks=4096 jobs/job_m10_ng5_diag
+set -u
+ROOT=${M10_ROOT:-$HOME/port_kokkos_ssh}
+source "$ROOT/jobs/m7_provenance.sh"
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_PRINT_EVERY=25         # per-step diagnostics: we need to SEE the blow-up
+
+MESH=${MESH:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+NSTEPS=${NSTEPS:-300}
+NPES=$SLURM_NTASKS
+FESOM=${BIN:-$ROOT/build-m7serial/fesom_port}
+OUT=/work/ab0995/a270088/port2/m10/ab/ng5diag_${SLURM_JOB_ID}; rm -rf "$OUT"; mkdir -p "$OUT"
+m7_provenance "$OUT" "$FESOM"; cat "$OUT/SHA.txt"
+[ -d "$MESH/dist_$NPES" ] || { echo "ERROR: $MESH/dist_$NPES missing"; exit 2; }
+
+echo "=== NG5 diagnosis  ntasks=$NPES  $(( 7402886 / NPES )) vertices/core  nsteps=$NSTEPS ==="
+
+leg () {   # leg <name> <dt> <knobs...>
+    local name=$1 dt=$2; shift 2
+    echo "--- $name : dt=$dt  knobs='$*'"
+    ( for kv in "$@"; do export "$kv"; done
+      srun "$FESOM" "$MESH" "$OUT" "$dt" "$NSTEPS" -1 "$PHC" 1958 \
+        > "$OUT/log_$name.txt" 2> "$OUT/err_$name.txt" )
+    echo "    rc=$?"
+    local last=$(grep -a -E '^ *[0-9]+  it=' "$OUT/log_$name.txt" | tail -1)
+    echo "    last step: ${last:-<none>}"
+    grep -a -m1 -E "CG_kk abort|nan" "$OUT/err_$name.txt" | sed 's/^/    ABORT: /'
+    grep -a "loop timing" "$OUT/log_$name.txt" | sed 's/^/    /'
+}
+
+# 🔴 THE FAILING LEGS RAN `FESOM_SPEED=1 FESOM_SPEED_FORCE_SERIAL=1 FESOM_SSH_STATS=1`.
+# Without FORCE_SERIAL the SPEED levers are INERT on a Serial build ("Serial stays legacy",
+# fesom_speed.hpp), so a first attempt (26745567) that omitted it ran the legacy path three
+# times and reproduced nothing — legs A and B returned byte-identical fields. Every leg below
+# carries the real knob set; only the variable under test differs.
+COMMON="FESOM_SPEED_FORCE_SERIAL=1 FESOM_SSH_STATS=1 FESOM_CG_PROFILE=1"
+# 🔴 THE 30-STEP RUN COULD NOT SEE IT. M7 records NG5 dist_4096 dt180 COLD with opt_visc=7
+# (the high-res production default) dying at ~STEP 200 in BOTH Fortran (26365809, step 203)
+# and the port (step 200) — same rank, same cell, same endgame, roundoff-seeded onset scatter.
+# The A/B legs ran 300 steps and hit it; my 30-step diagnosis stopped long before.
+# PRINT_EVERY=25 so the CFLz ramp is visible instead of hidden by print_every=999.
+leg A_default_300   180 FESOM_SPEED=1 $COMMON
+leg B_wsplit_300    180 FESOM_SPEED=1 FESOM_WSPLIT=1 $COMMON
+leg C_visc5_300     180 FESOM_SPEED=1 FESOM_VISC_OPT=5 $COMMON
+
+echo "=== done ==="
+rm -f "$OUT"/*.nc 2>/dev/null || true
