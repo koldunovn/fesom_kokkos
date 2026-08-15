@@ -1,0 +1,107 @@
+#!/bin/bash
+#SBATCH --job-name=m14_gate_ser
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/gate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/gate.%j.err
+#
+# M14 KNOB-OFF BYTE GATE — the user's acceptance condition, run PER MERGE.
+#
+# The condition: with every new knob unset, the integration binary must return to the
+# pre-campaign state that reproduces FESOM-Fortran closely. The M6 baseline snapshot is
+# the campaign-long invariant that main (via M7/h17) preserves BIT-FOR-BIT, so byte
+# identity against it IS byte identity against main — without rebuilding main.
+#
+# Run this after EVERY merge (A2 m12b, A4 m9, A5 m10), not only at the end. A byte break
+# discovered at B1 after all five merges has no attribution and costs a CUDA rebuild plus
+# queue turnaround to bisect.
+#
+# Same config as job_m6_gate_serial / job_m7_gate_serial (which produced the baseline):
+# private mesh, CORE2 dist_8, 8 ranks, dt=1800, 20 steps, snap_every=10, year 1958,
+# vader single-copy off (L18 deterministic gather).
+#
+# The 20-step window matters: Z7/L78 says a mode that makes a CONSTANT array time-varying
+# is bitwise-equal at cold start and only breaks at step 2. Snapshots at 0/10/20 clear it;
+# a 1-step gate would not.
+#
+# Usage: sbatch jobs/job_m14_gate_serial
+#        M14_TAG=a2_m12b sbatch jobs/job_m14_gate_serial
+#        M14_TAG=live KNOBS="FESOM_SSH_MODE=se" sbatch jobs/job_m14_gate_serial   (liveness: expect FAIL)
+
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+
+# The private mesh — NOT /pool (whose core2 nlvls/elvls were swapped 2026-07-03, L73).
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+# Comparison target. Defaults to the certified M6 baseline (the knob-off invariant).
+# Override to compare a lever against a DIFFERENT reference — e.g. the ice wide halo claims
+# to be EXACT, so it must be compared against plain mEVP, not against the EVP baseline:
+#   M14_BASELINE=/work/…/m14/gate_mevp  KNOBS="FESOM_WHICH_EVP=1;FESOM_SPEED_EVPWIDE=8;…"
+BASELINE=${M14_BASELINE:-/work/ab0995/a270088/port2/m6_baseline_serial}
+# A lever that is bit-neutral BY DESIGN inverts the liveness expectation: set M14_EXPECT=same
+# and the job requires rc=0 (identical) plus a confirming announce line in the run log.
+EXPECT=${M14_EXPECT:-differ}
+
+# ---- ALL knobs OFF: M6 physics + M7 speed + every M14 family -------------------------
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_EVP_DUMP_DIR FESOM_ALE_DUMP_DIR
+# M13 det IC / M12 split-explicit / M12b wide halo / M10 solvers / M9 ice — grep the live
+# environment rather than listing names, so a knob added later cannot leak in silently.
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SPEED[A-Za-z0-9_]*\)=.*/\1/p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SSH[A-Za-z0-9_]*\)=.*/\1/p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_SE_[A-Za-z0-9_]*\)=.*/\1/p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_PCSI[A-Za-z0-9_]*\)=.*/\1/p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_IC_EXTRAP[A-Za-z0-9_]*\)=.*/\1/p')
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_EVPWIDE[A-Za-z0-9_]*\)=.*/\1/p')
+
+# Optional knobs — this job doubles as the B2 LIVENESS gate: set a knob and require the
+# diff to FAIL (rc != 0). A knob that leaves the snapshot byte-identical is either dead
+# (the L80 trap) or bit-neutral by design and must be asserted on another signal.
+if [ -n "${KNOBS:-}" ]; then IFS=';' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; echo "knob: $kv"; done; fi
+
+TAG=${M14_TAG:-$SLURM_JOB_ID}
+OUT=/work/ab0995/a270088/port2/m14/gate_$TAG
+rm -rf "$OUT"; mkdir -p "$OUT"
+( cd "$ROOT" && git rev-parse HEAD ) > "$OUT/SHA.txt"
+md5sum "$ROOT/build-m14serial/fesom_port" >> "$OUT/SHA.txt"
+
+echo "=== M14 knob-OFF byte gate — tag=$TAG  HEAD=$(cd "$ROOT" && git rev-parse --short HEAD) ==="
+echo "=== live FESOM_ env after the unsets (should be empty) ==="
+env | grep -E '^FESOM_' | sort || true
+
+srun -l "$ROOT/build-m14serial/fesom_port" "$MESH" "$OUT" 1800 20 10 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "run rc=$?"
+tail -2 "$OUT/run.log"
+
+echo
+echo "=== diff_snap.py vs the certified M6 baseline (zero tolerance, all fields) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+"$PY" "$ROOT/scripts/diff_snap.py" "$BASELINE" "$OUT"
+RC=$?
+echo "diff_snap rc=$RC"
+if [ -n "${KNOBS:-}" ]; then
+    echo "=== announce lines emitted by the run (the liveness signal for bit-neutral levers) ==="
+    grep -E '\[fesom_speed\]|\[ssh_se|\[ice|whichEVP|NOT running|wide|lean' "$OUT/run.err" "$OUT/run.log" 2>/dev/null | sort -u | head -20
+    if [ "$EXPECT" = differ ]; then
+        if [ "$RC" -ne 0 ]; then echo "=== LIVENESS PASS — the knob changed the answer ==="; exit 0
+        else echo "=== LIVENESS FAIL — knob set but output identical: dead knob (L80) or bit-neutral by design (rerun with M14_EXPECT=same) ==="; exit 1; fi
+    else
+        if [ "$RC" -eq 0 ]; then echo "=== EXACTNESS PASS — bit-neutral as designed; liveness rests on the announce lines above ==="; exit 0
+        else echo "=== EXACTNESS FAIL — a lever claiming bitwise exactness changed the answer ==="; exit 1; fi
+    fi
+fi
+if [ "$RC" -eq 0 ]; then
+    echo "=== M14 KNOB-OFF GATE PASS — the default path is untouched ==="
+else
+    echo "=== M14 KNOB-OFF GATE FAIL — a merge perturbed the default path. Do not proceed. ==="
+fi
+exit $RC

@@ -372,15 +372,32 @@ Seed recipe (a starting guess, to be confirmed or refuted by D2):
 
 | mesh | CPU ranks | GPU nodes (4× A100-80) |
 |---|---|---|
-| CORE2 | 128, 256, 432, 512, 864, **[1024, 1536 — require P2 generation]** | 1, 2, 4, 8, 16 |
-| fArc | 512, 1024, 2048, 4096, **8192** | 1, 2, 4, 8, 16 |
-| dars | 1024, 2048, 4096, 6144, 8192 | 2, 4, 8, 16 |
-| NG5 | 2048, 4096, 8192, 16384 | 4, 8, 16 |
+| CORE2 | 128, 256, 432, 512, 864 · **1024, 1536, 2048** (tree switches to `core2_bigpart`) | 1, 2, 4, 8, 16 |
+| fArc | 512, 1024, 2048 ⛔ **4096/8192 do not exist — max partition anywhere is 2304** | 1, 2, 4, 8, 16 |
+| dars | 1024, 2048, 4096 · 6144, 8192 (`dars_bigpart`) | 2, 4, 8, 16 |
+| NG5 | 2048, 4096, 8192 · 16384 (`ng5_bigpart`) | 4, 8, 16 |
 
-⚠️ **CORE2 CPU above 864 does not exist today** and must come from P2. M10 measured efficiency
-falling to 66.6 % at 864 (vs 128) while throughput was *still improving* — so CORE2's turnover has
-never been observed, only its efficiency decline. Showing the turnover is exactly why the user
-relaxed the rule, and it requires new partitions.
+✅ **P1 (2026-08-15) resolved the inventory — see `docs/m14/PARTITIONS.md`.** Every GPU point exists.
+Every CPU point exists **except fArc above 2304**. `MESH=` switches tree at CORE2 1024, dars 6144
+and NG5 16384, so `jobs/m14_config.sh` must carry a mesh path per point, not one per mesh.
+
+⚠️ **RETRACTED by P1.** Rev 2 said "CORE2 CPU above 864 does not exist today and must come from
+P2". It does exist — `port2/mesh/core2_bigpart` carries `dist_{864,1024,1536,2048}`. The M10 doc's
+"864 is the largest that exists" was true when written and has been superseded by the bigpart trees.
+**No CORE2 generation is needed.** M10's substantive point still stands: efficiency falls to 66.6 %
+at 864 (vs 128) while throughput was *still improving*, so CORE2's turnover has never been observed,
+only its efficiency decline — which is exactly what these three extra rungs are for.
+
+⛔ **fArc is now the constrained ladder, not CORE2.** The largest fArc partition anywhere is 2304,
+so fArc CPU cannot show a turnover without generated partitions (P2-a). Decide explicitly: generate
+4096/8192, or publish fArc CPU as a three-point ladder that is still scaling at its end.
+
+**Partition lever coverage (P1):** the certified set is **4 usable points** — `core2_v1/dist_4`
+(CORE2 GPU 1 node), `core2_v1/dist_512` (CORE2 CPU 512), `farc_v1/dist_2048`, `dars_v1/dist_2048`
+— plus `dars_gpu_v1`/`ng5_gpu_v1` pending promotion. **At the other ~34 ladder points the best arm
+runs the base partition**, and the figure must mark where the partition lever is live. Manufacturing
+one partition per point would mean shipping ~34 untested draws into a speed board, against M11's
+own finding that an untested re-roll is frequently slower.
 
 **Cut by review, and I agree:** NG5 32768 (256 CPU nodes) and dars 16384 (128 nodes) are dropped as
 routine past-the-knee points. They would likely exceed the rest of the CPU campaign combined and
