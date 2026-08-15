@@ -3,56 +3,42 @@
 One page. The evidence is in `PARTITIONING_M11.md` (Findings 1–45); the per-race table is
 `scripts/m11_harvest_races.py --best`.
 
-## 🔴🔴 2026-08-14/15 — THE DISTURBANCE COLUMN BELOW IS SUPERSEDED; RE-RUN IN PROGRESS
+## 🔴🔴 Re-measured 2026-08-15 under the deterministic initial condition — read this first
 
-M13 found that the climatology hole-filler gives each decomposition a **different initial
-condition**, and the campaign is being re-measured with the deterministic fill
-(`FESOM_IC_EXTRAP=det`). Plan and status: `docs/plans/20260815-m11-det-rerun.md`; evidence:
-`PARTITIONING_M11.md` session 7.
+Every number on this page was re-earned under `FESOM_IC_EXTRAP=det`. The reason: FESOM's
+climatology hole-filler fills gaps in the initial temperature and salinity fields in an order
+that depends on the decomposition, so **two partitions of one mesh were starting from different
+oceans — about 27 salinity units apart, on all four meshes** (measured directly; zero under det).
+Plan and scope: `docs/plans/20260815-m11-det-rerun.md`; evidence: `PARTITIONING_M11.md`
+session 7.
 
-What that means for this page, stated in the order it matters:
+What that changed, in the order it matters:
 
-1. **The disturbance/tier column was largely measuring the hole-filler, not the partition.**
-   Measured directly: two partitions of CORE2 differ in their *initial* salinity by 27.4 PSU and
-   fArc by 26.0 PSU, against zero under det. Re-derived with det, the CORE2 864 field differences
-   shrink by five to six orders of magnitude and the `+24 %` salt excursion that removed that
-   point from the recommendation **disappears**. Do not quote a tier from the table below until
-   its row says det.
-2. **The stability column's failures are void, not confirmed.** Every "diverges / blows up"
-   verdict (Findings 34, 39, 45) was earned on a run whose initial state was an artefact of the
-   very partition being judged. Re-screens are running.
-3. **The gains appear to survive.** Re-raced under det so far: CORE2 512 slack −3.87 %
-   (was −3.83), CORE2 512 KaHIP −4.03 % (−4.03), CORE2 512 Hilbert+engine −5.08 % (−5.83),
-   CORE2 864 KaMinPar −4.25 % (−4.07/−4.92), fArc 2048 Mt-KaHyPar −7.37 % (−7.52), fArc 2048
-   `MINCONN` −5.07 % (−5.49). Ordering unchanged, magnitudes inside the usual spread.
-4. **The tier-2 "stopping mechanism" needs re-deriving rather than re-quoting.** Under det every
-   leg of the CORE2 864 and CORE2 512 gates — arms and controls — takes an *identical* CG
-   iteration path for all twenty steps. The differing iteration counts that the explanation rests
-   on followed from the legs starting in different states.
-5. The four promoted meshes under `mesh_m11_certified/` are unaffected **as artefacts** — a
-   `dist_N` file does not change. Their evidence lines were recorded under the legacy fill and
-   are being re-earned.
+1. **The speed results survived.** All eight gains reproduce within the usual same-day spread,
+   ordering intact. Those are the numbers in the table below.
+2. **The accuracy layer did not — it was measuring the hole-filler.** Field differences shrank by
+   five to six orders of magnitude, **every point is now tier 1**, and tiers 2/3/4 have no
+   occupants among recommended arms. In every re-gate the arms and the seed controls take an
+   *identical* CG iteration path for all twenty steps.
+3. **All eight "fragile partition" failures were the initial condition, and are refuted** — the
+   same partitions now complete 3,000 steps, including the Finding-45 "killer", which is in fact
+   among the fastest at its point.
+4. **Two recommendations change on the merits.** dars 2048 CPU: `MINCONN` restored, the external
+   engine now the slowest of three options, and a plain seed re-roll of the stock recipe as good
+   as either — so the advice there is "regenerate the partition". NG5 64 GPU: the plain slack arm
+   wins, the only GPU point where the `MINCONN` family does not.
+5. **Everything measured offline is untouched** — edge cut, communication volume, `nbr_max`, the
+   engine comparison, the ordering survey, the `check_partitioning` fix and both upstream PRs.
+   The four promoted meshes are unaffected as artefacts; their evidence lines are being re-earned.
 
-## 🔴 State of the evidence (read before quoting any number below)
+**Stability screening stays in the procedure** (a partition can in principle be bad), but it is
+guarding a far rarer failure than this campaign believed: none of the eight failures it caught
+was real.
 
-**Protocol decision (user, 2026-08-13, supersedes the binary yardstick of 2026-08-12):** there
-is no certified/not-certified accuracy verdict any more. Two tiers remain:
-
-1. **Stability at length — hard pass/fail, unchanged.** A partition that makes the model
-   diverge or blow up (Findings 34/39/45; eight caught, one from the stock recipe) is not a
-   "disturbance", it is unusable. Nothing un-screened is a recommendation, and `m11_promote`
-   keeps enforcing ≥3,000 steps at the target rank count.
-2. **Accuracy — a graded disturbance report, not a gate.** Every surviving partition changes
-   the solution a bit; the question is how big the change is against the natural scale bar —
-   the spread of ordinary seed re-rolls of the stock recipe — and what it means. The
-   per-point numbers and their interpretation are in the disturbance column of the table
-   below and in the "how to read it" block after it.
-
-**Scope of the disturbance numbers, stated honestly:** they are 20-step cold-start divergences
-— a *detectability* statement ("can this partition be told apart from re-rolling the seed?"),
-not a climate measurement. Long-term climate impact was not measured in M11. The cheap next
-tier is comparing end states after 3,000 steps against 3 controls; the real answer is a long
-twin run (the M7 precedent: a 63-year hindcast separated port from reference at climate level).
+**Scope of the accuracy numbers, stated honestly:** they are 20-step cold-start differences — a
+*detectability* statement ("can this partition be told apart from re-rolling the seed?"), not a
+climate measurement. The cheap next test is comparing end states after 3,000 steps against the
+same controls; the conclusive one is a multi-year twin run.
 
 ## The short version
 
@@ -95,16 +81,16 @@ Stability = the 3,000-step screen at the target rank count (hard requirement). D
 20-step rms deviation from base, quoted **relative to the spread of ≥3 seed-control re-rolls**
 of the stock recipe on the same mesh.
 
-**The CPU rows below are re-measured under det** (2026-08-15). GPU rows are being re-measured;
-those still carrying legacy numbers are marked.
+**Every row is measured under det** (2026-08-15), at the mesh's cold-start ladder dt, against
+the shipped partition. "legacy" in brackets is the pre-det value for comparison.
 
 | mesh | backend | ranks | setting | gain | stability | disturbance vs seed spread |
 |---|---|--:|---|--:|---|---|
 | **dars** | GPU | 64 | **`MINCONN`+`CONTIG`+u30** | **−18.5 %** (legacy −18.6) | ✅ | **tier 1 — the LOWEST temp deviation of any leg incl. 5 controls; temp max below the class; identical CG paths.** The legacy "largest disturbance in the campaign" was the hole-filler |
 | dars | GPU | 64 | `MINCONN` alone | **−12.9 %** (legacy −13.6) | ✅ | temp/ssh in class, salt +12 % over a tight 5-control top — tier 1/2 boundary |
-| CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
 | NG5 | GPU | 64 | **slack `UFACTOR=30` alone** | **−10.1 %** | ✅ | ⬜ gate running (26980859) — **new: the only GPU point where `MINCONN` does not win**; that arm was never raced here before, the legacy fill killed it |
 | NG5 | GPU | 64 | `MINCONN` | **−9.5 %** (legacy −9.7) | ✅ | **tier 1 — in class on temp, salt AND ssh against 4 controls, identical CG paths.** The legacy tier-3 ssh excursion was the hole-filler |
+| CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | **−3.9 %** by median (legacy −3.6) | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.8 %** at length | ✅ 3,000 steps | in class on all three (3 controls) — tier 1 |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.4 %** at length | ✅ 3,000 steps | in class — tier 1 |
