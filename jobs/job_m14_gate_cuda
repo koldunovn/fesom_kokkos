@@ -37,8 +37,11 @@ export OMPI_MCA_btl_vader_single_copy_mechanism=none
 
 MESH=/work/ab0995/a270088/port2/mesh/core2
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
-REF_BIN=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda      # md5 f8384e86...
-NEW_BIN=$ROOT/build-m14cuda/fesom_port
+# 🔴 BOTH binaries are FROZEN copies, never build-tree paths. A queued job resolves its binary at
+# RUN time, so a rebuild while the job waits silently swaps what is being tested — the "always pin
+# BIN=" rule, in miniature. Point at /work copies whose md5 is recorded in PROVENANCE.txt.
+REF_BIN=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda          # md5 f8384e86…
+NEW_BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i1}/fesom_port_cuda   # md5 42078250…
 
 # ALL knobs OFF — grep the environment rather than listing names, so a knob added later
 # cannot leak in silently.
