@@ -2093,6 +2093,7 @@ Best variant per configuration (`oati` throughout):
 | farc CPU 2048 r | −13.28 % (26741204) | **−12.90 %** (26961566) | 22.8 | 23.3 | 211.3 → 213.1 |
 | farc CPU 1024 r | −5.60 % (26741203) | **−5.29 %** (26961567) | 11.7 | 11.3 | 211.7 → 213.0 |
 | dars CPU 6144 r | −3.01 % (26741040) | **−1.69 %** (26961555) | 5.6 | 4.6 | 36.62 → 36.63 |
+| dars CPU 8192 r | −3.94 % (26741041) | **−3.32 %** (26969056) | 6.4 | 5.6 | 36.66 → 36.66 |
 | NG5 CPU 4096 r | *(unmeasurable)* | **−0.69 %** (26961553) | — | 1.9 | — → 76.7 |
 | NG5 CPU 8192 r | *(unmeasurable)* | **−1.93 %** (26961554) | — | 3.6 | — → 76.7 |
 
@@ -2100,11 +2101,22 @@ Best variant per configuration (`oati` throughout):
 against −13.28 % — a 0.38 pp difference eight days apart, inside the inter-allocation noise
 band (never compare across weeks: the same-day rule exists for exactly this).
 
-**dars is the one row that moves, and it moves for the reason the campaign predicts.** The
-variants are unchanged (`oati` 5.41 → 5.52 ms, iterations 36.62 → 36.63, ms/iter 0.150 →
-0.151); what changed is the BASELINE solve, 7.44 → 6.00 ms/step, dropping the SSH share
-5.6 → 4.6 %. Less headroom, proportionally less payoff (share-scaled prediction −2.5 %,
-observed −1.7 %). The solver did not get worse under a clean IC — the baseline got better.
+**⭐ dars moves on BOTH rungs, and the mechanism is the same one at each.** The variants'
+absolute solve cost is essentially invariant under det — `oati` 5.41 → 5.52 ms at 6144 and
+4.97 → 4.81 ms at 8192, iterations identical to 2 dp (36.62/36.66) — while the BASELINE solve
+gets markedly cheaper: 7.44 → 6.00 ms (−19 %) at 6144 and 6.49 → 5.57 ms (−14 %) at 8192, at
+unchanged iteration counts (36.38 → 36.41). The SSH share falls with it (5.6 → 4.6 % and
+6.4 → 5.6 %) and the payoff falls proportionally (8192: share-scaled prediction −3.5 %,
+observed −3.3 %).
+
+Read through the per-iteration numbers, this says something sharper than "the share fell".
+Baseline `cg`'s ms/iter drops 0.205 → 0.167 and 0.179 → 0.154 while `oati`'s barely moves
+(0.150 → 0.151, 0.137 → 0.133). Since ~90 % of the measured solve cost at scale is MPI wait,
+and the baseline is the most synchronous method of the four, **a clean IC removes
+imbalance-driven wait, which benefits the baseline most and therefore narrows exactly the gap
+the low-synchronisation solvers exploit.** The solvers did not get worse under a deterministic
+IC — the method they are being compared against got better. This is dars-specific: on farc the
+baseline solve is unchanged (18.72 → 18.97 ms) and the headline reproduces.
 
 **⭐ NG5 CPU: two rows where the board had none.** Every legacy attempt died or zombied
 (§ the audit above), so the campaign has never had a NG5 CPU point. Under det both rungs run
