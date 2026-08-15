@@ -1,0 +1,92 @@
+--- fesom2_ref/src/fvom_init.F90	2026-07-03 10:53:34.000000000 +0200
++++ fesom2/src/fvom_init.F90	2026-08-10 18:53:20.000000000 +0200
+@@ -1831,6 +1831,10 @@
+ 
+   integer :: max_adjacent_nodes
+   integer, allocatable :: ne_part(:), ne_part_num(:), ne_part_load(:,:)
++  ! [M11] FESOM_PART_FIXISO — see the block below the isolated-node print
++  character(len=32) :: m11_env
++  integer           :: m11_stat, m11_len
++  logical           :: m11_fixiso
+ #include "associate_part_def.h"
+ #include "associate_mesh_ini.h"
+ #include "associate_part_ass.h" !just for partit%part
+@@ -1862,6 +1866,41 @@
+   allocate(ne_part(max_adjacent_nodes), ne_part_num(max_adjacent_nodes), &
+        ne_part_load(2,max_adjacent_nodes))
+ 
++  ! ---------------------------------------------------------------------------------------
++  ! [M11] FESOM_PART_FIXISO: repair the candidate-list seeding below.
++  !
++  ! The stock code seeds the list of candidate partitions with node_neighb_part(1)
++  ! UNCONDITIONALLY, while the loop that fills the rest of the list explicitly skips
++  ! neighbours that are in the node's own partition. Two consequences:
++  !
++  !   (a) when the adjacency list happens to BEGIN with the node's own partition, that
++  !       partition becomes a move candidate, usually wins, and the node is "moved" to where
++  !       it already is. The routine prints success and the isolated node survives every
++  !       later pass. Whether this happens depends on the ORDER of the adjacency list, i.e.
++  !       on the mesh numbering — same mesh, same partition, same node, repaired under one
++  !       numbering and silently not under another (M11 Finding 9, found by relabelling).
++  !   (b) the first neighbour is counted TWICE (once by the seed, once by the loop), which
++  !       biases the "partition with the most adjacent nodes" choice towards it.
++  !
++  ! Both go away by letting the loop build the whole list. Default OFF, so with no knob set
++  ! this tool still reproduces upstream byte-for-byte (null-1).
++  ! ---------------------------------------------------------------------------------------
++  m11_fixiso = .false.
++  call get_environment_variable('FESOM_PART_FIXISO', m11_env, m11_len, m11_stat)
++  if (m11_stat == 0 .and. m11_len > 0) then
++     select case (trim(m11_env))
++     case ('0')
++        m11_fixiso = .false.
++     case ('1')
++        m11_fixiso = .true.
++     case default
++        print *,'[M11] FESOM_PART_FIXISO='//trim(m11_env)//' not recognised (want 0 or 1)'
++        stop 1
++     end select
++     print *,'[M11] FESOM_PART_FIXISO=',trim(m11_env), &
++          ' (candidate list seeded from neighbours OUTSIDE part(n))'
++  end if
++
+   print *,' '
+   print *,'Check for isolated nodes ========'
+   n_iso = 0
+@@ -1879,11 +1918,15 @@
+ 
+         ! count the adjacent nodes of the other PEs
+ 
+-        np=1
+-        ne_part(1) = node_neighb_part(1)
+-        ne_part_num(1) = 1
+-        ne_part_load(1,1) = nod_per_partition(1,ne_part(1)) + 1
+-        ne_part_load(2,1) = nod_per_partition(2,ne_part(1)) + nlevels_nod2D(n)
++        if (m11_fixiso) then
++           np = 0                      ! [M11] the loop below builds the whole list
++        else
++           np=1
++           ne_part(1) = node_neighb_part(1)
++           ne_part_num(1) = 1
++           ne_part_load(1,1) = nod_per_partition(1,ne_part(1)) + 1
++           ne_part_load(2,1) = nod_per_partition(2,ne_part(1)) + nlevels_nod2D(n)
++        end if
+ 
+         do i=1,cnt
+            if (node_neighb_part(i)==part(n)) cycle
+@@ -1913,6 +1956,15 @@
+         !        (There might be two partitions with the same number of adjacent
+         !         nodes. Don't care about this here)
+ 
++        if (np == 0) then
++           ! [M11] every neighbour is in this node's own partition, so there is nowhere to
++           ! move it. Only reachable with FIXISO on, and only for a degree-1 node whose one
++           ! neighbour shares its partition. The stock code would "move" it to its own
++           ! partition here and report success.
++           print *,'Node',n,'has no neighbouring partition to move to - left in place'
++           cycle checkloop
++        endif
++
+         kmax = maxloc(ne_part_num(1:np),1)
+ 
+         if (ne_part_num(kmax) <= 1) then

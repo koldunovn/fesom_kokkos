@@ -1,0 +1,8 @@
+# M11 promotion evidence — core2_v1 (original CORE2 numbering; drop-in dist swaps)
+# dist_4   <- zoo/core2/a4m     METIS Kway MINCONN=1 (UFACTOR=1): GPU winner, -8.06 % at 3,000 steps
+# dist_512 <- zoo/core2/a5_u30  METIS Kway UFACTOR=30 slack:      CPU winner, -3.83 % at 3,000 steps
+# Screens: 26892875 (4 GPU ranks, dt 1800, 4/4 rc=0) and 26886214 (512 ranks, dt 1800, 4/4 rc=0).
+# Gates: 26892982 (both GPU arms below both controls on temp/salt/ssh) and 26885353 (in class).
+# Full trail: docs/PARTITIONING_M11.md Finding 32.
+dist_4    run=26892875 steps=3000 rc=0 dt=1800 ranks=4gpu arm=a4m recipe=KWAY+MINCONN gate=26892982 accuracy=PASS gain_at3000=-8.06%
+dist_512  run=26886214 steps=3000 rc=0 dt=1800 ranks=512cpu arm=a5_u30 recipe=KWAY+UFACTOR30 gate=26885353 accuracy=PASS gain_at3000=-3.83%

@@ -1,0 +1,7 @@
+# M11 promotion evidence — core2hil_v1 (Hilbert-xyz RENUMBERED CORE2 mesh — NOT a drop-in dist
+# swap: adopting this mesh re-baselines every C<->Kokkos floor in docs/REFERENCE_RUNS.md, per
+# scheme, and moves every track pinning a CORE2 reference. See M11_RECOMMENDATION.md,
+# "Renumbering: CORE2 only".)
+# dist_512 <- zoo/core2hil/b_kahip_a100  Hilbert renumbering + KaHIP w=100+nlev: -5.83 % at 3,000
+# steps (renumber+engine leg of screen 26886214, 4/4 rc=0; gate 26885353 in class).
+dist_512  run=26886214 steps=3000 rc=0 dt=1800 ranks=512cpu arm=hil_kahip_a100 recipe=HILBERT-XYZ+KAHIP_w100nlev gate=26885353 accuracy=PASS gain_at3000=-5.83%

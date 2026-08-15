@@ -1557,3 +1557,85 @@ independent pairs exist, let cross-pair agreement pick the statistic.** A useful
 fell out of the same data — a lever that removes exchanges also removes the step's exposure to
 network variation, so the treated arm is often the quiet one (spread 4.8 % → 0.4 % here); the arm
 that needs the reps is the untreated one.
+
+> **M14 renumbering note (2026-08-15).** The M11 and M12b branches each began numbering at
+> `L110` independently (the common ancestor stopped at `L103`), so the integration merge found
+> five real collisions. M12b keeps `L110`-`L122`; **M11's five lessons were renumbered**
+> `L110`->`L123`, `L111`->`L124`, `L112`->`L125`, `L113`->`L126`, `L114`->`L127`.
+> Pre-merge M11 documents may still cite the old numbers.
+
+---
+
+### L123 — A COLD-START LADDER dt IS PART OF THE EXPERIMENT, NOT A DETAIL: M11 read the same wrong-timestep blow-up as three different findings before catching it. (M11 sessions 3–4, 2026-08-12)
+
+Running a partition arm at the mesh's **production** dt instead of its **cold-start ladder** dt
+makes the model diverge, and a campaign that is looking for bad partitions will happily accept
+that divergence as an arm result. It happened four times:
+
+| what it looked like | what it was |
+|---|---|
+| "three unusable dars partitions" | dt 240 instead of the dars ladder dt 120 |
+| "NG5's CONTIG arms are broken" | dt 240 instead of the NG5 ladder dt 180 |
+| "the dars GPU race keeps getting killed" | dt 240 — **even the baseline died** |
+| "NG5 MINCONN is un-startable" | genuine, but see L124 |
+
+The third is the instructive one. `srun: error: task N: Killed` is only SLURM tearing down after
+`MPI_Abort`; the real line, several hundred lines earlier, is `[fesom_port FATAL] CG_kk residual
+diverged`. It read as a machine fault for a day.
+
+**Rules.** (1) Every job asserts the mesh's ladder dt — CORE2 1800 · fArc 900 · dars 120 · NG5 180.
+(2) When *every* arm including the baseline fails, suspect the protocol, not the arms.
+(3) Grep past the `Killed` lines before calling anything a machine fault.
+
+### L124 — "IT ABORTS AT ITERATION 1" DOES NOT MEAN "IT ABORTS AT STEP 1": a solver's iteration counter is not the model's step counter. (M11 session 4, 2026-08-12)
+
+`[fesom_ssh] CG_kk abort at iter 1: pp·App = nan (s_old=nan)` was read as "the initial residual is
+already NaN, so the model cannot even set this partition up" — and written into a finding. It
+means the first CG *iteration* of whichever step first carries a NaN. A five-step smoke of that
+exact partition passes; it blows up at step 71.
+
+The consequence is not cosmetic. It changes the adoption rule from "smoke it at the target rank
+count" (which this partition passes) to "screen it at protocol length" (which it fails). Before
+concluding *where* a run died, print every step and look — the step number was one job away.
+
+### L125 — A CONTROL MUST BE DEMONSTRATED TO BE DIFFERENT, AND ONE CONTROL IS NOT AN ENVELOPE. (M11 session 4, 2026-08-12)
+
+Two failure modes of the project's standard "is this arm inside the spread of ordinary controls?"
+gate, both hit in one session:
+
+1. **The degenerate control.** `core2_m11` vs `core2_base` at 4 ranks differ by rms temp 5.9e−7 —
+   at that rank count the two partitions *coincide*. The "control" measured round-off, so every
+   arm would have looked out of class. A control has to be shown to be a different partition
+   (compare the part vectors), never assumed.
+2. **The one-member envelope.** At fArc 2048 a single control put an arm's salt rms at 2× the
+   class. Four seed-only controls span **×2.7** on that same statistic, and the arm is plainly
+   inside. Use ≥3 controls, and quote the envelope, not the median.
+
+The corollary is that widening the ensemble is not a way to pass an arm: at fArc 16 GPU going from
+two controls to four *tightened* the temperature envelope and the arms stayed outside it — which
+is how that point ended up flagged rather than shipped.
+
+### L126 — A METRIC THAT TIES CANNOT RANK: an identical Spearman ρ at three independent points was tie arithmetic, not a physical constant. (M11 session 4, 2026-08-12)
+
+`nbr_max` (max communication partners) correlated with GPU step time at ρ = **+0.87 at all three**
+GPU points — CORE2/4, fArc/16, dars/64 — which looks like a law. It is a small integer taking two
+or three distinct values per group, so ρ is fixed by the tie structure. At CORE2/4 it is a perfect
+*binary* split (every `nbr_max=2` arm at −7.5…−8.1 %, every `nbr_max=3` arm at +3.0…−2.5 %) and it
+orders nothing *within* a level: at dars/64 the two `nbr_max=7` arms differ by 5 pp.
+
+The mechanism claim survives — partner count is the only metric family with a consistent sign on
+GPU, while every volume-like metric has the opposite sign — but it is a **threshold, not a
+ranking**. Before quoting a suspiciously repeatable correlation, look at how many distinct values
+the predictor takes.
+
+### L127 — GUARD THE ARTEFACT THAT CARRIES NO CHECKSUM: replacing a partition leaves every mesh file untouched, so the md5 manifest still verifies. (M11 session 4, 2026-08-12)
+
+A one-word slip aimed a partition-generation job at `dars_m11` — the directory whose `dist_2048`
+every dars race had been measured against. Cancelled in time, but the accident was invisible to
+the whole guard stack: the guards protect the read-only *source* meshes and check the *mesh files*
+by md5, and regenerating a `dist_N` touches neither. The baseline would simply have become a
+different partition, silently, mid-campaign.
+
+Generalisation: a manifest guards what it hashes. When a derived artefact (a partition, an index,
+a cache) is an experimental input in its own right, it needs its own protection —
+`m11_partgen.sh` now refuses to overwrite an existing `dist_N` without `OVERWRITE_DIST=1`.

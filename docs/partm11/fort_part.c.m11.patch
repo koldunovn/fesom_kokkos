@@ -1,0 +1,460 @@
+--- /home/a/a270088/fesom_part/fesom2/src/fort_part.c	2026-06-21 12:55:57.628899289 +0200
++++ /work/ab0995/a270088/port2/partm11/fesom2/src/fort_part.c	2026-08-10 16:29:28.000000000 +0200
+@@ -40,10 +40,199 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
++
++/* ==========================================================================
++ * M11 partitioning campaign — runtime knobs (worktree ~/port_kokkos_part).
++ *
++ * Everything the partitioner does was compile-time: the weighting was an
++ * #ifdef, the seed a -D, the METIS entry point a source edit. That makes an
++ * A/B a comparison of two binaries, which is not an A/B. These knobs move all
++ * of it to run time so one binary produces every arm.
++ *
++ * L80 rule, absolute: every knob ANNOUNCES itself when set, and ABORTS on a
++ * value it does not recognise. A silently-ignored knob produces a null result
++ * that looks like a measurement.
++ *
++ * Knobs (all optional; unset == the historical behaviour of this binary):
++ *   FESOM_PART_FILE      path  inject a ready part vector, skip METIS entirely
++ *   FESOM_PART_GRAPH_DUMP path dump the exact CSR handed to METIS, then continue
++ *   FESOM_PART_WGT       0|1|2 vertex weighting (2D only / 3D only / dual+100)
++ *   FESOM_PART_WGT_A     int   single scalar weight w = a + nlev (supersedes WGT)
++ *   FESOM_PART_KWAY      0|1   METIS_PartGraphKway instead of Recursive
++ *   FESOM_PART_OBJ       cut|vol  objective (vol is Kway-only in METIS)
++ *   FESOM_PART_VSIZE     0|1   pass vsize = nlev (the comm-volume size array)
++ *   FESOM_PART_CONTIG    0|1   force contiguous parts (Kway-only; pre-connects)
++ *   FESOM_PART_MINCONN   0|1   minimise the maximum neighbour count (Kway-only)
++ *   FESOM_PART_UFACTOR   int   allowed imbalance in promille
++ *   FESOM_PART_NCUTS     int   number of trial partitionings
++ *   FESOM_PART_NITER     int   refinement iterations
++ *   FESOM_PART_SEED      int   METIS RNG seed (compile-time before this)
++ *   FESOM_PART_TPWGTS_FILE path  per-part target fractions (npes numbers)
++ * ========================================================================== */
++
++static int m11_env_present(const char *name)
++{
++    const char *e = getenv(name);
++    return e && e[0];
++}
++
++static int m11_env_int(const char *name, int dflt)
++{
++    const char *e = getenv(name);
++    char *end = NULL;
++    long v;
++    if (!e || !e[0]) return dflt;
++    v = strtol(e, &end, 10);
++    if (end == e || (end && *end != '\0')) {
++        printf("[M11] %s='%s' is not an integer -- aborting\n", name, e);
++        exit(1);
++    }
++    return (int)v;
++}
++
++static int m11_env_bool(const char *name, int dflt)
++{
++    int v;
++    if (!m11_env_present(name)) return dflt;
++    v = m11_env_int(name, dflt);
++    if (v != 0 && v != 1) {
++        printf("[M11] %s=%d out of range: expected 0 or 1 -- aborting\n", name, v);
++        exit(1);
++    }
++    return v;
++}
++
++static int m11_env_pos(const char *name, int dflt)
++{
++    int v;
++    if (!m11_env_present(name)) return dflt;
++    v = m11_env_int(name, dflt);
++    if (v < 1) {
++        printf("[M11] %s=%d must be >= 1 -- aborting\n", name, v);
++        exit(1);
++    }
++    return v;
++}
+ 
+ #if METIS_VERSION == 5 /* ---------------- METIS 5 part ------------------------ */
+ #include "metis.h"
+ 
++/* Read a 0-based part vector of exactly n entries; validate hard, because a bad
++ * vector here surfaces as a model abort minutes later, or worse, as a silently
++ * wrong decomposition. */
++static void m11_read_part_file(const char *path, idx_t n, idx_t npes, idx_t *part)
++{
++    FILE *f = fopen(path, "r");
++    idx_t i, mn, mx;
++    idx_t *cnt;
++    long v;
++    int empty = 0;
++    if (!f) {
++        printf("[M11] FESOM_PART_FILE='%s' cannot be opened -- aborting\n", path);
++        exit(1);
++    }
++    for (i = 0; i < n; i++) {
++        if (fscanf(f, "%ld", &v) != 1) {
++            printf("[M11] FESOM_PART_FILE='%s': only %d of %d entries could be read"
++                   " -- aborting\n", path, (int)i, (int)n);
++            exit(1);
++        }
++        part[i] = (idx_t)v;
++    }
++    if (fscanf(f, "%ld", &v) == 1) {
++        printf("[M11] FESOM_PART_FILE='%s': MORE than nod2D=%d entries -- aborting\n",
++               path, (int)n);
++        exit(1);
++    }
++    fclose(f);
++
++    mn = mx = part[0];
++    for (i = 1; i < n; i++) {
++        if (part[i] < mn) mn = part[i];
++        if (part[i] > mx) mx = part[i];
++    }
++    if (mn != 0 || mx != npes - 1) {
++        printf("[M11] FESOM_PART_FILE='%s': ranks span [%d,%d], expected [0,%d]"
++               " -- aborting\n", path, (int)mn, (int)mx, (int)(npes - 1));
++        exit(1);
++    }
++    cnt = (idx_t *)calloc(npes, sizeof(idx_t));
++    if (!cnt) { printf("[M11] out of memory for the part histogram\n"); exit(1); }
++    for (i = 0; i < n; i++) cnt[part[i]]++;
++    for (i = 0; i < npes; i++) if (cnt[i] == 0) empty++;
++    if (empty) {
++        printf("[M11] FESOM_PART_FILE='%s': %d EMPTY part(s) -- aborting\n", path, empty);
++        exit(1);
++    }
++    {   /* announce the shape of what we injected: min/max/mean per part */
++        idx_t lo = cnt[0], hi = cnt[0];
++        double mean = 0.0;
++        for (i = 0; i < npes; i++) {
++            if (cnt[i] < lo) lo = cnt[i];
++            if (cnt[i] > hi) hi = cnt[i];
++            mean += (double)cnt[i];
++        }
++        mean /= (double)npes;
++        printf("[M11] FESOM_PART_FILE='%s' INJECTED: %d nodes into %d parts, "
++               "min %d max %d mean %.1f (imbalance %.4f)\n",
++               path, (int)n, (int)npes, (int)lo, (int)hi, mean, (double)hi / mean);
++    }
++    free(cnt);
++}
++
++/* Dump the CSR exactly as handed to METIS (1-based, as the Fortran side built it).
++ * This is the authoritative reference the Python exporter must reproduce. */
++static void m11_dump_graph(const char *path, idx_t n, idx_t *ptr, idx_t *adj, idx_t *wgt)
++{
++    FILE *f = fopen(path, "w");
++    idx_t i;
++    if (!f) {
++        printf("[M11] FESOM_PART_GRAPH_DUMP='%s' cannot be written -- aborting\n", path);
++        exit(1);
++    }
++    fprintf(f, "%d %d %d\n", (int)n, (int)(ptr[n] - ptr[0]), wgt ? 1 : 0);
++    for (i = 0; i <= n; i++) fprintf(f, "%d\n", (int)ptr[i]);
++    for (i = 0; i < ptr[n] - ptr[0]; i++) fprintf(f, "%d\n", (int)adj[i]);
++    /* The weight array is `nlevels_nod2D` as the Fortran side RECOMPUTED it in
++     * memory. The partitioner keeps a pre-existing nlvls.out on disk while
++     * partitioning with these values (fvom_init.F90:996-1017), so the two can
++     * silently disagree — review M5. Dumping it here settles that per mesh,
++     * without patching Fortran. */
++    if (wgt) for (i = 0; i < n; i++) fprintf(f, "%d\n", (int)wgt[i]);
++    fclose(f);
++    printf("[M11] FESOM_PART_GRAPH_DUMP='%s' WROTE the ssh_stiff CSR: n=%d nnz=%d "
++           "(1-based, rowptr, colind%s)\n", path, (int)n, (int)(ptr[n] - ptr[0]),
++           wgt ? ", in-memory nlevels_nod2D" : "");
++}
++
++/* Count connected components of the graph with a union-find, so CONTIG is never
++ * requested on a disconnected graph (METIS silently ignores it there). */
++static idx_t m11_find(idx_t *p, idx_t x)
++{
++    while (p[x] != x) { p[x] = p[p[x]]; x = p[x]; }
++    return x;
++}
++
++static idx_t m11_components(idx_t n, idx_t *ptr, idx_t *adj, idx_t *root_out)
++{
++    idx_t *p = (idx_t *)malloc(n * sizeof(idx_t));
++    idx_t i, j, a, b, ncomp = 0;
++    if (!p) { printf("[M11] out of memory in component scan\n"); exit(1); }
++    for (i = 0; i < n; i++) p[i] = i;
++    for (i = 0; i < n; i++)
++        for (j = ptr[i] - 1; j < ptr[i + 1] - 1; j++) {
++            a = m11_find(p, i);
++            b = m11_find(p, adj[j] - 1);
++            if (a != b) p[a] = b;
++        }
++    for (i = 0; i < n; i++) if (m11_find(p, i) == i) ncomp++;
++    if (root_out) for (i = 0; i < n; i++) root_out[i] = m11_find(p, i);
++    free(p);
++    return ncomp;
++}
++
++
+ void do_partit(idx_t *n, idx_t *ptr, idx_t *adj, idx_t *wgt, idx_t *np, idx_t *part)
+ {
+   int i, j, wgt_type;
+@@ -53,6 +242,9 @@
+   idx_t *wgt_edge = NULL;
+   int ierr;
+   int n_levels, n_part_low = 1;     /* Number of lower hierarchy levels and partitions in them */
++  int m11_kway = 0, m11_vol = 0;    /* M11: chosen METIS entry point / objective */
++  idx_t  *m11_vsize  = NULL;        /* M11: comm-volume size array (vsize = nlev) */
++  real_t *m11_tpwgts = NULL;        /* M11: per-part target fractions */
+ 
+   static int current_level = -1; /* Current level in hierarchical partitioning */
+ 
+@@ -87,6 +279,30 @@
+   printf("Partitioning into %d subdomains on level %d with Metis version %d.%d.%d\n",
+          np[current_level], current_level+1, METIS_VER_MAJOR,METIS_VER_MINOR,METIS_VER_SUBMINOR);
+ 
++  /* ---- M11: dump the graph METIS is about to see ------------------------- */
++  if (m11_env_present("FESOM_PART_GRAPH_DUMP") && current_level == 0)
++    m11_dump_graph(getenv("FESOM_PART_GRAPH_DUMP"), *n, ptr, adj, wgt);
++
++  /* ---- M11: part-vector injection — the whole point of the seam ----------
++   * Everything downstream of do_partit consumes only part[], so an external
++   * engine can own the decomposition while the Fortran tool still writes the
++   * dist files. The injected vector is ALREADY 0-based, so we return before
++   * the `part[i]--` that undoes METIS's Fortran numbering. check_partitioning
++   * still runs afterwards, exactly as for a METIS partition. */
++  if (m11_env_present("FESOM_PART_FILE"))
++  {
++    if (n_levels > 1)
++    {
++      printf("[M11] FESOM_PART_FILE with hierarchical partitioning (n_levels=%d) is not "
++             "supported -- aborting\n", n_levels);
++      exit(1);
++    }
++    m11_read_part_file(getenv("FESOM_PART_FILE"), *n, np[current_level], part);
++    printf("[M11] METIS SKIPPED: the partition came from the file. "
++           "check_partitioning still runs on it.\n");
++    return;
++  }
++
+ #ifdef PART_WEIGHTED
+   wgt_type = 2;  /* 3D and 2D equally distributed */
+     /* wgt_type = 1; /* only 3D equally distributed, like old partit2  */
+@@ -94,6 +310,20 @@
+   wgt_type = 0; /* only 2D nodes equally distributed */
+ #endif
+ 
++  /* ---- M11: the weighting becomes a run-time choice (ported from the M10
++   * partw patch). Without the variable the compiled-in default is unchanged. */
++  if (m11_env_present("FESOM_PART_WGT"))
++  {
++    int v = m11_env_int("FESOM_PART_WGT", wgt_type);
++    if (v < 0 || v > 2)
++    {
++      printf("[M11] FESOM_PART_WGT=%d out of range [0,2] -- aborting\n", v);
++      exit(1);
++    }
++    printf("[M11] FESOM_PART_WGT=%d overrides the compiled default %d\n", v, wgt_type);
++    wgt_type = v;
++  }
++
+   METIS_SetDefaultOptions(opt);
+ 
+   /* The following values are the result of some tests with mesh_aguv, wgt_type=2. */
+@@ -149,7 +379,119 @@
+   /* METIS_OPTION_NUMBERING x           x */
+   /* METIS_OPTION_DBGLVL    x           x */
+ 
+-  switch(wgt_type) 
++  /* ---- M11: the knob block ------------------------------------------------
++   * Applied AFTER every historical default above, so an unset environment
++   * reproduces this binary's previous behaviour exactly (null-1 in Task 4). */
++  {
++    int kway    = m11_env_bool("FESOM_PART_KWAY", 0);
++    int minconn = m11_env_bool("FESOM_PART_MINCONN", 0);
++    int contig  = m11_env_bool("FESOM_PART_CONTIG", 0);
++    int use_vol = 0;
++
++    if (m11_env_present("FESOM_PART_OBJ"))
++    {
++      const char *o = getenv("FESOM_PART_OBJ");
++      if      (!strcmp(o, "cut")) use_vol = 0;
++      else if (!strcmp(o, "vol")) use_vol = 1;
++      else { printf("[M11] FESOM_PART_OBJ='%s' unrecognised (cut|vol) -- aborting\n", o);
++             exit(1); }
++      printf("[M11] FESOM_PART_OBJ=%s\n", o);
++    }
++    if (m11_env_present("FESOM_PART_KWAY"))
++      printf("[M11] FESOM_PART_KWAY=%d (%s)\n", kway,
++             kway ? "METIS_PartGraphKway" : "METIS_PartGraphRecursive");
++    /* METIS documents OBJTYPE_VOL, MINCONN and CONTIG as Kway-only. Recursive
++     * accepts the options and ignores them: that is how contiguity and the
++     * comm-volume objective were silently off for every FESOM partition ever
++     * generated. Refuse the combination instead of repeating it. */
++    if (!kway && (use_vol || minconn || contig))
++    {
++      printf("[M11] OBJ=vol / MINCONN / CONTIG are Kway-only and are SILENTLY IGNORED by "
++             "METIS_PartGraphRecursive. Set FESOM_PART_KWAY=1 or drop them -- aborting\n");
++      exit(1);
++    }
++    if (use_vol)  opt[METIS_OPTION_OBJTYPE] = METIS_OBJTYPE_VOL;
++    if (minconn) { opt[METIS_OPTION_MINCONN] = 1; printf("[M11] FESOM_PART_MINCONN=1\n"); }
++    if (contig)
++    {
++      idx_t nc = m11_components(*n, ptr, adj, NULL);
++      printf("[M11] FESOM_PART_CONTIG=1: the graph has %d connected component(s)\n", (int)nc);
++      if (nc > 1)
++      {
++        /* METIS ignores CONTIG on a disconnected graph without a word. Rather
++         * than pre-connect behind the user's back, say so and stop: the
++         * pre-connect arm has to be an explicit, logged decision. */
++        printf("[M11] CONTIG on a %d-component graph is a silent no-op in METIS. "
++               "Pre-connect the components first -- aborting\n", (int)nc);
++        exit(1);
++      }
++      opt[METIS_OPTION_CONTIG] = 1;
++    }
++    if (m11_env_present("FESOM_PART_UFACTOR"))
++    {
++      opt[METIS_OPTION_UFACTOR] = m11_env_pos("FESOM_PART_UFACTOR", 1);
++      printf("[M11] FESOM_PART_UFACTOR=%d promille\n", (int)opt[METIS_OPTION_UFACTOR]);
++    }
++    if (m11_env_present("FESOM_PART_NCUTS"))
++    {
++      opt[METIS_OPTION_NCUTS] = m11_env_pos("FESOM_PART_NCUTS", 10);
++      printf("[M11] FESOM_PART_NCUTS=%d\n", (int)opt[METIS_OPTION_NCUTS]);
++    }
++    if (m11_env_present("FESOM_PART_NITER"))
++    {
++      opt[METIS_OPTION_NITER] = m11_env_pos("FESOM_PART_NITER", 15);
++      printf("[M11] FESOM_PART_NITER=%d\n", (int)opt[METIS_OPTION_NITER]);
++    }
++    if (m11_env_present("FESOM_PART_SEED"))
++    {
++      opt[METIS_OPTION_SEED] = m11_env_int("FESOM_PART_SEED", 35243);
++#ifdef METISRANDOMSEED
++      printf("[M11] FESOM_PART_SEED=%d (compiled default %d)\n",
++             (int)opt[METIS_OPTION_SEED], METISRANDOMSEED);
++#else
++      printf("[M11] FESOM_PART_SEED=%d (no compiled default)\n", (int)opt[METIS_OPTION_SEED]);
++#endif
++    }
++    m11_kway = kway;
++    m11_vol  = use_vol;
++  }
++
++  /* ---- M11: single scalar weight w = a + nlev ------------------------------
++   * The documented cure for the multi-constraint penalty (ESA'26): balance is
++   * one constraint again, so refinement is not crippled. a=0 is pure 3D,
++   * a=infinity is 2D-only, and the interior between the two arms M10 measured
++   * has never been explored. */
++  if (m11_env_present("FESOM_PART_WGT_A"))
++  {
++    int a = m11_env_int("FESOM_PART_WGT_A", -1);
++    if (a < 0)
++    {
++      printf("[M11] FESOM_PART_WGT_A=%d: negative means 'legacy dual', which is "
++             "FESOM_PART_WGT=2 -- aborting to keep one way to say each thing\n", a);
++      exit(1);
++    }
++    if (wgt == NULL)
++    {
++      printf("[M11] FESOM_PART_WGT_A needs the nlev weight array, which is NULL -- aborting\n");
++      exit(1);
++    }
++    ncon = 1;
++    wgt_2d3d = (idx_t*) malloc(*n * sizeof(idx_t));
++    if (wgt_2d3d == NULL) { printf("[M11] out of memory for the scalar weights\n"); exit(1); }
++    {
++      double sum = 0.0;
++      for (i = 0; i < *n; i++) { wgt_2d3d[i] = a + wgt[i]; sum += (double)wgt_2d3d[i]; }
++      printf("[M11] FESOM_PART_WGT_A=%d: single scalar weight w = %d + nlev, "
++             "sum(w) = %.0f (int32 ledger %s)\n", a, a, sum,
++             sum < 1073741824.0 ? "OK" : "EXCEEDED -- normalise w");
++      if (sum >= 2147483647.0)
++      {
++        printf("[M11] sum(w) overflows idx_t -- aborting\n");
++        exit(1);
++      }
++    }
++  }
++  else switch(wgt_type)
+   {
+   case 0:
+     ncon = 1;   
+@@ -230,15 +572,71 @@
+   fclose(coord_file);
+ #endif
+ 
+-  ierr = METIS_PartGraphRecursive(n,&ncon,ptr,adj,wgt_2d3d,NULL,wgt_edge,np+current_level,NULL,NULL,opt,&ec,part);
++  /* ---- M11: vsize (comm-volume sizes) and tpwgts (per-part targets) ------- */
++  if (m11_env_bool("FESOM_PART_VSIZE", 0) || m11_vol)
++  {
++    if (wgt == NULL)
++    {
++      printf("[M11] vsize = nlev requested but the nlev array is NULL -- aborting\n");
++      exit(1);
++    }
++    m11_vsize = (idx_t*) malloc(*n * sizeof(idx_t));
++    if (!m11_vsize) { printf("[M11] out of memory for vsize\n"); exit(1); }
++    for (i = 0; i < *n; i++) m11_vsize[i] = wgt[i];
++    printf("[M11] vsize = nlev passed to METIS (%s)\n",
++           m11_vol ? "required by OBJ=vol" : "FESOM_PART_VSIZE=1");
++  }
++  if (m11_env_present("FESOM_PART_TPWGTS_FILE"))
++  {
++    const char *tp = getenv("FESOM_PART_TPWGTS_FILE");
++    FILE *tf = fopen(tp, "r");
++    idx_t k, nparts = np[current_level];
++    double s = 0.0, v;
++    if (!tf) { printf("[M11] FESOM_PART_TPWGTS_FILE='%s' cannot be opened -- aborting\n", tp);
++               exit(1); }
++    m11_tpwgts = (real_t*) malloc((size_t)nparts * ncon * sizeof(real_t));
++    if (!m11_tpwgts) { printf("[M11] out of memory for tpwgts\n"); exit(1); }
++    for (k = 0; k < nparts; k++)
++    {
++      if (fscanf(tf, "%lf", &v) != 1 || v <= 0.0)
++      {
++        printf("[M11] FESOM_PART_TPWGTS_FILE='%s': need %d positive numbers, failed at %d"
++               " -- aborting\n", tp, (int)nparts, (int)k);
++        exit(1);
++      }
++      m11_tpwgts[k] = (real_t)v;
++      s += v;
++    }
++    fclose(tf);
++    for (k = 0; k < nparts; k++)
++    {
++      real_t f = (real_t)(m11_tpwgts[k] / s);
++      for (j = 0; j < ncon; j++) m11_tpwgts[k * ncon + j] = f;
++    }
++    printf("[M11] FESOM_PART_TPWGTS_FILE='%s': %d target fractions read and normalised "
++           "(ncon=%d)\n", tp, (int)nparts, (int)ncon);
++  }
++
++  if (m11_kway)
++    ierr = METIS_PartGraphKway(n,&ncon,ptr,adj,wgt_2d3d,m11_vsize,wgt_edge,np+current_level,m11_tpwgts,NULL,opt,&ec,part);
++  else
++    ierr = METIS_PartGraphRecursive(n,&ncon,ptr,adj,wgt_2d3d,m11_vsize,wgt_edge,np+current_level,m11_tpwgts,NULL,opt,&ec,part);
+   if (ierr != METIS_OK) {
+     printf("MEITS finished with error, code=%d\n", ierr);
+     exit(1);
+-  } else { 
++  } else {
+     printf("METIS edgecut %d\n", ec);
+-    
++    /* 🔴 M11: `ec` is METIS's objective for the partition METIS produced. It is NOT
++     * the cut of the dist files this run writes: check_partitioning (fvom_init.F90:1809)
++     * may still relocate nodes afterwards. Measured on CORE2 wgt2 16r: one node moved,
++     * unweighted cut -1, nlev-weighted cut +5. Score the FILES, never this line. */
++    if (m11_vol)
++      printf("[M11] note: OBJ=vol, so the number above is COMMUNICATION VOLUME, not edgecut\n");
++
+     for(i=0;i<*n;i++) part[i]--;
+   }
++  free(m11_vsize);
++  free(m11_tpwgts);
+ 
+   if (current_level < n_levels-1)
+   {

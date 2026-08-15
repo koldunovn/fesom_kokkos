@@ -1,0 +1,6 @@
+# M11 promotion evidence — farc_v1
+# dist_2048 <- zoo/farc/b_mtkahypar_a100  Mt-KaHyPar w=100+nlev: -7.52 % at 3,000 steps
+# (screen 26892880, dt 900, 3/3 rc=0). Accuracy: first gate 26892879 flagged salt vs ONE control;
+# across FOUR seed-only controls salt spans 4.44e-2..1.215e-1 and the arm's 8.91e-2 is plainly
+# inside (re-gate 26893194; the one-member-envelope lesson, memory + Finding 38 context).
+dist_2048 run=26892880 steps=3000 rc=0 dt=900 ranks=2048cpu arm=b_mtkahypar_a100 recipe=MTKAHYPAR_w100+nlev gate=26892879+26893194 accuracy=PASS-4controls gain_at3000=-7.52%
