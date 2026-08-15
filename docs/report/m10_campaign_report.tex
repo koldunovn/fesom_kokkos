@@ -139,6 +139,52 @@ doubles the whole-step gain, from $-4.86$\,\% to $-11.11$\,\% at CORE2 864 ranks
 return flattens and reappears as wasted work: $K=20$ buys 1.2 percentage points more while
 overshooting the tolerance by 6.7\,\% more iterations.
 
+\subsection{How much of this depends on the initial condition}
+
+Because the fill defect above changes every cold-start trajectory, nine of the configurations
+were re-measured with the deterministic fill in place. The comparison is between ratios, each
+of which is internally consistent --- all four legs of a comparison share one allocation and
+one initial condition --- so it asks whether the conclusions survive a different, correct
+starting state rather than whether the timings repeat.
+
+\begin{center}\small
+\begin{tabular}{llrrr}
+\toprule
+configuration & solver & legacy fill & deterministic fill & iterations \\
+\midrule
+fArc, 2048 CPU ranks  & \texttt{oati} & $-13.28$\,\% & $-12.90$\,\% & $211 \to 213$ \\
+fArc, 1024 CPU ranks  & \texttt{oati} & $-5.60$\,\%  & $-5.29$\,\%  & $212 \to 213$ \\
+fArc, 16 GPU nodes    & \texttt{oati} & $-10.36$\,\% & $-10.58$\,\% & $212 \to 213$ \\
+DARS, 8192 CPU ranks  & \texttt{oati} & $-3.94$\,\%  & $-3.32$\,\%  & $36.7 \to 36.7$ \\
+DARS, 6144 CPU ranks  & \texttt{oati} & $-3.01$\,\%  & $-1.69$\,\%  & $36.6 \to 36.6$ \\
+CORE2, 1 GPU node     & \texttt{pcsi} & $-5.19$\,\%  & $-3.11$\,\%  & $121 \to 133$ \\
+NG5, 16 GPU nodes     & \texttt{pcsi} & $-2.32$\,\%  & $-1.70$\,\%  & $78 \to 87$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\noindent
+The headline results stand: fArc reproduces on both backends, including the campaign's best
+figure of $-10.4$ against $-10.6$\,\% at 16 GPU nodes. Two effects are worth stating plainly.
+
+On DARS the gain shrinks, and the reason is visible in the per-iteration cost. The variants are
+unchanged in absolute terms, while the baseline solve becomes 14--19\,\% cheaper at an unchanged
+iteration count --- that is, it waits less. Since roughly nine tenths of the measured solve cost
+at these scales is time spent waiting at collectives, and the baseline is the most synchronous
+of the four methods, a clean initial condition removes imbalance that was penalising it
+specifically. The low-synchronisation solvers did not get worse; the method they are measured
+against got better.
+
+The second effect is confined to P-CSI and is a caution about how its numbers travel. Chebyshev
+iteration counts are fixed by a spectral estimate made at setup from the operator, which depends
+on the state; where that estimate moved, so did the result --- 9.5\,\% more iterations at CORE2
+GPU and 11.5\,\% at NG5 GPU, enough to cost P-CSI first place at the former and most of its lead
+at the latter --- while at fArc and DARS, where the estimate did not move, its numbers are
+unchanged. This is the same sensitivity that made a deliberately truncated Lanczos run look
+fast earlier in the campaign. It does not weaken P-CSI as an option, but a P-CSI figure should
+be quoted together with the state its interval was estimated on, in a way a \texttt{cg2} or
+\texttt{oati} figure need not be.
+
 \section{Where the step actually goes}
 
 \begin{figure}[t]
@@ -224,23 +270,40 @@ We had previously read this blow-up as a stability limit of the timestep, follow
 campaign that measured the same death at step 200 in this port and step 203 in Fortran. That
 evidence came from the same shipped partition, so both readings attributed to the
 configuration what belongs to one decomposition; Fortran failing there as well shows only that
-Fortran dislikes it too. Balance is a marker rather than the mechanism --- uneven work costs
-time, not accuracy --- so what destabilises the model is presumably some other malformation of
-those partitions, which we have not identified. The practical rule is cheap: measure a
-partition's 3-D balance before attributing a blow-up to the timestep, the viscosity scheme or
-the solver.
+Fortran dislikes it too.
+
+The mechanism has since been identified, and it is not the balance. The climatology
+hole-filling routine that supplies initial temperature and salinity where the 1$^\circ$
+climatology has no data --- the entire Sea of Marmara, and most straits and marginal seas ---
+fills each dummy node from its already-valid neighbours in local numbering order, running each
+rank to exhaustion before the next halo exchange. The result therefore depends on the
+decomposition. On an unlucky partition it writes a density front of order
+10\,kg\,m$^{-3}$ across a single element in a strait separating water masses that differ by
+some 20\,PSU; the resulting pressure-gradient force is constant, drives a linear velocity ramp
+from the first step, and reaches the CFL limit a few hundred steps later. Every scheme dies on
+such a partition. Balance was a marker only in the accidental sense that the same partitions
+were built by different recipes. A deterministic fill --- ring-filling followed by relaxation,
+with neighbour sums accumulated in global-index order --- removes the dependence: initial
+conditions become bitwise identical across decompositions, and all four previously fatal NG5
+partitions complete 300 steps. The same defect exists upstream in Fortran, where cold starts on
+unlucky partitions inherit the same fragility (restarts are immune, which is why it is rarely
+seen).
+
+The practical rule is unchanged in form but now has a cause behind it: a cold-start blow-up
+that appears on one decomposition and not another is an initial-condition artifact, not a
+property of the timestep, the viscosity scheme or the solver.
 
 \section{Status and limitations}
 
-CPU and GPU coverage is complete for CORE2, fArc and DARS. NG5 has no valid CPU row yet, but
-the obstacle has turned out to be the shipped partitions rather than the model: on a
-regenerated decomposition NG5 runs the full 300 steps at 4096 ranks. Partitions at 16384,
-20480 and 24576 pieces --- 451, 361 and 301 vertices per core, the range at which NG5 is
-actually run --- have been generated and are usable, so the measurement is now possible where
-it previously appeared not to be. It has not been made: at the rank counts measured so far the
-solve is 1.6--2.3\,\% of the NG5 step, below the level at which any effect is resolvable, and
-the smallest of those partitions needs 128 nodes. NG5 on GPU rests on a single 16-node
-configuration.
+CPU and GPU coverage is complete for CORE2, fArc and DARS. NG5 now has two CPU rows as well,
+measured with the deterministic fill described above: at 4096 ranks the solve is 1.9\,\% of the
+step and the best variant returns $-0.69$\,\%, at 8192 ranks 3.6\,\% and $-1.93$\,\%. Both are
+honest negatives and both sit where the share law puts them; NG5 is simply a mesh on which the
+barotropic solve is a small part of the step at the rank counts we can reach. The in-range
+partitions (16384, 20480 and 24576 pieces --- 451, 361 and 301 vertices per core) are generated
+and usable, and the smallest of them needs 128 nodes; those rungs are left to the
+split-explicit campaign, which is measuring the same ladder. NG5 on GPU rests on a single
+16-node configuration.
 
 All numbers come from one machine and a 300-step window. The default solver is unchanged: the
 switch selects a variant only when set, and which variant to adopt --- together with the value
