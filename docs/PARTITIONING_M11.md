@@ -3385,3 +3385,22 @@ No output, no abort, no NaN — it simply stopped. That is unlike every failure 
 catalogued: those were divergences and blow-ups, which are loud, and all of them were the IC.
 The same arm runs fine at dars 64 GPU (it is the −18.5 % winner there). Probe with per-50-step
 printing: 26970464. It does not affect the recommended fArc arm (`MINCONN`+`CONTIG`).
+
+### NG5 64 GPU, partial gate (26969071 timed out at leg 7 of 8; two controls, indicative only)
+
+Each leg costs ~8 min here because the deterministic fill runs ~10k fill + 20-30k relaxation
+sweeps on NG5 — the one real cost of the fix, and worth budgeting for. Full 4-control gate:
+26972358 (90 min).
+
+| leg | temp rms | salt rms | ssh rms |
+|---|--:|--:|--:|
+| the two controls | 1.71–1.87e−7 | 3.59–4.21e−8 | 1.92–2.01e−9 |
+| **`MINCONN`** (the recommended arm) | **1.29e−7 — below both** | 3.83e−8 — in | 1.92e−9 — in |
+| `MINCONN`+`CONTIG` | 1.96e−7 (+5 %) | 5.21e−8 (+24 %) | in |
+| +`UFACTOR=30` | 2.10e−7 (+12 %) | 5.24e−8 (+24 %) | in |
+
+The legacy verdict here was **tier 3 — "ssh rms +8.3 % above the envelope, mechanism ruled out,
+small and unexplained"**, and it was the sole occupant of that category. On this partial gate the
+ssh excursion is gone: `MINCONN` is inside the control range on ssh and below both controls on
+temperature. If the 4-control gate confirms it, **every accuracy objection this campaign raised
+traces to the hole-filler**, and tier 3 empties.
