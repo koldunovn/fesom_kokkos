@@ -564,6 +564,23 @@ staging is a small part of an 11.4 ms busy, and the rung's wider element extent 
 per-step waves cost **+7.1 % busy** — more than it saves. The block is compute-bound, so there is
 nothing for the lever to take.
 
+### 7b-bis. Pre-registration for the two rows that complete the law
+
+The law says the payoff is set by nodes per rank, through the staging share of the barotropic
+busy. Two GPU points fill the gap between 1 982 (CORE2 16N, −11.5 %) and 115 670 (NG5 16N,
++0.3 %), and their predictions are written down before they run:
+
+| point | nodes/rank | bt busy / wait (certified, measured) | **predicted Δ step** |
+|---|---|---|---|
+| CORE2 4N GPU (job 26969116) | 7 928 | 6.88 / 7.69 ms of a 70.3 ms step | **−6 % … −9 %** |
+| dars 16N GPU (job 26969117) | 49 380 | not yet measured | **−1 % … −3 %** |
+
+The CORE2 4N reasoning: at 102 exchanges and ~51 µs each, staging is ~5.2 ms of that 6.88 ms
+busy, so the rung should take ~2.5 ms of busy plus a proportional slice of the 7.69 ms wait — call
+it 5 ms of a 70 ms step. The dars reasoning is weaker (its bt split is unmeasured) and rests only
+on its position in the ordering, which is why the band is wide. **If dars lands outside −1…−3 %
+the law is not a clean function of per-rank size and needs the staging share measured per point.**
+
 ## 🔴 7c. Deep K: the "no" is RETRACTED
 
 §7's verdict was built on the flat-busy model, which is now falsified. Rebuilding it on the

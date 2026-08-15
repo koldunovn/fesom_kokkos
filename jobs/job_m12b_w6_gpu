@@ -43,6 +43,8 @@ case "$POINT" in
          DT=1800; M=50; WSPLIT=0 ;;
   ng5)   MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5
          DT=180;  M=20; WSPLIT=1 ;;
+  dars)  MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars
+         DT=120;  M=20; WSPLIT=1 ;;
   *) echo "unknown POINT=$POINT"; exit 2 ;;
 esac
 
