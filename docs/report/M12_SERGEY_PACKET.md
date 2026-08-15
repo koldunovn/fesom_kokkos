@@ -182,13 +182,31 @@ of mEVP** — mEVP carries element σ across substeps, the η/Ū alternation doe
 node zone as a fraction of owned at K=8: NG5 64 GPU **0.10** · CORE2 64 GPU 0.66 · farc 2048
 CPU 2.40 · dars 8192 CPU 3.02. Deep K is nearly free exactly where the subdomain is largest.
 
-**First CPU numbers, and they say what you said.** Same-day pinned pairs, 300 steps, min-of-2,
-loop-only: **farc 2048 −1.8 %**, **dars 8192 +0.4 % (a wash)**. The mechanism is intact — bt
-MPI calls per step 182→94 (farc) and 42→24 (dars), as designed — but the barotropic block is
-only ~16 % (farc) and ~6 % (dars) of the step there, so the latency saving is bounded by that
-share while the redundant compute is paid in full. The GPU pairs (CORE2 and NG5 at 16 nodes,
-where the bt phase is 7.8 ms busy against **11.8 ms MPI wait** of an 84 ms step) are queued;
-they are the points the rung was built for.
+**The numbers, and your prediction was right about GPU-vs-CPU — but the reason is not the one we
+expected.** Same-day pinned pairs, 300 steps, min-of-2, loop-only:
+
+| point | nodes per rank | certified | rung K=1 | Δ |
+|---|---|---|---|---|
+| **CORE2 16 nodes GPU** | 1 982 | 0.0841 | 0.0744 | **−11.5 %** |
+| farc 2048 CPU | 5 700 | 0.0731 | 0.0718 | −1.8 % |
+| dars 8192 CPU | 5 100 | 0.0976 | 0.0980 | +0.4 % |
+| **NG5 16 nodes GPU** | 115 670 | 0.2461 | 0.2469 | +0.3 % |
+
+We expected the GPU gain to come from removing MPI *wait*. It mostly came from removing GPU
+*work*: on the device the halo pack/unpack and its staging are kernels and copies that sit in the
+block's busy time — about **51 µs per exchange** at CORE2 16N against roughly 2.6 ms of actual
+barotropic arithmetic — so halving the exchanges cut the barotropic busy time by **31 %**
+(7.84 → 5.37 ms). The wait then fell by 40 % as a consequence, because that staging cost scales
+with each rank's halo size (which varies 11× across ranks here), so it was also most of the
+block's load imbalance. On CPU the same pack is a memcpy and the effect does not exist, which is
+why the CPU rows are small.
+
+The consequence is that **the payoff is governed by the number of nodes per rank, not by the
+mesh**: the rung pays where the subdomain is small enough that the barotropic block is dominated
+by per-exchange overhead, which is precisely the strong-scaling limit. At NG5 with 115 670 nodes
+per rank the wider element extent costs +7.1 % of busy and the rung is a wash. So "GPU advantage,
+CPU better scaling" holds — with the refinement that it is really "small-subdomain advantage",
+and a big-mesh GPU run at few nodes behaves like the CPU case.
 
 **One more measurement, which qualifies the whole expectation.** The argument for the wide halo
 is that the barotropic block's MPI wait is large (60 % of its cost at CORE2 16N GPU). But a wait
@@ -214,14 +232,14 @@ whether we build the deeper-K layer at all.
    compute-instead-of-communicate transformation will meet it.
 8. For deep K on GPU, is K=8 with a K-ring extended mesh (owner bytes shipped once at startup,
    BFS ring order) the direction you would take, given that its node-zone cost at NG5/dars GPU
-   is 10–30 % of owned? **Our own answer is currently "no", and it is a measurement rather than
-   an opinion:** on the certified GPU runs the barotropic wait is 47 % / 56 % / 31 % load
-   imbalance (CORE2 4N / CORE2 16N / NG5 16N; a rank's wait correlates with its own busy at
-   −0.95…−0.99), and imbalance-driven wait is conserved under any communication lever. Working
-   that through, K=4 returns the *same* step time as K=1 at CORE2 even in the latency-bound
-   limit, because what the deeper halo saves in messages it pays back in ring compute while the
-   imbalance stays put. We are confirming the K=1 half of that arithmetic with a paired GPU run;
-   if it holds, the wide halo ends at K=1 and the remaining barotropic wait is a partitioning
-   question, not a halo one. **Does that match your expectation, or is there a configuration
-   (larger M, a mesh with a much better-balanced barotropic block) where you would expect deep K
-   to pay?**
+   is 10–30 % of owned? **We had talked ourselves into "no" and the measurement
+   reopened it.** Our first estimate treated the barotropic wait as mostly load imbalance, which
+   no halo change can remove, and concluded K=1 was the end of the line. The K=1 GPU pair then
+   came in at −11.5 % against our predicted −1.5…−2.9 %, because the exchange cost is GPU *work*
+   rather than wait (above). On the measured cost — ~51 µs of busy per exchange — going from
+   ⌈50/1⌉ to ⌈50/4⌉ exchanges would take another ~2 ms out of the barotropic block before the
+   ring compute (which grows to ~30 % of the owned node set at K=4 for this configuration)
+   claws some back, so **K=2–4 looks worth roughly three more points at CORE2 16N** — an
+   extrapolation from two points, not a measurement. **Would you expect the ring compute to
+   behave that way at K=4, and is there a reason to prefer exchanging η every k substeps
+   (cheap to try, no extra mesh machinery) over building the K-ring extended mesh?**
