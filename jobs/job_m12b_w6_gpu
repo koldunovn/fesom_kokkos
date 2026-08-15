@@ -70,6 +70,10 @@ leg () {   # $1 arm(off|on)  $2 rep  $3 phasestats(0|1)
   srun "$BIN" "$MESH" "$OUT" "$DT" 300 -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"
   echo "--- arm=$arm rep=$rep ph=$ph exit=$?"
   grep -h "loop timing" "$OUT/run.log" | tail -1
+  # 🔴 trap 6: a NaN leg's wall-clock is not a measurement, and NaN comparisons
+  # leave a min/max reduction's sentinels untouched (L110) — print the final
+  # diagnostic line so every timing leg can be checked for a live ocean.
+  grep -h " it=" "$OUT/run.log" | tail -1 | cut -c1-120
   [ "$arm" = "on" ] && grep -h "ssh_se-wire" "$OUT/run.err" | head -2
   [ "$ph" = "1" ] && grep -hE "phasestat|\bbt\b" "$OUT/run.err" "$OUT/run.log" | tail -12
   return 0
