@@ -67,11 +67,14 @@ GPU, `MINCONN`+`CONTIG`+u30 — the arm with the campaign's largest disturbance,
 `MINCONN` alone is **−14.3 %** there with a disturbance confined to SSH. Switching the call to
 `PartGraphKway` is a few lines.
 
-The campaign has also seen four partitions fail at length (Findings 34, 39, 45) — three from
-`MINCONN`-family arms and one from **the stock shipped recipe itself** (a seed-only re-roll,
-Finding 45). The fragility is a property of repartitioning these meshes at these rank counts,
-not of any particular knob — which is why the adoption procedure below is not optional, for any
-recipe, including re-generating today's defaults with a new seed.
+🔴 **The "fragile partitions" of Findings 34, 39 and 45 do not exist.** Every one of those
+failures was a cold start from a partition-dependent initial condition, and under the
+deterministic fill the same partitions run the full 3,000-step screen: dars `MINCONN` −4.24 %,
+the Finding-45 "killer" `dars_seed660013` −4.53 %, and both NG5 arms that "died" at steps 71 and
+63. Measured cause: the hole-filler starts two partitions of the same mesh **27 PSU apart** in
+salinity (all four meshes; zero under det). The adoption screen below is still worth running —
+partitions can in principle be bad — but it is guarding a far rarer failure than this campaign
+believed, and none of the eight failures it caught was real.
 
 To be fair to the original authors, this is a documented choice rather than an oversight:
 `fort_part.c:328-355` records that `PartGraphRecursive` "resulted in a far better partition than
@@ -87,22 +90,45 @@ Stability = the 3,000-step screen at the target rank count (hard requirement). D
 20-step rms deviation from base, quoted **relative to the spread of ≥3 seed-control re-rolls**
 of the stock recipe on the same mesh.
 
+**The CPU rows below are re-measured under det** (2026-08-15). GPU rows are being re-measured;
+those still carrying legacy numbers are marked.
+
 | mesh | backend | ranks | setting | gain | stability | disturbance vs seed spread |
 |---|---|--:|---|--:|---|---|
-| dars | GPU | 64 | `MINCONN`+`CONTIG`+u30 | **−19.7 %** | ✅ | 🔴 **largest in campaign**: temp rms +13 %, temp max ×1.8–2.5 the class (tier 4 — long twin run before production) |
-| dars | GPU | 64 | `MINCONN` alone | **−14.3 %** | ✅ | ssh rms +11 % only; stopping mechanism (tier 2 — bounded by solver tolerance) |
-| NG5 | GPU | 64 | `MINCONN` | **−9.8 %** | ✅ | ssh rms +8 % only; mechanism ruled out (tier 3 — small, unexplained) |
-| CORE2 | GPU | 4 | `MINCONN` | **−8.1 %** | ✅ | below every control on all three fields (tier 1 — indistinguishable) |
-| fArc | GPU | 16 | `MINCONN`+`CONTIG` | −3.6 % | ✅ | temp rms +33 %, ssh +68 % above a 4-control envelope (tier 4; also the smallest gain measured) |
-| fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.5 %** | ✅ | in class on all three (4 controls) — tier 1 |
-| CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.8 %** | ✅ | in class — tier 1 |
-| dars | CPU | 2048 | **KaMinPar `w=100+nlev`** | **−4.2 %** | ✅ | below every control on temp/salt — tier 1 |
-| ~~dars~~ | ~~CPU~~ | ~~2048~~ | ~~`MINCONN`~~ | ~~−4.5 %~~ | 🔴 **diverges before step 3,000 — unusable** | — |
-| CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | −4.1 % | ✅ (−4.9 % at length) | salt rms +24 % above a 5-control envelope, temp below every control (tier 4, mixed) |
-| CORE2 | CPU | 512 | `UFACTOR=30` alone | −3.8 % | ✅ | in class, ssh below both controls — tier 1 |
-| NG5 | CPU | 2048 | — | **null** | — | — |
+| dars | GPU | 64 | `MINCONN`+`CONTIG`+u30 | ~−19 % *(legacy −19.7; det race running)* | ✅ | re-gating under det |
+| dars | GPU | 64 | `MINCONN` alone | *(legacy −14.3 %)* | ✅ | re-gating under det |
+| NG5 | GPU | 64 | `MINCONN` | *(legacy −9.8 %)* | ✅ | re-gating under det |
+| CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
+| fArc | GPU | 16 | `MINCONN`+`CONTIG` | *(legacy −3.6 %)* | ✅ | re-gating under det |
+| fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.8 %** at length | ✅ 3,000 steps | in class on all three (3 controls) — tier 1 |
+| CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.4 %** at length | ✅ 3,000 steps | in class — tier 1 |
+| CORE2 | CPU | 864 | KaMinPar `w=100+nlev` | **−5.1 %** at length | ✅ 3,000 steps | **at or below every one of 5 controls** — tier 1 (the legacy salt +24 % was the hole-filler) |
+| **dars** | CPU | 2048 | **a fresh seed of the STOCK recipe** | **−4.6 %** | ✅ 3,000 steps | tier 1 — see the dars note below |
+| dars | CPU | 2048 | `MINCONN` | **−4.3 %** at length | ✅ 3,000 steps (the F39 failure was the hole-filler) | tier 1 — no arm distinguishable from a re-roll on any field |
+| CORE2 | CPU | 512 | KaHIP `w=100+nlev` | −3.9 % | ✅ 3,000 steps | tier 1 |
+| CORE2 | CPU | 512 | `UFACTOR=30` alone | **−3.7 %** at length | ✅ 3,000 steps | tier 1 |
+| dars | CPU | 2048 | KaMinPar `w=100+nlev` | −3.6 % | ✅ | tier 1 |
+| NG5 | CPU | 2048 | — | **null** (best arm +0.4 %) | ✅ all four arms run | — |
+
+### 🔴 dars 2048 CPU is a different recommendation from the rest
+
+At every other point the shipped partition is a *good* draw and the gain comes from the knob or
+the engine: a stock-recipe seed re-roll costs **+8…+15 %** at CORE2 864 and **+3…+8 %** at fArc.
+At dars it is the opposite — three independent re-rolls of the stock recipe all beat the shipped
+`dist_2048` by 4.55–4.86 %, and at min-of-3 a plain re-roll (−4.61 %) ties `MINCONN` (−4.27 %)
+inside the repetition spread. The dars baseline is byte-identical to `/pool`'s shipped partition.
+
+⇒ At dars, **re-run the stock partitioner with a different seed**; the knobs add nothing beyond
+that. Elsewhere, use the knob/engine rows and keep the shipped partition as the thing to beat.
 
 ### How to read the disturbance column
+
+🔴 **Every CPU point re-gated under det is tier 1**, and the tier-4 verdicts that removed CORE2
+864 and the dars alternates from the recommendation are gone. The absolute numbers moved by five
+to six orders of magnitude (CORE2 864 salt: 2.24e−1 → 1.43e−7), because the legacy envelopes were
+measuring the initial condition rather than the model's response to the decomposition. Tiers 2–4
+are kept below because the GPU points have not all been re-gated yet — but see the caveat under
+tier 2.
 
 * **Tier 1 — inside (or below) the seed spread.** Adopting this partition disturbs the solution
   no more than re-rolling the METIS seed of the stock recipe, which nobody audits. Nothing to
@@ -112,6 +138,11 @@ of the stock recipe on the same mesh.
   measurably elsewhere *inside the same requested tolerance*. Both runs satisfy the tolerance;
   the difference lives in the solver's own tolerance ball, and tightening the tolerance would
   shrink it. This is a numerics artefact, not a physics bias.
+  🔴 **Caveat (2026-08-15): this mechanism may not survive.** Under det, every leg of every CPU
+  gate re-run so far — arms *and* controls — takes an **identical** CG iteration path for all
+  twenty steps, at CORE2 512, CORE2 864, dars 2048 and CORE2 4 GPU. The differing iteration
+  counts the explanation rests on were a consequence of the legs starting from different states.
+  Whether any iteration-count difference remains at dars 64 and NG5 64 GPU is being measured.
 * **Tier 3 — SSH-only, unexplained.** Same signature as tier 2 but the iteration-count
   mechanism is ruled out (NG5: the winner's CG trace matches the controls exactly). Small and
   confined to one diagnostic field, but without a mechanism it stays labelled unexplained.
@@ -127,20 +158,23 @@ Adding KaMinPar/Mt-KaHyPar to the workflow is a real cost (a build, a graph expo
 injection step — though all offline and once per mesh×N). What it buys, against the best
 METIS-knobs-only arm **at the same point and gate standard**:
 
-| point | best METIS-only arm | its gates | engine premium |
+Re-measured under det, every arm below is tier 1, so the question is purely speed:
+
+| point | best METIS-only arm | engine | verdict |
 |---|---|---|---|
-| CORE2 512 | `UFACTOR=30` −3.8 % | ✅ tier 1 | ≈ 0 pp (KaHIP raced −4.0 %, inside noise) — **skip the engine** |
-| fArc 2048 | `MINCONN` −5.5 % at length | ✅ screen + accuracy (26892880/26892879) | **+2.0 pp** (−7.5 %) — adopter's choice |
-| dars 2048 | slack −3.1 % / `a4` −2.8 % | 🔴 both tier 4 (temp/salt above the 4-control spread); `MINCONN` −4.5 % diverges at length | **engine is the only stable + tier-1 arm** |
+| CORE2 512 | `UFACTOR=30` −3.7 % | KaHIP −3.9 % | ≈ 0.2 pp — **skip the engine** |
+| CORE2 864 | (none raced under det) | KaMinPar **−5.1 %** | the only arm measured; a seed re-roll is +8…+15 % |
+| fArc 2048 | `MINCONN` −5.3 % at length | Mt-KaHyPar **−7.8 %** at length | **+2.5 pp** — worth the workflow cost |
+| dars 2048 | `MINCONN` −4.3 % | KaMinPar −3.6 % | **−0.7 pp — the engine LOSES**; and a plain seed re-roll (−4.6 %) beats both |
 
-On GPU the engines never won a point — `MINCONN` (a plain METIS knob) is the whole GPU story —
-so the engine question is CPU-only. Pattern (Finding 45 block): at dars and fArc the engines are
-simultaneously the fastest arms and the best-behaved in the accuracy gate.
+🔴 **This reverses the campaign's dars conclusion.** The engine was recommended there because
+`MINCONN` "diverged at length" (Finding 39) and the METIS alternates were tier 4 — both artefacts
+of the hole-filler. On the re-measurement the engine is the *slowest* of the three options at
+dars. On GPU the engines never won a point, so the engine question stays CPU-only, and the
+honest summary is now: **the engine is worth a build only at fArc.**
 
-At the NG5 re-race (ladder dt 180) the three alternate arms — `MINCONN`+`CONTIG`, +`UFACTOR=30`,
-and slack — all diverged within 300 steps in both reps while `MINCONN` ran clean at −9.7 %:
-NG5 is the most partition-fragile mesh in the campaign, and the adoption screen is doing exactly
-the work Finding 45 says it must.
+NG5 needs no engine and no knob — all four arms now run and every one is slower than the shipped
+partition (+0.4 to +2.1 %). It is a null point, not a fragile mesh.
 
 ## The two rules that fall out of it
 
@@ -178,22 +212,33 @@ FESOM_PART_KWAY=1 FESOM_PART_OBJ=vol FESOM_PART_VSIZE=1 FESOM_PART_WGT_A=100 \
 FESOM_PART_MINCONN=1 [FESOM_PART_CONTIG=1] [FESOM_PART_UFACTOR=30]
 ```
 
-then, **without exception**:
+**Run cold starts with `FESOM_IC_EXTRAP=det`** — otherwise the initial condition depends on the
+decomposition and neither a timing comparison nor a stability screen means what it appears to
+(measured: two partitions of the same mesh start 27 PSU apart on all four meshes). This is the
+single most important line on the page, and it applies to anyone comparing partitions, not just
+to this campaign.
+
+Then:
 
 1. **Screen at protocol length at the target rank count** — 3,000 steps at the mesh's cold-start
-   ladder dt (CORE2 1800 · fArc 900 · dars 120 · NG5 180).
-2. **If it fails, re-roll `FESOM_PART_SEED` and screen again.** A failing partition is a lottery
-   ticket, not a verdict on the knobs (Finding 34).
-3. `m11_promote` enforces both: it refuses any `dist_N` whose evidence lacks
+   ladder dt (CORE2 1800 · fArc 900 · dars 120 · NG5 180). Cheap, and still the only honest proof
+   that a partition runs.
+2. **If it fails, re-roll `FESOM_PART_SEED` and screen again.**
+3. `m11_promote` enforces the screen: it refuses any `dist_N` whose evidence lacks
    `run=<jobid> steps=>=3000 rc=0` at N ranks.
+
+**Race the seed re-roll as well as the knobs.** At dars a plain re-roll of the stock recipe beats
+every knob (−4.6 %); at CORE2 864 and fArc it is 3–15 % *worse* than the shipped partition. It
+costs one partitioner run to find out which kind of point you have, and nothing else in this
+campaign predicts it.
 
 ### Two things that do NOT work as gates
 
-- **The scorecard.** It is a design aid, never a gate (Findings 18, 34, 37). On NG5 it failed on four arms to
-  identify a partition that destroys the run — every column put a dying arm on the *better* side
-  of a surviving one.
-- **A short smoke run.** The NG5 partition that blows up at step 71 passes a 5-step smoke and
-  would pass a 20-step gate.
+- **The scorecard.** It is a design aid, never a gate (Findings 18, 37). It cannot rank arms on
+  CPU at all, and no column of it predicts the dars seed effect.
+- **A short smoke run.** Unchanged in principle, though the concrete example this rule was
+  written from (an NG5 partition "blowing up at step 71") was the initial condition, not the
+  partition.
 
 ## Renumbering: CORE2 only
 
