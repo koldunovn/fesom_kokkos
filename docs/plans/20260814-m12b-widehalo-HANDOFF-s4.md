@@ -24,50 +24,37 @@ for the whole session, with thirteen jobs queued ahead of ours. Bins: serial
 `fesom_port_serial_4cc9eda4`, cuda `fesom_port_cuda_3a584dc9` (both in
 `/work/ab0995/a270088/port2/m12b/bin/`, shas in `SHA256.m12b`). Tree clean.
 
-## 2. 🔴 FIRST ACTIONS (in order)
+## 2. 🔴 STATE OF THE BOARD — the GPU rows are IN
 
-0. ✅ **DONE in s4 — the W2 CUDA gate PASSED** (26960090): drift nonzero-steps=0, free and off
-   arms both η=2.02 with identical prints, matching the M12 CUDA SE reference. The **W6 GPU pairs
-   are already submitted** on the gate's binary — `26962396` (core2), `26962397` (ng5). So the
-   first action is to **harvest those**: `loop timing` min-of-2 per arm, check the `it=` lines
-   (trap 6), then read the wait-anatomy and bt-imbalance blocks the job prints at the end, and
-   compare with §7's pre-registered band: **−1.5 % … −2.9 %** at CORE2 16N, **−0.35 % … −0.7 %**
-   at NG5 16N. Those bands come from φ (the imbalance share of the bt wait) measured at all three
-   GPU points from the M12 board's own per-rank phasestats — 47 % / 56 % / 31 % — which also
-   **answers deep K with "no"**: at CORE2, K=4 returns the same −2.9 % as K=1 even in the
-   latency-bound limit. If the pairs land in the band, that verdict stands and the track is
-   finished at K=1; if they land outside it, the model is missing something (most likely the GPU
-   pack cost) and §7 needs revisiting before any deep-K conclusion is quoted.
+| point | off | on | Δ |
+|---|---|---|---|
+| CORE2 16N GPU dt1800 M=50 | 0.0841 | 0.0744 | **−11.5 %** |
+| NG5 16N GPU dt180 M=20 | 0.2461 | 0.2469 | +0.3 % (wash) |
+| farc 2048 CPU | 0.0731 | 0.0718 | −1.8 % |
+| dars 8192 CPU | 0.0976 | 0.0980 | +0.4 % (wash) |
 
-1. *(superseded)* If for any reason `26960090` needs re-running, harvest
-   `/work/ab0995/a270088/port2/m12b/w2cu_26960090.out`: gate = `drift nonzero-steps=0` and
-   healthy `it=` lines on all three arms. It is the FIRST-EVER CUDA run of the `ELEM2D_FULL`
-   device-halo path and of the F-reconcile's per-step host round-trip — a crash there is
-   diagnostic, not noise. If it has been cancelled or never ran, resubmit:
-   `sbatch --export=ALL,BIN=/work/ab0995/a270088/port2/m12b/bin/fesom_port_cuda_3a584dc9 jobs/job_m12b_w2cuda`
-2. **GREEN → the W6 GPU pairs**, the points the whole track was built for (CORE2 16N bt = 7.8 ms
-   busy + 11.8 ms MPI wait of an 84 ms step):
-   `sbatch --export=ALL,POINT=core2,BIN=/work/ab0995/a270088/port2/m12b/bin/fesom_port_cuda_3a584dc9 jobs/job_m12b_w6_gpu`
-   and the same with `POINT=ng5`. 16 nodes each = AT the gpu cap; do not exceed it.
-   🔴 Pin ONE binary for both arms of a pair. `3a584dc9` and s3's `674a53bc` differ only by the
-   s4 startup census (byte-inert, proven on Serial), but never mix them inside a pair.
-   - Drift small+flat but nonzero → judge against the SE CUDA floor (η ~1e-3,
-     `docs/REFERENCE_RUNS.md`) before touching anything; `GEOCHK=2` probes work on CUDA too.
-   - Drift GROWING → stop, do not run perf; instrument as in s3 (probe the READS, both
-     components, halo-vs-owner).
-3. **Run `scripts/m12b_wait_anatomy.py off=<off_ph1_dir> on=<on_ph1_dir>` on the W6 GPU pair's
-   phasestats legs.** This is the s4 finding that reframes the whole deep-K question: on CPU the
-   bt wait's elasticity to the exchange count is only **0.17–0.21**, because a quarter to a half
-   of that "wait" is the block's own load imbalance (a rank's wait correlates with its own busy
-   at −0.6) and even the busiest rank's floor has elasticity ~0.45. If the GPU behaves the same
-   way, the rung is a ~2 % lever there and deep K is not worth building; if the GPU is
-   latency-bound, K=2–4 buys another ~40 % over K=1. §7 has the pre-registered decision rule
-   (build the extended-mesh layer only if the GPU floor elasticity ≥0.7 and imbalance share
-   ≤0.3) and a pre-registered prediction band for the CORE2 16N pair itself: **−2.1 % to −6.6 %**.
-4. **Harvest the M-sweep 26952126/27** — the independent check of the same elasticity on the
-   baseline `se0`.
-5. Then the deep-K decision (§7 has the arithmetic; it needs exactly the W6 GPU numbers). The
-   Sergey packet is already updated (addendum 2 in `docs/report/M12_SERGEY_PACKET.md`).
+The W2 CUDA gate passed first (drift 0.000000e+00 every step). All eight GPU timing legs are alive
+and end at the same physical state per point. **The rung ships as a GPU recommendation at
+small-per-rank-size points** — the payoff is a per-rank-size law, not a mesh law, and it sits at
+the strong-scaling limit.
+
+### FIRST ACTIONS
+
+1. **Read §7b before quoting anything from §7.** The pre-registered band was −1.5…−2.9 % at
+   CORE2 16N and the measurement was −11.5 %. The failed term is named (bt_busy, calibrated on
+   CPU where the pack is a memcpy; on GPU the pack is kernels+copies and lands in busy at ~51 µs
+   per exchange). §7's own prediction table is marked SUPERSEDED — do not quote it.
+2. **The deep-K "no" is RETRACTED (§7c).** Rebuilt on the measured staging law, K=2–4 plausibly
+   adds ~3 more points at CORE2 16N. It is a two-point extrapolation. Before any §4
+   extended-mesh build, run the cheap test: a **k-periodic η exchange arm** (exchange every k
+   substeps using the existing ring-1 data) traces the staging curve at K=2 and 4 with no new
+   mesh layer. That is the highest-value next job in this track.
+3. **CORE2 4N GPU is the obvious missing row** (census says +2.0 % ring cost, bt is 21 % of the
+   step, 7 928 nodes/rank — between the two measured points). `sbatch --nodes=4 --ntasks=16
+   --export=ALL,POINT=core2,BIN=/work/ab0995/a270088/port2/m12b/bin/fesom_port_cuda_674a53bc
+   jobs/job_m12b_w6_gpu` would place the per-rank-size law on a third GPU point.
+4. Then the write-up: the M12b recommendation, and the Sergey packet's addendum 2 needs its
+   GPU paragraph replaced with the measured board.
 
 ## 3. What session 4 added
 
