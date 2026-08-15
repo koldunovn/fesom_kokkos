@@ -85,6 +85,16 @@ NG5   & 7\,402\,886 & 14\,827\,217 & 70 & 180\,s \\
 \end{tabular}
 \end{center}
 
+\textbf{Initial conditions.} All runs are cold starts from the PHC winter climatology. The nodes it
+leaves empty --- the marginal seas --- are conventionally filled by a Gauss-Seidel sweep run to
+exhaustion on each process between halo exchanges, first value winning, which makes the result
+depend on the decomposition. Since every point of a scaling curve uses a different decomposition,
+the points of one curve would not start from the same ocean. We therefore use a
+decomposition-independent fill throughout, and checked that it is one: the largest
+pressure-gradient force after one step varies by factors of 1.8 to 2.5 across the process counts of
+a single curve under the conventional fill, and is constant under ours. Running the whole fleet
+both ways changes no verdict's sign and moves the model-step figures by at most 1.1 points.
+
 \section*{3. Why the sub-cycle is expensive}
 
 One model step performs 120 ice-velocity halo exchanges, each moving very little data, with very
@@ -179,13 +189,13 @@ same schedule, gives:
 change of the sea-ice cost at $K$=8, & CORE2 & fArc & DARS & NG5 \\
 each mesh at its operating point & 1 node / 4 GPUs & 4 / 16 & 8 / 32 & 16 / 64 \\
 \midrule
-reference: sea-ice cost per step             & 15.8\,ms & 26.1\,ms & 43.3\,ms & 39.5\,ms \\
-wide halo, standard form, ring kernels       & $-11.4\%$ & $-10.0\%$ & $-24.3\%$ & $-13.4\%$ \\
-wide halo, divergence form, ring kernels     & $+1.9\%$  & $-6.1\%$  & $-28.4\%$ & $-16.7\%$ \\
-\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.0\%}$ & $\mathbf{-36.8\%}$ & $\mathbf{-43.4\%}$ & $\mathbf{-35.2\%}$ \\
-\textbf{wide halo, divergence form, widened loops} & $\mathbf{-58.2\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.1\%}$ & $\mathbf{-44.1\%}$ \\
+reference: sea-ice cost per step             & 15.4\,ms & 26.3\,ms & 43.0\,ms & 38.7\,ms \\
+wide halo, standard form, ring kernels       & $-10.4\%$ & $-11.4\%$ & $-22.8\%$ & $-11.1\%$ \\
+wide halo, divergence form, ring kernels     & $+7.8\%$  & $-5.7\%$  & $-28.1\%$ & $-15.5\%$ \\
+\textbf{wide halo, standard form, widened loops}   & $\mathbf{-57.1\%}$ & $\mathbf{-36.9\%}$ & $\mathbf{-43.0\%}$ & $\mathbf{-33.3\%}$ \\
+\textbf{wide halo, divergence form, widened loops} & $\mathbf{-57.8\%}$ & $\mathbf{-43.3\%}$ & $\mathbf{-50.2\%}$ & $\mathbf{-42.6\%}$ \\
 \midrule
-best widened-loop row, as a share of the model step & $-14.4\%$ & $-9.6\%$ & $-12.7\%$ & $-6.8\%$ \\
+best widened-loop row, as a share of the model step & $-13.9\%$ & $-9.9\%$ & $-12.5\%$ & $-6.6\%$ \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -200,9 +210,10 @@ step, and the \emph{owned} kernels speed up as well, their launch gap falling fr
 1.3\,$\mu$s --- the constant-memory staging had been serialising its neighbours too.
 
 \textbf{Your reformulation wins once the launch structure is removed, and we had been measuring
-past it.} With ring kernels the standard form leads by 13.3 points of ice cost on CORE2 and 3.8 on
-fArc, the divergence form leading only on DARS (4.2). With widened loops the divergence form leads
-at all four meshes, and its lead is ordered by how much mesh each GPU holds: 1.3, 6.5, 6.7 and 8.9
+past it.} With ring kernels the standard form leads by 18.2 points of ice cost on CORE2 and 5.7 on
+fArc, while the divergence form leads on the two large meshes, by 5.3 on DARS and 4.4 on NG5. With
+widened loops the divergence form leads
+at all four meshes, and its lead is ordered by how much mesh each GPU holds: 0.7, 6.5, 7.2 and 9.3
 points of ice cost against 32, 40, 99 and 116 thousand surface nodes per GPU. That is what a halved
 nodal message should produce, and it is monotone across the four. It is ahead at every $K$ we tried
 as well. It is not a law over every configuration, though: a scaling sweep across node counts
@@ -245,31 +256,31 @@ result. As a check on the whole fleet, the three points it shares with the opera
 Sect.~5.3 reproduce it to between 0.2 and 0.8\%, on different days and in different allocations.
 
 \textbf{On GPU the sea ice does not scale.} For the standard scheme its cost per step is flat or
-rising with node count on every mesh. In milliseconds per step: CORE2 15.6, 15.0, 22.9, 24.4, 34.0
-at 1 to 16 nodes; fArc 24.7, 27.9, 26.3, 28.0, 26.9; DARS 38.8, 34.1, 43.4, 43.0 at 2 to 16; NG5
-48.7, 42.8, 47.9, 39.1. The ocean around it scales normally, which is why the model step still
+rising with node count on every mesh. In milliseconds per step: CORE2 15.7, 15.2, 22.8, 23.8, 33.7
+at 1 to 16 nodes; fArc 24.4, 28.0, 26.3, 28.0, 27.0; DARS 38.5, 34.0, 43.3, 43.2 at 2 to 16; NG5
+48.8, 42.3, 46.8, 39.0. The ocean around it scales normally, which is why the model step still
 falls --- and which is exactly why the step is the wrong measure here. Adding GPUs buys nothing on
 the ice and on the smaller meshes costs.
 
 \textbf{Written as widened loops the wide halo lowers that cost and partly restores its scaling.}
 In the divergence form the ice cost \emph{falls} with node count where the standard scheme's rises:
-fArc 16.9, 15.0, 13.5, 12.8\,ms at 2 to 16 nodes, DARS 26.9, 21.6, 21.5, 21.1, NG5 34.2, 26.0,
-25.6, 22.1. On CORE2 it still rises, but from 6.5\,ms instead of 15.6 and less than half as
+fArc 17.1, 15.0, 13.3, 12.8\,ms at 2 to 16 nodes, DARS 27.0, 21.8, 21.8, 21.3, NG5 34.3, 25.9,
+25.5, 22.0. On CORE2 it still rises, but from 6.5\,ms instead of 15.7 and less than half as
 steeply.
 
 \textbf{The saving therefore grows with the number of GPUs}, which is the opposite of how an
 optimisation usually ages, and is the reason a table at one node count per mesh understates the
 scheme. In the divergence form, comparing each mesh's smallest and largest node count, it goes from
-$-58$ to $-65\%$ of the ice cost on CORE2, $-40$ to $-52\%$ on fArc, $-31$ to $-51\%$ on DARS and
+$-59$ to $-65\%$ of the ice cost on CORE2, $-39$ to $-53\%$ on fArc, $-30$ to $-51\%$ on DARS and
 $-30$ to $-44\%$ on NG5. The individual points are not perfectly monotone --- CORE2 dips to
-$-49\%$ at 2 nodes and NG5 peaks at $-47\%$ at 8 --- but every mesh ends better than it starts.
+$-51\%$ at 2 nodes and NG5 peaks at $-46\%$ at 8 --- but every mesh ends better than it starts.
 
-\textbf{On CPU the sea ice scales cleanly} --- on fArc 91.9\,ms at 1 node down to 10.4 at 16 ---
-and the wide halo is a uniform penalty, between $+46$ and $+173\%$ of the ice cost across all
-fourteen points measured, which is $+2.9$ to $+22\%$ of the model step. There is no node count at
-which it becomes profitable. Two intended CPU points are absent: DARS on one node exhausts memory
-(3.2 million surface nodes do not fit in one 128-core node), and NG5 on four nodes exceeded its
-time limit and is being repeated.
+\textbf{On CPU the sea ice scales cleanly} --- on fArc 94.5\,ms at 1 node down to 10.5 at 16 ---
+and the wide halo is a uniform penalty, between $+41$ and $+172\%$ of the ice cost across all
+fifteen points measured, which is $+2.2$ to $+22\%$ of the model step. There is no node count at
+which it becomes profitable. Three intended CPU points are absent, all for the same reason ---
+the mesh does not fit in the memory of one or two 128-core nodes: DARS on one node (3.2 million
+surface nodes), and NG5 on one and on two (7.4 million).
 
 \begin{figure}[tb]
 \centering
