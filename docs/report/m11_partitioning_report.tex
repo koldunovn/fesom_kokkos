@@ -385,9 +385,12 @@ a single neighbour as reassignment candidate, and update METIS to 5.2.1.
 For runs on the machines measured here: use \minconn\ on GPU, and decide \contig\ and
 \texttt{UFACTOR} by a timing run, since they help on some meshes and cost on others. On CPU
 use KaMinPar or Mt-KaHyPar with $w = 100 + \mathrm{nlev}$, or \texttt{UFACTOR=30} if adding a
-partitioning program to the workflow is not worth it (at CORE2 512 the two are equal; at DARS
-2{,}048 the program is 1.1 percentage points better and the only candidate that both ran
-3{,}000 steps and stayed inside the seed scatter). Hilbert renumbering is worth taking on
+partitioning program to the workflow is not worth it: at CORE2 512 the two are equal, at fArc
+the program is 2.5 percentage points better, and at DARS 2{,}048 the program is the
+\emph{slowest} of the options --- there, regenerating the shipped partition with a new random
+seed ($-4.6\,\%$) is as good as anything and costs one partitioner run. That is specific to
+DARS; on CORE2 864 and fArc a new seed is 3--15\,\% slower than the shipped partition, so test
+it rather than assume it either way. Hilbert renumbering is worth taking on
 CORE2-class meshes where re-establishing the reference solutions is acceptable. Quantities
 computed from a partition are useful for designing candidates and useless for accepting them:
 acceptance is the 3{,}000-step run plus the comparison of Section~6.
@@ -399,12 +402,16 @@ and DARS 2{,}048 --- are packaged as mesh directories that carry their own run r
 DARS and NG5 64-GPU partitions can be packaged the same way. What remains is the upstream pull
 request.
 
-Two questions are open. Whether an interconnect with working GPU-direct communication prices
+One question is open. Whether an interconnect with working GPU-direct communication prices
 messages like the A100 fabric or like the GH200 test system decides how much of the GPU gain
-transfers to JUPITER, and only a measurement there will settle it. And for the three
-candidates whose temperature or salinity difference exceeds the seed scatter --- among them the
-largest gain measured, $-19.7\,\%$ on DARS --- a long paired integration would show whether the
-difference matters at climate scale.
+transfers to JUPITER, and only a measurement there will settle it.
+
+The question that dominated the first version of this report --- whether the candidates with
+large temperature or salinity excursions were safe to use --- has been answered by removing
+the excursions: they were the decomposition-dependent initial condition of Section~5. Every
+recommended candidate now lies inside the seed scatter, so none of them carries a specific
+reason for a long paired integration beyond the general one that applies to any change of
+partition. All measurements in this report were made under \texttt{FESOM\_IC\_EXTRAP=det}.
 
 \vspace{4pt}
 \noindent\textit{Job ids for every number quoted here, and the full record of the experiments,
