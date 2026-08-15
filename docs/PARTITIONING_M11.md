@@ -3377,14 +3377,18 @@ solver-tolerance scatter, not the artefact.
 penalty reproducing exactly (−0.15 %), all arms at or below the four-control top on every field,
 identical CG paths. Tier 1, as before.
 
-### ⚠️ A new failure mode, and it is NOT the initial condition
+### ⚠️ A silent 46-minute hang on fArc 16 GPU — investigated, NOT a partition property
 
 On fArc 16 GPU the `MINCONN`+`CONTIG`+`UFACTOR=30` arm **entered the timestep loop and hung
 silently for 46 minutes** (job 26968997) while the other three legs each finished in 90 seconds.
-No output, no abort, no NaN — it simply stopped. That is unlike every failure this campaign
-catalogued: those were divergences and blow-ups, which are loud, and all of them were the IC.
-The same arm runs fine at dars 64 GPU (it is the −18.5 % winner there). Probe with per-50-step
-printing: 26970464. It does not affect the recommended fArc arm (`MINCONN`+`CONTIG`).
+No output, no abort, no NaN. That is unlike every failure this campaign catalogued — those were
+divergences and blow-ups, which are loud.
+
+**It does not reproduce.** Probe 26970464, same arm, same mesh, same rank count, two repetitions:
+0.1184 s/step both times, spread 0.0 % (+0.34 % vs base, i.e. a null arm). ⇒ a transient — a
+fabric or node stall — not a property of the partition. Recorded so the next person who sees a
+silent GPU hang knows it has been seen once, did not repeat, and cost 46 minutes of walltime;
+budget re-runs accordingly rather than treating it as a result.
 
 ### NG5 64 GPU, partial gate (26969071 timed out at leg 7 of 8; two controls, indicative only)
 
