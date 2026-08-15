@@ -3429,3 +3429,24 @@ cost ever matters, but loosening it re-introduces the fronts the relaxation exis
 
 The two arms the campaign recorded as diverging at the ladder dt now run to 300 steps and are
 simply slower than the winner. Completion race (base + the two best arms, 2 reps): 26975543.
+
+### fArc 16 GPU under det — and why the headline is the MEDIAN, not the min
+
+Three baseline repetitions across two jobs (26968997 rep 1, 26970463 reps 1–2) and the arms
+measured in both:
+
+| leg | reps | min | median | vs base (min) | vs base (median) |
+|---|---|--:|--:|--:|--:|
+| base | 0.1199 · 0.1175 · 0.1204 | 0.1175 | 0.1199 | — | — |
+| `MINCONN`+`CONTIG` | 0.1153 · 0.1152 · 0.1152 | 0.1152 | 0.1152 | −1.96 % | **−3.9 %** |
+| `MINCONN` | 0.1161 · 0.1160 · 0.1155 | 0.1155 | 0.1160 | −1.28 % | −3.3 % |
+
+The arms reproduce to **0.1 %** across independent jobs while the baseline spans **2.0 %**, which
+is exactly the condition Finding 43's correction names: min-of-N rewards the noisier leg, so one
+lucky baseline repetition sets the reference and the arms read too small. By the median the
+winner is **−3.9 %**, consistent with the legacy −3.6 %.
+
+⇒ **fArc 16 GPU: −3.9 %, tier 1.** It was the campaign's only outright accuracy failure
+("both arms above a four-control temperature envelope, the winner 68 % above the ssh envelope,
+not recommended"); under det the winner has the lowest temperature deviation of any leg in its
+gate. Both halves of that verdict — the speed and the accuracy — were re-earned.
