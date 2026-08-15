@@ -103,7 +103,7 @@ those still carrying legacy numbers are marked.
 | **dars** | GPU | 64 | **`MINCONN`+`CONTIG`+u30** | **−18.5 %** (legacy −18.6) | ✅ | **tier 1 — the LOWEST temp deviation of any leg incl. 5 controls; temp max below the class; identical CG paths.** The legacy "largest disturbance in the campaign" was the hole-filler |
 | dars | GPU | 64 | `MINCONN` alone | **−12.9 %** (legacy −13.6) | ✅ | temp/ssh in class, salt +12 % over a tight 5-control top — tier 1/2 boundary |
 | CORE2 | GPU | 4 | `MINCONN` | **−7.1 %** (legacy −8.1) | ✅ | at or below the 4-control top on temp/salt/ssh, identical CG paths — **tier 1** |
-| NG5 | GPU | 64 | `MINCONN` | **−9.6 %** (legacy −9.7) | ✅ | partial gate: below both controls on temp, in class on ssh — the legacy tier-3 ssh excursion is gone (4-control gate running) |
+| NG5 | GPU | 64 | `MINCONN` | **−9.6 %** (legacy −9.7) | ✅ | **tier 1 — in class on temp, salt AND ssh against 4 controls, identical CG paths.** The legacy tier-3 ssh excursion was the hole-filler |
 | fArc | GPU | 16 | `MINCONN`+`CONTIG` | **−3.9 %** by median (legacy −3.6) | ✅ | **tier 1 — lowest temp deviation of any leg incl. 3 controls.** The legacy "FAILED on accuracy" (temp +33 %, ssh +68 %) was the hole-filler |
 | fArc | CPU | 2048 | Mt-KaHyPar `w=100+nlev` | **−7.8 %** at length | ✅ 3,000 steps | in class on all three (3 controls) — tier 1 |
 | CORE2 | CPU | 512 | Hilbert renumbering + engine | **−5.4 %** at length | ✅ 3,000 steps | in class — tier 1 |
@@ -128,12 +128,27 @@ that. Elsewhere, use the knob/engine rows and keep the shipped partition as the 
 
 ### How to read the disturbance column
 
-🔴 **Every CPU point re-gated under det is tier 1**, and the tier-4 verdicts that removed CORE2
-864 and the dars alternates from the recommendation are gone. The absolute numbers moved by five
-to six orders of magnitude (CORE2 864 salt: 2.24e−1 → 1.43e−7), because the legacy envelopes were
-measuring the initial condition rather than the model's response to the decomposition. Tiers 2–4
-are kept below because the GPU points have not all been re-gated yet — but see the caveat under
-tier 2.
+🔴🔴 **Every point, both backends, is now tier 1 — the tier system has no occupants left among
+the recommended arms.** Re-gated under det with ≥3 demonstrated-distinct seed controls: CORE2 512,
+CORE2 864, fArc 2048 CPU, dars 2048 CPU, CORE2 4 GPU, fArc 16 GPU, dars 64 GPU, NG5 64 GPU. The
+absolute differences fell by five to six orders of magnitude (CORE2 864 salt: 2.24e−1 → 1.43e−7),
+because the legacy envelopes were measuring the initial condition rather than the model's response
+to the decomposition, and in every gate re-run the arms and the controls take an **identical CG
+iteration path** for all twenty steps.
+
+Every accuracy objection this campaign raised has been traced to the same cause:
+
+| legacy verdict | point | under det |
+|---|---|---|
+| tier 4, withdrawn, "largest disturbance in the campaign" | dars 64 GPU u30 | tier 1 — lowest temp deviation of any leg incl. controls |
+| tier 4, "FAILED on accuracy, not recommended" | fArc 16 GPU | tier 1 — lowest temp deviation of any leg |
+| tier 4, removed from the recommendation | CORE2 864 CPU | tier 1 — at or below all 5 controls |
+| tier 4, engine preferred on behaviour | dars 2048 CPU alternates | tier 1 |
+| tier 3, "small and unexplained" | NG5 64 GPU | tier 1 — in class on all three fields |
+| tier 2, "stopping mechanism" | dars 64 GPU `MINCONN` | mechanism does not arise |
+
+The tier definitions are kept below for reference and for anyone re-deriving this on another
+mesh; the caveat under tier 2 now applies everywhere.
 
 * **Tier 1 — inside (or below) the seed spread.** Adopting this partition disturbs the solution
   no more than re-rolling the METIS seed of the stock recipe, which nobody audits. Nothing to
