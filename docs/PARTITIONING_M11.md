@@ -3345,3 +3345,43 @@ count back up) reproduces exactly.
 Gate 26961547, four seed controls: every arm at or below the control top on temp, salt and ssh,
 and **every leg — arms and controls — takes an identical CG iteration path for all twenty steps.**
 Tier 1, and now for a defensible reason rather than a wide envelope.
+
+## 🔴🔴 The GPU points under det: the two tier-4 rejections were both the hole-filler
+
+**dars 64 GPU — the campaign's largest gain is tier 1.** Race 26968998 (min-of-2, spreads
+0.1–0.3 %): `MINCONN`+`CONTIG`+`UFACTOR=30` **−18.48 %** (legacy −18.64 raced / −19.70 at
+length), `MINCONN` −12.94 %, `MINCONN`+`CONTIG` −11.57 %. Gate 26969047, five seed controls:
+
+| field | control range | `MINCONN` | +`CONTIG` | **+u30** (the −18.5 % arm) |
+|---|--:|--:|--:|--:|
+| temp | 2.88–5.86e−8 | 5.66e−8 | 6.12e−8 | **2.48e−8 — the LOWEST leg in the gate** |
+| salt | 1.03–2.13e−8 | 2.39e−8 | 2.54e−8 | **1.52e−8 — in class** |
+| ssh  | 1.21–1.38e−9 | 1.30e−9 | 1.29e−9 | 1.38e−9 — at the top |
+
+The u30 arm was withdrawn as "the campaign's largest disturbance: temp rms +13 %, temp max
+×1.8–2.5 the class (tier 4 — long twin run before production)". Under det its temperature
+deviation is the smallest of any leg *including the controls*, and its temp MAX is 6.2e−5
+against controls up to 3.3e−4 — below the class, not above it. Every leg, arms and controls,
+takes an identical CG iteration path for all twenty steps, so the tier-2 stopping mechanism does
+not arise here either. **−18.5 % at tier 1.**
+
+**fArc 16 GPU — the "FAILED on accuracy" verdict is also gone.** Gate 26969048, three controls:
+every arm inside or below the control range on temp and salt, and the winner
+`MINCONN`+`CONTIG` has the lowest temperature deviation of any leg (2.78e−6 vs controls
+5.73–7.96e−6). Legacy: temp +33 %, ssh +68 % above a four-control envelope, "not recommended, on
+accuracy, not speed". Only `+UFACTOR=30` (not the recommended arm) is meaningfully above on ssh
+(+32 %), and here iteration counts do differ by ±1 across arms *and* controls — ordinary
+solver-tolerance scatter, not the artefact.
+
+**CORE2 4 GPU** (race 26961428, gate 26961547): `MINCONN` −7.08 % (legacy −8.06), the `CONTIG`
+penalty reproducing exactly (−0.15 %), all arms at or below the four-control top on every field,
+identical CG paths. Tier 1, as before.
+
+### ⚠️ A new failure mode, and it is NOT the initial condition
+
+On fArc 16 GPU the `MINCONN`+`CONTIG`+`UFACTOR=30` arm **entered the timestep loop and hung
+silently for 46 minutes** (job 26968997) while the other three legs each finished in 90 seconds.
+No output, no abort, no NaN — it simply stopped. That is unlike every failure this campaign
+catalogued: those were divergences and blow-ups, which are loud, and all of them were the IC.
+The same arm runs fine at dars 64 GPU (it is the −18.5 % winner there). Probe with per-50-step
+printing: 26970464. It does not affect the recommended fArc arm (`MINCONN`+`CONTIG`).
