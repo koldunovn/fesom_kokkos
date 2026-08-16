@@ -74,6 +74,31 @@ echo "mesh : $MESH/dist_$N"
 echo "nodes: $SLURM_JOB_NODELIST"
 md5sum "$BIN"
 [ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
+
+# 🔴 WSPLIT MUST BE DECLARED — it is not allowed to be silently absent (rule 0.41).
+# A cold PHC start at the protocol dt rides a CFL blow-up on the big meshes; the onset step is
+# ROUNDOFF-SEEDED (CUDA atomics vs serial order, rank count), so it moves with the backend and the
+# rank count and a leg can die anywhere from step 4 to step 291. M5.24 found it, M7 re-confirmed it
+# as rule 0.41 ("'dt180 stable' was only ever a 35-step statement"), and the discriminator settled
+# the cure: Fortran WITHOUT wsplit dies in the same window (rc=1, NaN after 261 CFLz warnings),
+# Fortran WITH wsplit completes. Production practice on large meshes always runs it.
+# Every leg of this campaign ran with it OFF and nothing in the log said so, which is why NG5 lost
+# its whole GPU arm (7 of 37 legs survived) and it read as a new CG bug. So: declare it, either way.
+#   WSPLIT=1  the documented cure (FESOM_WSPLIT=1 on BOTH arms — it is a configuration, not a lever)
+#   WSPLIT=0  the historical configuration, knowingly unstable on a cold start at protocol dt
+# The value is stamped into cfg= so a wsplit-on row can never be compared against a wsplit-off one.
+case "${WSPLIT:-unset}" in
+    1) WSPLIT_TAG=wsplit1 ;;
+    0) WSPLIT_TAG=wsplit0 ;;
+    *) echo "REFUSE: WSPLIT is not set."
+       echo "  WSPLIT=1 -> FESOM_WSPLIT=1 on both arms (the cure; see rule 0.41)"
+       echo "  WSPLIT=0 -> run without it, knowingly (what every pre-2026-08-16 M14 point did)"
+       echo "  This is deliberate: the source itself refuses to guess a wsplit value"
+       echo "  (src/fesom_ale.cpp:279), and so does the harness."
+       exit 2 ;;
+esac
+echo "wsplit    : $WSPLIT_TAG"
+
 if [ -n "${BEST_MESH:-}" ]; then
     echo "best mesh : $BEST_MESH/dist_$N   (partition lever)"
     [ -d "$BEST_MESH/dist_$N" ] || { echo "REFUSE: $BEST_MESH/dist_$N does not exist"; exit 2; }
@@ -81,10 +106,11 @@ fi
 
 clean_env () {
     unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
-    for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+    for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE FESOM_WSPLIT; do
         while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
     done
     export FESOM_SPEED=1 FESOM_IC_EXTRAP=det      # both arms
+    [ "$WSPLIT_TAG" = wsplit1 ] && export FESOM_WSPLIT=1   # a configuration, both arms
     # BASE_KNOBS applies to BOTH arms. It exists for two reasons, both experimental hygiene:
     #  (1) a lever that REQUIRES a configuration (SE needs FESOM_ALE=zstar, the M9 ice lever needs
     #      FESOM_WHICH_EVP=1) must have that configuration on BOTH sides, or the pair measures the
@@ -141,7 +167,7 @@ else
 fi
 
 echo; echo "=== result ==="
-python3 - "$OUT/legs.txt" "$POINT" "$N" "${BASE_KNOBS:-}" <<'PY'
+python3 - "$OUT/legs.txt" "$POINT" "$N" "${BASE_KNOBS:-}" "$WSPLIT_TAG" <<'PY'
 import sys, collections
 d=collections.OrderedDict()
 for ln in open(sys.argv[1]):
@@ -157,5 +183,6 @@ if 'base' in d and 'best' in d:
 # shared configuration differs: farc 4096 measured 0.0686 on the paper config (linfs+std EVP) and
 # 0.0626 on the production config (zstar+mEVP) -- 8.7% apart, and indistinguishable without this.
 cfg = (sys.argv[4] or "paper").replace(" ", "+") if len(sys.argv) > 4 else "paper"
+cfg += "+" + sys.argv[5] if len(sys.argv) > 5 else "+wsplit?"
 print(f"CSV {sys.argv[2]},{sys.argv[3]},cfg={cfg}," + ",".join(f"{k}={min(v):.4f}" for k,v in d.items()))
 PY

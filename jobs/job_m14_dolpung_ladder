@@ -72,6 +72,31 @@ md5sum "$BIN"
 [ -n "$BASE_KNOBS" ] && echo "base knobs: $BASE_KNOBS"
 [ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
 
+# 🔴 WSPLIT MUST BE DECLARED — it is not allowed to be silently absent (rule 0.41).
+# A cold PHC start at the protocol dt rides a CFL blow-up on the big meshes; the onset step is
+# ROUNDOFF-SEEDED (CUDA atomics vs serial order, rank count), so it moves with the backend and the
+# rank count and a leg can die anywhere from step 4 to step 291. M5.24 found it, M7 re-confirmed it
+# as rule 0.41 ("'dt180 stable' was only ever a 35-step statement"), and the discriminator settled
+# the cure: Fortran WITHOUT wsplit dies in the same window (rc=1, NaN after 261 CFLz warnings),
+# Fortran WITH wsplit completes. Production practice on large meshes always runs it.
+# Every leg of this campaign ran with it OFF and nothing in the log said so, which is why NG5 lost
+# its whole GPU arm (7 of 37 legs survived) and it read as a new CG bug. So: declare it, either way.
+#   WSPLIT=1  the documented cure (FESOM_WSPLIT=1 on BOTH arms — it is a configuration, not a lever)
+#   WSPLIT=0  the historical configuration, knowingly unstable on a cold start at protocol dt
+# The value is stamped into cfg= so a wsplit-on row can never be compared against a wsplit-off one.
+case "${WSPLIT:-unset}" in
+    1) WSPLIT_TAG=wsplit1 ;;
+    0) WSPLIT_TAG=wsplit0 ;;
+    *) echo "REFUSE: WSPLIT is not set."
+       echo "  WSPLIT=1 -> FESOM_WSPLIT=1 on both arms (the cure; see rule 0.41)"
+       echo "  WSPLIT=0 -> run without it, knowingly (what every pre-2026-08-16 M14 point did)"
+       echo "  This is deliberate: the source itself refuses to guess a wsplit value"
+       echo "  (src/fesom_ale.cpp:279), and so does the harness."
+       exit 2 ;;
+esac
+echo "wsplit    : $WSPLIT_TAG"
+
+
 leg () {                        # leg <arm> <index>
     local arm=$1 idx=$2
     local out="$OUT/${idx}_${arm}"
@@ -80,6 +105,7 @@ leg () {                        # leg <arm> <index>
     [ "$arm" = best ] && extra="$BEST_KNOBS"
     srun -c72 --distribution=block:block bash -c "
         export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_IC_EXTRAP=det
+        $([ "$WSPLIT_TAG" = wsplit1 ] && printf 'export FESOM_WSPLIT=1; ')
         $(for kv in $BASE_KNOBS $extra; do printf 'export %s; ' "$kv"; done)
         exec $BIN $MESH $out $DT $NSTEPS -1 $PHC 1958" > "$out/run.log" 2>&1
     local rc=$?
@@ -107,5 +133,5 @@ echo; echo "=== result ==="
 awk '{a[$1]=(a[$1]==""||$2<a[$1])?$2:a[$1]; n[$1]++}
      END{ for(k in a) printf "  %-5s min=%.4f (%d legs)\n", k, a[k], n[k];
           if (a["base"]!="" && a["best"]!="") printf "  GAIN = %+.2f%%\n", (a["best"]-a["base"])/a["base"]*100;
-          printf "DCSV %s,%s,", MESH, N; for(k in a) printf "%s=%.4f,", k, a[k]; printf "\n" }' \
-     MESH="$POINT" N="$N" "$OUT/legs.txt"
+          printf "DCSV %s,%s,cfg=%s,", MESH, N, CFG; for(k in a) printf "%s=%.4f,", k, a[k]; printf "\n" }' \
+     MESH="$POINT" N="$N" CFG="${BASE_KNOBS:-paper}+$WSPLIT_TAG" "$OUT/legs.txt"

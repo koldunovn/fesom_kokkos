@@ -127,7 +127,12 @@ def harvest():
 
     def add(plat, mesh, units, job, lever, txt, pat):
         fam, detail = classify(txt)
-        r = dict(plat=plat, mesh=mesh, units=units, job=job, lever=lever, fam=fam, detail=detail)
+        # The wsplit state is part of the CONFIGURATION, not a lever, so two rows measured with
+        # it on and off are not repeats of each other. Runs predating the 2026-08-16 harness guard
+        # carry no line at all; they are all wsplit-off, tagged `wsplit?` to keep that visible.
+        w = re.search(r"^wsplit\s*: (\w+)", txt, re.M)
+        r = dict(plat=plat, mesh=mesh, units=units, job=job, lever=lever, fam=fam, detail=detail,
+                 wsplit=w.group(1) if w else "wsplit?")
         for arm in ("base", "best"):
             m = re.search(pat.format(arm=arm), txt)
             if m and float(m.group(1)) > 0:
@@ -163,6 +168,22 @@ def harvest():
         add("gh200", m.group(1), int(m.group(2)), os.path.basename(f), _lever(txt), txt,
             r"\n\s+{arm}\s+min=([\d.]+)")
     return recs
+
+
+def check_wsplit(recs):
+    """A curve must not silently merge a wsplit-on measurement with a wsplit-off one."""
+    seen = collections.defaultdict(set)
+    for r in recs:
+        seen[(r["plat"], r["mesh"], r["units"])].add(r["wsplit"])
+    mixed = {k: v for k, v in seen.items() if len(v) > 1}
+    if mixed:
+        print("\n  \U0001F534 MIXED wsplit STATE — these points merge different configurations:")
+        for (plat, mesh, units), tags in sorted(mixed.items()):
+            print(f"     {plat:5s} {mesh:6s} {units:5d}  {sorted(tags)}")
+        print("     Split the figure by wsplit state before quoting any of these.\n")
+    else:
+        tags = sorted({r["wsplit"] for r in recs})
+        print(f"  wsplit state, uniform per point: {tags}")
 
 
 def in_best_combination(r):
@@ -516,6 +537,7 @@ LEVER_NOTE = {
 
 if __name__ == "__main__":
     recs = harvest()
+    check_wsplit(recs)
     data, sp = curves(recs), speedups(recs)
     for plat, pname, _ in PLATS:
         for mesh in MESH_ORDER:
