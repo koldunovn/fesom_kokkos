@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=m14_cgnan
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=16 --ntasks=64 --ntasks-per-node=4
+#SBATCH --gres=gpu:4 --gpu-bind=none -C a100_80
+#SBATCH --time=01:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/cgnan.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/cgnan.%j.err
+#
+# IS THE GPU CG NaN AN M14 REGRESSION?
+#
+# Symptom: "[fesom_port FATAL] CG_kk: pp·App is -nan" on farc/dars/NG5 at 16/32/64 GPUs,
+# INTERMITTENTLY. Zero occurrences in ANY CPU leg (NG5 ran to 49152 ranks clean). det IS active
+# (announce verified), and with det the IC is bitwise identical run-to-run -- so an INTERMITTENT
+# failure cannot be caused by the initial conditions. User reports CG ran fine on big meshes on
+# GPU before this merge.
+#
+# Test the frozen binaries on the SAME mesh/ranks/allocation, several legs each because the
+# failure is stochastic. m13 = my merge base (has det). h17 = pre-campaign main (no det knob).
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+MESH=${MESH_OVERRIDE:-/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars}
+DT=${DT:-120}
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+O=/work/ab0995/a270088/port2/m14/cgnan_$SLURM_JOB_ID; mkdir -p $O
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+export FESOM_SPEED=1
+echo "=== CG-NaN bisect — mesh=$(basename $MESH) ranks=$SLURM_NTASKS dt=$DT ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+try () {   # try <tag> <bin> <det?>
+    local tag=$1 bin=$2 det=$3 nan=0 ok=0
+    for rep in 1 2; do
+        local o=$O/${tag}_$rep; mkdir -p $o
+        ( [ "$det" = yes ] && export FESOM_IC_EXTRAP=det
+          srun "$bin" "$MESH" "$o" "$DT" 300 -1 "$PHC" 1958 ) > $o/log 2>&1
+        local rc=$?
+        if grep -qiE 'pp.App is -?nan' $o/log $o/../${tag}_$rep/log 2>/dev/null; then nan=$((nan+1))
+        elif [ $rc -eq 0 ]; then ok=$((ok+1)); fi
+    done
+    printf "  %-14s det=%-3s  clean=%d/2  CG-NaN=%d/2\n" "$tag" "$det" "$ok" "$nan"
+}
+try h17_main  /work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda            no
+try m13_base  /work/ab0995/a270088/port2/m13/bin/fesom_port_cuda_det1          yes
+try m14_i3    /work/ab0995/a270088/port2/m14/bin/i3/fesom_port_cuda            yes
+try m14_nodet /work/ab0995/a270088/port2/m14/bin/i3/fesom_port_cuda            no
