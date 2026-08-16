@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=m14_extpart
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=0
+#SBATCH -o /work/ab0995/a270088/port2/m14/extpart.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/extpart.%j.err
+#
+# Optimised partitions from the EXTERNAL engines, at the ladder rungs M11 never generated.
+# Two steps, and my first attempt skipped the first one:
+#   1. scripts/m11_engines.sh <engine> <mesh> <k>   -> a .part VECTOR
+#   2. jobs/m11_zoo_b_dists.sh                      -> converts that vector into dist_N
+# It also needs SRC, not just MESHTAG: with MESHTAG=farc but no SRC it partitioned CORE2's mesh.
+#
+# Engines are each mesh's CERTIFIED winner (from the certified meshes' own provenance):
+#   farc -> mtkahypar (w=100+nlev)   dars -> kaminpar (w=100+nlev)
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+cd $ROOT
+MESHTAG=${MESHTAG:?}; ENGINE=${ENGINE:?}; SRC=${SRC:?}; KS=${KS:?}
+OUTD=/work/ab0995/a270088/port2/m11/engines
+mkdir -p $OUTD
+echo "=== M14 external partitions — $MESHTAG / $ENGINE  k='$KS' ==="
+echo "mesh: $SRC"
+for K in $KS; do
+    echo "--- k=$K : step 1, part vector ---"
+    bash scripts/m11_engines.sh "$ENGINE" "$SRC" "$K" "$OUTD" 2>&1 | tail -4
+    echo "--- k=$K : step 2, vector -> dist_$K ---"
+    MESHTAG=$MESHTAG SRC=$SRC ARMS="${ENGINE}_a100" K=$K ROOT=$ROOT \
+      bash jobs/m11_zoo_b_dists.sh 2>&1 | grep -E 'generation|dist_|FAIL|ok|done' | tail -5
+done
+echo "=== available now ==="
+ls -d /work/ab0995/a270088/port2/mesh_m11/zoo/$MESHTAG/b_${ENGINE}_a100/dist_* 2>/dev/null | sed 's/.*dist_//' | sort -n | tr '\n' ' '; echo
