@@ -45,7 +45,7 @@ Everything else on the list is supporting evidence for those two.
 
 ## State at handoff
 
-**Pushed:** branch `m14-integrate` at `github.com/koldunovn/fesom_kokkos`, HEAD `aa1a442`.
+**Pushed:** branch `m14-integrate` at `github.com/koldunovn/fesom_kokkos`.
 Knobs-off is byte-identical to `main` on Serial.
 
 **Already on JUPITER from the July M7 campaign** (do not re-fetch): meshes, stock partitions
@@ -61,12 +61,12 @@ GPU winner. `scripts/jupiter_fetch.sh` pulls exactly the reachable rungs (~6.3 G
 | core2 | `a5_u30` | 4, 8, 16, 32, 64 ✅ |
 | farc | `a5_u30` | 4, 8, 16, 32, 64, 128 ✅ |
 | dars | `a4u30` | 16, 32, 64, 128, 256, 512 ✅ |
-| ng5 | `a5_u30` | 16, 32, 64, 128, 256 ✅ — **512 and 1024 were still generating at handoff** |
+| ng5 | `a5_u30` | 16, 32, 64, 128, 256, 512, 1024 ✅ |
 
-🔴 **Check NG5 512 and 1024 exist on Levante before you plan the 128- and 256-node partition
-pairs.** `ssh a270088@levante.dkrz.de 'ls -d /work/ab0995/a270088/port2/mesh_m11/zoo/ng5/a5_u30/dist_*'`.
-If they are missing, the generating job was 27001775 (`jobs/m11_zoo_a.sh`); re-run it with
-`MESHTAG=ng5 SRC=/work/ab0995/a270088/port2/mesh_m11/ng5_m11 ARMS=a5_u30 A5_A=100 RANKS="512 1024"`.
+All 27 rungs are generated and verified complete by file count — a finished `dist_N` has exactly
+2N+1 files (`rpart.out` + one `com_info` and one `my_list` per rank). `jupiter_fetch.sh` re-checks
+that on both sides, because a directory the partitioner is still writing exists and is half-full
+and rsync would copy it happily.
 
 🔴 **These partitions are CANDIDATES, not winners.** M11's own conclusion is that the best
 partition is point-specific; GPU pays per *message* (`nbr_max`) and JUPITER's fabric is not
