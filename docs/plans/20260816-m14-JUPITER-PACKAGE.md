@@ -138,7 +138,8 @@ Levante now (jobs 27001771/72/74/75, `jobs/m11_zoo_a.sh`), engine = M11's per-me
 
 🔴 **The fetch script copies only the rungs a 256-node run can reach.** The engine directories on
 Levante also carry CPU-scale partitions — `ng5/a5_u30` goes up to `dist_40960`, dars/farc/core2 to
-2048 — and rsyncing a whole engine directory would pull all of them for nothing.
+2048. Measured, those unusable rungs total ~5.8 GB (ng5 alone ~4.3 GB), so a whole-directory rsync
+would roughly double the transfer to ~12 GB.
 
 🔴 **Treat these as candidates, not winners.** M11's own conclusion is that the best partition is
 point-specific, and every M11 number was earned on Levante hardware — GPU pays per *message*

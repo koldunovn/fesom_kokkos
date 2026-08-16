@@ -45,9 +45,10 @@ want () { [ "$ONLY" = all ] || [ "$ONLY" = "$1" ]; }
 # certified winners there: M11's own finding is that the winner is point-specific,
 # and every M11 number was earned on Levante hardware.
 # 🔴 Copy ONLY the rungs this machine can use. The engine directories on Levante also hold
-# CPU-scale partitions the JUPITER ladder can never reach — ng5/a5_u30 goes up to dist_40960,
-# dars and farc to 2048, core2 to 2048. Rsyncing a whole engine directory would multiply this
-# transfer many times over for partitions that are unreachable at a 256-node (1024-rank) cap.
+# CPU-scale partitions the JUPITER ladder can never reach — ng5/a5_u30 goes to dist_40960, and
+# core2/farc/dars to 2048. Measured, those unusable rungs are ~5.8 GB (ng5 alone ~4.3: dist_2048
+# 0.67, 4096 0.71, ... 40960 1.20), so a whole-directory rsync would roughly DOUBLE the transfer
+# — 12 GB instead of 6.3. Worth avoiding; not the order-of-magnitude I first claimed.
 if want partitions; then
     say "M11 optimised partitions -> $MESHOPT"
     mkdir -p "$MESHOPT"
