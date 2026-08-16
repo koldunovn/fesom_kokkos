@@ -17,8 +17,9 @@
 #     PHC IC + Sweeney chl    /e/scratch/hclimrep/koldunov1/meshes/{phc3.0,Sweeney}
 #   NEW FOR M14 — this script's real job:
 #     the M11 OPTIMISED partitions (mesh_m11 zoo + the certified promotions)
-# So the default run moves ~2 GB, not ~20. The mesh/forcing stanzas are kept, guarded
-# by an existence check, so a fresh scratch or a purged directory still works.
+# The default run moves ~6.3 GB (NG5's optimised set is ~4.3 GB of that: 7 rungs x ~0.6 GB —
+# an optimised partition is the same size as the stock one it replaces). The mesh/forcing
+# stanzas are kept, guarded by an existence check, so a purged scratch still works.
 set -u
 
 LEV=${LEV:-a270088@levante.dkrz.de}
@@ -43,13 +44,28 @@ want () { [ "$ONLY" = all ] || [ "$ONLY" = "$1" ]; }
 # dars = a4u30 (MINCONN+CONTIG+u30). These are CANDIDATES to race on JUPITER, not
 # certified winners there: M11's own finding is that the winner is point-specific,
 # and every M11 number was earned on Levante hardware.
+# 🔴 Copy ONLY the rungs this machine can use. The engine directories on Levante also hold
+# CPU-scale partitions the JUPITER ladder can never reach — ng5/a5_u30 goes up to dist_40960,
+# dars and farc to 2048, core2 to 2048. Rsyncing a whole engine directory would multiply this
+# transfer many times over for partitions that are unreachable at a 256-node (1024-rank) cap.
 if want partitions; then
     say "M11 optimised partitions -> $MESHOPT"
     mkdir -p "$MESHOPT"
+    opt_rungs () { case $1 in
+        core2) echo 4 8 16 32 64 ;;
+        farc)  echo 4 8 16 32 64 128 ;;
+        dars)  echo 16 32 64 128 256 512 ;;
+        ng5)   echo 16 32 64 128 256 512 1024 ;;
+    esac; }
     for spec in core2:a5_u30 farc:a5_u30 dars:a4u30 ng5:a5_u30; do
         m=${spec%%:*}; e=${spec##*:}
-        mkdir -p "$MESHOPT/$m"
-        $RSYNC "$LEV:/work/ab0995/a270088/port2/mesh_m11/zoo/$m/$e/" "$MESHOPT/$m/$e/"
+        src=/work/ab0995/a270088/port2/mesh_m11/zoo/$m/$e
+        mkdir -p "$MESHOPT/$m/$e"
+        for n in $(opt_rungs "$m"); do
+            [ -d "$MESHOPT/$m/$e/dist_$n" ] && { echo "  $m/$e/dist_$n present"; continue; }
+            $RSYNC "$LEV:$src/dist_$n/" "$MESHOPT/$m/$e/dist_$n/" || \
+                echo "  !! $m/$e/dist_$n not on Levante yet (generation job still running?)"
+        done
     done
     say "M11 certified promotions -> $MESHOPT/certified"
     mkdir -p "$MESHOPT/certified"

@@ -14,7 +14,8 @@ The July M7 campaign already put the meshes, the stock partitions (ng5 to 8192, 
 the 1958 forcing and the PHC initial condition on JUPITER, and it already settled the toolchain
 (`env_jupiter.sh` = Stages/2025, GCC 13.3, ParaStationMPI 5.11, CUDA 12, vendored Kokkos 4.4.01)
 and the transport (`FESOM_HALO_STAGE=1`). **The only new data M14 needs is the M11 optimised
-partitions, about 2 GB.** So: push the branch, `git clone` it into a new directory on JUPITER,
+partitions, about 6.3 GB** — NG5's set alone is ~4.3 GB, since an optimised partition is the
+same size as the stock one it replaces. So: push the branch, `git clone` it into a new directory on JUPITER,
 build once, run `scripts/jupiter_fetch.sh`, then submit the ladders in §5.
 
 ---
@@ -104,7 +105,7 @@ login node (`ssh-copy-id`, or forward your agent). Nothing writes back to Levant
 
 | what | where it lands | size | status |
 |---|---|---|---|
-| **M11 optimised partitions** | `$SCRATCH/meshes_m11/<mesh>/<engine>/dist_N` | ~2 GB | **NEW — the real payload** |
+| **M11 optimised partitions** | `$SCRATCH/meshes_m11/<mesh>/<engine>/dist_N` | **6.3 GB** (ng5 4.3, dars 1.6, farc 0.3, core2 0.05) | **NEW — the real payload** |
 | M11 certified promotions | `$SCRATCH/meshes_m11/certified/` | small | new |
 | mesh statics (7 files/mesh) | `$SCRATCH/meshes/<mesh>/` | 3.1 GB | already there; guarded |
 | stock `dist_N` | `$SCRATCH/meshes/<mesh>/dist_N` | 6.3 GB | already there to ng5 8192 |
@@ -134,6 +135,10 @@ Levante now (jobs 27001771/72/74/75, `jobs/m11_zoo_a.sh`), engine = M11's per-me
 | farc | `a5_u30` | 64 | 4, 8, 16, 32, 128 |
 | dars | `a4u30` | 64 | 16, 32, 128, 256, 512 |
 | ng5 | `a5_u30` | 64, 2048, 4096, 8192, 16384, 40960 | 16, 32, 128, 256, 512, 1024 |
+
+🔴 **The fetch script copies only the rungs a 256-node run can reach.** The engine directories on
+Levante also carry CPU-scale partitions — `ng5/a5_u30` goes up to `dist_40960`, dars/farc/core2 to
+2048 — and rsyncing a whole engine directory would pull all of them for nothing.
 
 🔴 **Treat these as candidates, not winners.** M11's own conclusion is that the best partition is
 point-specific, and every M11 number was earned on Levante hardware — GPU pays per *message*

@@ -71,6 +71,12 @@ echo "UCX_TLS=$UCX_TLS"
 md5sum "$BIN"
 [ -n "$BASE_KNOBS" ] && echo "base knobs: $BASE_KNOBS"
 [ -n "$BEST_KNOBS" ] && echo "best knobs: $BEST_KNOBS"
+# BEST_MESH: the PARTITION lever is a mesh directory, not an env knob. Missing here for the whole
+# campaign, exactly as it was in job_m14_ladder_gpu, so the lever had no GH200 coverage either.
+if [ -n "${BEST_MESH:-}" ]; then
+    echo "best mesh : $BEST_MESH/dist_$N   (partition lever)"
+    [ -d "$BEST_MESH/dist_$N" ] || { echo "REFUSE: $BEST_MESH/dist_$N does not exist"; exit 2; }
+fi
 
 # 🔴 WSPLIT MUST BE DECLARED — it is not allowed to be silently absent (rule 0.41).
 # A cold PHC start at the protocol dt rides a CFL blow-up on the big meshes; the onset step is
@@ -100,14 +106,15 @@ echo "wsplit    : $WSPLIT_TAG${WSPLIT:+ (explicit WSPLIT=$WSPLIT)}"
 leg () {                        # leg <arm> <index>
     local arm=$1 idx=$2
     local out="$OUT/${idx}_${arm}"
-    local extra=""
+    local extra="" mesh="$MESH"
     mkdir -p "$out"
     [ "$arm" = best ] && extra="$BEST_KNOBS"
+    [ "$arm" = best ] && [ -n "${BEST_MESH:-}" ] && mesh="$BEST_MESH"
     srun -c72 --distribution=block:block bash -c "
         export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_IC_EXTRAP=det
         $([ "$WSPLIT_TAG" = wsplit1 ] && printf 'export FESOM_WSPLIT=1; ')
         $(for kv in $BASE_KNOBS $extra; do printf 'export %s; ' "$kv"; done)
-        exec $BIN $MESH $out $DT $NSTEPS -1 $PHC 1958" > "$out/run.log" 2>&1
+        exec $BIN $mesh $out $DT $NSTEPS -1 $PHC 1958" > "$out/run.log" 2>&1
     local rc=$?
     local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
     local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$out/run.log" | tail -1)
