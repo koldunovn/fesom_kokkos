@@ -178,18 +178,35 @@ def harvest():
             for r in _csv.DictReader(fh):
                 if r.get("void_mixture", "").strip().lower() == "true":
                     continue                      # variant/baseline mixture — not a measurement
-                # 🔴 The JUPITER campaign spans two binaries. `fab4919c` predates the EVPWIDE
-                # staging fix and posts MPI on device pointers, which on this fabric crashes.
-                # 23 of the 48 wide-halo rows are on it: they measure the broken path, not the
-                # lever, so they are dropped. Every other lever is untouched by that fix and
-                # both binaries are valid for them.
-                if r["lever"] == "evpwide" and r.get("md5", "").startswith("fab4919c"):
+                # 🔴 The JUPITER campaign spans two binaries: fab4919c predates the EVPWIDE
+                # staging fix (it posts MPI on device pointers and crashes on that fabric),
+                # 0cad3289 is post-fix. Two rules follow, and they are NOT the same rule.
+                #
+                # (A) Two jobs straddled the rebuild, so the binary changed BETWEEN their legs.
+                #     The header checksum is hashed once at job start, so it describes only the
+                #     first leg — 1391342's crashing leg ran pre-fix code while the leg that
+                #     produced its number ran post-fix (reported by the JUPITER session, whose
+                #     per-leg logs stayed on that machine; not independently checked here).
+                #     Either way the job violates one-binary-per-job and is void as a
+                #     measurement. Both rungs were re-measured cleanly in the post-fix burst.
+                if r["job"] in ("1391342", "1391348"):
                     continue
+                # (B) On the remaining pre-fix rows the BEST arm carried the wide halo through
+                #     the crashing path, so that number is void — but the BASE arm of a wide-halo
+                #     job runs no wide-halo knob at all. It is an ordinary baseline measurement
+                #     and is kept. Dropping the whole row would have thrown away 23 good
+                #     baselines, and those rows are also the evidence base for the transport bug.
+                if r["lever"] == "evpwide" and r.get("md5", "").startswith("fab4919c"):
+                    r_best_void = True
+                else:
+                    r_best_void = False
                 fam, detail = FAM.get(r["lever"], ("combo", r["lever"]))
                 rec = dict(plat="jupiter", mesh=r["mesh"], units=int(r["ranks"]),
                            job=r["job"], lever=r["lever"], fam=fam, detail=detail,
                            wsplit=r.get("wsplit", "wsplit?"))
                 for arm in ("base", "best"):
+                    if arm == "best" and r_best_void:
+                        continue
                     v = (r.get(arm) or "").strip()
                     if v:
                         rec[arm] = float(v)
