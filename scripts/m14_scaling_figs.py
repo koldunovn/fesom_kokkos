@@ -83,6 +83,40 @@ def _lever(txt):
     return re.sub(r"\s+", " ", lev)
 
 
+# The three lever families the campaign can isolate, because each was measured on its own against
+# the same baseline in its own job. A job that carries TWO levers (part+oati) is a `combo` and
+# belongs to none of them; a job with no lever at all is a `null` cost control, and admitting it
+# as a "best" arm would put a noise-level pair on a lever's curve.
+FAMILIES = {"ssh":  "SSH solve",
+            "ice":  "sea-ice wide halo",
+            "part": "partitioning"}
+
+
+def classify(txt):
+    """-> (family, detail). detail distinguishes curves WITHIN a family (oati vs SE, K, engine)."""
+    bk = re.search(r"best knobs: (.*)", txt)
+    bm = re.search(r"^best mesh : \S*/(\w+)/dist_", txt, re.M)
+    knobs = re.sub(r"\s+", " ", bk.group(1).strip()) if bk else ""
+    part = bm.group(1) if bm else None
+    ssh = "SSH_SOLVER" in knobs or "SSH_MODE" in knobs
+    ice = "EVPWIDE" in knobs
+    if part and not knobs:
+        return "part", part
+    if part or (ssh and ice):
+        return "combo", (f"part={part} " if part else "") + knobs
+    if ssh:
+        if "SSH_MODE=se" in knobs:
+            # M is a PER-MESH tuning (fArc 90, dars 20); the default 50 is a different
+            # configuration, not a repeat of the same one, so it stays its own curve.
+            return "ssh", "SE (tuned M)" if re.search(r"SE_M=\d+", knobs) else "SE (default M=50)"
+        m = re.search(r"SSH_SOLVER=(\w+)", knobs)
+        return "ssh", m.group(1) if m else "solver"
+    if ice:
+        m = re.search(r"EVPWIDE=(\d+)", knobs)
+        return "ice", "K=" + (m.group(1) if m else "?") + (" lean" if "LEAN" in knobs else "")
+    return "null", ""
+
+
 def harvest():
     """-> list of per-job records {plat, mesh, units, job, lever, base, best}.
 
@@ -92,7 +126,8 @@ def harvest():
     recs = []
 
     def add(plat, mesh, units, job, lever, txt, pat):
-        r = dict(plat=plat, mesh=mesh, units=units, job=job, lever=lever)
+        fam, detail = classify(txt)
+        r = dict(plat=plat, mesh=mesh, units=units, job=job, lever=lever, fam=fam, detail=detail)
         for arm in ("base", "best"):
             m = re.search(pat.format(arm=arm), txt)
             if m and float(m.group(1)) > 0:
@@ -108,11 +143,8 @@ def harvest():
         m = re.search(r"M14 CPU ladder — (\w+) ranks=(\d+)", txt)
         if not m:
             continue
-        lev = _lever(txt)
-        if "evpwide" in lev:      # measured a LOSS on CPU at every K — never in the best arm
-            continue
         add("cpu", m.group(1), max(1, round(int(m.group(2)) / 128)),
-            os.path.basename(f), lev, txt, RESULT)
+            os.path.basename(f), _lever(txt), txt, RESULT)
 
     # --- Levante A100 ------------------------------------------------------
     for f in glob.glob(f"{M14}/gladder.*.out"):
@@ -133,12 +165,27 @@ def harvest():
     return recs
 
 
+def in_best_combination(r):
+    """Which measured levers the "best combination" curve is allowed to take.
+
+    A null control carries no lever. The sea-ice wide halo is a measured LOSS on CPU at every K
+    and on GH200, so the recommended combination excludes it there — but the records are still
+    harvested, because the ice-only figure has to show exactly that loss."""
+    if r["fam"] == "null":
+        return False
+    if r["fam"] == "ice" and r["plat"] != "a100":
+        return False
+    return True
+
+
 def curves(recs):
     """-> {plat: {mesh: {units: {'base': s, 'best': s, 'lever': str}}}}, min over every job."""
     out = collections.defaultdict(lambda: collections.defaultdict(dict))
     for r in recs:
         d = out[r["plat"]][r["mesh"]].setdefault(r["units"], {})
         for arm in ("base", "best"):
+            if arm == "best" and not in_best_combination(r):
+                continue
             if arm in r and (arm not in d or r[arm] < d[arm]):
                 d[arm] = r[arm]
                 if arm == "best":
@@ -152,7 +199,7 @@ def speedups(recs):
     Same lever measured several times => median gain (F43). Different levers => the best."""
     per_lever = collections.defaultdict(list)
     for r in recs:
-        if "base" in r and "best" in r:
+        if "base" in r and "best" in r and in_best_combination(r):
             per_lever[(r["plat"], r["mesh"], r["units"], r["lever"])].append(r["base"] / r["best"])
     out = collections.defaultdict(lambda: collections.defaultdict(dict))
     best = {}
@@ -216,8 +263,12 @@ NOTE_SYPD = ("SYPD = dt_prod/(365·s_step), dt_prod = CORE2 1800 · fArc 900 · 
              "dars is measured at dt120 and NG5 at dt180 — NO CG dt-correction applied (it would "
              "be ×1.022 / ×1.011), so dars/NG5 SYPD is ~2 %/1 % optimistic.  SE points rescaled "
              "to production dt are estimates: the barotropic subcycle count depends on dt.")
-NOTE_GAP = ("NG5 on A100 has no best arm: every best leg died on the unresolved GPU CG NaN "
-            "(present in the merge base too, so probably not an M14 regression) — baseline only.")
+NOTE_GAP = ("NG5 on A100 is BASELINE ONLY, and not because the lever failed: the unresolved GPU CG "
+            "NaN killed 30 of its 37 timing legs and hits BOTH arms alike (baseline 5/21 legs "
+            "admitted, lever 2/16), so no single job ever produced a base+lever pair to divide.  "
+            "The three baseline points that do exist each rest on one or two surviving legs.  The "
+            "same NaN appears on CORE2, fArc and dars A100 legs and in the merge base, so it is "
+            "neither NG5-specific nor an M14 regression.")
 
 
 def annotate_gaps(ax, plat, data):
@@ -228,7 +279,8 @@ def annotate_gaps(ax, plat, data):
                if m in data.get(plat, {})
                and not any("best" in v for v in data[plat][m].values())]
     if missing:
-        ax.text(0.02, 0.03, "  ".join(missing) + ": baseline only\n(best arm blocked, GPU CG NaN)",
+        ax.text(0.02, 0.03, "  ".join(missing) + ": baseline only — GPU CG NaN\n"
+                "killed 30/37 legs, in BOTH arms",
                 transform=ax.transAxes, fontsize=6.6, color="0.35", va="bottom")
 
 
@@ -347,6 +399,121 @@ def fig_speedup(sp, data, fname):
     print("wrote", fname)
 
 
+DETAIL_LS = ["-", "--", "-.", (0, (3, 1, 1, 1, 1, 1))]
+
+
+def fig_lever(recs, data, fam, fname):
+    """One lever, on its own: absolute curves (row 0) and its within-job speedup (row 1).
+
+    The baseline (dotted) is the SAME curve in every lever figure — min over every admitted base
+    leg at that rung, from any job. The lever curve is min over that family's best legs only.
+    Speedups are within-job, so a rung where the lever ran but its own baseline legs died has an
+    absolute point and NO speedup point — that asymmetry is real and is left visible."""
+    mine = [r for r in recs if r["fam"] == fam]
+    # Most-measured detail gets the solid line: within a family it is the one the campaign
+    # actually settled on (oati, K=8, a5_u30), and the eye reads solid as the main curve.
+    freq = collections.Counter(r["detail"] for r in mine)
+    details = sorted(freq, key=lambda d: (-freq[d], d))
+    ls_of = {d: DETAIL_LS[i % len(DETAIL_LS)] for i, d in enumerate(details)}
+
+    lev_abs = collections.defaultdict(dict)          # (plat,mesh,detail) -> {units: s}
+    lev_sp = collections.defaultdict(lambda: collections.defaultdict(list))
+    for r in mine:
+        k = (r["plat"], r["mesh"], r["detail"])
+        if "best" in r:
+            d = lev_abs[k]
+            if r["units"] not in d or r["best"] < d[r["units"]]:
+                d[r["units"]] = r["best"]
+        if "base" in r and "best" in r:
+            lev_sp[k][r["units"]].append(r["base"] / r["best"])
+
+    fig, axes = plt.subplots(2, 3, figsize=(15.0, 7.8))
+    lo, hi, shi, slo = 1e9, 0, 1.05, 1.0
+    for col, (plat, pname, xlab) in enumerate(PLATS):
+        a0, a1 = axes[0][col], axes[1][col]
+        allx = []
+        for mesh in MESH_ORDER:
+            c = MESH_COLOR.get(mesh, "k")
+            base = {u: v["base"] for u, v in data.get(plat, {}).get(mesh, {}).items()
+                    if "base" in v}
+            has = [d for d in details if lev_abs.get((plat, mesh, d))]
+            if not has:
+                continue
+            xs = sorted(base)
+            if xs:                                   # baseline, identical in all three figures
+                a0.plot(xs, [base[u] for u in xs], marker="o", ms=4, ls=":", color=c, lw=1.2,
+                        markerfacecolor="none")
+                allx += xs
+                lo, hi = min(lo, min(base.values())), max(hi, max(base.values()))
+            for d in has:
+                pts = lev_abs[(plat, mesh, d)]
+                xs = sorted(pts)
+                allx += xs
+                lo, hi = min(lo, min(pts.values())), max(hi, max(pts.values()))
+                a0.plot(xs, [pts[u] for u in xs], marker="o", ms=4.5, ls=ls_of[d], color=c, lw=1.7)
+                sp = lev_sp.get((plat, mesh, d), {})
+                xs = sorted(sp)
+                if xs:
+                    ys = [statistics.median(sp[u]) for u in xs]
+                    shi, slo = max(shi, max(ys)), min(slo, min(ys))
+                    a1.plot(xs, ys, marker="o", ms=4.5, ls=ls_of[d], color=c, lw=1.7)
+        for ax in (a0, a1):
+            if allx:
+                log2_axis(ax, allx, xlab if ax is a1 else "")
+            ax.grid(alpha=0.25)
+            if not allx:
+                ax.text(0.5, 0.5, "not measured", transform=ax.transAxes, ha="center",
+                        fontsize=9, color="0.6")
+                ax.set_xticks([])
+                ax.set_yticks([])
+        a1.axhline(1.0, color="0.5", lw=1.0, ls="--")
+        a0.set_title(pname, fontsize=10)
+        if allx:
+            a0.set_yscale("log")
+        if col == 0:
+            a0.set_ylabel("wall time per step  (s)")
+            a1.set_ylabel("speedup  (baseline / lever)")
+    for col in range(3):
+        if axes[0][col].get_xticks().size:
+            decimal_log_yaxis(axes[0][col], lo, hi)
+        axes[1][col].set_ylim(min(0.97, slo * 0.99), max(1.03, shi * 1.03))
+
+    handles = [Line2D([], [], color=MESH_COLOR.get(m, "k"), marker="o", ms=4.5, ls="-",
+                      label=MESH_LABEL.get(m, m)) for m in MESH_ORDER
+               if any((p, m, d) in lev_abs for p, _, _ in PLATS for d in details)]
+    handles += [Line2D([], [], color="0.35", ls=":", marker="o", ms=4, markerfacecolor="none",
+                       label="baseline")]
+    handles += [Line2D([], [], color="0.35", ls=ls_of[d], label=d) for d in details]
+    ncol = min(len(handles), 6)
+    rows = -(-len(handles) // ncol)                  # the legend wrapped onto the x-label
+    bottom = 0.075 + 0.022 * rows
+    fig.legend(handles=handles, ncol=ncol, fontsize=8, frameon=False,
+               loc="lower center", bbox_to_anchor=(0.5, bottom - 0.022 * rows))
+    fig.suptitle(f"M14 — {FAMILIES[fam]} alone: strong scaling and speedup", fontsize=11, y=0.99)
+    fig.text(0.5, 0.008, LEVER_NOTE[fam], ha="center", fontsize=6.6, color="0.35", wrap=True)
+    fig.tight_layout(rect=[0, bottom, 1, 0.965])
+    fig.savefig(fname, dpi=140)
+    print("wrote", fname)
+
+
+LEVER_NOTE = {
+    "ssh": ("Two distinct SSH levers, both measured alone against the same baseline: the `oati` "
+            "Krylov solver (M10) and split-explicit barotropic subcycling (M12, `FESOM_SSH_MODE=se`, "
+            "requires zstar).  SE needs a PER-MESH subcycle count: the default M=50 ABORTS on fArc "
+            "and inverts the verdict on dars, so fArc is run at M=90 and dars at M=20.  An SE point "
+            "rescaled to production dt would be an estimate — these are s/step at the measured dt."),
+    "ice": ("The M9/M12b wide ice halo (FESOM_SPEED_EVPWIDE=K with the lean writing), which trades "
+            "halo EXCHANGES for replicated ghost work, so it pays only where a flat per-message "
+            "staging cost dominates.  On A100 that holds and it is the campaign's best GPU lever; "
+            "on CPU it is a LOSS at every K and every rank count, which is why the CPU panel sits "
+            "BELOW 1.0 — that is the measurement, not a plotting error."),
+    "part": ("Partitioning alone: the same binary and knobs, only the dist_N tree swapped for an "
+             "M11 partition (a5_u30 = slack UFACTOR=30, plus the KaHyPar/KaMinPar external engines "
+             "and the certified *_v1 promotions).  Measured on CPU only — the M11 GPU points were "
+             "re-measured in that campaign, not re-run here."),
+}
+
+
 if __name__ == "__main__":
     recs = harvest()
     data, sp = curves(recs), speedups(recs)
@@ -360,6 +527,18 @@ if __name__ == "__main__":
                        default=None)
             tag = f"  best A/B {best[0]:.3f}x @{best[1]} [{best[2]}]" if best else "  no A/B pair"
             print(f"  {pname:32s} {mesh:6s}: {len(pts):2d} rungs, {nb:2d} with a best arm{tag}")
+    print("\n  per-lever job counts (jobs with a usable within-job pair / jobs with a best arm):")
+    for fam in FAMILIES:
+        n = [r for r in recs if r["fam"] == fam]
+        print(f"    {fam:5s} {FAMILIES[fam]:20s} "
+              f"{sum(1 for r in n if 'base' in r and 'best' in r):3d} / {sum(1 for r in n if 'best' in r):3d}"
+              f"   details: {sorted({r['detail'] for r in n})}")
+    for fam in ("combo", "null"):
+        n = [r for r in recs if r["fam"] == fam]
+        print(f"    {fam:5s} {'(excluded from lever figures)':20s} {len(n):3d} jobs")
+
     fig_sstep(data, f"{M14}/m14_scaling_sstep.png")
     fig_sypd(data, f"{M14}/m14_scaling_sypd.png")
     fig_speedup(sp, data, f"{M14}/m14_speedup.png")
+    for fam in FAMILIES:
+        fig_lever(recs, data, fam, f"{M14}/m14_lever_{fam}.png")
