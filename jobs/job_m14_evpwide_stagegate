@@ -1,0 +1,93 @@
+#!/bin/bash
+#SBATCH --job-name=m14_evpw_stage
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH -C a100_80
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/evpwstage.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/evpwstage.%j.err
+#
+# Does the EVPWIDE staging fix (94877a9) actually work?
+#
+# 🔴 LEVANTE IS THE ONLY MACHINE THAT CAN ANSWER THIS. The fix reroutes the wide-halo MPI
+# through pinned host mirrors when FESOM_HALO_STAGE=1, because on JUPITER's fabric (PSMPI
+# 5.11 / UCX 1.19, no GPUDirect) UCX CPU-packs a device send pointer and SIGSEGVs. That means
+# JUPITER can only ever run the NEW path — the old one crashes there, so nothing on that
+# machine can show the two paths agree. Levante's OpenMPI 4.1.5 + nvhpc IS GPUDirect-capable,
+# so BOTH paths run here and the equivalence is testable exactly once, here.
+#
+# The claim under test: staging is a pure TRANSPORT change. Same messages, same counts, same
+# tags, same order — only the buffer the MPI call sees. If that is true, the staged run and
+# the device run must produce the same model state.
+#
+# 🔴 "The same" cannot mean bitwise on CUDA. This campaign measured that a Levante A100 CUDA
+# binary does not reproduce ITSELF run to run (handoff §3: h17-vs-h17 self-difference in T of
+# 1.0e-03…1.7e-03, Kv exactly 1.0e-01, from threshold flips in the instability mixing). So the
+# gate is the amended acceptance form: the staged-vs-device difference must be no larger than
+# the difference the SAME configuration shows against ITSELF, with >=3 control legs.
+#
+# Legs: dev_1 dev_2 dev_3  (EVPWIDE, device pointers — the pre-fix path, valid on Levante)
+#       stg_1 stg_2        (EVPWIDE + FESOM_HALO_STAGE=1 — the fixed path)
+# CONTROL pairs = dev vs dev. TEST pairs = dev vs stg. Verdict: test <= control, field by field.
+#
+# Run at 8 ranks on 2 nodes so the exchange is genuinely inter-node: an intra-node-only test
+# would exercise shared memory and miss the transport entirely.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante; source "$ROOT/env_cuda.sh"
+MESH=/work/ab0995/a270088/port2/mesh/core2          # private copy (L73), never /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${M14_BIN:-/work/ab0995/a270088/port2/m14/bin/i4}/fesom_port_cuda
+B=/work/ab0995/a270088/port2/m14/evpwstage_$SLURM_JOB_ID
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+mkdir -p "$B"
+
+# Scrub every FESOM knob from the inherited environment, then set only what each leg needs.
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE FESOM_WSPLIT FESOM_HALO; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+
+echo "=== EVPWIDE staging equivalence gate — CORE2 dist_8, 8 ranks / 2 nodes, dt=1800, 20 steps"
+echo "nodes: $SLURM_JOB_NODELIST"
+md5sum "$BIN"
+
+leg () {            # leg <tag> <extra knobs>
+  local tag=$1; shift
+  local o=$B/$tag; mkdir -p "$o"
+  ( export FESOM_SPEED=1 FESOM_IC_EXTRAP=det FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_EVPWIDE_LEAN=1
+    for kv in "$@"; do export "$kv"; done
+    env | grep -E '^FESOM_(HALO_STAGE|SPEED_EVPWIDE)' | sort | sed 's/^/    knob /'
+    srun -l "$BIN" "$MESH" "$o" 1800 20 10 "$PHC" 1958 > "$o/log" 2>&1 )
+  local rc=$?
+  # A crashed leg must never be compared: diff_snap on two absent snapshots reports "identical".
+  # That false-PASS class already bit this campaign twice (a byte gate PASSed on two segfaults).
+  local n; n=$(ls "$o"/snap_*.nc 2>/dev/null | wc -l)
+  echo "  leg $tag rc=$rc snapshots=$n"
+  [ "$rc" -eq 0 ] && [ "$n" -ge 2 ] || { echo "  !! leg $tag UNUSABLE"; tail -4 "$o/log" | sed 's/^/     | /'; }
+}
+
+leg dev_1
+leg dev_2
+leg dev_3
+leg stg_1 FESOM_HALO_STAGE=1
+leg stg_2 FESOM_HALO_STAGE=1
+
+cmp_pair () { echo "  [$1 vs $2]"; "$PY" "$ROOT/scripts/diff_snap.py" "$B/$1" "$B/$2" 2>&1 | grep -E 'max-abs-diff|^== ' | sed 's/^/    /'; }
+
+echo; echo "=== CONTROL: device path against ITSELF (the noise floor) ==="
+cmp_pair dev_1 dev_2
+cmp_pair dev_1 dev_3
+cmp_pair dev_2 dev_3
+echo; echo "=== TEST: staged path against the device path ==="
+cmp_pair dev_1 stg_1
+cmp_pair dev_2 stg_2
+cmp_pair stg_1 stg_2
+echo
+echo "VERDICT RULE: every TEST max-abs-diff must sit inside the CONTROL range, field by field."
+echo "A TEST difference LARGER than the control range means staging is not transport-neutral."
