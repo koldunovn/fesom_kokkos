@@ -63,9 +63,21 @@ if want partitions; then
         src=/work/ab0995/a270088/port2/mesh_m11/zoo/$m/$e
         mkdir -p "$MESHOPT/$m/$e"
         for n in $(opt_rungs "$m"); do
-            [ -d "$MESHOPT/$m/$e/dist_$n" ] && { echo "  $m/$e/dist_$n present"; continue; }
-            $RSYNC "$LEV:$src/dist_$n/" "$MESHOPT/$m/$e/dist_$n/" || \
-                echo "  !! $m/$e/dist_$n not on Levante yet (generation job still running?)"
+            exp=$((2*n+1))
+            [ "$(ls "$MESHOPT/$m/$e/dist_$n" 2>/dev/null | wc -l)" -eq "$exp" ] && \
+                { echo "  $m/$e/dist_$n present ($exp files)"; continue; }
+            # 🔴 Check completeness on the SOURCE first. A partitioner writing dist_1024 right
+            # now has a directory that exists and is half-full; rsync would copy it happily and
+            # the model would then fail at rank 1670 with a missing my_list. Verified real:
+            # ng5/a5_u30/dist_1024 was at 1669/2049 files while this script was being written.
+            got=$(ssh "$LEV" "ls $src/dist_$n 2>/dev/null | wc -l" 2>/dev/null || echo 0)
+            if [ "${got:-0}" -ne "$exp" ]; then
+                echo "  !! SKIP $m/$e/dist_$n — Levante has $got/$exp files (still generating?)"
+                continue
+            fi
+            $RSYNC "$LEV:$src/dist_$n/" "$MESHOPT/$m/$e/dist_$n/"
+            got=$(ls "$MESHOPT/$m/$e/dist_$n" 2>/dev/null | wc -l)
+            [ "$got" -eq "$exp" ] || echo "  !! $m/$e/dist_$n INCOMPLETE after copy: $got/$exp"
         done
     done
     say "M11 certified promotions -> $MESHOPT/certified"
