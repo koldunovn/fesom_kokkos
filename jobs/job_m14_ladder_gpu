@@ -95,20 +95,20 @@ md5sum "$BIN"
 # Fortran WITH wsplit completes. Production practice on large meshes always runs it.
 # Every leg of this campaign ran with it OFF and nothing in the log said so, which is why NG5 lost
 # its whole GPU arm (7 of 37 legs survived) and it read as a new CG bug. So: declare it, either way.
-#   WSPLIT=1  the documented cure (FESOM_WSPLIT=1 on BOTH arms — it is a configuration, not a lever)
+#   WSPLIT=1  FESOM_WSPLIT=1 on BOTH arms — it is a configuration, not a lever
 #   WSPLIT=0  the historical configuration, knowingly unstable on a cold start at protocol dt
 # The value is stamped into cfg= so a wsplit-on row can never be compared against a wsplit-off one.
-case "${WSPLIT:-unset}" in
-    1) WSPLIT_TAG=wsplit1 ;;
-    0) WSPLIT_TAG=wsplit0 ;;
-    *) echo "REFUSE: WSPLIT is not set."
-       echo "  WSPLIT=1 -> FESOM_WSPLIT=1 on both arms (the cure; see rule 0.41)"
-       echo "  WSPLIT=0 -> run without it, knowingly (what every pre-2026-08-16 M14 point did)"
-       echo "  This is deliberate: the source itself refuses to guess a wsplit value"
-       echo "  (src/fesom_ale.cpp:279), and so does the harness."
-       exit 2 ;;
+# USER RULE (2026-08-16): "wsplit should be ON on large meshes." So it is the DEFAULT here for
+# every mesh but CORE2, and turning it OFF on a large mesh takes an explicit WSPLIT=0. Defaulting
+# is the point: this trap has now cost the project three times, and remembering is not a mechanism.
+case "${WSPLIT:-${POINT}}" in
+    1)               WSPLIT_TAG=wsplit1 ;;
+    0)               WSPLIT_TAG=wsplit0 ;;
+    core2)           WSPLIT_TAG=wsplit0 ;;   # small mesh, no cold-start CFL class documented
+    farc|dars|ng5)   WSPLIT_TAG=wsplit1 ;;   # large meshes -> ON by default
+    *) echo "REFUSE: WSPLIT=\"${WSPLIT:-}\" is not 0 or 1 — refusing to guess"; exit 2 ;;
 esac
-echo "wsplit    : $WSPLIT_TAG"
+echo "wsplit    : $WSPLIT_TAG${WSPLIT:+ (explicit WSPLIT=$WSPLIT)}"
 
 # BEST_MESH: the PARTITION lever is a different mesh directory, not an env knob. The CPU ladder
 # has had this since D3; the GPU ladder did NOT, and MESH_OVERRIDE changes BOTH arms — so the
