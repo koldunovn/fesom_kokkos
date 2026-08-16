@@ -172,79 +172,73 @@ for n in 4 8 16 32 64 128;       do sbatch --nodes=$n --time=01:00:00 --export=A
 for n in 4 8 16 32 64 128 256;   do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=ng5,ARMS=base   jobs/job_m14_jupiter_ladder; done
 ```
 
-### 5.3 The lever pairs (arm: `base best`, both in one allocation, ABBA)
+### 5.3 The lever pairs — the FULL matrix
 
-🔴 **Do the NG5 `oati` pair at 4 nodes before anything larger.** On Levante A100 with wsplit on,
-NG5 baseline legs complete (4/5) but every `oati` leg died (0/4, steps 96-190). If that reproduces
-here, the NG5 `oati` ladder is void and the NG5 question moves to the partition lever.
+Every mesh, every applicable lever, every rung of its ladder. Both arms in one allocation, ABBA,
+warmup discarded. No pre-emptive trimming: an unmeasured point is a hole in the paper, and the
+allocation exists to be spent.
 
-`oati` — the SSH solver, the lever that grows fastest with scale, and the one that should decide
-the NG5 g256 question:
-
-```bash
-for n in 4 8 16 32 64 128 256; do sbatch --nodes=$n --time=02:00:00 \
-  --export=ALL,POINT=ng5,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
-  jobs/job_m14_jupiter_ladder; done
-for n in 4 8 16 32 64 128; do sbatch --nodes=$n --time=01:30:00 \
-  --export=ALL,POINT=dars,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
-  jobs/job_m14_jupiter_ladder; done
-for n in 2 4 8 16 32; do sbatch --nodes=$n --time=01:00:00 \
-  --export=ALL,POINT=farc,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
-  jobs/job_m14_jupiter_ladder; done
-# CORE2 flattens at 2 nodes here (July: 155 SYPD at g1, 169 at g2, then flat to g8 at 13 %
-# efficiency), so it earns no large allocation. But two small jobs are nearly free, and CORE2
-# showed the LARGEST A100 lever gains of any mesh (-19.4 % from the ice halo at 64 GPUs), which
-# makes it the best mesh for an A100-vs-GH200 like-for-like. Added 2026-08-16 after the first
-# JUPITER session flagged that CORE2 had baseline runs and no pairs.
-for n in 1 2; do sbatch --nodes=$n --time=00:40:00 \
-  --export=ALL,POINT=core2,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
-  jobs/job_m14_jupiter_ladder; done
-```
-
-CORE2 deliberately gets no split-explicit and no partition pair. The split-explicit scheme needs a
-per-mesh barotropic subcycle count and we only calibrated one for fArc (90) and dars (20) —
-guessing one for CORE2 is precisely how the dars verdict got inverted. Its partition question is
-fully answerable on Levante, where it is already worth −22 % at 16 CPU nodes.
-
-Split-explicit SSH — 🔴 **`FESOM_SE_M` is per-mesh and the default 50 is wrong on both**: it
-ABORTS on fArc (`dtbt 18.00 s > limit 11.09 s → M_min=82`) and *inverts the verdict* on dars
-(+2.32 % at M=50, −3.72 % at the tuned M=20). SE also requires zstar on both arms:
+**Lever 1 — the alternative SSH solver (`oati`, from M10).** The lever whose payoff grows fastest
+with scale, and the one the NG5 g256 question rests on.
 
 ```bash
-for n in 4 8 16 32; do sbatch --nodes=$n --time=01:00:00 \
-  --export=ALL,POINT=farc,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=90" \
-  jobs/job_m14_jupiter_ladder; done
-for n in 16 32 64 128; do sbatch --nodes=$n --time=01:30:00 \
-  --export=ALL,POINT=dars,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=20" \
-  jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16;           do sbatch --nodes=$n --time=00:40:00 --export=ALL,POINT=core2,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16 32;        do sbatch --nodes=$n --time=01:00:00 --export=ALL,POINT=farc,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati"  jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128;     do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=dars,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati"  jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128 256; do sbatch --nodes=$n --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati"   jobs/job_m14_jupiter_ladder; done
 ```
 
-Partitioning — the measurement that exists nowhere above 64 GPUs:
+**Lever 2 — split-explicit barotropic subcycling (from M12).** Requires zstar on BOTH arms, and a
+per-mesh subcycle count `FESOM_SE_M`. Calibrated values from M12b's CFL probe: **fArc 90, dars 20,
+CORE2 M_min = 35**. NG5 was never probed — run ONE short job first and read the abort message,
+which states the required minimum (`dtbt X s > limit Y s → M_min=Z`), then use that value:
+
+```bash
+sbatch --nodes=4 --time=00:20:00 --export=ALL,POINT=ng5,ARMS=base,NSTEPS=20,\
+BASE_KNOBS="FESOM_ALE=zstar FESOM_SSH_MODE=se" jobs/job_m14_jupiter_ladder   # read M_min
+for n in 1 2 4 8 16;           do sbatch --nodes=$n --time=00:40:00 --export=ALL,POINT=core2,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=35" jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16 32;        do sbatch --nodes=$n --time=01:00:00 --export=ALL,POINT=farc,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=90" jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128;     do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=dars,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=20" jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128 256; do sbatch --nodes=$n --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",BASE_KNOBS="FESOM_ALE=zstar",BEST_KNOBS="FESOM_SSH_MODE=se FESOM_SE_M=<from the probe>" jobs/job_m14_jupiter_ladder; done
+```
+
+**Lever 3 — partitioning (from M11).** The measurement that exists nowhere in this project above
+64 GPUs. All 27 rungs were generated and verified for exactly this.
 
 ```bash
 M=/e/scratch/e-sta-destine/koldunov1/meshes_m11
-for n in 4 16 64 128 256; do sbatch --nodes=$n --time=02:00:00 \
-  --export=ALL,POINT=ng5,ARMS="base best",BEST_MESH=$M/ng5/a5_u30 \
-  jobs/job_m14_jupiter_ladder; done
-for n in 4 16 64 128; do sbatch --nodes=$n --time=01:30:00 \
-  --export=ALL,POINT=dars,ARMS="base best",BEST_MESH=$M/dars/a4u30 \
-  jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16;           do sbatch --nodes=$n --time=00:40:00 --export=ALL,POINT=core2,ARMS="base best",BEST_MESH=$M/core2/a5_u30 jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16 32;        do sbatch --nodes=$n --time=01:00:00 --export=ALL,POINT=farc,ARMS="base best",BEST_MESH=$M/farc/a5_u30  jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128;     do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=dars,ARMS="base best",BEST_MESH=$M/dars/a4u30   jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128 256; do sbatch --nodes=$n --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",BEST_MESH=$M/ng5/a5_u30    jobs/job_m14_jupiter_ladder; done
 ```
 
-**Sea ice wide halo: do NOT run it here.** It is a win on A100 (up to −19.4 %) and a measured
-**loss** on GH200 and on CPU. It trades messages for replicated ghost work, so it pays only where
-a flat per-message staging cost dominates — which is an A100 property, not a GH200 one.
-
-### 5.4 Composition, at the two points that matter
-
-Composition measured multiplicative on Levante to 0.1 pp (CORE2 2048: partition −21.98 % ×
-`oati` −17.74 % ⇒ predicted −35.82 %, measured −35.92 %). Worth one confirmation at scale:
+**Lever 4 — the sea-ice wide halo (from M9/M12b).** A large win on A100 (up to −19.4 % on CORE2)
+and a measured loss on the dolpung GH200 partition. JUPITER is a *different* GH200 machine with a
+working fabric, and the dolpung verdict was taken on a fabric with no GPUDirect — so measure it
+here rather than inherit the conclusion. If it loses, that is a clean confirmation and costs
+little; if it wins, the A100-vs-GH200 story changes.
 
 ```bash
-sbatch --nodes=128 --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",\
-BEST_MESH=$M/ng5/a5_u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati" jobs/job_m14_jupiter_ladder
-sbatch --nodes=256 --time=02:30:00 --export=ALL,POINT=ng5,ARMS="base best",\
-BEST_MESH=$M/ng5/a5_u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati" jobs/job_m14_jupiter_ladder
+K="FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_EVPWIDE_LEAN=1"
+for n in 1 2 4 8 16;           do sbatch --nodes=$n --time=00:40:00 --export=ALL,POINT=core2,ARMS="base best",BEST_KNOBS="$K" jobs/job_m14_jupiter_ladder; done
+for n in 1 2 4 8 16 32;        do sbatch --nodes=$n --time=01:00:00 --export=ALL,POINT=farc,ARMS="base best",BEST_KNOBS="$K"  jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128;     do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=dars,ARMS="base best",BEST_KNOBS="$K"  jobs/job_m14_jupiter_ladder; done
+for n in 4 8 16 32 64 128 256; do sbatch --nodes=$n --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",BEST_KNOBS="$K"   jobs/job_m14_jupiter_ladder; done
+```
+
+### 5.4 Composition — all levers together
+
+Composition measured multiplicative on Levante to 0.1 percentage points (CORE2 at 2048 ranks:
+partition −21.98 % × `oati` −17.74 % predicted −35.82 %, measured −35.92 %). Confirm it here at
+every mesh's best rung and at NG5's largest:
+
+```bash
+M=/e/scratch/e-sta-destine/koldunov1/meshes_m11
+for n in 2 8 16;               do sbatch --nodes=$n --time=00:40:00 --export=ALL,POINT=core2,ARMS="base best",BEST_MESH=$M/core2/a5_u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati" jobs/job_m14_jupiter_ladder; done
+for n in 4 16 32;              do sbatch --nodes=$n --time=01:00:00 --export=ALL,POINT=farc,ARMS="base best",BEST_MESH=$M/farc/a5_u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati"  jobs/job_m14_jupiter_ladder; done
+for n in 16 64 128;            do sbatch --nodes=$n --time=01:30:00 --export=ALL,POINT=dars,ARMS="base best",BEST_MESH=$M/dars/a4u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati"   jobs/job_m14_jupiter_ladder; done
+for n in 16 64 128 256;        do sbatch --nodes=$n --time=02:00:00 --export=ALL,POINT=ng5,ARMS="base best",BEST_MESH=$M/ng5/a5_u30,BEST_KNOBS="FESOM_SSH_SOLVER=oati"    jobs/job_m14_jupiter_ladder; done
 ```
 
 ---
@@ -300,19 +294,12 @@ do not merge them into one curve.
 
 ---
 
-## 8. Cost estimate
+## 8. Scale of the campaign
 
-At 300 steps per leg, 5 legs per pair job (warmup + ABBA):
+Roughly 100 pair jobs plus 24 baseline jobs, ~3500 node-hours at 300 steps and 5 legs per pair.
+The 256-node NG5 points dominate.
 
-| ladder | node-hours (rough) |
-|---|---|
-| baselines, all four meshes | ~120 |
-| `oati` pairs (ng5+dars+farc) | ~400 |
-| SE pairs (farc+dars) | ~150 |
-| partition pairs (ng5+dars) | ~350 |
-| composition at 128+256 | ~180 |
-| **total** | **~1200 node-hours** |
-
-The 256-node NG5 points dominate. If the allocation is tight, drop in this order: composition →
-farc `oati` → dars partition. Keep NG5 `oati` and NG5 partition at 128 and 256 — that pair of
-points is the whole reason to be on JUPITER.
+**Run the whole matrix.** Do not pre-emptively drop points to save allocation — an unmeasured
+point is a hole in the paper, and every coverage gap in the Levante campaign turned out to matter.
+If the allocation genuinely runs short, say so with numbers and ask; do not silently narrow the
+plan.
