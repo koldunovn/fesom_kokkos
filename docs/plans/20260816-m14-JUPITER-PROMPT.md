@@ -100,8 +100,29 @@ the warmup and one `best` leg failed with wsplit demonstrably ON
 dismissing wsplit**:
 `ssh a270088@levante.dkrz.de 'grep -E "wsplit|^leg |min=|GAIN" /work/ab0995/a270088/port2/m14/gladder.270017{23,24,25}.out'`
 
-If wsplit does not fix it, the live hypothesis is that the *port's* wsplit implementation still
-does not match Fortran's — M5.24 recorded "CG NaN ~step 85 when enabled" and M7 left "debug
+🔴🔴 **UPDATE, same day, jobs 27001723/24 finished — wsplit WORKS for the baseline and the
+failure is now `oati`-SPECIFIC.** NG5 A100 at 16 and 32 GPUs with `FESOM_WSPLIT=1` demonstrably on:
+
+| arm | legs completing 300 steps |
+|---|---|
+| baseline config (incl. warmup) | **4 of 5** — was 5 of 21 with wsplit off |
+| `FESOM_SSH_SOLVER=oati` | **0 of 4** — died at steps 96, 115, 117, 190 |
+
+Before wsplit, both arms died at similar rates (24 % vs 13 %) and the failure was clearly
+configuration-wide. With wsplit on, the baseline runs and **only the `oati` arm dies.** That is a
+different problem wearing the same costume: it points at the M10 SSH solver on NG5 GPU, not at the
+rule-0.41 cold-start class. Note also that the two 16-GPU `oati` deaths carry **no CG NaN message
+at all** (the 32-GPU ones do), so there may be two distinct signatures.
+
+**Consequence for this trip, act on it before spending an allocation:** `oati` is the headline
+lever in §5.3 and the whole NG5 g256 question rests on it. **Run the NG5 `oati` pair at 4 nodes
+FIRST and confirm both arms complete 300 steps.** If the `oati` legs die there too, do not submit
+the 64/128/256-node NG5 `oati` jobs — switch the NG5 question to the partition lever (which has
+no such problem) and report the `oati` failure as a finding. n is 4 legs, so confirm rather than
+assume, but the contrast with 4-of-5 is not subtle.
+
+If wsplit had not helped, the live hypothesis would have been that the *port's* wsplit
+implementation still does not match Fortran's — M5.24 recorded "CG NaN ~step 85 when enabled" and M7 left "debug
 port-wsplit to bit-match Fortran-wsplit" as an open work item that may never have been closed at
 NG5 scale. That would be a real finding, and it would mean NG5 GPU numbers need a shorter
 measurement window or a different dt until it is fixed. **Do not report it as a merge regression:

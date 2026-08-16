@@ -174,6 +174,10 @@ for n in 4 8 16 32 64 128 256;   do sbatch --nodes=$n --time=01:30:00 --export=A
 
 ### 5.3 The lever pairs (arm: `base best`, both in one allocation, ABBA)
 
+🔴 **Do the NG5 `oati` pair at 4 nodes before anything larger.** On Levante A100 with wsplit on,
+NG5 baseline legs complete (4/5) but every `oati` leg died (0/4, steps 96-190). If that reproduces
+here, the NG5 `oati` ladder is void and the NG5 question moves to the partition lever.
+
 `oati` — the SSH solver, the lever that grows fastest with scale, and the one that should decide
 the NG5 g256 question:
 
