@@ -191,7 +191,20 @@ for n in 4 8 16 32 64 128; do sbatch --nodes=$n --time=01:30:00 \
 for n in 2 4 8 16 32; do sbatch --nodes=$n --time=01:00:00 \
   --export=ALL,POINT=farc,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
   jobs/job_m14_jupiter_ladder; done
+# CORE2 flattens at 2 nodes here (July: 155 SYPD at g1, 169 at g2, then flat to g8 at 13 %
+# efficiency), so it earns no large allocation. But two small jobs are nearly free, and CORE2
+# showed the LARGEST A100 lever gains of any mesh (-19.4 % from the ice halo at 64 GPUs), which
+# makes it the best mesh for an A100-vs-GH200 like-for-like. Added 2026-08-16 after the first
+# JUPITER session flagged that CORE2 had baseline runs and no pairs.
+for n in 1 2; do sbatch --nodes=$n --time=00:40:00 \
+  --export=ALL,POINT=core2,ARMS="base best",BEST_KNOBS="FESOM_SSH_SOLVER=oati" \
+  jobs/job_m14_jupiter_ladder; done
 ```
+
+CORE2 deliberately gets no split-explicit and no partition pair. The split-explicit scheme needs a
+per-mesh barotropic subcycle count and we only calibrated one for fArc (90) and dars (20) —
+guessing one for CORE2 is precisely how the dars verdict got inverted. Its partition question is
+fully answerable on Levante, where it is already worth −22 % at 16 CPU nodes.
 
 Split-explicit SSH — 🔴 **`FESOM_SE_M` is per-mesh and the default 50 is wrong on both**: it
 ABORTS on fArc (`dtbt 18.00 s > limit 11.09 s → M_min=82`) and *inverts the verdict* on dars
