@@ -144,6 +144,28 @@ mixed-binary jobs (running across the mid-campaign rebuild) flagged manually: 13
 288 core-h/node-h) for the full campaign incl. calm pass — ~1% of the remaining e-sta-destine
 budget (72.8 of 97 Mcore-h available as of 2026-08-16).
 
+## Phase attribution at the top rungs → M15 targets (FESOM_SPEED_PHASESTATS pairs, jobs 1392314/1392376)
+
+NG5 base at 1024 GPUs is 61% MPI-wait, with the implicit-SSH CG alone at 21.6 ms wait/step
+(31% of the step — quantitatively reproducing July's knee diagnosis). The best combo removes CG
+(SE's bt = 4.2 ms, 42 msg/step) and cuts icedyn messages 120→16 (EVPWIDE), leaving 35.5 ms/step
+whose anatomy across g512→g1024 names the next campaign:
+
+1. **Ocean-phase compute imbalance under the M11 partition** — busy spread 1.6× (g512) → 1.8×
+   (g1024) vs 1.12× on the stock partition: a5_u30 bought its message wins with work imbalance
+   (weights ~2D-heavy, A=100). Target: re-score the zoo's WGT_A axis (a3_a0/a15/a40) at NG5
+   512–2048 ranks with phasestats busy-spread as a scoring column. Headroom ≈12–14%/step.
+   (Generation in flight on Levante, 2026-08-16 night.)
+2. **icedyn replication floor** — busy flat at 4.9 ms from g512 to g1024: the K=8 ghost ring's
+   redundant work is rank-count-invariant. Target: K-sweep (K=4 vs 8) at the top rungs; plus
+   EVPWIDE_FUSE, measured −3.1% (g256) / −5.3% (g1024) fused-vs-unfused clean pairs — joins the
+   recommended config (confirmation on the full combo pending).
+3. **bt latency floor** — 42 msg/step at M=20. M12b's k-periodic η exchange (Path-B: exchange
+   every k substeps on the existing K=1 wide rung, which is exact free-running after the s3
+   fixes) prices deep-K with no extended mesh; k=2 removes ~25% of SE exchanges.
+   Implementation + 1-node validation done this session (uncommitted); staging race at g512
+   next.
+
 ## Open items
 
 1. Calm-pass adjudication of every 🔶 above (running).
