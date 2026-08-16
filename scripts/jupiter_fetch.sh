@@ -56,12 +56,20 @@ if want partitions; then
         core2) echo 4 8 16 32 64 ;;
         farc)  echo 4 8 16 32 64 128 ;;
         dars)  echo 16 32 64 128 256 512 ;;
-        ng5)   echo 16 32 64 128 256 512 1024 ;;
+        ng5)   echo 16 32 64 128 256 512 1024 2048 ;;   # 2048 added 2026-08-16: the 512-node probe
     esac; }
     for spec in core2:a5_u30 farc:a5_u30 dars:a4u30 ng5:a5_u30; do
         m=${spec%%:*}; e=${spec##*:}
         src=/work/ab0995/a270088/port2/mesh_m11/zoo/$m/$e
         mkdir -p "$MESHOPT/$m/$e"
+        # 🔴 The engine dir must also hold the SEVEN STATICS (found the hard way on JUPITER,
+        # job 1391028: the port reads nod2d.out etc. from the SAME dir as dist_N, and the zoo
+        # dirs on Levante are full mesh copies). Fetch the zoo's own statics, not the stock
+        # ones — the partitions index nodes in the ordering of the mesh they were cut from.
+        for f in "${STATICS[@]}"; do
+            [ -f "$MESHOPT/$m/$e/$f" ] || $RSYNC "$LEV:$src/$f" "$MESHOPT/$m/$e/" || \
+                echo "  !! $m/$e/$f missing on Levante"
+        done
         for n in $(opt_rungs "$m"); do
             exp=$((2*n+1))
             [ "$(ls "$MESHOPT/$m/$e/dist_$n" 2>/dev/null | wc -l)" -eq "$exp" ] && \

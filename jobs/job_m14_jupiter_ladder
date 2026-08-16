@@ -138,6 +138,6 @@ echo; echo "=== result ==="
 awk '{a[$1]=(a[$1]==""||$2<a[$1])?$2:a[$1]; n[$1]++}
      END{ if (length(a)==0) { print "  NO ADMITTED LEGS"; exit 1 }
           for(k in a) printf "  %-5s min=%.4f (%d legs)\n", k, a[k], n[k];
-          if (a["base"]!="" && a["best"]!="") printf "  GAIN = %+.2f%%  (best vs base, min over legs)\n", (a["best"]-a["base"])/a["base"]*100;
+          if (("base" in a) && ("best" in a)) printf "  GAIN = %+.2f%%  (best vs base, min over legs)\n", (a["best"]-a["base"])/a["base"]*100;
           printf "JCSV %s,%s,cfg=%s,", MESH, N, CFG; for(k in a) printf "%s=%.4f,", k, a[k]; printf "\n" }' \
      MESH="$POINT" N="$N" CFG="${BASE_KNOBS:-paper}+$WSPLIT_TAG" "$OUT/legs.txt"
