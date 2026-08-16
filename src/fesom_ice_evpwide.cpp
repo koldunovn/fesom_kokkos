@@ -22,6 +22,7 @@
 #include "fesom_ice_evpwide.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"          /* prof hooks */
+#include "fesom_halo_device.hpp" /* FESOM_HALO_STAGE: staged MPI leg on pinned mirrors */
 #include "fesom_ice_types.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -79,6 +80,12 @@ struct EvpwState {
     Kokkos::View<char*>   selff_d;              /* [nrecv] selfcheck flag: dist(slot) <= K-1 */
     Kokkos::View<real_t*> sbuf_d, rbuf_d;       /* [nsend*11] / [nrecv*11] */
     Kokkos::View<real_t*> esbuf_d, erbuf_d;     /* [nesend*3] / [nerecv*3] */
+    /* FESOM_HALO_STAGE pinned mirrors (M7.5 transport; allocated only when staged).
+     * On no-GPUDirect fabrics MPI must never see a device pointer — UCX CPU-packs the
+     * send buffer (ucp_mem_type_pack) and SEGVs, even intra-node (pscom shared-memory
+     * eager bcopy). Same staged leg as the main device halo / cgpipe. */
+    Kokkos::View<real_t*, fesom_halo_pinned_space> sbuf_h, rbuf_h;
+    Kokkos::View<real_t*, fesom_halo_pinned_space> esbuf_h, erbuf_h;
     /* ── D1 / P0b: the FUSED form of the two-segment ship (cell ② and std EVP) ────────────
      * Same bytes, same pack work, ONE message per partner instead of two: the node segment and
      * the element-sigma segment are laid out back-to-back per partner in a single buffer.
@@ -87,6 +94,7 @@ struct EvpwState {
     int  fuse_cache = -2;
     bool fuse = false;
     Kokkos::View<real_t*> fsbuf_d, frbuf_d;     /* [nsend*11+nesend*3] / [nrecv*11+nerecv*3] */
+    Kokkos::View<real_t*, fesom_halo_pinned_space> fsbuf_h, frbuf_h;   /* STAGE mirrors, fused form */
     Kokkos::View<int*> spart_d, rpart_d;        /* [nsend]/[nrecv]  partner INDEX of each entry */
     Kokkos::View<int*> espart_d, erpart_d;      /* [nesend]/[nerecv] ditto, element segment */
     Kokkos::View<int*> soff_d, roff_d;          /* [P+1] device copies of the offsets */
@@ -738,6 +746,12 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
     S.rbuf_d  = Kokkos::View<real_t*>("evpw.rbuf", (size_t)S.nrecv * 11);
     S.esbuf_d = Kokkos::View<real_t*>("evpw.esbuf", (size_t)S.nesend * 3);
     S.erbuf_d = Kokkos::View<real_t*>("evpw.erbuf", (size_t)S.nerecv * 3);
+    if (fesom_halo_stage_on()) {   /* M7.5: pinned mirrors for the staged MPI leg */
+        S.sbuf_h  = Kokkos::View<real_t*, fesom_halo_pinned_space>("evpw.sbuf_h", (size_t)S.nsend * 11);
+        S.rbuf_h  = Kokkos::View<real_t*, fesom_halo_pinned_space>("evpw.rbuf_h", (size_t)S.nrecv * 11);
+        S.esbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>("evpw.esbuf_h", (size_t)S.nesend * 3);
+        S.erbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>("evpw.erbuf_h", (size_t)S.nerecv * 3);
+    }
 
     /* -------- D1 / P0b: the fused-transport maps. Built ONLY when the knob is on, so the
      * default form carries no extra memory and no extra device arrays whose mere existence
@@ -770,6 +784,12 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
                                            (size_t)S.nsend * 11 + (size_t)S.nesend * 3);
         S.frbuf_d  = Kokkos::View<real_t*>("evpw.frbuf",
                                            (size_t)S.nrecv * 11 + (size_t)S.nerecv * 3);
+        if (fesom_halo_stage_on()) {   /* M7.5: staged mirrors of the fused buffers */
+            S.fsbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>(
+                "evpw.fsbuf_h", (size_t)S.nsend * 11 + (size_t)S.nesend * 3);
+            S.frbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>(
+                "evpw.frbuf_h", (size_t)S.nrecv * 11 + (size_t)S.nerecv * 3);
+        }
     }
 
     FesomEvpwideDev &D = S.dev;
@@ -1032,9 +1052,30 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
     }
     Kokkos::fence();   /* MANDATORY pre-MPI: MPI reads sbuf + re-posts rbuf (drains prev unpack) */
 
+    /* FESOM_HALO_STAGE (M7.5): MPI on pinned-host mirrors of the PACKED buffers — this
+     * exchange must honour the same transport knob as the main device halo and cgpipe, or
+     * UCX CPU-packs a device send pointer (ucp_mem_type_pack) and SEGVs on no-GPUDirect
+     * stacks. D2H only the USED range (the plan's nf, not the 11-wide sizing); H2D the recv
+     * range back right after Waitall, BEFORE any device reader (the diag kernels read the
+     * DEVICE recv views, then the unpack does). Message count / order / tags are untouched,
+     * so msg_count keeps separating the two forms exactly as before. */
+    const bool   staged = fesom_halo_stage_on();
+    const size_t s_used = (size_t)S.nsend * nf + (fused ? (size_t)S.nesend * 3 : 0);
+    const size_t r_used = (size_t)S.nrecv * nf + (fused ? (size_t)S.nerecv * 3 : 0);
+    if (staged && s_used > 0)
+        Kokkos::deep_copy(Kokkos::subview(fused ? S.fsbuf_h : S.sbuf_h,
+                                          std::make_pair((size_t)0, s_used)),
+                          Kokkos::subview(fused ? S.fsbuf_d : S.sbuf_d,
+                                          std::make_pair((size_t)0, s_used)));
+    if (staged && !fused && sig && S.nesend > 0)
+        Kokkos::deep_copy(Kokkos::subview(S.esbuf_h, std::make_pair((size_t)0, (size_t)S.nesend * 3)),
+                          Kokkos::subview(S.esbuf_d, std::make_pair((size_t)0, (size_t)S.nesend * 3)));
+
     int nreq = 0;
-    real_t *sp = fused ? S.fsbuf_d.data() : S.sbuf_d.data();
-    real_t *rp = fused ? S.frbuf_d.data() : S.rbuf_d.data();
+    real_t *sp = fused ? (staged ? S.fsbuf_h.data() : S.fsbuf_d.data())
+                       : (staged ? S.sbuf_h.data()  : S.sbuf_d.data());
+    real_t *rp = fused ? (staged ? S.frbuf_h.data() : S.frbuf_d.data())
+                       : (staged ? S.rbuf_h.data()  : S.rbuf_d.data());
     double bytes = 0.0;
     if (fused) {
         /* ONE message per partner: [node entries][elem entries], contiguous. Same bytes as the
@@ -1069,8 +1110,8 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
                           p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
         }
         if (sig) {   /* the sigma segment: second message per partner, tag 2205 */
-            real_t *esp = S.esbuf_d.data();
-            real_t *erp = S.erbuf_d.data();
+            real_t *esp = staged ? S.esbuf_h.data() : S.esbuf_d.data();
+            real_t *erp = staged ? S.erbuf_h.data() : S.erbuf_d.data();
             for (size_t q = 0; q < S.partner.size(); ++q) {
                 const int rc = (S.eroff[q + 1] - S.eroff[q]) * 3;
                 if (rc > 0) {
@@ -1092,6 +1133,14 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
     if (P.diag == EvpwPlan::PRESTEP_ECHO) { S.msg_pre += nreq; S.dbl_pre += bytes / (double)sizeof(real_t); }
     else                                  { S.msg_win += nreq; S.dbl_win += bytes / (double)sizeof(real_t); }
     fesom_halo_prof_waitall(nreq, S.reqs.data());
+    if (staged && r_used > 0)   /* M7.5: packed halo back to device (fences via deep_copy) */
+        Kokkos::deep_copy(Kokkos::subview(fused ? S.frbuf_d : S.rbuf_d,
+                                          std::make_pair((size_t)0, r_used)),
+                          Kokkos::subview(fused ? S.frbuf_h : S.rbuf_h,
+                                          std::make_pair((size_t)0, r_used)));
+    if (staged && !fused && sig && S.nerecv > 0)
+        Kokkos::deep_copy(Kokkos::subview(S.erbuf_d, std::make_pair((size_t)0, (size_t)S.nerecv * 3)),
+                          Kokkos::subview(S.erbuf_h, std::make_pair((size_t)0, (size_t)S.nerecv * 3)));
     fesom_halo_prof_bytes(bytes);
 
     /* selfcheck, wide-refresh path (nf<=4): refresh-vs-local BEFORE unpack. With R=K +
@@ -1522,6 +1571,12 @@ void fesom_evpwide_free(void)
     S.sbuf_d = Kokkos::View<real_t*>(); S.rbuf_d = Kokkos::View<real_t*>();
     S.esbuf_d = Kokkos::View<real_t*>(); S.erbuf_d = Kokkos::View<real_t*>();
     S.fsbuf_d = Kokkos::View<real_t*>(); S.frbuf_d = Kokkos::View<real_t*>();
+    S.sbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();   /* M7.5 staged mirrors */
+    S.rbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();
+    S.esbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();
+    S.erbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();
+    S.fsbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();
+    S.frbuf_h = Kokkos::View<real_t*, fesom_halo_pinned_space>();
     S.spart_d = Kokkos::View<int*>();  S.rpart_d = Kokkos::View<int*>();
     S.espart_d = Kokkos::View<int*>(); S.erpart_d = Kokkos::View<int*>();
     S.soff_d = Kokkos::View<int*>();   S.roff_d = Kokkos::View<int*>();
