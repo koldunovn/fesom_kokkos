@@ -877,3 +877,17 @@ per-step wire is now M+3
 numbers — note the s3 induction transfers to deep K only if ring-K inputs are owner-coherent the
 same way (H0e over the K-ring extent, F still reconciled; the §4 extended-mesh layer ships owner
 bytes by construction, which is compatible).
+
+### §3f addendum — the wide-vs-plain report resolved (2026-08-17, JUPITER)
+
+A wide-vs-plain state divergence (T 6.8e-04 @ step 10, Kv/Av ~9e-2 @ step 20, growing) was
+reported from Levante against `m14-integrate` and investigated as a suspected merge regression.
+Verdict: **the retired-W1 contract, not a defect** — the pre-merge certified binary
+(`4f4c13a^2`) reproduces the identical divergence (same onset step, same field), per-step diag
+lines line-identical to the merged binary's; both s3 defaults fire; the audit is green; the
+Fbt ulp seed at multi-claimed elements (step 3–4, ~1e-18) reproduces in both IC modes. Gate the
+rung with `FESOM_SE_WIDE_SELFCHECK=1` (drift == 0.0 — green on the merged branch, serial and
+CUDA) and judge A/B state against the W5b rounding floor. Evidence:
+`/e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide/` (JUPITER). This is the s3 trap's
+third sighting; the startup NOTE added to `se_wide_startup` states the contract in every
+multi-rank wide run's log.

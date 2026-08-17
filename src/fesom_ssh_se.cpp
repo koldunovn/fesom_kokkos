@@ -151,6 +151,56 @@ int fesom_se_wide(void)
     return cached;
 }
 
+/* M14 — FESOM_SE_WIDE_KPERIOD=k (integer >= 1, default 1): the Path-B exchange
+ * cadence (WIDEHALO_M12B.md §3d option 2) as a measurable knob, pricing the
+ * deep-K staging curve without the extended-mesh layer.
+ *
+ * 🔴 Direction of the knob, stated plainly: the K=1 rung as shipped is ALREADY
+ * the k=∞ endpoint of the Path-B family — under FESOM_SE_WIDE=1 the substep
+ * loop performs NO per-substep η exchange at all (ring-1 η is computed locally
+ * and is bitwise the owner's bytes, s3), and one per-STEP coherence exchange
+ * reconciles η before the 3-D model reads it. So:
+ *   k=1 (default)  = today's rung, UNTOUCHED: free-running substeps, the final
+ *                    coherence exchange only. Gates nothing; byte-frozen path.
+ *   k>=2           = ADDS a real in-loop η exchange on substeps where
+ *                    (m % k)==0 (the final substep's slot is covered by the
+ *                    always-on per-step coherence exchange), i.e. the deep-K
+ *                    cadence "exchange every k substeps + final". Because the
+ *                    rung is exact free-running, each such exchange replaces
+ *                    ring-1 slots with identical owner bytes: the trajectory is
+ *                    unchanged by construction and only the wire cost moves —
+ *                    which is exactly what a pricing knob should move.
+ * k>1 REQUIRES the rung: the certified path has no locally-computed ring-1 η
+ * to stand in on the substeps between exchanges, so skipping there would leave
+ * stale halo η under k3's AM4 stencil — refuse, don't guess. */
+static int fesom_se_wide_kperiod(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_SE_WIDE_KPERIOD");
+        if (!e || !e[0]) {
+            cached = 1;
+        } else {
+            char *end = NULL;
+            const long v = strtol(e, &end, 10);
+            if (end == e || (end && *end) || v < 1) {
+                fprintf(stderr, "FESOM_SE_WIDE_KPERIOD=%s not supported (need an integer "
+                                ">= 1; 1 = today's rung)\n", e);
+                exit(1);
+            }
+            if (v > 1 && !fesom_se_wide()) {
+                fprintf(stderr, "FESOM_SE_WIDE_KPERIOD=%ld REQUIRES FESOM_SE_WIDE=1: without "
+                                "the rung there is no locally-computed ring-1 eta to cover the "
+                                "substeps between exchanges (the halo would go stale under "
+                                "k3's AM4 stencil)\n", v);
+                exit(1);
+            }
+            cached = (int)v;
+        }
+    }
+    return cached;
+}
+
 /* M12b — FESOM_SE_WIDE_SELFCHECK=1: keep BOTH paths alive in the same run and
  * diff them. The ring-1 η is computed locally, STASHED, and only then is the
  * exchange performed on top of it; the diff is stash-vs-exchanged.
@@ -423,6 +473,12 @@ struct fesom_se_state {
      * Kokkos::finalize (the Tchk rule). */
     fesom::Field wide_chk;
     double       wide_chk_max = 0.0;
+    /* M14 KPERIOD>1 instrument only (L110: max-reductions are NaN-blind, so the
+     * drift number alone can print a healthy-looking value over NaN diffs —
+     * count them explicitly, attributing the side: stash = the local free-run
+     * bytes, owner = what the exchange delivered). */
+    long         wide_chk_nan_s = 0;
+    long         wide_chk_nan_o = 0;
 
     /* s3 F-reconcile pattern (owner-wins over the multi-claimed elements).
      * The 3-D model's per-element redundancy leaves Fbt different at the last
@@ -471,7 +527,7 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
     if (!fesom_se_on()) {
         /* L80/L102 dead-knob note: a sub-knob set while the mode is off does nothing. */
         if (p->mype == 0 && (getenv("FESOM_SE_M") || getenv("FESOM_SE_M_FORCE")
-                             || getenv("FESOM_SE_WIDE")))
+                             || getenv("FESOM_SE_WIDE") || getenv("FESOM_SE_WIDE_KPERIOD")))
             fprintf(stderr, "[ssh_se] NOTE: FESOM_SE_* is set but FESOM_SSH_MODE is not 'se' "
                             "— the knobs have no effect (the SE solver never runs).\n");
         return;
@@ -558,6 +614,9 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
     /* T2: the deterministic operators (div CSR + viscosity adjacency), then
      * the one-shot operator self-test under FESOM_SE_CHECK. */
     se_build_operators(mesh, p);
+    /* M14: parse KPERIOD here so a k>1-without-the-rung contradiction refuses at
+     * STARTUP, not at the first step (the parser holds the refusal logic). */
+    (void)fesom_se_wide_kperiod();
     se_wide_startup(mesh, p);        /* M12b: guards + announce (no-op when off) */
     if (fesom_se_check_on())
         se_selftest(mesh, p);
@@ -600,6 +659,25 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
     if (p->mype == 0) {
         fprintf(stderr, "[ssh_se] wide halo: K=1 (ring-1 eta computed locally from the owner's "
                         "div-CSR rows; Ubt exchanged over ELEM2D_FULL)\n");
+        /* M14 Path-B cadence announce. Only when the knob is explicitly set:
+         * unset/1 is today's rung and must stay output-identical to it. */
+        if (getenv("FESOM_SE_WIDE_KPERIOD")) {
+            const int kper = fesom_se_wide_kperiod();
+            const int M    = s_se.M;
+            if (kper > 1) {
+                /* in-loop exchanges/step: m in [0, M-1) with m % kper == 0
+                 * (m = M-1 is served by the always-on final coherence exchange) */
+                const int nx = (M >= 2) ? ((M - 2) / kper + 1) : 0;
+                fprintf(stderr, "[ssh_se]   WIDE KPERIOD = %d (exchange every %d substeps "
+                                "+ final: %d in-loop + 1 final eta exchanges/step at M=%d; "
+                                "NOTE the k=1 rung is the final-only endpoint, so k>1 ADDS "
+                                "wire — this is the deep-K cadence pricing knob)\n",
+                        kper, kper, nx, M);
+            } else {
+                fprintf(stderr, "[ssh_se]   WIDE KPERIOD = 1 (today's rung: free-running "
+                                "substeps, final coherence exchange only)\n");
+            }
+        }
         if (p->npes <= 1)
             fprintf(stderr, "[ssh_se]   NOTE npes=1: eDim=0, so the rung is a STRUCTURAL NO-OP "
                             "here — a single-rank run can never be evidence that it works.\n");
@@ -753,6 +831,25 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
                         "elem2D_full %d  (messages/substep x%.3f)\n",
                 p->com_nod2D.rPEnum, p->com_elem2D.rPEnum, m_base, m_wide,
                 m_base ? (double)m_wide / (double)m_base : 0.0);
+        /* 🔴 The equivalence CONTRACT, stated where an A/B reader will see it.
+         * Knob-on vs knob-off is a ROUNDING-CLASS pair, not a byte pair, BY
+         * DESIGN: the rung canonicalises the viscosity neighbour order and
+         * owner-wins-reconciles F at the ~0.55 % multi-claimed elements — both
+         * rung-only rewrites of the 3-D model's own last-bit redundancy, and
+         * both required for the free-running exactness (drift == 0.0, the
+         * FESOM_SE_WIDE_SELFCHECK gate). W1 byte identity vs the certified
+         * path is unattainable by construction (WIDEHALO_M12B.md §3f; plan
+         * FINDING "not a defect of the rung"). A wide-vs-plain diff that GROWS
+         * from ~1e-18 F seeds is this contract, not a regression — judge it
+         * against the rounding floor (W5b: 2200-2400x below rank-count
+         * spread), never against byte identity. */
+        if (p->npes > 1)
+            fprintf(stderr, "[ssh_se-wide] NOTE: knob-on vs knob-off is a ROUNDING-CLASS pair "
+                            "(rung-only neighbour-order canonicalisation + owner-wins "
+                            "F-reconcile over multi-claimed elements). Byte identity vs plain "
+                            "se is unattainable by construction — gate the rung with "
+                            "FESOM_SE_WIDE_SELFCHECK (drift == 0.0) and judge A/B state "
+                            "diffs against the rounding floor (WIDEHALO_M12B.md §3f).\n");
     }
 }
 
@@ -1623,10 +1720,17 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * "diagnostic" silently repairs the thing it is measuring, which has now
      * fooled this session twice. */
     const int    wide_chk = wide && (fesom_se_wide_selfcheck() == 1);
+    /* M14 Path-B cadence: 1 = today's rung (no in-loop eta exchange), k>1 =
+     * scheduled in-loop eta exchange every k substeps (+ the final coherence
+     * exchange, which always runs). Parser refuses k>1 without the rung. */
+    const int    kper     = fesom_se_wide_kperiod();
     const int    eDim     = mesh->eDim_nod2D;
     const int    Neta     = Nown + (wide ? eDim : 0);   /* k2 range: owned + ring 1 */
     const int    visc_on  = fesom_se_visc_on();
-    if (wide_chk && eDim > 0 && !s_se.wide_chk.allocated())
+    /* stash buffer also needed by the in-loop drift measurement under
+     * KPERIOD>1 + SELFCHECK=2 (each scheduled exchange measures its k-window) */
+    if ((wide_chk || (kper > 1 && fesom_se_wide_selfcheck() == 2))
+        && eDim > 0 && !s_se.wide_chk.allocated())
         s_se.wide_chk.alloc("se.wide.chk", (size_t)eDim);
     const real_t vg0 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA0", 10.0);
     const real_t vg1 = (real_t)se_visc_gamma("FESOM_SE_VISC_GAMMA1", 2750.0);
@@ -1795,6 +1899,8 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                                                        * consumed into F by
                                                        * se_forcing — free now */
 
+    int kper_nx = 0;   /* M14: in-loop eta exchanges actually performed this step */
+
     for (int m = 0; m < M; ++m) {
         /* GEOCHK>=2: k3-input coherence at substep entry (step 2, first four
          * substeps — the measured onset window; step 1 rides along as the null).
@@ -1878,27 +1984,66 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
         }
         if (!wide) {
             fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
-        } else if (wide_chk && eDim > 0) {
+        } else if (kper == 1 ? (wide_chk && eDim > 0)
+                             : (m % kper == 0 && m != M - 1)) {
+            /* Under the rung an in-loop eta exchange happens on exactly two
+             * schedules, and NOWHERE else:
+             *   kper == 1 (today): only SELFCHECK=1's per-substep compare —
+             *     the unmodified M12b path, byte-for-byte.
+             *   kper  > 1 (M14 Path-B): the scheduled cadence (m % k)==0.
+             *     m == M-1 is excluded because the always-on per-step
+             *     coherence exchange after the loop IS the final-substep
+             *     exchange — an in-loop one here would pay the message twice.
+             * 🔴 SELFCHECK honesty under kper>1 (the s3 trap, third sighting):
+             * the stash-compare below runs ONLY on substeps that actually
+             * exchange. On skipped substeps there is nothing exchanged to
+             * compare against — and a compare that ran its own exchange anyway
+             * would silently restore the per-substep cadence and repair the
+             * very free-run window KPERIOD creates. Skipped substeps are
+             * measured implicitly: the NEXT scheduled exchange (or the final
+             * coherence exchange) diffs the drift accumulated over the whole
+             * window. */
+            const int chk = eDim > 0
+                            && (wide_chk || (kper > 1 && fesom_se_wide_selfcheck() == 2));
+            if (kper > 1) ++kper_nx;
             /* stash the LOCAL ring-1 values, then let the exchange overwrite
              * them, then diff: stash-vs-owner. Without the stash this compares
              * the owner's value with itself and always reports 0.0. */
-            {
+            if (chk) {
                 const real_t *e = s_se.eta[0].d().data();
                 real_t       *s = s_se.wide_chk.d().data();
                 Kokkos::parallel_for("se_wide_stash", Kokkos::RangePolicy<>(0, eDim),
                     KOKKOS_LAMBDA(const int j) { s[j] = e[Nown + j]; });
             }
             fesom_halo_field(s_se.eta[0], FESOM_HALO_NOD2D, 1, 1, p);
-            {
+            if (chk) {
                 const real_t *e = s_se.eta[0].d().data();
                 const real_t *s = s_se.wide_chk.d().data();
                 double mx = 0.0;
+                /* L110 hardening, kper>1 instrument ONLY (k=1 keeps HEAD bytes,
+                 * including HEAD's NaN-blindness): a NaN diff is promoted to a
+                 * 1e300 sentinel so it cannot hide under the Max identity, and
+                 * the NaN population is counted per side below. */
+                const int nanaware = (kper > 1);
                 Kokkos::parallel_reduce("se_wide_chk", Kokkos::RangePolicy<>(0, eDim),
                     KOKKOS_LAMBDA(const int j, double &acc) {
                         const double d = (double)e[Nown + j] - (double)s[j];
-                        const double a = d < 0.0 ? -d : d;
+                        double a = d < 0.0 ? -d : d;
+                        if (nanaware && d != d) a = 1e300;
                         if (a > acc) acc = a;
                     }, Kokkos::Max<double>(mx));
+                if (nanaware) {
+                    long ns = 0, no = 0;
+                    Kokkos::parallel_reduce("se_wide_chk_nans", Kokkos::RangePolicy<>(0, eDim),
+                        KOKKOS_LAMBDA(const int j, long &acc) {
+                            if (s[j] != s[j]) ++acc; }, ns);
+                    Kokkos::parallel_reduce("se_wide_chk_nano", Kokkos::RangePolicy<>(0, eDim),
+                        KOKKOS_LAMBDA(const int j, long &acc) {
+                            const real_t v = e[Nown + j];
+                            if (v != v) ++acc; }, no);
+                    s_se.wide_chk_nan_s += ns;
+                    s_se.wide_chk_nan_o += no;
+                }
                 if (mx > s_se.wide_chk_max) s_se.wide_chk_max = mx;
                 /* Per-substep trace for the first two steps: a mismatch that is
                  * SEEDED at one substep (constant magnitude) means an input
@@ -2052,12 +2197,18 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
      * One exchange per STEP restores the invariant and costs 1 message where the
      * certified path spends M: at M=50 the rung is still 100 -> 51, not 100 -> 50.
      * The saving survives; the invariant is not negotiable. */
-    if (wide && !wide_chk) {
+    if (wide && (!wide_chk || kper > 1)) {
         /* SELFCHECK=2 measures the FREE-RUNNING drift here, which is the number
          * that actually matters and which the per-substep selfcheck cannot see:
          * it stashes what M substeps of local computation produced, lets the
-         * exchange deliver the owner's values on top, and reports the gap. */
-        const int chk2 = (fesom_se_wide_selfcheck() == 2) && eDim > 0;
+         * exchange deliver the owner's values on top, and reports the gap.
+         * M14: under KPERIOD>1 this final exchange ALSO runs when SELFCHECK=1
+         * is on — the in-loop schedule excludes m = M-1, so the step must still
+         * end reconciled HERE before the baroclinic coupling reads eta; the
+         * stash-compare rides along so the tail window is measured rather than
+         * silently repaired. */
+        const int chk2 = (fesom_se_wide_selfcheck() == 2
+                          || (wide_chk && kper > 1)) && eDim > 0;
         if (chk2) {
             if (!s_se.wide_chk.allocated()) s_se.wide_chk.alloc("se.wide.chk", (size_t)eDim);
             const real_t *e = s_se.eta[0].d().data();
@@ -2070,18 +2221,65 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
             const real_t *e = s_se.eta[0].d().data();
             const real_t *s = s_se.wide_chk.d().data();
             double mx = 0.0;
+            /* L110 hardening under kper>1 only (see the in-loop twin). */
+            const int nanaware = (kper > 1);
             Kokkos::parallel_reduce("se_wide_chk_step", Kokkos::RangePolicy<>(0, eDim),
                 KOKKOS_LAMBDA(const int j, double &acc) {
                     const double d = (double)e[Nown + j] - (double)s[j];
-                    const double a = d < 0.0 ? -d : d;
+                    double a = d < 0.0 ? -d : d;
+                    if (nanaware && d != d) a = 1e300;
                     if (a > acc) acc = a;
                 }, Kokkos::Max<double>(mx));
-            MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
-            if (p->mype == 0)
-                fprintf(stderr, "[ssh_se-wide-drift] step %d free-running max|local - owner| "
-                                "over ring-1 eta after %d substeps = %.6e\n", step_n, M, mx);
+            if (kper > 1) {
+                /* Per-step max over ALL performed exchanges: the in-loop
+                 * scheduled diffs already folded into wide_chk_max; fold the
+                 * tail window (last scheduled exchange -> final, <= kper
+                 * substeps) and report the combined number. Reset here unless
+                 * SELFCHECK=1's verdict block below owns report + reset. */
+                {
+                    long ns = 0, no = 0;
+                    Kokkos::parallel_reduce("se_wide_chk_step_nans",
+                        Kokkos::RangePolicy<>(0, eDim),
+                        KOKKOS_LAMBDA(const int j, long &acc) {
+                            if (s[j] != s[j]) ++acc; }, ns);
+                    Kokkos::parallel_reduce("se_wide_chk_step_nano",
+                        Kokkos::RangePolicy<>(0, eDim),
+                        KOKKOS_LAMBDA(const int j, long &acc) {
+                            const real_t v = e[Nown + j];
+                            if (v != v) ++acc; }, no);
+                    s_se.wide_chk_nan_s += ns;
+                    s_se.wide_chk_nan_o += no;
+                }
+                if (mx > s_se.wide_chk_max) s_se.wide_chk_max = mx;
+                double red[3] = { s_se.wide_chk_max,
+                                  (double)s_se.wide_chk_nan_s,
+                                  (double)s_se.wide_chk_nan_o };
+                MPI_Allreduce(MPI_IN_PLACE, &red[0], 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+                MPI_Allreduce(MPI_IN_PLACE, &red[1], 2, MPI_DOUBLE, MPI_SUM, p->MPI_COMM_FESOM);
+                if (p->mype == 0)
+                    fprintf(stderr, "[ssh_se-wide-drift] step %d KPERIOD=%d max|local - owner| "
+                                    "over ring-1 eta at the %d performed exchanges (free-run "
+                                    "windows <= %d substeps) = %.6e | NaN diffs (1e300 "
+                                    "sentinel): stash %ld owner %ld\n",
+                            step_n, kper, kper_nx + 1, kper, red[0],
+                            (long)red[1], (long)red[2]);
+                if (!wide_chk) s_se.wide_chk_max = 0.0;
+                s_se.wide_chk_nan_s = 0;
+                s_se.wide_chk_nan_o = 0;
+            } else {
+                MPI_Allreduce(MPI_IN_PLACE, &mx, 1, MPI_DOUBLE, MPI_MAX, p->MPI_COMM_FESOM);
+                if (p->mype == 0)
+                    fprintf(stderr, "[ssh_se-wide-drift] step %d free-running max|local - owner| "
+                                    "over ring-1 eta after %d substeps = %.6e\n", step_n, M, mx);
+            }
         }
     }
+
+    /* M14 KPERIOD accounting: the measured counterpart of the startup
+     * prediction (deterministic schedule; printed sparsely). */
+    if (wide && kper > 1 && p->mype == 0 && (step_n <= 2 || step_n % 10 == 0))
+        fprintf(stderr, "[ssh_se-kperiod] step %d eta exchanges: %d in-loop + 1 final "
+                        "(kper=%d, M=%d)\n", step_n, kper_nx, kper, M);
 
     /* GEOCHK, end of step: is Ū itself rank-consistent on the elements that more
      * than one rank claims? Geometry, stencil and forcing are (measured), so if

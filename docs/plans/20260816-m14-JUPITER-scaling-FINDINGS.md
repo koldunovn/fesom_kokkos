@@ -153,9 +153,15 @@ whose anatomy across g512→g1024 names the next campaign:
 
 1. **Ocean-phase compute imbalance under the M11 partition** — busy spread 1.6× (g512) → 1.8×
    (g1024) vs 1.12× on the stock partition: a5_u30 bought its message wins with work imbalance
-   (weights ~2D-heavy, A=100). Target: re-score the zoo's WGT_A axis (a3_a0/a15/a40) at NG5
-   512–2048 ranks with phasestats busy-spread as a scoring column. Headroom ≈12–14%/step.
-   (Generation in flight on Levante, 2026-08-16 night.)
+   (weights ~2D-heavy, A=100). **TESTED 2026-08-17 (race jobs 1395316–26, WGT_A arms
+   a3_a0/a15/a40 vs a5_u30, full combo + phasestats, g512+g1024): the axis is a DEAD END.**
+   a3_a15 flattens the spread exactly as designed (1.85×→1.36×, min busy 6.6→8.9 ms, wait
+   −2 ms) yet nets −0.5% at g1024 / +10.7% at g512 (allocation noise); a3_a0/a3_a40 are
+   null-to-losses (a3_a0 +17.7% at g1024 — pure-3D weights wreck the message side). Lesson:
+   busy-SPREAD is not recoverable time — rebalancing lifts the min but cannot lower the mean;
+   the only prize is the ~2 ms straggler-absorption wait, and the re-weighted arms pay ≈that
+   in comm shape. a5_u30 remains the production partition; headroom estimate corrected
+   from ≈12–14% to ≈0–5%.
 2. **icedyn replication floor** — busy flat at 4.9 ms from g512 to g1024: the K=8 ghost ring's
    redundant work is rank-count-invariant. Target: K-sweep (K=4 vs 8) at the top rungs; plus
    EVPWIDE_FUSE, measured −3.1% (g256) / −5.3% (g1024) fused-vs-unfused clean pairs — joins the

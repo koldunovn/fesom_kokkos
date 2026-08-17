@@ -52,13 +52,19 @@ want () { [ "$ONLY" = all ] || [ "$ONLY" = "$1" ]; }
 if want partitions; then
     say "M11 optimised partitions -> $MESHOPT"
     mkdir -p "$MESHOPT"
-    opt_rungs () { case $1 in
+    opt_rungs () {    # opt_rungs <mesh> <engine>
+        # M15 ocean-balance arms (WGT_A axis, engines a3_*): only the at-scale rungs —
+        # the race is at g512/g1024 where phasestats measured the a5_u30 ocean busy
+        # imbalance (1.6-1.8x vs stock 1.12x).
+        case $2 in a3_*) echo 256 512 1024; return ;; esac
+        case $1 in
         core2) echo 4 8 16 32 64 ;;
         farc)  echo 4 8 16 32 64 128 ;;
         dars)  echo 16 32 64 128 256 512 ;;
         ng5)   echo 16 32 64 128 256 512 1024 2048 ;;   # 2048 added 2026-08-16: the 512-node probe
     esac; }
-    for spec in core2:a5_u30 farc:a5_u30 dars:a4u30 ng5:a5_u30; do
+    for spec in core2:a5_u30 farc:a5_u30 dars:a4u30 ng5:a5_u30 \
+                ng5:a3_a0 ng5:a3_a15 ng5:a3_a40; do
         m=${spec%%:*}; e=${spec##*:}
         src=/work/ab0995/a270088/port2/mesh_m11/zoo/$m/$e
         mkdir -p "$MESHOPT/$m/$e"
@@ -70,7 +76,7 @@ if want partitions; then
             [ -f "$MESHOPT/$m/$e/$f" ] || $RSYNC "$LEV:$src/$f" "$MESHOPT/$m/$e/" || \
                 echo "  !! $m/$e/$f missing on Levante"
         done
-        for n in $(opt_rungs "$m"); do
+        for n in $(opt_rungs "$m" "$e"); do
             exp=$((2*n+1))
             [ "$(ls "$MESHOPT/$m/$e/dist_$n" 2>/dev/null | wc -l)" -eq "$exp" ] && \
                 { echo "  $m/$e/dist_$n present ($exp files)"; continue; }
