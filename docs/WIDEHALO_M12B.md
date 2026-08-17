@@ -211,6 +211,20 @@ runs print it too) — device-resident fields the host-side print does not sync,
 the reconcile active); knob-on vs knob-off is a rounding-class pair (the F-reconcile is rung-only
 by design, so the certified path stays byte-frozen vs its own history under `XCHG=0`).
 
+> **2026-08-17 — the rounding-class contract, rediscovered as a "regression" (resolved, not a
+> defect).** A Levante-side report read the paragraph above's EXACT certificate as "wide == plain
+> byte-for-byte" and filed the growing wide-vs-plain diff (T 6.8e-04 @ step 10, Kv/Av ~9e-2 @ 20,
+> np8) as an m14-integrate merge defect. Diagnosis on JUPITER (evidence:
+> `/e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide/`, jobs 1396588-1396836): the
+> PRE-MERGE certified binary (m12b tip, own build) reproduces the divergence **identically** —
+> same first-visible step (18, `hf` 4.79e+03 vs 4.80e+03 at %.2e, CORE2 dist_8 serial np8 M=50
+> legacy IC) — and each arm matches its merged twin line-for-line; the merged branch's W1′ drift
+> is 0.000000e+00 at every step (serial np8, CUDA np4/np8, 30 steps). The seed is §3e's 3-D-born
+> holder-`Fbt` ulp, re-measured at step 4 (3 elems, 1.7e-18, legacy IC; step 3, 8.7e-19, det IC).
+> The startup announce now states the contract (`[ssh_se-wide] NOTE: ... ROUNDING-CLASS pair`).
+> Gate the rung with `FESOM_SE_WIDE_SELFCHECK`, judge A/B state against §3b's floor — never
+> against byte identity (retired gate W1).
+
 ## 3b. Disturbance report — the lever against the model's own rank-dependence (W5b, PASS)
 
 Job 26953179, CORE2, 20 steps, `scripts/m12b_disturbance.py`. The residual is a rank-ordering
