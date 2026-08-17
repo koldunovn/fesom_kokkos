@@ -191,21 +191,11 @@ def harvest():
                 #     measurement. Both rungs were re-measured cleanly in the post-fix burst.
                 if r["job"] in ("1391342", "1391348"):
                     continue
-                # 🔴 (A2) CORE2 SE and max-config rows measured at FESOM_SE_M=35 are SUSPECT:
-                # M=35 is the CFL guard MINIMUM (dtbt at 98.6 % of the mesh limit), a live-print
-                # binary blows up at step 2-3 there, and the NaN-aware instrument found all 21888
-                # ring-1 eta entries NaN by step 30 while the NaN-blind one printed 0.0. The
-                # ladder's own zombie check is blind at that point because the GPU diag line
-                # carries no live ocean signal. L106: a NaN ocean measures FASTER, so these rows
-                # are optimistically biased. The certified CORE2 value is 50
-                # (docs/SSH_SE_M12.md:25). Re-earned at M=50 in jobs 1396897-901 / 1396964-68,
-                # which are NOT yet in this CSV -- so CORE2's JUPITER SE column is a GAP, not a
-                # number, until that harvest lands.
-                if r["job"] in tuple(str(j) for j in
-                                     list(range(1391309, 1391314)) +
-                                     list(range(1391973, 1391978)) +
-                                     list(range(1392095, 1392100))):
-                    continue
+                # (A2) The CORE2 M=35 rows are handled AT SOURCE now: the CSV voids their best
+                # arms (empty `best`) and deliberately KEEPS their base arms, which are valid
+                # baseline measurements. My earlier job-ID filter dropped the whole row and threw
+                # those baselines away — the same mistake I made once already with the pre-fix
+                # EVPWIDE rows. Nothing to do here: an empty `best` simply does not enter.
                 # (B) On the remaining pre-fix rows the BEST arm carried the wide halo through
                 #     the crashing path, so that number is void — but the BASE arm of a wide-halo
                 #     job runs no wide-halo knob at all. It is an ordinary baseline measurement
