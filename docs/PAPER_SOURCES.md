@@ -22,6 +22,7 @@ superseded or retracted, and the documents that contain them were not always upd
 | **"NG5 is the most fragile mesh"** | M11 pre-det text | Retired. Plain null under `det`; all four arms run. | `docs/plans/20260815-m11-det-rerun.md` |
 | **A100 dars partition "−10.1 %"** | earlier M14 figures | Estimator error: one job's best divided by another job's base, where the first job's baseline legs were rejected. Defensible value **1.046× at 16 GPUs**. | `scripts/m14_scaling_figs.py` header |
 | **"CG NaN blocks the merge"** | M14 handoff §0.1 (original text) | Not a bug. The M5.24 cold-start vertical CFL blow-up (rule 0.41) with `wsplit` off. `h17` fails the same condition; the merged binary does not. | M14 handoff §0.1 amendment + §6 |
+| **"the wide SE rung is bitwise-exact"** | my own memory index; easy to infer from the M12b handoffs | **Misreading.** That claim is the `FESOM_SE_WIDE_SELFCHECK` metric — the rung's locally computed ring-1 η against the owner's exchanged bytes. M12b **explicitly retired** byte identity against plain SE as "unattainable by construction" (`docs/plans/20260814-m12b-widehalo.md:157,:462`). The shipped contract is a **rounding-class pair** (`docs/WIDEHALO_M12B.md:211`), because the rung applies an owner-wins F-reconcile and a viscosity neighbour-order canonicalisation over multi-claimed elements that plain SE does not. | JUPITER session, 2026-08-17, incl. a pre-merge-binary reproduction |
 | **dolpung GH200 as "the GH200 result"** | pre-2026-08-16 figures | Superseded by JUPITER, which reaches 2048 GPUs. dolpung was a 42-node proxy. | `docs/plans/20260816-m14-JUPITER-scaling-FINDINGS.md` |
 
 ---
@@ -119,11 +120,18 @@ weight from the imbalance slack. **Not yet raced.**
   FB-θ reference used for comparison is at `ssh_sergey/zenodo_se/` (gitignored — third-party)
 - **Source:** `src/fesom_ssh_se.cpp` · knobs `FESOM_SSH_MODE=se` (requires `FESOM_ALE=zstar`),
   `FESOM_SE_M=<subcycles>`
-- 🔴 **`FESOM_SE_M` is per-mesh and the default is wrong on two meshes.** Calibrated: fArc **90**,
-  dars **20**, CORE2 M_min 35 (use margin — see below), NG5 M_min 17 (probe printed by the model).
-  The default 50 *aborts* on fArc and *inverts* the verdict on dars.
-  ⚠️ Running at exactly M_min produces NaN with a clean exit code — measured 2026-08-16 at CORE2
-  M=35. Both production values carry 10–18 % margin.
+- 🔴 **`FESOM_SE_M` is per-mesh. Use the CERTIFIED value, never the CFL guard minimum.**
+  Certified ladder values are in `docs/SSH_SE_M12.md:25`: **CORE2 50**, fArc **90**, dars **20**.
+  The startup guard prints the mesh *minimum* and aborts below it — that minimum is not a usable
+  setting. CORE2's minimum is 35 and running there blows up at step 2–3 in **both** arms; my
+  attempt to "add margin" to it (45) also failed, at 64 ranks. The default 50 is right for CORE2,
+  *aborts* on fArc and *inverts* the verdict on dars. NG5 was never certified — its guard prints
+  M_min 17 and the JUPITER campaign ran 20.
+- 🔴 **The wide rung's equivalence contract:** knob-on vs knob-off is a **rounding-class pair**,
+  not a byte pair. Gate it with `FESOM_SE_WIDE_SELFCHECK=1` (drift ≡ 0.0) and judge A/B state
+  differences against the rounding floor — never by byte identity of coupled state. The seed is a
+  3-D-born last-bit difference in `Fbt` at the ~1341 multi-claimed elements of CORE2 dist_8,
+  present under both IC modes from step 3–4, which the coupled model then amplifies.
 - **Wide rung (K-ring):** `docs/WIDEHALO_M12B.md` · `docs/plans/20260814-m12b-widehalo.md` +
   four session handoffs. Only **K=1** is implemented; `src/fesom_ssh_se.cpp:141` aborts on K≥2 and
   names what is missing. K≥2 is under development on JUPITER.
@@ -175,10 +183,11 @@ confirmed at 1536 and 512 ranks). Details in the M14 handoff §2.
    paper should describe the fallback as a robustness limit *of the guard or of the method* —
    the two have not been separated.
 2. **NG5 split-explicit fidelity** (see §4b).
-3. **The wide split-explicit rung is not byte-exact on `m14-integrate`** at 8 ranks with a clean
-   self-control (measured 2026-08-17, `jobs/job_m14_sewide_bytegate`). Under investigation in
-   another session.
-4. **Plain split-explicit goes NaN at 64 ranks on CORE2 at M=45**, both arms, clean exit code.
+3. ~~wide rung not byte-exact~~ — **CLOSED, was not a defect.** My gate tested a premise M12b
+   had already retired; see §0. `jobs/job_m14_sewide_bytegate` encodes that invalid premise and
+   should not be reused as written.
+4. ~~plain SE NaN at 64 ranks~~ — **almost certainly the same error**: I ran M=45, below CORE2's
+   certified 50. Not re-tested at 50.
 5. **Partition promotions** `dars_gpu_v1` / `ng5_gpu_v1` lack their 3000-step screen.
 6. **JUPITER numbers are single-allocation on a production-loaded fabric.** The campaign's ruling
    is that a loaded fabric is the deployment-relevant condition, but the largest gains carry an
