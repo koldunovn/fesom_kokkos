@@ -1,0 +1,61 @@
+#!/bin/bash
+#SBATCH --job-name=kper_price
+#SBATCH -p booster
+#SBATCH -A e-sta-destine
+#SBATCH --nodes=16
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=64
+#SBATCH --gres=gpu:4
+#SBATCH --time=00:25:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide/kper_price_%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide/kper_price_%j.err
+#
+# M14/M12b deep-K DECISION INPUT — the Path-B cadence pricing curve at the point
+# where the s4 retraction says K=2-4 plausibly pays: CORE2 16N GPU (64 ranks,
+# small mesh per rank, strong-scaling limit). One job runs the k ladder
+# back-to-back on the same allocation so the node draw cancels (the campaign
+# harness lesson: -C cannot pin nodes, so pair on ONE allocation).
+#
+#   k unset = today's K=1 rung (free-running, final coherence exchange only)
+#   k=2,4   = ADDS a scheduled in-loop eta exchange every k substeps — the
+#             deep-K cadence's wire cost, measured without the extended mesh.
+#
+# READ FIRST: the k arms are trajectory-neutral BY CONSTRUCTION only because
+# the rung free-runs exactly (W1' drift == 0.0, re-verified 2026-08-17 on the
+# merged branch). Gate before pricing: the serial np8 ladder
+# (claude_sewide/kU,kK1,kK2,kK4) must show kK1 byte == kU and kK2/kK4
+# diag-identical with windowed drift 0.0. Do NOT run this at M=35 — the CORE2
+# M=35 GPU point is NaN-suspect (findings doc caveat, 2026-08-17); M=50 only.
+#
+# 🔴 The binary must carry the FESOM_SE_WIDE_KPERIOD patch (main-checkout
+# uncommitted as of 2026-08-17, or the staged build below). Verify the announce
+# '[ssh_se]   WIDE KPERIOD = k' fired in every arm — a knob that does nothing
+# is indistinguishable from a lever that does not pay (L80).
+set -u
+BIN=${BIN:-/e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide/kper_tree/build-cuda/fesom_port}
+MESH=/e/scratch/e-sta-destine/koldunov1/meshes/ng5
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/m14/claude_sewide
+DT=180; NSTEPS=300; YEAR=1958
+
+source /e/home/jusers/koldunov1/jupiter/port_kokkos/env_jupiter.sh
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+export HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_IC_EXTRAP=det
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=20 FESOM_SE_WIDE=1
+
+sha256sum "$BIN"
+for K in 0 1 2 4 2 0; do          # 0 = unset; ladder bracketed by repeats for drift-of-the-node control
+  ARM=k${K}_$(date +%s)
+  OUT=$BASE/kper_price_${SLURM_JOB_ID}_$ARM; mkdir -p "$OUT"
+  unset FESOM_SE_WIDE_KPERIOD
+  [ "$K" != "0" ] && export FESOM_SE_WIDE_KPERIOD=$K
+  echo "=== arm $ARM (KPERIOD=${FESOM_SE_WIDE_KPERIOD:-unset}) -> $OUT"
+  srun -n 64 "$BIN" "$MESH" "$OUT" $DT $NSTEPS -1 "$PHC" $YEAR \
+       > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -h "WIDE KPERIOD" "$OUT/run.err" | head -1        # fired-proof (L80)
+  grep -h "loop timing" "$OUT/run.log" | tail -1          # the number
+done
+echo "=== kper pricing ladder done"
