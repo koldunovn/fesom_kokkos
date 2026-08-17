@@ -92,6 +92,17 @@ gently past the plateau (−9% at 2048 GPUs vs base's collapse to 0.0934 s/step)
   no timing quoted without `fallbacks=`). Not a merge regression, not wsplit.
 - **Split-explicit** — see Q1. Per-mesh M matters (probe first): farc 90, dars 20, NG5 20
   (M_min 17), core2 35 (probe confirmed the M12b calibration; core2 SE ladder ran with it).
+  🔴 **2026-08-17 CAVEAT — the CORE2 `M=35` GPU rows are SUSPECT (probable NaN ocean).** A
+  fresh binary with live CUDA diag prints blows up at step 2-3 at CORE2 g4 `M=35` (real 1958
+  forcing, det IC, `[fesom_port] BLOWUP at step 3` — `claude_sewide/A_plain,B_wide`), and the
+  2026-08-16 KPERIOD probes' NaN-aware arms measured **all 21888 ring-1 η entries NaN by
+  step 30** at the same point (`claude_sekp/kp2b,kp4b`; the non-NaN-aware arms printed a fake
+  `0.000000e+00` — the L110 max-identity trap, third sighting). The ladder binary's GPU diag
+  line carries NO live ocean signal (`uv=0 eta=0 Kv=0`, stale host `hf`/`stress` identical at
+  steps 1 and 300), so its BLOWUP guard is blind there — "300 steps, 0 rejections" does not
+  certify a live ocean at `M=35`. `M=50` runs clean (30-step pairs, serial+CUDA, live prints).
+  Before quoting any CORE2 SE row: re-earn it at `M=50` (the 1396897-1396901 wave) or prove
+  the `M=35` ocean live (snapshot diff, not diag lines).
 - **Partition** — see Q2.
 - **Composition (partition+`oati`)** — NG5 g512: −18.3% in a *clean* allocation
   (base 0.0618 ≈ solo baseline 0.0624); best-arm 0.0505 was the campaign's fastest NG5 number

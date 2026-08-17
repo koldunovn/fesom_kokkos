@@ -753,6 +753,25 @@ static void se_wide_startup(const struct fesom_mesh *mesh, struct fesom_partit *
                         "elem2D_full %d  (messages/substep x%.3f)\n",
                 p->com_nod2D.rPEnum, p->com_elem2D.rPEnum, m_base, m_wide,
                 m_base ? (double)m_wide / (double)m_base : 0.0);
+        /* 🔴 The equivalence CONTRACT, stated where an A/B reader will see it.
+         * Knob-on vs knob-off is a ROUNDING-CLASS pair, not a byte pair, BY
+         * DESIGN: the rung canonicalises the viscosity neighbour order and
+         * owner-wins-reconciles F at the ~0.55 % multi-claimed elements — both
+         * rung-only rewrites of the 3-D model's own last-bit redundancy, and
+         * both required for the free-running exactness (drift == 0.0, the
+         * FESOM_SE_WIDE_SELFCHECK gate). W1 byte identity vs the certified
+         * path is unattainable by construction (WIDEHALO_M12B.md §3f; plan
+         * FINDING "not a defect of the rung"). A wide-vs-plain diff that GROWS
+         * from ~1e-18 F seeds is this contract, not a regression — judge it
+         * against the rounding floor (W5b: 2200-2400x below rank-count
+         * spread), never against byte identity. */
+        if (p->npes > 1)
+            fprintf(stderr, "[ssh_se-wide] NOTE: knob-on vs knob-off is a ROUNDING-CLASS pair "
+                            "(rung-only neighbour-order canonicalisation + owner-wins "
+                            "F-reconcile over multi-claimed elements). Byte identity vs plain "
+                            "se is unattainable by construction — gate the rung with "
+                            "FESOM_SE_WIDE_SELFCHECK (drift == 0.0) and judge A/B state "
+                            "diffs against the rounding floor (WIDEHALO_M12B.md §3f).\n");
     }
 }
 
