@@ -172,6 +172,18 @@ whose anatomy across g512→g1024 names the next campaign:
    Implementation + 1-node validation done this session (uncommitted); staging race at g512
    next.
 
+## 🔴 CORE2 SE M=35 rows: SUSPECT — superseded by the M=50 re-measurement
+
+The CORE2 SE and max-config rows measured at FESOM_SE_M=35 (jobs 1391309–13, 1391973–77,
+1392095–99) are flagged SUSPECT: M=35 is the CFL minimum (dtbt at 98.6% of the mesh limit), a
+live-print binary blows up at step 2–3 at that config, the NaN-aware KPERIOD instrument found
+all 21,888 ring-1 η entries NaN by step 30 at the same point while the NaN-blind instrument
+printed 0.0 (L110, third sighting), and the ladder's zombie check is blind there (stale GPU
+diag prints). The L106 lesson applies: a NaN ocean measures FASTER. Re-earned at the certified
+M=50 (jobs 1396897–901): SE gains are real but 3–5 pp smaller — −14.2/−19.4/−21.1/−23.2/−24.0%
+at g4–g64 (best 0.0332–0.0386 s/step). The production table's CORE2 column uses the M=50 basis
+(max-config re-run jobs 1396964–68); no M=35 row may be quoted.
+
 ## Open items
 
 1. Calm-pass adjudication of every 🔶 above (running).
