@@ -195,6 +195,14 @@ M=50 (jobs 1396897–901): SE gains are real but 3–5 pp smaller — −14.2/�
 at g4–g64 (best 0.0332–0.0386 s/step). The production table's CORE2 column uses the M=50 basis
 (max-config re-run jobs 1396964–68); no M=35 row may be quoted.
 
+CSV state (2026-08-17, on Levante's request): `20260816-m14-scaling.csv` now carries the M=50
+re-measurement — jobs 1396897–901 as lever `se` (binary 038b2cc2) and 1396964–68 as lever
+`se+evpwide` (binary 1bd52880, classifies to the combo family via the harvester's fallback).
+The 15 M=35-suspect rows keep their base arms (ordinary no-knob baselines) but have `best` and
+`gain_pct` blanked — same treatment the pre-fix EVPWIDE rows got. Note the original harvest had
+mislabeled 1392095–99 as lever `se` although their knobs were the full SE+EVPWIDE combo; moot
+now that those best arms are void.
+
 
 ## M15 measurement round (2026-08-17) — wide-halo question set closed
 
