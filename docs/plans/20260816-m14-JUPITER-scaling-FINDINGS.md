@@ -195,6 +195,26 @@ M=50 (jobs 1396897–901): SE gains are real but 3–5 pp smaller — −14.2/�
 at g4–g64 (best 0.0332–0.0386 s/step). The production table's CORE2 column uses the M=50 basis
 (max-config re-run jobs 1396964–68); no M=35 row may be quoted.
 
+
+## M15 measurement round (2026-08-17) — wide-halo question set closed
+
+- **Partition rebalance (WGT_A)**: dead end (see caveat above); a5_u30 stays production.
+- **EVPWIDE K-sweep**: keep K=8 — K=4 loses +8.1% clean at g1024 (doubled exchange frequency,
+  more staging busy); the g512 job's −22.5% "win" is a monotone fabric-drift artifact (base
+  legs 0.0668→0.0484 within one allocation; wait fell 43→28 ms while busy was flat) — a
+  failure mode min-over-ABBA only partly guards; flagged.
+- **EVPWIDE_FUSE**: null on the full combo (−0.3%); not adopted.
+- **FESOM_SE_WIDE=1** (the free-running K=1 SSH rung, exonerated as rounding-class): −4.1%
+  at g512 on the full combo, null at g1024 — adopt at the sweet-spot rung.
+- **Deep-K pricing (validated KPERIOD instrument, bracketed 6-arm ladders)**:
+  CORE2 16N: noise floor (≤0.4%, <30 µs/exchange) — deep-K dead there.
+  NG5 g1024 (job 1397208): k=2 reproduces 0.0429/0.0429 vs brackets 0.0393–0.0406 —
+  **~0.25–0.3 ms per η exchange**, giving the extended-mesh K-ring build a measured payoff
+  bound of ~5–10%/step at production scale (remove ~(1−1/K)·M Ū exchanges; bt budget caps it).
+  Deep-K (M12b §D) is a justified M16 candidate at NG5-scale rungs only.
+- CORE2 production column re-earned at M=50: best 0.0300 s/step (g32) ≈ 164 SYPD,
+  gains −18.8→−30.1% (supersedes the M=35-suspect 176 SYPD).
+
 ## Open items
 
 1. Calm-pass adjudication of every 🔶 above (running).

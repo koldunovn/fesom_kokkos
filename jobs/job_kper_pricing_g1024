@@ -1,0 +1,51 @@
+#!/bin/bash
+#SBATCH --job-name=kper_g1024
+#SBATCH -p booster
+#SBATCH -A e-sta-destine
+#SBATCH --nodes=256
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=72
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:50:00
+#SBATCH -o /e/scratch/e-sta-destine/koldunov1/port2/m14/kper_g1024_%j.out
+#SBATCH -e /e/scratch/e-sta-destine/koldunov1/port2/m14/kper_g1024_%j.err
+#
+# Deep-K pricing at the CAMPAIGN TARGET: NG5 g1024 (256 nodes, 1024 GPUs), the
+# smallest-per-rank point in the fleet — if the scheduled eta-exchange cadence
+# costs anything anywhere, it is here (SE step ~0.04 s; k=2 adds 10+1
+# exchanges/step at M=20, k=4 adds 5+1). Same bracketed ladder as
+# jobs/job_kper_pricing (CORE2 16N verdict: noise floor, <=0.4%).
+# NG5 fleet rules: dt=180, FESOM_SE_M=20 (M_min 17), FESOM_WSPLIT=1 (cold PHC
+# start dies without it), FESOM_HALO_STAGE=1 transport, det IC, production
+# a5_u30 partition. User-authorized 2026-08-17 ("run the deep-K pricing at
+# g1024 yourself").
+set -u
+BIN=${BIN:-/e/home/jusers/koldunov1/jupiter/port_kokkos/build-jupiter-cuda/fesom_port}
+MESH=/e/scratch/e-sta-destine/koldunov1/meshes_m11/ng5/a5_u30
+PHC=/e/scratch/hclimrep/koldunov1/meshes/phc3.0/phc3.0_winter.nc
+BASE=/e/scratch/e-sta-destine/koldunov1/port2/m14
+DT=180; NSTEPS=300; YEAR=1958
+
+[ -d "$MESH/dist_1024" ] || { echo "REFUSE: $MESH/dist_1024 missing"; exit 2; }
+source /e/home/jusers/koldunov1/jupiter/port_kokkos/env_jupiter.sh
+export FESOM_FORCING_DIR=/e/scratch/e-sta-destine/koldunov1/forcing_1958
+export FESOM_CHL_FILE=/e/scratch/hclimrep/koldunov1/meshes/Sweeney/Sweeney_2005.nc
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_SPEED=1 FESOM_HALO_STAGE=1 FESOM_IC_EXTRAP=det FESOM_WSPLIT=1
+export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=20 FESOM_SE_WIDE=1
+
+md5sum "$BIN"
+for K in 0 1 2 4 2 0; do    # bracketed: repeats control allocation drift
+  ARM=k${K}_$(date +%s)
+  OUT=$BASE/kper_g1024_${SLURM_JOB_ID}_$ARM; mkdir -p "$OUT"
+  unset FESOM_SE_WIDE_KPERIOD
+  [ "$K" != "0" ] && export FESOM_SE_WIDE_KPERIOD=$K
+  echo "=== arm $ARM (KPERIOD=${FESOM_SE_WIDE_KPERIOD:-unset}) -> $OUT"
+  srun -n 1024 bash -c "source /e/home/jusers/koldunov1/jupiter/port_kokkos/env_jupiter.sh; exec $BIN $MESH $OUT $DT $NSTEPS -1 $PHC $YEAR" \
+       > "$OUT/run.log" 2> "$OUT/run.err"
+  echo "exit=$?"
+  grep -ah "WIDE KPERIOD" "$OUT/run.err" | head -1     # fired-proof (L80)
+  grep -ah "loop timing" "$OUT/run.log" | tail -1       # the number
+done
+echo "=== kper g1024 pricing ladder done"
