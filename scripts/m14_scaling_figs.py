@@ -191,6 +191,21 @@ def harvest():
                 #     measurement. Both rungs were re-measured cleanly in the post-fix burst.
                 if r["job"] in ("1391342", "1391348"):
                     continue
+                # 🔴 (A2) CORE2 SE and max-config rows measured at FESOM_SE_M=35 are SUSPECT:
+                # M=35 is the CFL guard MINIMUM (dtbt at 98.6 % of the mesh limit), a live-print
+                # binary blows up at step 2-3 there, and the NaN-aware instrument found all 21888
+                # ring-1 eta entries NaN by step 30 while the NaN-blind one printed 0.0. The
+                # ladder's own zombie check is blind at that point because the GPU diag line
+                # carries no live ocean signal. L106: a NaN ocean measures FASTER, so these rows
+                # are optimistically biased. The certified CORE2 value is 50
+                # (docs/SSH_SE_M12.md:25). Re-earned at M=50 in jobs 1396897-901 / 1396964-68,
+                # which are NOT yet in this CSV -- so CORE2's JUPITER SE column is a GAP, not a
+                # number, until that harvest lands.
+                if r["job"] in tuple(str(j) for j in
+                                     list(range(1391309, 1391314)) +
+                                     list(range(1391973, 1391978)) +
+                                     list(range(1392095, 1392100))):
+                    continue
                 # (B) On the remaining pre-fix rows the BEST arm carried the wide halo through
                 #     the crashing path, so that number is void — but the BASE arm of a wide-halo
                 #     job runs no wide-halo knob at all. It is an ordinary baseline measurement
@@ -330,7 +345,10 @@ NOTE_SYPD = ("SYPD = dt_prod/(365·s_step), dt_prod = CORE2 1800 · fArc 900 · 
              "dars is measured at dt120 and NG5 at dt180 with NO CG dt-correction applied "
              "(it would be ×1.022 / ×1.011), so dars/NG5 SYPD is ~2 %/1 % optimistic.")
 NOTE_GAP = ("JUPITER points are single-allocation on a production-loaded fabric.  NG5 on A100 is "
-            "baseline-only: a cold-start CFL blow-up killed 30 of its 37 legs in BOTH arms.")
+            "baseline-only: a cold-start CFL blow-up killed 30 of its 37 legs in BOTH arms.  "
+            "CORE2 on JUPITER UNDERSTATES its split-explicit lever: those rows were measured at a "
+            "subcycle count below the certified value, are flagged as probable NaN oceans, and are "
+            "excluded here; the re-measurement (-18.8 to -30.1 %) is not yet in this dataset.")
 
 
 def annotate_gaps(ax, plat, data):
