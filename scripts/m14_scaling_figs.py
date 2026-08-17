@@ -336,9 +336,8 @@ NOTE_SYPD = ("SYPD = dt_prod/(365·s_step), dt_prod = CORE2 1800 · fArc 900 · 
              "(it would be ×1.022 / ×1.011), so dars/NG5 SYPD is ~2 %/1 % optimistic.")
 NOTE_GAP = ("JUPITER points are single-allocation on a production-loaded fabric.  NG5 on A100 is "
             "baseline-only: a cold-start CFL blow-up killed 30 of its 37 legs in BOTH arms.  "
-            "CORE2 on JUPITER UNDERSTATES its split-explicit lever: those rows were measured at a "
-            "subcycle count below the certified value, are flagged as probable NaN oceans, and are "
-            "excluded here; the re-measurement (-18.8 to -30.1 %) is not yet in this dataset.")
+            "CORE2 on JUPITER is on the certified M=50 basis; the earlier M=35 rows were probable "
+            "NaN oceans and their best arms are voided at source.")
 
 
 def annotate_gaps(ax, plat, data):
