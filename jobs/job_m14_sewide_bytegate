@@ -1,0 +1,107 @@
+#!/bin/bash
+#SBATCH --job-name=m14_sewide
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=64
+#SBATCH --time=00:25:00
+#SBATCH -o /work/ab0995/a270088/port2/m14/sewide.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m14/sewide.%j.err
+#
+# Is the split-explicit WIDE rung (FESOM_SE_WIDE=1, i.e. K=1) still byte-exact on the merged
+# m14-integrate tree?
+#
+# WHY THIS MATTERS NOW: the K>=2 extended-mesh rung is being implemented on JUPITER
+# (src/fesom_ssh_se.cpp:141 currently aborts on K>=2 — "only K=1 exists"). K=1 is that work's
+# correctness REFERENCE: the rung is an exact transformation of the same arithmetic, so
+# knob-on must be BIT-IDENTICAL to knob-off. If K=1 is not exact on this branch, a K=2
+# implementation has nothing valid to be checked against, and any drift it introduces will be
+# indistinguishable from drift it inherited. M12b proved exactness in its own worktree against
+# its own baseline; this re-proves it on the MERGED tree, which is what JUPITER built from.
+#
+# The two s3 fixes that made the rung exact (owner-bytes H0e exchange, owner-wins F
+# reconciliation) now DEFAULT ON, so this also checks that those defaults survived the merge.
+#
+# 🔴 A byte gate, not a climate budget: any mismatch is a bug, never rounding.
+# 🔴 SE_M carries MARGIN over the mesh minimum. CORE2's M_min is 35 and running exactly there
+#    produced NaN in both arms on the first attempt (dtbt 51.43 s against a 52.20 s limit).
+#    fArc runs 90 against M_min 82 and dars 20 against 17 — about 10-18 % margin. Default 45.
+# 🔴 np1 is deliberately absent — with no halo the rung is a structural no-op and would pass
+#    vacuously. Run np8 AND np64 so the halo is real and multi-rank.
+set -u
+ROOT=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+ulimit -s 204800
+
+BIN=${BIN:-/work/ab0995/a270088/port2/m14/bin/i4}/fesom_port_serial
+MESH=/work/ab0995/a270088/port2/mesh/core2              # private copy (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+B=/work/ab0995/a270088/port2/m14/sewide_$SLURM_JOB_ID
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+mkdir -p "$B"
+
+for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE FESOM_WSPLIT FESOM_HALO; do
+  while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
+done
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+
+echo "=== SE wide-rung byte gate — CORE2, dt=1800, 20 steps, snapshots at 0/10/20"
+md5sum "$BIN"
+
+# 20 steps, not 1: a mode that turns a CONSTANT array time-varying is bitwise-equal at cold
+# start and only breaks from step 2 (the Z7/L78 class). Snapshots at 0/10/20 clear it.
+run () {            # run <tag> <ranks> <extra knobs...>
+  local tag=$1 np=$2; shift 2
+  local o=$B/$tag; mkdir -p "$o"
+  ( export FESOM_ALE=zstar FESOM_SSH_MODE=se FESOM_SE_M=${SE_M:-45} FESOM_IC_EXTRAP=det
+    for kv in "$@"; do export "$kv"; done
+    srun -n "$np" -l "$BIN" "$MESH" "$o" 1800 20 10 "$PHC" 1958 > "$o/log" 2>&1 )
+  local rc=$?
+  local n; n=$(ls "$o"/snap_*.nc 2>/dev/null | wc -l)
+  # 🔴 ZOMBIE CHECK. rc=0 and a full set of snapshots is NOT aliveness — the first version of
+  # this gate checked only those two and reported "the rung is NOT exact" on a pair where BOTH
+  # arms had produced NaN fields. diff_snap then reports max-abs-diff=nan, which is neither
+  # equal nor unequal, and the gate called it a mismatch. Require the final step line to exist,
+  # be finite, carry a non-zero iteration count, and NOT be the +-1e+30 "no valid data"
+  # sentinel that a min/max reduction returns when every input is NaN.
+  local last; last=$(grep -E "^[0-9]*:? *[0-9]+ +it=" "$o/log" | tail -1)
+  local live=yes
+  [ -n "$last" ] || live=no
+  echo "$last" | grep -qiE "nan|inf" && live=no
+  echo "$last" | grep -qE "it=0[^0-9]" && live=no
+  echo "$last" | grep -qE "1[.]0*e\+30|1000000000000000019884624838656" && live=no
+  echo "  $tag (np=$np): rc=$rc snapshots=$n live=$live"
+  [ "$rc" -eq 0 ] && [ "$n" -ge 3 ] && [ "$live" = yes ] || {
+      echo "  !! $tag UNUSABLE — no verdict can rest on it"; echo "     | $last"; return 1; }
+}
+
+fail=0
+for np in 8 64; do
+  echo; echo "############ np=$np ############"
+  off_ok=1;  run "off_$np"  "$np"                 || { off_ok=0;  fail=1; }
+  # 🔴 SELF-CONTROL, and it is not optional. A byte gate without one cannot tell "the knob
+  # changed the answer" from "this configuration does not reproduce itself". Serial SHOULD be
+  # deterministic, which is exactly why an unnoticed non-determinism here would be read as a
+  # code defect. Same knobs, same ranks, second run.
+  ctl_ok=1;  run "ctl_$np"  "$np"                 || { ctl_ok=0;  fail=1; }
+  wide_ok=1; run "wide_$np" "$np" FESOM_SE_WIDE=1 || { wide_ok=0; fail=1; }
+  if [ "$off_ok" = 1 ] && [ "$ctl_ok" = 1 ]; then
+    echo "--- SELF-CONTROL: SE vs SE, identical knobs (MUST be byte-identical on Serial) ---"
+    "$PY" "$ROOT/scripts/diff_snap.py" "$B/off_$np" "$B/ctl_$np" >/dev/null 2>&1; crc=$?
+    echo "  control diff_snap rc=$crc"
+    [ "$crc" -eq 0 ] && echo "  ✅ the configuration reproduces itself — a knob-on difference is real" \
+                     || echo "  🔴 IT DOES NOT REPRODUCE ITSELF — no verdict on the rung is possible from this gate"
+  fi
+  if [ "$off_ok" = 1 ] && [ "$wide_ok" = 1 ]; then
+    echo "--- diff_snap: SE vs SE+WIDE (must be byte-identical) ---"
+    "$PY" "$ROOT/scripts/diff_snap.py" "$B/off_$np" "$B/wide_$np"; rc=$?
+    echo "  diff_snap rc=$rc"
+    [ "$rc" -eq 0 ] && echo "  ✅ np=$np EXACT — the K=1 rung is byte-identical on the merged tree" \
+                    || { echo "  ❌ np=$np MISMATCH — the rung is NOT exact here; K>=2 has no valid reference"; fail=1; }
+  fi
+done
+echo
+[ "$fail" -eq 0 ] && echo "=== SE WIDE BYTE GATE PASS (np8 + np64) ===" \
+                  || { echo "=== SE WIDE BYTE GATE FAIL ==="; exit 1; }
