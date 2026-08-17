@@ -91,7 +91,9 @@ GPUs and **do not transfer to GH200 at small scale** (JUPITER findings §Q2).
 
 **Open, and relevant if the paper wants a mechanism:** the JUPITER phase table indicates the
 2-D-heavy weight trades compute balance for message shape, so the winner may differ at 512–2048
-GPUs. Sixteen new NG5 partitions were generated 2026-08-17 to test exactly this — arms `a3_a0`,
+GPUs. ⚠️ *2026-08-17 plan-review: no per-phase table could be found in any JUPITER doc
+(FINDINGS, FLEET_RESULTS, PACKAGE), and the ladder logs carry no per-phase timings — locate the
+basis for this claim before citing it.* Sixteen new NG5 partitions were generated 2026-08-17 to test exactly this — arms `a3_a0`,
 `a3_a15`, `a3_a40`, `a3_a100` at 256/512/1024/2048 ranks, under
 `/work/ab0995/a270088/port2/mesh_m11/zoo/ng5/`. Comparing `a3_a100` against `a5_u30` separates the
 weight from the imbalance slack. **Not yet raced.**
@@ -157,6 +159,12 @@ speed number for it is protocol timing only. Adoption needs the M12b fidelity ga
 - **Tidy data, 219 rows, one row per job:** `docs/plans/20260816-m14-scaling.csv`
   (columns include `lever`, `cfg`, `wsplit`, `base`, `best`, `gain_pct`, `rejected`,
   `void_mixture`, `md5` — the last of these is load-bearing, see §0)
+  🔴 *2026-08-17: this CSV is **JUPITER-only** (7-digit JSC job ids, no machine column). The
+  Levante CPU/A100 half of the campaign exists only as job logs
+  `/work/ab0995/a270088/port2/m14/{ladder,gladder}.*.out`, parsed at runtime by
+  `scripts/m14_scaling_figs.py harvest()` — no stored table. Raw JUPITER sbatch logs for all
+  227 jobs are on Levante in `/work/ab0995/a270088/port2/m14/m14_jupiter_bundle.tar.gz`
+  (leg-level rc/live/s-per-step only, no per-phase timings; per-leg run.logs stayed on JUPITER).*
 - **Figures, all regenerated from logs with no manual editing:**
   `scripts/m14_scaling_figs.py` → `docs/figures/m14_scaling_sstep.png`,
   `m14_scaling_sypd.png` (throughput; the figure with the story),
