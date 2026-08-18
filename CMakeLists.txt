@@ -88,7 +88,7 @@ set(FESOM_CORE_SRC
   src/fesom_ice_fct.cpp     src/fesom_gm.cpp          src/fesom_kpp.cpp
   src/fesom_calendar.cpp    src/fesom_io_stream.cpp   src/fesom_io_stream_dispatch.cpp
   src/fesom_tke.cpp         src/fesom_ice_maevp.cpp
-  src/fesom_io_config.cpp
+  src/fesom_io_config.cpp     src/fesom_io_restart.cpp
 )
 add_library(fesom_core OBJECT ${FESOM_CORE_SRC})
 target_include_directories(fesom_core PUBLIC src ${NC_INCDIR})

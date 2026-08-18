@@ -60,6 +60,13 @@ typedef struct fesom_step_ctx {
      * if the FESOM_NO_ICE_THERMO env knob is set. */
     const struct fesom_jra55      *jra;
     const struct fesom_sss_runoff *sr;
+    /* 1 when the run resumed from a restart file. The Adams-Bashforth
+     * cold-start branch is keyed on it, not on step_n == 1: a resumed run
+     * starts again at step_n == 1 and would otherwise take the cold-start
+     * branch a second time. The Fortran guards the same thing with
+     * `if (lfirst .and. (.not. r_restart))` (oce_ale_vel_rhs.F90:287); the C
+     * reference's round-trip gate is what found it missing here. */
+    int                            restarted;
 } fesom_step_ctx;
 
 /*

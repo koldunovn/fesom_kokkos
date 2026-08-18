@@ -12,9 +12,27 @@
  *
  * Important MPI semantics:
  *   - Nodes are partitioned exclusively across ranks → Σ myDim_n == nod2D.
- *   - Elements may be REPLICATED across rank boundaries (Σ myDim_e ≥ elem2D).
- *     Duplicate writes for the same global element id are harmless because
- *     each contributing rank produces the same value after halo exchange.
+ *   - Elements may be REPLICATED across rank boundaries (Σ myDim_e ≥ elem2D):
+ *     gen_comm.F90:264-270 puts an element in myList_elem2D of EVERY rank that
+ *     owns one of its nodes, and each of them computes it.
+ *
+ * ⚠️ This header used to say duplicate element writes are harmless "because
+ * each contributing rank produces the same value after halo exchange". That is
+ * FALSE, and the C reference's restart round-trip gate is what disproved it. A
+ * halo exchange cannot equalise a replicated element — the element is *owned*
+ * on both ranks, so it is in neither one's halo list — and the copies do not
+ * agree: visc_filt_bcksct sums into U_b over myDim_edge2D+eDim_edge2D, and two
+ * ranks reach the same element's three edges in a different order. Measured on
+ * CORE2 at 128 ranks, uv agrees on all 15348 replicated slots after one step
+ * and disagrees on 3311 of them after twenty (one ulp). Inherited from the
+ * Fortran, not introduced by either port.
+ *
+ * For the snapshot and time-mean writers this remains harmless in practice —
+ * they keep the last writer's value, one ulp from any other owner's. It is NOT
+ * harmless for a restart, which is why gather_elem carries the duplicate check
+ * (FESOM_IO_GATHER_DUPCHECK=1) and why fesom_io_restart pushes the gathered
+ * values back. See rst_canonicalise there, and §2c of
+ * port2/fesom2_port_zstar/docs/plans/20260818-restart-io-port.md.
  */
 #ifndef FESOM_IO_GATHER_H
 #define FESOM_IO_GATHER_H
@@ -59,5 +77,26 @@ void gather_elem(const real_t *local, int stride,
                  const gather_plan *gp,
                  real_t *global,
                  MPI_Comm comm);
+
+/* Names the field in gather_elem's duplicate-check line (FESOM_IO_GATHER_DUPCHECK=1).
+ * Reset to "?" after each report, so a writer that does not set one cannot
+ * inherit another's label. Costs nothing when the knob is unset. */
+void gather_set_label(const char *label);
+
+/* The inverse of the two gathers: rank 0 permutes its global buffer into rank
+ * order with the same gathered_myList_* the gather reads on the way out, then
+ * MPI_Scatterv sends each rank its interior block. Because the permutation is
+ * the gather's read side run backwards, a field written on N ranks and read on
+ * M lands on the same global ids either way. Only the OWNED range is written;
+ * the caller re-exchanges the halo if its readers touch it. */
+void scatter_node(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm);
+
+void scatter_elem(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm);
 
 #endif /* FESOM_IO_GATHER_H */

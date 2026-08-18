@@ -1,0 +1,94 @@
+#!/bin/bash
+#SBATCH --job-name=kk_rst_gate
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_gate_kk.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_gate_kk.%j.err
+#
+# Task 2, the Kokkos half: four legs, four comparisons, one job.
+#
+#   A  C reference,   N+M steps, checkpointing at N and at N+M
+#   B  C reference,   N steps -> resume -> M steps
+#   C  Kokkos-Serial, N+M steps, checkpointing at N and at N+M
+#   D  Kokkos-Serial, N steps -> resume -> M steps
+#
+#   A@N+M vs B@N+M   the C round trip           (already green at 128 ranks)
+#   C@N+M vs D@N+M   the Kokkos round trip
+#   A@N+M vs C@N+M   C == Kokkos-Serial, no restart involved
+#   B@N+M vs D@N+M   C == Kokkos-Serial ACROSS a restart  <- the plan's gate
+#
+# The last two are the ones that matter and the first two are what makes a
+# failure attributable: if the cross-code comparison fails while both round
+# trips pass, the restart is fine and the two codes differ; if a round trip
+# fails, the restart is not.
+#
+# 8 ranks and dt=1800 to match the established Kokkos-Serial certification
+# (jobs/job_m14_gate_serial), including its L18 deterministic-gather setting.
+# Physics is the paper's, not that gate's default: zstar + cvmix_TKE + mEVP.
+set -u
+KK=/home/a/a270088/port_kokkos_int
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source "$KK/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/restart_gate_kk}
+N=${N:-10}; M=${M:-10}; DT=1800
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIFF="$CREF/tests/restart_roundtrip/compare_restart.py"
+
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{A,B1,B2,C,D1,D2}
+{ echo "C   $(cd "$CREF" && git rev-parse HEAD)"
+  echo "KK  $(cd "$KK"   && git rev-parse HEAD)"
+  echo "N=$N M=$M dt=$DT ntasks=$SLURM_NTASKS"; } > "$ROOT/PROVENANCE.txt"
+
+run () {   # $1 = binary, $2 = out dir, $3 = nsteps, rest = env assignments
+    local bin=$1 out=$2 steps=$3; shift 3
+    env "$@" srun -l --ntasks=$SLURM_NTASKS "$bin" "$MESH" "$out" $DT $steps -1 "$PHC" 1958 \
+        > "$out/run.log" 2> "$out/run.err"
+}
+
+CBIN=$CREF/build/fesom_port
+KBIN=$KK/build-m14serial/fesom_port
+
+echo "=== A: C reference, $((N+M)) steps, checkpoint at $N ==="
+run "$CBIN" "$ROOT/A"  $((N+M)) FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=0 FESOM_RESTART_AT=$N
+echo "=== B: C reference, $N then $M ==="
+run "$CBIN" "$ROOT/B1" $N       FESOM_RESTART_OUT="$ROOT/B1" FESOM_RESTART_EVERY=0
+run "$CBIN" "$ROOT/B2" $M       FESOM_RESTART_IN="$(ls "$ROOT"/B1/*.restart.nc)" \
+                                FESOM_RESTART_OUT="$ROOT/B2" FESOM_RESTART_EVERY=0
+echo "=== C: Kokkos-Serial, $((N+M)) steps, checkpoint at $N ==="
+run "$KBIN" "$ROOT/C"  $((N+M)) FESOM_RESTART_OUT="$ROOT/C" FESOM_RESTART_EVERY=0 FESOM_RESTART_AT=$N
+echo "=== D: Kokkos-Serial, $N then $M ==="
+run "$KBIN" "$ROOT/D1" $N       FESOM_RESTART_OUT="$ROOT/D1" FESOM_RESTART_EVERY=0
+run "$KBIN" "$ROOT/D2" $M       FESOM_RESTART_IN="$(ls "$ROOT"/D1/*.restart.nc)" \
+                                FESOM_RESTART_OUT="$ROOT/D2" FESOM_RESTART_EVERY=0
+
+fa=$(ls "$ROOT"/A/*.restart.nc | tail -1)
+fb=$(ls "$ROOT"/B2/*.restart.nc | tail -1)
+fc=$(ls "$ROOT"/C/*.restart.nc | tail -1)
+fd=$(ls "$ROOT"/D2/*.restart.nc | tail -1)
+
+rc=0
+cmp_pair () {   # $1 $2 = files, $3 = headline
+    echo; echo "=== $3 ==="
+    if "$CMP" "$DIFF" "$1" "$2" > "$ROOT/cmp.txt" 2>&1; then
+        echo "PASS  $3"
+    else
+        echo "FAIL  $3"; grep -E 'DIFFERS|FAIL' "$ROOT/cmp.txt" | head -10; rc=1
+    fi
+}
+cmp_pair "$fa" "$fb" "C round trip:        A@$((N+M)) vs B@$((N+M))"
+cmp_pair "$fc" "$fd" "Kokkos round trip:   C@$((N+M)) vs D@$((N+M))"
+cmp_pair "$fa" "$fc" "C == Kokkos-Serial:  A@$((N+M)) vs C@$((N+M))"
+cmp_pair "$fb" "$fd" "C == Kokkos-Serial across a restart: B@$((N+M)) vs D@$((N+M))"
+echo; echo "gate exit $rc"; exit $rc

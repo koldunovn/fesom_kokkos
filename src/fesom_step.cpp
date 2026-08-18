@@ -635,9 +635,11 @@ int fesom_timestep(int                          step_n,
     /* M5.13e: w_e device-resident with its halo (12d fesom_halo_field) - no re-push; compute_vel_rhs reads it on device. */
     /* M5.4: pgf_x/pgf_y are device-resident with their halo from substep 2 — no re-push. */
     /* M5.13f: hnode device-resident from last step's commit - no re-push; compute_vel_rhs reads it on device. */
-    fesom_compute_vel_rhs_kk(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
+    fesom_compute_vel_rhs_kk(mesh, aux, dyn,
+                             /*is_first_step=*/(step_n == 1 && !ctx->restarted), p);
     /* M5.13d: uv_rhsAB OUT sync_host removed - AB2 history read on device, no host reader. */
-    if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn, (step_n == 1), p, step_n,
+    if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn,
+                                                   (step_n == 1 && !ctx->restarted), p, step_n,
                                                     vrhs_uv_rhsAB_in.data());
     /* M5.4: uv_rhs needed by visc_filt_bidiff on HALO elements → device-halo (GPU-aware MPI on
      * CUDA, host-staged on Serial). The old OUT sync_host + the visc IN re-push (below) are gone:

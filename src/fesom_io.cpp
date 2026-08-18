@@ -38,6 +38,21 @@
 /* live in fesom_io.h so fesom_io_stream.c can reuse the plumbing.    */
 /* ------------------------------------------------------------------ */
 
+/* Duplicate-write check for gather_elem (FESOM_IO_GATHER_DUPCHECK=1): how many
+ * global element ids does the gather write more than once, and how many of
+ * those writes disagree. Ported from the C reference, where it is what
+ * identified the replicated-element property documented in fesom_io_gather.h.
+ * Zero cost when the knob is unset. */
+static const char *g_gather_label = "?";
+
+void gather_set_label(const char *label) { g_gather_label = label ? label : "?"; }
+
+static int dupcheck_on(void)
+{
+    const char *e = getenv("FESOM_IO_GATHER_DUPCHECK");
+    return e && atoi(e);
+}
+
 void gather_plan_init(gather_plan *gp,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit *partit)
@@ -68,10 +83,11 @@ void gather_plan_init(gather_plan *gp,
         gp->total_e = gp->displ_e[gp->npes-1] + gp->all_e[gp->npes-1];
         /* Nodes are partitioned exclusively (each global node has one owner)
          * so Σ myDim_n = nod2D. Elements may be REPLICATED across rank
-         * boundaries (Fortran convention; sum can exceed elem2D). When
-         * unpacking, duplicate writes for the same global element id are
-         * harmless because each contributing rank produces the same value
-         * after halo exchange. */
+         * boundaries (Fortran convention; sum can exceed elem2D), and their
+         * copies do NOT agree bit for bit — see the ⚠️ in fesom_io_gather.h.
+         * When unpacking, the last writer wins; for the snapshot and time-mean
+         * streams that costs one ulp, for a restart it does not, which is what
+         * fesom_io_restart's rst_canonicalise is for. */
         FESOM_CHECK(gp->total_n == mesh->nod2D,
                     "gather_plan: Σmyn=%d != nod2D=%d", gp->total_n, mesh->nod2D);
         FESOM_CHECK(gp->total_e >= mesh->elem2D,
@@ -152,16 +168,102 @@ void gather_elem(const real_t *local, int stride,
     MPI_Gatherv((void *)local, gp->myDim_e * stride, MPI_DOUBLE,
                 recv, counts, displs, MPI_DOUBLE, 0, comm);
     if (gp->mype == 0) {
+        /* gid < elem2D <= total_e, so total_e is a safe size for the flag. */
+        char *seen = dupcheck_on()
+                   ? (char *)calloc((size_t)gp->total_e, 1) : NULL;
+        long ndup = 0, ndiff = 0; double maxd = 0.0;
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_e[r]; ++i) {
                 int gid = gp->gathered_myList_e[gp->displ_e[r] + i] - 1;
-                memcpy(global + (size_t)gid * stride,
-                       recv + ((size_t)gp->displ_e[r] + i) * stride,
-                       (size_t)stride * sizeof(real_t));
+                const real_t *src = recv + ((size_t)gp->displ_e[r] + i) * stride;
+                real_t       *dst = global + (size_t)gid * stride;
+                if (seen) {
+                    if (seen[gid]) {
+                        ++ndup;
+                        for (int k = 0; k < stride; ++k) {
+                            if (memcmp(&dst[k], &src[k], sizeof(real_t)) != 0) {
+                                double d = fabs((double)dst[k] - (double)src[k]);
+                                if (d > maxd) maxd = d;
+                                ++ndiff;
+                                break;
+                            }
+                        }
+                    }
+                    seen[gid] = 1;
+                }
+                memcpy(dst, src, (size_t)stride * sizeof(real_t));
             }
+        }
+        if (seen) {
+            fprintf(stderr, "[gather-dup] %-10s stride=%-5d duplicates=%ld "
+                            "disagreeing=%ld max|d|=%.3e\n",
+                    g_gather_label, stride, ndup, ndiff, maxd);
+            fflush(stderr);
+            free(seen);
+            g_gather_label = "?";
         }
         free(recv); free(counts); free(displs);
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * scatter_node / scatter_elem — the inverse of the two gathers.      *
+ * See the contract in fesom_io_gather.h.                             *
+ * ------------------------------------------------------------------ */
+void scatter_node(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm)
+{
+    real_t *send = NULL;
+    int *counts = NULL, *displs = NULL;
+    if (gp->mype == 0) {
+        send   = (decltype(send))malloc((size_t)gp->total_n * (size_t)stride * sizeof(real_t));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
+        FESOM_CHECK(send && counts && displs, "scatter_node: oom");
+        for (int r = 0; r < gp->npes; ++r) {
+            counts[r] = gp->all_n[r] * stride;
+            displs[r] = gp->displ_n[r] * stride;
+            for (int i = 0; i < gp->all_n[r]; ++i) {
+                int gid = gp->gathered_myList_n[gp->displ_n[r] + i] - 1;
+                memcpy(send + ((size_t)gp->displ_n[r] + i) * stride,
+                       global + (size_t)gid * stride,
+                       (size_t)stride * sizeof(real_t));
+            }
+        }
+    }
+    MPI_Scatterv(send, counts, displs, MPI_DOUBLE,
+                 local, gp->myDim_n * stride, MPI_DOUBLE, 0, comm);
+    if (gp->mype == 0) { free(send); free(counts); free(displs); }
+}
+
+void scatter_elem(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm)
+{
+    real_t *send = NULL;
+    int *counts = NULL, *displs = NULL;
+    if (gp->mype == 0) {
+        send   = (decltype(send))malloc((size_t)gp->total_e * (size_t)stride * sizeof(real_t));
+        counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
+        displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
+        FESOM_CHECK(send && counts && displs, "scatter_elem: oom");
+        for (int r = 0; r < gp->npes; ++r) {
+            counts[r] = gp->all_e[r] * stride;
+            displs[r] = gp->displ_e[r] * stride;
+            for (int i = 0; i < gp->all_e[r]; ++i) {
+                int gid = gp->gathered_myList_e[gp->displ_e[r] + i] - 1;
+                memcpy(send + ((size_t)gp->displ_e[r] + i) * stride,
+                       global + (size_t)gid * stride,
+                       (size_t)stride * sizeof(real_t));
+            }
+        }
+    }
+    MPI_Scatterv(send, counts, displs, MPI_DOUBLE,
+                 local, gp->myDim_e * stride, MPI_DOUBLE, 0, comm);
+    if (gp->mype == 0) { free(send); free(counts); free(displs); }
 }
 
 /* Integer variants for nlevels / elem_nodes. */
