@@ -1,0 +1,140 @@
+#!/bin/bash
+#SBATCH --job-name=gpu_accept
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=02:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/gpu_accept.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/gpu_accept.%j.err
+#
+# Task 5, the two CUDA gates: GPU acceptance, and package H.
+#
+# Neither can be a byte gate. CUDA is not run-to-run reproducible on Levante
+# A100 -- three legs of ONE binary in ONE job differ by 1.0e-3..1.7e-3 in T --
+# so "the two binaries agree" is not a testable sentence there. Both gates are
+# therefore the same question asked twice: do the legs of the two arms look like
+# two samples of one population, or like two different codes?
+#
+#   A. ACCEPTANCE. The campaign binary with every lever off must reproduce the
+#      pre-campaign binary (h17, frozen 2026-07-16, the certified M7 master).
+#      This is the claim that the optimisation work did not quietly change the
+#      model underneath the levers.
+#
+#   B. PACKAGE H. Tier 1 with the six package-H rails against tier 1 without
+#      them. Package H removes host<->device transfers by asserting the data is
+#      already where it is needed, so its failure mode is a missing
+#      modify_host() -- and on Serial the DualView's two views ALIAS, which
+#      makes that failure a no-op. The Serial byte proofs in knobs.csv are
+#      silent about it by construction. This gate is the only evidence there is.
+#
+# A third comparison, all of tier 1 against knobs-off, falls out of the same
+# legs and is printed too: it is the CUDA-side statement behind "the whole
+# speedup is available without giving up bit identity".
+#
+# 20 steps with snapshots at 0/10/20, as every gate in this project since M6:
+# long enough for a mode that is equal at cold start to break (Z7/L78), short
+# enough to afford four legs per arm. A missing rail is not a subtle signal --
+# it reads ~1e-1 against a ~1e-3 floor.
+#
+# ⚠️ Four legs per arm, not three. The verdict is a permutation test over the
+# balanced relabellings of the eight legs of a comparison; with 3+3 the smallest
+# reachable p is 0.10 and no single field can ever be rejected at 0.05.
+#
+# ⚠️ Byte identity is not the only way a gate lies to you. A lever that resolves
+# to OFF looks exactly like a lever that changes nothing (L80), so every leg is
+# also required to ANNOUNCE the levers it was given -- and the arms that are
+# supposed to be lever-free are required NOT to announce them.
+set -u
+KK=/home/a/a270088/port_kokkos_int
+PAPER=/home/a/a270088/port_paper/paper_v2
+# ⚠️ before env_cuda.sh, which unloads the git module — a provenance line that
+# silently comes out empty is worse than none.
+GIT_KK=$(cd "$KK" && git rev-parse HEAD)
+GIT_PAPER=$(cd "$PAPER" && git rev-parse HEAD)
+source /sw/etc/profile.levante
+source "$KK/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/gpu_accept}
+LEGS=${LEGS:-4}
+N=${N:-20}; SNAP=${SNAP:-10}
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_cuda   # pre-campaign, frozen
+NEW=$KK/build-m14cuda/fesom_port                            # the campaign binary
+
+rm -rf "$ROOT"; mkdir -p "$ROOT"
+{ echo "KK        $GIT_KK"
+  echo "paper     $GIT_PAPER"
+  echo "pre-camp  $REF  md5 $(md5sum "$REF" | cut -d' ' -f1)"
+  echo "campaign  $NEW  md5 $(md5sum "$NEW" | cut -d' ' -f1)"
+  echo "legs=$LEGS steps=$N snap_every=$SNAP ntasks=$SLURM_NTASKS nodes=$SLURM_NODELIST"
+  nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sort -u
+} > "$ROOT/PROVENANCE.txt"
+cat "$ROOT/PROVENANCE.txt"
+
+# The knob sets come from the campaign module, which is the only place in the
+# project allowed to decide what a tier contains. Hand-typing them here is how a
+# job and a figure caption drift apart.
+env_of () { "$PY" "$PAPER/scripts/campaign.py" env "$1" kokkos_cuda | tr '\n' ' '; }
+ENV_BASE=$(env_of base)
+ENV_NOH=$(env_of tier1_noH)
+ENV_T1=$(env_of tier1)
+
+leg () {   # $1 = binary, $2 = leg dir, rest = environment
+    local bin=$1 tag=$2 out="$ROOT/$2"; shift 2; mkdir -p "$out"
+    env "$@" srun -l --ntasks=$SLURM_NTASKS "$bin" "$MESH" "$out" 1800 $N $SNAP "$PHC" 1958 \
+        > "$out/run.log" 2> "$out/run.err"
+    echo "  $tag rc=$?  $(ls "$out"/snap_*.nc 2>/dev/null | wc -l) snapshots"
+}
+
+echo; echo "=== $LEGS legs per arm ==="
+for i in $(seq 1 $LEGS); do
+    leg "$REF" "h17_$i"   $ENV_BASE
+    leg "$NEW" "off_$i"   $ENV_BASE
+    leg "$NEW" "noH_$i"   $ENV_NOH
+    leg "$NEW" "tier1_$i" $ENV_T1
+done
+
+# ---------------------------------------------------------------- vacuity
+# What the model says it is running, not what the job asked for.
+H_KNOBS="FLUXDEV ICERAILS BULKTAIL SSHRAILS SMOOTHSCRATCH LAZYSNAP"
+NOH_KNOBS="SWSKIP ICEFLUXDEV NOFENCE2 IOACC FLAT TDMANOINIT ROTCACHE FORCEDEV FERNOINIT VISCNOINIT"
+rc=0
+announced () { grep -q "FESOM_SPEED_$2 = ON" "$ROOT/$1/run.err"; }
+require_on ()  { for k in $2; do announced "$1" "$k" || { echo "  VACUOUS: $1 never announced $k ON"; rc=1; }; done; }
+require_off () { for k in $2; do announced "$1" "$k" && { echo "  LEAK: $1 announced $k ON, and must not have"; rc=1; }; done; }
+
+echo; echo "=== what the model announced ==="
+for i in $(seq 1 $LEGS); do
+    require_off "h17_$i"   "$NOH_KNOBS $H_KNOBS"
+    require_off "off_$i"   "$NOH_KNOBS $H_KNOBS"
+    require_on  "noH_$i"   "$NOH_KNOBS"
+    require_off "noH_$i"   "$H_KNOBS"
+    require_on  "tier1_$i" "$NOH_KNOBS $H_KNOBS"
+done
+[ "$rc" -eq 0 ] && echo "  all $((LEGS*4)) legs ran the levers they were given, and only those"
+
+# ---------------------------------------------------------------- verdicts
+arm () { local n=$1 out=""; for i in $(seq 1 $LEGS); do out="$out,${n}_$i"; done; echo "$n=${out#,}"; }
+"$PY" "$KK/tests/gpu_acceptance/accept.py" --root "$ROOT" --json "$ROOT/verdict.json" \
+    --arm "$(arm h17)" --arm "$(arm off)" --arm "$(arm noH)" --arm "$(arm tier1)" \
+    --compare h17:off --compare noH:tier1 --compare off:tier1
+vrc=$?
+
+echo
+case $vrc in
+  0) echo "gates: every comparison is inside the hardware's own spread — acceptance and package H both hold";;
+  1) echo "gates: a comparison exceeds the threshold, which is the magnitude of a stale mirror";;
+  *) echo "gates: ERROR — a comparison could not be made. That is not a verdict.";;
+esac
+[ "$rc" -ne 0 ] && echo "and at least one leg did not run the levers it was given, which voids the leg"
+[ "$vrc" -gt "$rc" ] && rc=$vrc
+echo "gpu_accept exit $rc"; exit $rc

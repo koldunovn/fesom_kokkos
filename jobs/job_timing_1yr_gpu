@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=t1yr_gpu
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --constraint=a100_80
+#SBATCH --time=03:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/timing_gpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/timing_gpu.%j.err
+#
+# One simulated year on CUDA at the node count this job was submitted with.
+# ⚠️ a100_80 is pinned: the node counts are compared against each other, and a
+# mixed A100-40/A100-80 ladder measures the hardware as much as the model.
+#
+# Submit one per point, e.g.
+#     TIER=tier1 sbatch -N1 --ntasks=4  jobs/job_timing_1yr_gpu
+#     TIER=tier1 sbatch -N2 --ntasks=8  jobs/job_timing_1yr_gpu
+#     TIER=tier1 sbatch -N4 --ntasks=16 jobs/job_timing_1yr_gpu
+#     TIER=base  sbatch -N2 --ntasks=8  jobs/job_timing_1yr_gpu
+set -u
+KK=/home/a/a270088/port_kokkos_int
+PAPER=/home/a/a270088/port_paper/paper_v2
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+TIER=${TIER:-tier1}
+GITSHA=$(cd "$KK" && git rev-parse --short HEAD)      # before env_cuda.sh unloads git
+
+source /sw/etc/profile.levante
+source "$KK/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+
+BIN=$KK/build-m14cuda/fesom_port
+NTASKS=$SLURM_NTASKS
+TAG=gpu_${TIER}_n${SLURM_NNODES}
+NSTEPS_SHORT=${NSTEPS_SHORT:-200}
+NSTEPS_YEAR=${NSTEPS_YEAR:-17520}     # 365 days at dt=1800; 1958 is not a leap year
+ENVSTR=$("$PY" "$PAPER/scripts/campaign.py" env "$TIER" kokkos_cuda | tr '\n' ' ')
+echo "kokkos $GITSHA  tier=$TIER"
+source "$KK/jobs/timing_1yr_body.sh"

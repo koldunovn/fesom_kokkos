@@ -1,0 +1,115 @@
+#!/bin/bash
+#SBATCH --job-name=byteproof
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/byteproof.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/byteproof.%j.err
+#
+# Task 5: the two byte proofs Task 4 found missing.
+#
+# BULKTAIL (H.3, -2.43%) and SMOOTHSCRATCH (H.7, -4.21%) are in the blessed set —
+# FESOM_SPEED=1 runs them — but neither has a FORCE_SERIAL byte proof on record,
+# so knobs.csv has them class=unverified and out of tier 1. Together that is
+# ~6.6% of step time sitting behind two Serial runs.
+#
+# The proof: on the Serial build, with FESOM_SPEED_FORCE_SERIAL=1 to bypass the
+# "Serial stays legacy" guard, a bit-identical lever must leave the restart file
+# byte-for-byte unchanged against the knob-off run of the same binary.
+#
+# ⚠️ Byte identity alone is NOT the proof, and this is the trap the whole M7
+# campaign was bitten by (L80): a lever that resolves to OFF is also
+# byte-identical. So each leg is required to ANNOUNCE the lever ON. A leg whose
+# announce line is missing is reported as VACUOUS, not as a pass.
+set -u
+KK=/home/a/a270088/port_kokkos_int
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source "$KK/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/byteproof}
+N=${N:-20}
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIFF="$CREF/tests/restart_roundtrip/compare_restart.py"
+BIN=$KK/build-m14serial/fesom_port
+
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"
+( cd "$KK" && git rev-parse HEAD ) > "$ROOT/PROVENANCE.txt"
+
+leg () {   # $1 = tag, rest = extra env
+    local out="$ROOT/$1"; shift; mkdir -p "$out"
+    env "$@" FESOM_RESTART_OUT="$out" FESOM_RESTART_EVERY=0 \
+        srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$out" 1800 $N -1 "$PHC" 1958 \
+        > "$out/run.log" 2> "$out/run.err"
+}
+
+# ⚠️ A lever must be proved WITH ITS DEPENDENCIES, and the baseline must carry the
+# same dependencies, so the only difference between the two legs is the lever
+# under test. The first version of this job tested BULKTAIL alone; the model
+# refused to run — correctly, because BULKTAIL without ICERAILS+ICEFLUXDEV+FLUXDEV
+# would let a downstream modify_host()+sync_device() copy a stale host mirror over
+# the device forcing and run on ZEROS. The job then read the missing restart file
+# as "differs" and reported a clean FAIL for a leg that never ran.
+DEPS_BULKTAIL="FESOM_SPEED_ICERAILS=1 FESOM_SPEED_ICEFLUXDEV=1 FESOM_SPEED_FLUXDEV=1"
+DEPS_SMOOTHSCRATCH=""
+
+leg off                                                     # bare baseline
+leg deps FESOM_SPEED_FORCE_SERIAL=1 $DEPS_BULKTAIL          # baseline for BULKTAIL
+leg BULKTAIL      FESOM_SPEED_FORCE_SERIAL=1 $DEPS_BULKTAIL FESOM_SPEED_BULKTAIL=1
+leg SMOOTHSCRATCH FESOM_SPEED_FORCE_SERIAL=1 FESOM_SPEED_SMOOTHSCRATCH=1
+
+rc=0
+check () {   # $1 = lever, $2 = its baseline leg
+    local k=$1 base=$2
+    echo; echo "=== $k (baseline: $base) ==="
+    local live=no same=unknown
+    grep -q "FESOM_SPEED_$k = ON" "$ROOT/$k/run.err" && live=yes
+    # "could not compare" is NOT "differs". Conflating them is how the first run
+    # of this job reported an abort as a scientific result.
+    if ! ls "$ROOT/$k"/*.restart.nc >/dev/null 2>&1; then
+        echo "ERROR: the $k leg produced no restart file — it did not run. Not a result."
+        tail -3 "$ROOT/$k/run.err" | sed 's/^/    /'
+        rc=1; return
+    fi
+    if "$CMP" "$DIFF" "$ROOT/$base/"*.restart.nc "$ROOT/$k/"*.restart.nc > "$ROOT/cmp_$k.txt" 2>&1; then
+        same=yes
+    else
+        grep -q 'Traceback' "$ROOT/cmp_$k.txt" && { echo "ERROR: the comparison itself failed"; \
+            tail -3 "$ROOT/cmp_$k.txt" | sed 's/^/    /'; rc=1; return; }
+        same=no
+    fi
+    echo "announced ON: $live   byte-identical to its baseline: $same"
+    if [ "$live" = no ]; then
+        echo "VACUOUS: the lever never announced itself ON — this leg proves nothing (L80)"; rc=1
+    elif [ "$same" = yes ]; then
+        echo "PASS: $k is bit-identical — promote it to tier 1 in knobs.csv and campaign.py"
+    else
+        echo "FAIL: $k changes the answer — it stays class=unverified and out of tier 1"
+        grep -E 'DIFFERS' "$ROOT/cmp_$k.txt" | head -5
+        rc=1
+    fi
+}
+
+# Control: the three dependencies are themselves tier-1 bit-identical levers, so
+# turning them on must change nothing. If this fails, one of THEM is misclassified
+# and the BULKTAIL verdict below means nothing.
+echo "=== control: ICERAILS + ICEFLUXDEV + FLUXDEV vs bare ==="
+if "$CMP" "$DIFF" "$ROOT/off/"*.restart.nc "$ROOT/deps/"*.restart.nc > "$ROOT/cmp_deps.txt" 2>&1; then
+    echo "PASS: the three dependencies are bit-identical, as tier 1 claims"
+else
+    echo "FAIL: a tier-1 dependency is NOT bit-identical — fix that before reading BULKTAIL"
+    grep -E 'DIFFERS' "$ROOT/cmp_deps.txt" | head -5; rc=1
+fi
+
+check BULKTAIL      deps
+check SMOOTHSCRATCH off
+echo; echo "byteproof exit $rc"; exit $rc

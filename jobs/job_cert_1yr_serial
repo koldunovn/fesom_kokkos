@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH --job-name=cert1yr
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=08:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/cert_1yr_serial.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/cert_1yr_serial.%j.err
+#
+# Task 5: certify Kokkos-Serial byte-identical to the C reference over ONE
+# SIMULATED YEAR in the DestinE-like configuration (zstar + cvmix_TKE + mEVP,
+# dt=1800, JRA55 1958, CORE2). 17 520 steps.
+#
+# This is the load-bearing claim of the paper's first fidelity tier, and the
+# reason it is a year rather than the 20 steps the merge gates use: a divergence
+# that needs a seasonal cycle to appear — an ice-edge branch that only fires in
+# the melt season, a mixing scheme that only convects in winter — is invisible in
+# a 20-step gate and fatal in a 63-year hindcast.
+#
+# Checkpoints every 730 steps (~15 days) rather than only at the end, for two
+# reasons: a divergence is LOCATED rather than merely detected, and if the job
+# hits the wall the certification is still valid up to the last matching pair.
+#
+# ⚠️ Both legs must use the same rank count — byte identity is a claim about two
+# codes on one decomposition, not about the decomposition.
+set -u
+KK=/home/a/a270088/port_kokkos_int
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source "$KK/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/cert_1yr_serial}
+STEPS=${STEPS:-17520}          # 365 days at dt=1800
+EVERY=${EVERY:-730}            # ~15 days
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIFF="$CREF/tests/restart_roundtrip/compare_restart.py"
+
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{c,kk}
+{ echo "C   $(cd "$CREF" && git rev-parse HEAD)"
+  echo "KK  $(cd "$KK"   && git rev-parse HEAD)"
+  echo "steps=$STEPS every=$EVERY ntasks=$SLURM_NTASKS"; } > "$ROOT/PROVENANCE.txt"
+
+echo "=== C reference, $STEPS steps ==="
+env FESOM_RESTART_OUT="$ROOT/c" FESOM_RESTART_EVERY=$EVERY \
+    srun -l --ntasks=$SLURM_NTASKS "$CREF/build/fesom_port" \
+         "$MESH" "$ROOT/c" 1800 $STEPS -1 "$PHC" 1958 > "$ROOT/c/run.log" 2> "$ROOT/c/run.err"
+echo "C rc=$?"; tail -1 "$ROOT/c/run.log" | cut -c1-120
+
+echo "=== Kokkos-Serial, $STEPS steps ==="
+env FESOM_RESTART_OUT="$ROOT/kk" FESOM_RESTART_EVERY=$EVERY \
+    srun -l --ntasks=$SLURM_NTASKS "$KK/build-m14serial/fesom_port" \
+         "$MESH" "$ROOT/kk" 1800 $STEPS -1 "$PHC" 1958 > "$ROOT/kk/run.log" 2> "$ROOT/kk/run.err"
+echo "KK rc=$?"; tail -1 "$ROOT/kk/run.log" | cut -c1-120
+
+echo
+echo "=== byte comparison at every checkpoint ==="
+rc=0; n=0; last=""
+for f in "$ROOT"/c/*.restart.nc; do
+    b=$(basename "$f")
+    if [ ! -f "$ROOT/kk/$b" ]; then
+        echo "MISSING in the Kokkos leg: $b"; rc=1; continue
+    fi
+    n=$((n+1))
+    if "$CMP" "$DIFF" "$f" "$ROOT/kk/$b" > "$ROOT/cmp_$b.txt" 2>&1; then
+        last="$b"
+    else
+        echo "FAIL at $b — the two codes diverge here"
+        grep -E 'DIFFERS' "$ROOT/cmp_$b.txt" | head -6
+        rc=1
+        break
+    fi
+done
+echo
+if [ "$rc" -eq 0 ] && [ "$n" -gt 0 ]; then
+    echo "PASS: Kokkos-Serial is byte-identical to the C reference at all $n checkpoints"
+    echo "      last verified: $last"
+else
+    echo "FAIL: certification incomplete (checkpoints compared: $n, last clean: ${last:-none})"
+fi
+echo "cert exit $rc"; exit $rc

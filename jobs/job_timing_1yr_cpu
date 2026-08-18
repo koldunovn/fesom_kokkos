@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=t1yr_cpu
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=03:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/timing_cpu.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/timing_cpu.%j.err
+#
+# One simulated year on CPU with the C reference — the binary plan Task 7's
+# c_bit run uses, because C is faster than Kokkos-CPU at every node count and
+# byte identity makes the C run evidence about Kokkos-CPU anyway.
+#
+# The C reference has no FESOM_SPEED levers at all, so there is one arm here and
+# no tier to choose.
+#
+# Submit one per point, e.g.
+#     sbatch -N1 jobs/job_timing_1yr_cpu     (128 ranks)
+#     sbatch -N2 jobs/job_timing_1yr_cpu     (256)
+#     sbatch -N4 jobs/job_timing_1yr_cpu     (512)
+set -u
+KK=/home/a/a270088/port_kokkos_int
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+PAPER=/home/a/a270088/port_paper/paper_v2
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+GITSHA=$(cd "$CREF" && git rev-parse --short HEAD)
+
+source /sw/etc/profile.levante
+source "$KK/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+ulimit -s 204800
+
+BIN=$CREF/build/fesom_port
+NTASKS=$SLURM_NTASKS
+TAG=c_n${SLURM_NNODES}
+NSTEPS_SHORT=${NSTEPS_SHORT:-200}
+NSTEPS_YEAR=${NSTEPS_YEAR:-17520}
+ENVSTR=$("$PY" "$PAPER/scripts/campaign.py" env base c | tr '\n' ' ')
+echo "c reference $GITSHA"
+source "$KK/jobs/timing_1yr_body.sh"

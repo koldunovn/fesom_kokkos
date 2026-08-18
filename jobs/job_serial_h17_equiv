@@ -1,0 +1,95 @@
+#!/bin/bash
+#SBATCH --job-name=h17_equiv
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --ntasks-per-node=8
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/h17_equiv.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/h17_equiv.%j.err
+#
+# Task 5, the reading the CUDA acceptance gate needs: is the campaign binary
+# with every lever off the SAME MODEL as the pre-campaign binary, in the
+# configuration this paper runs?
+#
+# job_gpu_accept answers "the two binaries are indistinguishable on GPU within
+# the hardware's run-to-run spread". That is the strongest statement CUDA
+# allows, but it is a statement about a noise floor of ~1e-3, so it would also
+# be satisfied by a real change smaller than the floor. Serial has no floor:
+# there the two binaries must agree BIT FOR BIT, and if they do not, the CUDA
+# result is measuring an intentional physics change and not noise.
+#
+# ⚠️ This is not the M14 knob-off byte gate, which already passes. That gate runs
+# the DEFAULT configuration -- KPP, linear free surface, standard EVP -- against
+# the M6 baseline. This paper runs zstar + cvmix_TKE + mEVP, and between h17 and
+# m14-integrate the tree merged M9 (sea-ice mEVP), M10 (SSH solvers), M11, M12b
+# and M13. Every new path is opt-in, so the default must be untouched; that is
+# the assumption being tested rather than assumed.
+#
+# 8 ranks, 20 steps, snapshots at 0/10/20 -- the same window as every byte gate
+# in this project.
+set -u
+KK=/home/a/a270088/port_kokkos_int
+PAPER=/home/a/a270088/port_paper/paper_v2
+source /sw/etc/profile.levante
+source "$KK/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none    # L18 deterministic gather
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/h17_equiv}
+N=${N:-20}; SNAP=${SNAP:-10}
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+REF=/work/ab0995/a270088/port2/m7/bin/h17/fesom_port_serial
+NEW=$KK/build-m14serial/fesom_port
+
+rm -rf "$ROOT"; mkdir -p "$ROOT"
+{ echo "KK        $(cd "$KK" && git rev-parse HEAD)"
+  echo "pre-camp  $REF  md5 $(md5sum "$REF" | cut -d' ' -f1)"
+  echo "campaign  $NEW  md5 $(md5sum "$NEW" | cut -d' ' -f1)"
+  echo "steps=$N snap_every=$SNAP ntasks=$SLURM_NTASKS"; } > "$ROOT/PROVENANCE.txt"
+cat "$ROOT/PROVENANCE.txt"
+
+# Every lever off, in the paper's physics. Taken from the campaign module so the
+# job cannot disagree with the tier definitions it is meant to be the floor for.
+ENV_BASE=$("$PY" "$PAPER/scripts/campaign.py" env base kokkos_serial | tr '\n' ' ')
+echo "env: $ENV_BASE"
+
+leg () {   # $1 = binary, $2 = leg dir
+    local bin=$1 out="$ROOT/$2"; mkdir -p "$out"
+    env $ENV_BASE srun -l --ntasks=$SLURM_NTASKS "$bin" "$MESH" "$out" 1800 $N $SNAP "$PHC" 1958 \
+        > "$out/run.log" 2> "$out/run.err"
+    echo "  $2 rc=$?  $(ls "$out"/snap_*.nc 2>/dev/null | wc -l) snapshots"
+}
+echo; echo "=== two legs ==="
+leg "$REF" h17
+leg "$NEW" m14
+
+# A gate must be able to say "could not compare". A leg that produced no
+# snapshot did not run, and reporting that as a difference is how a crash gets
+# published as a finding.
+rc=0
+for tag in h17 m14; do
+    if ! ls "$ROOT/$tag"/snap_*.nc >/dev/null 2>&1; then
+        echo "ERROR: the $tag leg wrote no snapshot — it did not run. Not a result."
+        tail -5 "$ROOT/$tag/run.err" | sed 's/^/    /'
+        rc=2
+    fi
+done
+[ "$rc" -eq 0 ] || { echo "h17_equiv exit $rc"; exit $rc; }
+
+echo; echo "=== byte comparison, all snapshots ==="
+if "$PY" "$KK/scripts/diff_snap.py" "$ROOT/h17" "$ROOT/m14" > "$ROOT/diff.txt" 2>&1; then
+    echo "PASS: knobs-off m14-integrate is BYTE-IDENTICAL to the pre-campaign h17 in"
+    echo "      zstar + cvmix_TKE + mEVP. Any GPU difference between them is hardware"
+    echo "      non-determinism, not a model change."
+else
+    echo "FAIL: the two binaries differ on Serial, where there is no noise floor."
+    echo "      The CUDA acceptance gate is then measuring a real change, and its"
+    echo "      PASS would only mean the change is smaller than the GPU's own spread."
+    head -30 "$ROOT/diff.txt" | sed 's/^/    /'
+    rc=1
+fi
+echo "h17_equiv exit $rc"; exit $rc
