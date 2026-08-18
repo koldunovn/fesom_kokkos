@@ -7,31 +7,34 @@
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --gpu-bind=none
-#SBATCH --time=00:50:00
+#SBATCH --time=01:00:00
 #SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_gate_cuda.%j.out
 #SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_gate_cuda.%j.err
 #
 # Task 2 on CUDA: the sync discipline, and the cross-backend read.
 #
-# CUDA is not run-to-run reproducible on Levante A100 (the plan's verified
-# facts: three control legs of one binary in one job differ by 1.0e-3..1.7e-3 in
-# T), so a restart round trip CANNOT be gated on byte identity here. The
-# project's standing convention applies instead: a change is accepted when it
-# moves the answer no more than the binary moves against ITSELF, measured in the
-# same job. So the noise floor is measured first, in this allocation, and the
-# round trip is judged against it.
+# CUDA is not run-to-run reproducible on Levante A100, so a restart round trip
+# cannot be gated on byte identity. The project's convention applies instead —
+# a change is accepted when it moves the answer no more than the binary moves
+# against itself, over >= 3 control legs in the same allocation.
 #
-#   ctl1, ctl2   two identical CUDA runs           -> the noise floor
-#   rt1          CUDA, N+M steps, checkpoint at N
-#   rt2          CUDA, N steps -> resume -> M      -> vs rt1, must be <= floor
-#   x2c          Serial writes at N, CUDA resumes  -> cross-backend read
-#   c2x          CUDA writes at N, Serial resumes  -> and the reverse
+# ⚠️ The first version of this job got that wrong twice, and both mistakes made
+# it FAIL a restart that is very likely fine. Recorded here so they are not
+# repeated:
 #
-# The two cross-backend legs are pass/fail on completing without an abort and on
-# the reader's own guards (format version, field list, node/element/level counts,
-# the mesh signature). They are NOT compared numerically: a CUDA trajectory and
-# a Serial one are not the same trajectory, and pretending otherwise would be
-# the kind of claim this paper is about not making.
+#   1. It estimated the floor from ONE pair of control legs. A single sample of
+#      a noisy quantity is not a floor, and the plan says >= 3 legs for exactly
+#      this reason. Now: FOUR continuous legs -> six pairwise differences.
+#   2. Worse, the legs did not share a checkpoint schedule. The round-trip legs
+#      checkpointed at N and at N+M; the controls only at N+M. Writing a restart
+#      canonicalises the replicated element slots (§2c of the port plan), so the
+#      round-trip legs took a one-ulp kick at step N that the controls never
+#      took — an extra divergence source present in one arm and absent from the
+#      other. Now every leg passes through a checkpoint at N.
+#
+# The comparison is like for like: max over six control-control pairs against
+# max over six restarted-restarted pairs. Same statistic, same number of pairs,
+# so neither side is favoured by the max.
 set -u
 KK=/home/a/a270088/port_kokkos_int
 source "$KK/env_cuda.sh"
@@ -42,71 +45,54 @@ ulimit -s 204800
 MESH=/work/ab0995/a270088/port2/mesh/core2
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/restart_gate_cuda}
-N=${N:-10}; M=${M:-10}; DT=1800
+N=${N:-10}; M=${M:-10}; DT=1800; REPS=${REPS:-4}
 GBIN=$KK/build-m14cuda/fesom_port
 SBIN=$KK/build-m14serial/fesom_port
-CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
-DIFF=/home/a/a270088/port2/fesom2_port_zstar/tests/restart_roundtrip/compare_restart.py
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
 
 export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
 export FESOM_PRINT_EVERY=1000
-rm -rf "$ROOT"; mkdir -p "$ROOT"/{ctl1,ctl2,rt1,rt2,ser_at_N,x2c,cuda_at_N,c2x}
+rm -rf "$ROOT"; mkdir -p "$ROOT"
 ( cd "$KK" && git rev-parse HEAD ) > "$ROOT/PROVENANCE.txt"
 
 run () {   # $1 binary, $2 outdir, $3 nsteps, rest = env
     local bin=$1 out=$2 steps=$3; shift 3
+    mkdir -p "$out"
     env "$@" srun -l --ntasks=$SLURM_NTASKS "$bin" "$MESH" "$out" $DT $steps -1 "$PHC" 1958 \
         > "$out/run.log" 2> "$out/run.err"
     echo "$?"
 }
 
-echo "=== noise floor: two identical CUDA runs of $((N+M)) steps ==="
-run "$GBIN" "$ROOT/ctl1" $((N+M)) FESOM_RESTART_OUT="$ROOT/ctl1" FESOM_RESTART_EVERY=0 >/dev/null
-run "$GBIN" "$ROOT/ctl2" $((N+M)) FESOM_RESTART_OUT="$ROOT/ctl2" FESOM_RESTART_EVERY=0 >/dev/null
-"$CMP" "$DIFF" "$(ls "$ROOT"/ctl1/*.restart.nc|tail -1)" "$(ls "$ROOT"/ctl2/*.restart.nc|tail -1)" \
-    > "$ROOT/floor.txt" 2>&1 || true
-FLOOR=$(grep -E '^temp ' "$ROOT/floor.txt" | awk '{print $4}')
-echo "CUDA run-to-run floor, temp: ${FLOOR:-<none>}"
+echo "=== $REPS continuous legs, each checkpointing at $N and at $((N+M)) ==="
+for i in $(seq 1 $REPS); do
+    run "$GBIN" "$ROOT/ctl$i" $((N+M)) \
+        FESOM_RESTART_OUT="$ROOT/ctl$i" FESOM_RESTART_EVERY=0 FESOM_RESTART_AT=$N >/dev/null
+done
 
-echo "=== CUDA restart round trip ==="
-run "$GBIN" "$ROOT/rt1" $((N+M)) FESOM_RESTART_OUT="$ROOT/rt1" FESOM_RESTART_EVERY=0 FESOM_RESTART_AT=$N >/dev/null
-run "$GBIN" "$ROOT/rt2" $N       FESOM_RESTART_OUT="$ROOT/rt2" FESOM_RESTART_EVERY=0 >/dev/null
-run "$GBIN" "$ROOT/rt2" $M       FESOM_RESTART_IN="$(ls "$ROOT"/rt2/*.restart.nc|tail -1)" \
-                                 FESOM_RESTART_OUT="$ROOT/rt2" FESOM_RESTART_EVERY=0 >/dev/null
-"$CMP" "$DIFF" "$(ls "$ROOT"/rt1/*.restart.nc|tail -1)" "$(ls "$ROOT"/rt2/*.restart.nc|tail -1)" \
-    > "$ROOT/roundtrip.txt" 2>&1 || true
-RT=$(grep -E '^temp ' "$ROOT/roundtrip.txt" | awk '{print $4}')
-echo "CUDA restart round trip, temp: ${RT:-<none>}"
+echo "=== $REPS restarted legs, $N then $M — same checkpoint schedule ==="
+for i in $(seq 1 $REPS); do
+    run "$GBIN" "$ROOT/res${i}a" $N FESOM_RESTART_OUT="$ROOT/res${i}a" FESOM_RESTART_EVERY=0 >/dev/null
+    run "$GBIN" "$ROOT/res${i}b" $M \
+        FESOM_RESTART_IN="$(ls "$ROOT"/res${i}a/*.restart.nc | tail -1)" \
+        FESOM_RESTART_OUT="$ROOT/res${i}b" FESOM_RESTART_EVERY=0 >/dev/null
+done
 
-echo "=== cross-backend read: Serial writes, CUDA resumes ==="
+echo "=== cross-backend read: Serial writes at $N, CUDA resumes ==="
 run "$SBIN" "$ROOT/ser_at_N" $N FESOM_RESTART_OUT="$ROOT/ser_at_N" FESOM_RESTART_EVERY=0 >/dev/null
 rc1=$(run "$GBIN" "$ROOT/x2c" $M FESOM_RESTART_IN="$(ls "$ROOT"/ser_at_N/*.restart.nc|tail -1)" \
                                  FESOM_RESTART_OUT="$ROOT/x2c" FESOM_RESTART_EVERY=0)
 echo "Serial -> CUDA rc=$rc1"
-
-echo "=== cross-backend read: CUDA writes, Serial resumes ==="
-run "$GBIN" "$ROOT/cuda_at_N" $N FESOM_RESTART_OUT="$ROOT/cuda_at_N" FESOM_RESTART_EVERY=0 >/dev/null
-rc2=$(run "$SBIN" "$ROOT/c2x" $M FESOM_RESTART_IN="$(ls "$ROOT"/cuda_at_N/*.restart.nc|tail -1)" \
+echo "=== cross-backend read: CUDA writes at $N, Serial resumes ==="
+rc2=$(run "$SBIN" "$ROOT/c2x" $M FESOM_RESTART_IN="$(ls "$ROOT"/res1a/*.restart.nc|tail -1)" \
                                  FESOM_RESTART_OUT="$ROOT/c2x" FESOM_RESTART_EVERY=0)
 echo "CUDA -> Serial rc=$rc2"
 
 echo
 echo "================= verdict ================="
-rc=0
-"$CMP" - <<'PY' "$FLOOR" "$RT" || rc=1
-import sys
-floor, rt = sys.argv[1], sys.argv[2]
-if not floor or not rt:
-    print("FAIL: could not read one of the two numbers"); sys.exit(1)
-f, r = float(floor), float(rt)
-print(f"noise floor (run-to-run)   temp max|d| = {f:.3e}")
-print(f"restart round trip         temp max|d| = {r:.3e}")
-if r <= f:
-    print("PASS: the restart moves the answer no more than the binary moves against itself")
-else:
-    print("FAIL: the restart moves the answer MORE than the run-to-run floor")
-    sys.exit(1)
-PY
-[ "$rc1" = 0 ] && echo "PASS: a Serial-written restart is readable by the CUDA build" || { echo "FAIL: Serial -> CUDA"; rc=1; }
-[ "$rc2" = 0 ] && echo "PASS: a CUDA-written restart is readable by the Serial build" || { echo "FAIL: CUDA -> Serial"; rc=1; }
+"$PY" "$KK/tests/restart_roundtrip/cuda_floor.py" "$ROOT" "$REPS"
+rc=$?
+[ "$rc1" = 0 ] && echo "PASS: a Serial-written restart is readable by the CUDA build" \
+               || { echo "FAIL: Serial -> CUDA"; rc=1; }
+[ "$rc2" = 0 ] && echo "PASS: a CUDA-written restart is readable by the Serial build" \
+               || { echo "FAIL: CUDA -> Serial"; rc=1; }
 echo "gate exit $rc"; exit $rc
