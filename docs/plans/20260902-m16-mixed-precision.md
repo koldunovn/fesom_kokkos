@@ -484,7 +484,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       scalars (`:310`, `:555`) → `FESOM_MPI_REAL`** (SP1 sites); `FESOM_IC_EXTRAP_TOL` default per
       precision (document the SP value and why: 1e-3 is ~8 000 float ulps at S≈35, so the DP default
       is reachable in SP — keep 1e-3 unless the sweep count says otherwise)
-- [x] gate DP part (`det` config BYTE-IDENTICAL in the np8 jobs above; **SP part still open, after C1**): **CORE2 gate with PHC + det** (pi has no PHC path) bit-identical to `ref0`;
+- [x] gate DP part (`det` config BYTE-IDENTICAL in the np8 jobs above; **SP part 2026-09-07, GPU pair job 27289143: DP and SP legs both `928 fill sweeps` (relax sweeps 7984/7443 vs 7988/7442, no relax-cap line) — the fill count matches; the ≤1e-6 initial-field check is still untested**): **CORE2 gate with PHC + det** (pi has no PHC path) bit-identical to `ref0`;
       **plus, once the SP build exists (C1):** the `[fesom_phc] det extrap: N fill + M relax sweeps` line
       shows the **same fill count** in DP and SP, no "relax cap" line in either, and the SP initial T/S
       fields agree with DP to ≤ 1e-6 relative L2 — the twins in G2–G4 must start from the same state,
