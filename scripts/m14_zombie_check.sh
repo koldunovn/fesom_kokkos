@@ -15,6 +15,7 @@ live=yes; why=""
 echo "$last" | grep -qiE 'nan|inf' && { live=no; why="$why non-finite"; }
 echo "$last" | grep -qE 'it=0[^0-9]' && { live=no; why="$why it=0"; }
 grep -q 'CGPIPE-INACTIVE' "$log" && { live=no; why="$why CGPIPE-INACTIVE"; }
+err=${log%run.log}run.err; [ -f "$err" ] && grep -q 'ssh-solver\] !! FALLBACK' "$err" && { live=no; why="$why solver-FALLBACK"; }   # M16 G3: a leg that fell back to CG did not time the solver it claims
 [ -n "$t" ] || { live=no; why="$why no-timer"; }
 if [ -n "$want" ]; then
     case "$want" in DOUBLE) bits=64;; SINGLE) bits=32;; *) echo "t=${t:-NA} live=no bad-WANT_PREC=$want"; exit 1;; esac

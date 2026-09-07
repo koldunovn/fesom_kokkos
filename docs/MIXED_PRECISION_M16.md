@@ -31,7 +31,20 @@ Incidents: job 27289077 (same pair, node **l50154**) hung after the speed-knob l
 warm-up segfaulted there with UCX `VM_UNMAP` warnings. Excluding the node fixed it — the gpu partition
 is heterogeneous (memory rule); submit GPU ladders with `--exclude=l50154` until DKRZ confirms the node.
 
-## 2. Gate 3 — knob liveness at SP (pending)
+## 2. Gate 3 — knob liveness at SP
+Driver: `jobs/job_m16_gate_{serial,cuda}` → `scripts/m16_gate0.sh` `M16_MODE=live` → `scripts/m16_knob_signals.sh`
+per config (CORE2 np8, 20 steps, `FESOM_SSH_PRECOND=0` + the config's knobs, the 15 gate-0 configs).
+
+| backend | job | verdict | detail |
+|---|---|---|---|
+| CUDA SP, 2 nodes (`e0/sp/fesom_port_cuda`) | 27289199 | 12 / 15 live; **pipecg, oati, pcsi DEAD** | every config rc 0 and finite; CG iterations at step 20 within 2 of the FP64 oracle for cg/cg2/cgpipe/cgpoly/se; **`[ssh-solver] !! FALLBACK … residual stalled or grew` on 20/20 solves (pipecg), 20/20 (oati), 19/20 (pcsi)** — the FP64 Serial oracle has 0 fallbacks in all three. The first liveness pass called them LIVE because the announce line prints before the fallback; `m16_knob_signals.sh` now has a `solver-fallback` row and `m14_zombie_check.sh` rejects a leg with a fallback. |
+| Serial SP, np8 (`e0/sp/fesom_port_serial`) | 27289198 | running | separates SP-generic from CUDA-specific for the three solvers |
+
+**Reading:** the port-only communication-avoiding solvers carry their recurrence scalars in `real_t` (class 4,
+"real_t except global integrals") — the pipelined/Chebyshev recurrences lose the residual in float. Upstream
+has none of these solvers, so this is the class-4 promotion the plan reserved for E5: the scalar chains of
+`pipecg`/`oati`/`pcsi` (dots, α/β/γ recurrences, Lanczos estimates) → `dbl_t`, measured give-back per solver.
+Plain `cg`, `cg2`, `cgpipe`, `cgpoly` are live at SP as built.
 ## 3. Gate 4 — screens and the 1-year twin (pending)
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
