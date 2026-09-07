@@ -702,7 +702,7 @@ void fesom_halo_device_selfcheck(fesom::Field &f, fesom_halo_kind kind,
     const std::size_t Nf = f.size();
 
     f.sync_host();                                   // device owned -> host (auth Device->Synced)
-    std::vector<double> ref(f.h(), f.h() + Nf);      // copy of owned (+ stale halo)
+    std::vector<real_t> ref(f.h(), f.h() + Nf);      // copy of owned (+ stale halo)
     fesom_halo_exchange(ref.data() + base_off, kind, n_levels, n_components, p);  // HOST reference
 
     f.modify_device();                               // device owned is still current

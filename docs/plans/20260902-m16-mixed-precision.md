@@ -401,7 +401,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       upstream computes areas/gradients in WP from WP coordinates); `ocean_area` / volume sums →
       `real_t` + `FESOM_MPI_REAL` (upstream `vol_n/vol_e` are `MPI_WP`)
 - [x] `fesom_io.cpp`: gathers templated on the element type (`gather_node_T<T>` with `fesom_mpi_of<T>()`, so the MPI type follows the storage type by construction); snapshot writer staged through double (July's hunks by hand) ➕ **discovered, exact port:** the time-mean accumulators are `dbl_t` (`fesom_io_acc_t`; upstream's 8-byte streams accumulate real64) — host + device accumulators, 34 resolvers, flush divides in double, `gather_*_d` (`MPI_DOUBLE` over `dbl_t`), written with `nc_put_vara_double` directly; the registry §1 row now points at this
-- [ ] gate (B1+B2 together, binary `b12` md5 `7f1ce202`): pi np1 all 12 configs bitwise ✓; pi np2 all + CORE2 np1 (7 oracles) + np2 (11 oracles) → **pending at the time of writing, filled in below**. Original spec: per-slice gate; np2 leg exercises the swept exchange; `m16_mpi_invariant.sh` (B8) run early
+- [x] gate (B1+B2 together, binary `b12` md5 `7f1ce202`): pi np1 all 12 configs bitwise ✓; pi np2 all bitwise ✓; **CORE2 np8 SLURM 2026-09-07: all 14 configs BYTE-IDENTICAL to ref0 (jobs 27286999 b12 / 27287001 b6 / 27287827 b3+verify / 27287828 b7+verify, GATE 0 PASS)**. Original spec: per-slice gate; np2 leg exercises the swept exchange; `m16_mpi_invariant.sh` (B8) run early
       on these files shows only `dbl_t` storage under `MPI_DOUBLE`
 
 ### Task B3: The SSH solver file (`fesom_ssh.{cpp,h}`, 4406 lines, 219 doubles, 35 MPI)
@@ -432,17 +432,17 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 **Files:** Modify `src/fesom_ssh.cpp` (`fesom_ssh_preconditioner`, `fesom_update_stiff_mat_ale_kk`
 `:2013-2031`), `src/fesom_ssh.h`, `src/fesom_io_restart.cpp` (`:229-243`, `:576`, `:838`)
 
-- [ ] **upstream #997 semantics**: `values_full` = whole-field device `FieldT<dbl_t>` sized to the local
+- [x] (2026-09-07, `fesom_ssh.{h,cpp}`) **upstream #997 semantics**: `values_full` = whole-field device `FieldT<dbl_t>` sized to the local
       nnz; compiled only under `FESOM_SINGLE_PRECISION`; **seeded from `values` on the first
       `update_stiff_mat_ale` call** (not in the preconditioner build); every increment `atomic_add` in
       `dbl_t`; `values = real_t(values_full)` once per update; the CG SpMV keeps float bandwidth
-- [ ] `FESOM_DIAG_STIFF_DRIFT=1` (upstream's instrument, **not optional** — it is the only gate this
+- [x] (runtime knob `FESOM_DIAG_STIFF_DRIFT=N` = print every N updates; the port has no `logfile_outfreq`) `FESOM_DIAG_STIFF_DRIFT=1` (upstream's instrument, **not optional** — it is the only gate this
       slice can have): a WP-accumulated twin and the once-per-`logfile_outfreq` print
       `[STIFFDRIFT] relL2(diag)= relL2(offdiag)=`
-- [ ] **restart (declared divergence, Overview b):** in the SP build the restart writer stores
+- [x] (`stiff_pack/gather/scatter<T>` + `rst_mpi_of<T>`; SP writer gathers the shadow, widened `values` under linfs; reader seeds the shadow and rounds into `values`) **restart (declared divergence, Overview b):** in the SP build the restart writer stores
       `values_full` into `stiff_values` (already `NC_DOUBLE`) and the reader seeds `values_full` from it
       and rounds into `values`; the DP build is unchanged; document in the registry row
-- [ ] gate (DP): `m16_gate0.sh` on zstar — bit-identical by construction (the code is compiled out);
+- [x] **gate PASS 2026-09-07** (frozen `bin/b3b` DP `aa09820b`, `bin/b3bsp` SP `96e120c2`): DP `m16_gate0.sh all` np1 + np2 all 14 configs BYTE-IDENTICAL to ref0; DP restart round-trip bitwise; **SP restart round-trip (zstar np2, write@10 → run to 20) BIT-IDENTICAL** to the straight SP run; `scripts/m16_stiffdrift_gate.sh` SP pi zstar np2 200 steps `DRIFT=20`: relL2(offdiag) 1.89e-7 → 1.25e-6 monotone, relL2(diag) 5e-9 → 7e-8 (10 lines, none zero), DP build prints no `[STIFFDRIFT]` line. Spec: gate (DP): `m16_gate0.sh` on zstar — bit-identical by construction (the code is compiled out);
       **gate (SP, pi zstar, NOW):** with `FESOM_DIAG_STIFF_DRIFT=1` the WP twin's drift is **non-zero and
       growing** over 200 steps while the shadow's working copy tracks `values_full` to one rounding —
       i.e. the instrument can see the defect and the shadow removes it; SP restart at step 10 → run to
@@ -457,7 +457,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 - [x] ledger every `+=` (A2, 3 indexed sites in `fesom_ssh_se.cpp`) in the subcycle (A2) with its increment/state scale; the selfcheck/drift
       diagnostics (`FESOM_SE_CHECK`, `SE_WIDE_SELFCHECK`, drift print) stay `dbl_t` (diagnostic)
 - [x] `FESOM_SE_M` CFL probe arithmetic: `real_t` (upstream SE is WP under `-r4`)
-- [ ] gate (B4+B5 together, next frozen binary): per-slice gate with `FESOM_SSH_MODE=se` and with `se + FESOM_SE_WIDE=1 FESOM_SE_H0E_XCHG=1
+- [x] gate (B4+B5 together, `b6`/`b7`; **CORE2 np8 SLURM 2026-09-07: all 14 configs BYTE-IDENTICAL to ref0 (jobs 27286999 b12 / 27287001 b6 / 27287827 b3+verify / 27287828 b7+verify, GATE 0 PASS)**): per-slice gate with `FESOM_SSH_MODE=se` and with `se + FESOM_SE_WIDE=1 FESOM_SE_H0E_XCHG=1
       FESOM_SE_WIDE_RECON=1` (drift 0.0 every step at np2 pi) — both bit-identical to `ref0`'s SE arms
 
 ### Task B5: Sea ice (EVP, mEVP, EVPWIDE lean, coupling, thermo, FCT)
@@ -470,7 +470,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 - [x] (audited 2026-09-07: every remaining raw `double` in `fesom_ice_maevp/ice/thermo/fct/evp.cpp` is a verify-twin max-diff, a `Kokkos::Max<double>` selfcheck, a profiler tic, or the `MPI_MAXLOC` (double,int) pair — diagnostics; the state code was already precision-generic, as July found) `fesom_ice_maevp.cpp`, `fesom_ice_evp.cpp`, `fesom_ice_fct.cpp`, `fesom_ice_thermo.cpp`: raw
       doubles → `real_t` (July found the pre-M9 ice tree precision-generic; M9 rewrote 2272 lines — audit
       them all)
-- [ ] gate (with B4): per-slice gate with `FESOM_WHICH_EVP=1 FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_EVPWIDE_LEAN=1
+- [x] gate (with B4; `evpwlean` config in the CORE2 np8 jobs above, BYTE-IDENTICAL): per-slice gate with `FESOM_WHICH_EVP=1 FESOM_SPEED_EVPWIDE=8 FESOM_SPEED_EVPWIDE_LEAN=1
       FESOM_SPEED_FORCE_SERIAL=1` vs `ref0`'s EVPWIDE-lean arm, **and** the announce line confirms the
       wide halo and the lean path are running (L80 — the naive `EVPWIDE_RINGS` form passes on a no-op)
 
@@ -484,7 +484,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       scalars (`:310`, `:555`) → `FESOM_MPI_REAL`** (SP1 sites); `FESOM_IC_EXTRAP_TOL` default per
       precision (document the SP value and why: 1e-3 is ~8 000 float ulps at S≈35, so the DP default
       is reachable in SP — keep 1e-3 unless the sweep count says otherwise)
-- [ ] gate (SLURM np8, b6/b7 binaries; SP part after C1): **CORE2 gate with PHC + det** (pi has no PHC path) bit-identical to `ref0`;
+- [x] gate DP part (`det` config BYTE-IDENTICAL in the np8 jobs above; **SP part still open, after C1**): **CORE2 gate with PHC + det** (pi has no PHC path) bit-identical to `ref0`;
       **plus, once the SP build exists (C1):** the `[fesom_phc] det extrap: N fill + M relax sweeps` line
       shows the **same fill count** in DP and SP, no "relax cap" line in either, and the SP initial T/S
       fields agree with DP to ≤ 1e-6 relative L2 — the twins in G2–G4 must start from the same state,
@@ -502,7 +502,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 - [ ] `fesom_calendar.*` (deferred to the SP flip, C1: verify seconds-in-day kind then): seconds-in-day follows upstream (WP) — verify against the merged diff first
       (`gen_modules_clock.F90` is **not** in the merged file list, so the clock's kind is whatever the
       default-real flag makes it); record the finding in the registry either way
-- [ ] gate (DP, SLURM np8 on b7): CORE2+JRA gate bit-identical to `ref0` (pi never runs this code);
+- [x] gate DP (job 27287828 on b7: every config BYTE-IDENTICAL; **SP part still open**): CORE2+JRA gate bit-identical to `ref0` (pi never runs this code);
       **gate (SP, once C1 exists):** interpolated forcing values across one JRA record boundary (3-h,
       the SP2 collision point) agree with a `dbl_t` reference evaluation of the same records to float
       rounding at every node, and the `[forcing]` inferred-resolution line says 3 h, not 6
@@ -519,7 +519,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       `:421` Scatterv of `real_t` matrix values → `FESOM_MPI_REAL`; `:768` `header_d[2]` stays
       `MPI_DOUBLE`** (genuinely double); `FESOM_RESTART_IC` path
 - [x] `fesom_phasestats.cpp`: timing only, stays double (documented)
-- [x] gate (b7 md5 `5440d4e9`, 2026-09-07): pi np1+np2 all 14 configs bitwise; `scripts/m16_restart_gate.sh` zstar np2 write@10/read/run-to-20 **BIT-IDENTICAL** to the straight run; CORE2 np8 SLURM pending. Spec: per-slice gate incl. one **restart round-trip at FP64** (write at step 10, read, run to
+- [x] gate (b7 md5 `5440d4e9`, 2026-09-07): pi np1+np2 all 14 configs bitwise; `scripts/m16_restart_gate.sh` zstar np2 write@10/read/run-to-20 **BIT-IDENTICAL** to the straight run; CORE2 np8 SLURM PASS 2026-09-07 (jobs 27287827/27287828). Spec: per-slice gate incl. one **restart round-trip at FP64** (write at step 10, read, run to
       20 — bit-identical to the straight run, the m14 restart gate's own claim) on pi np2
 
 ### Task B6d: Port the M8 instruments (`FESOM_MP_NANSCAN`, `FESOM_MP_TRACE_NODE`, `FESOM_MP_CONSERV`)
@@ -533,7 +533,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 - [x] `FESOM_MP_TRACE_NODE=<1-based gid>` + `FESOM_MP_TRACE_FROM=<step>`: end-of-step single-node series
 - [x] `FESOM_MP_CONSERV=N` (call in `fesom_main.cpp` after `fesom_timestep`, July's cadence): `dbl_t` Kokkos reduce over owned wet columns + `MPI_DOUBLE` Allreduce of
       volume/heat/salt every N steps, device-current views
-- [x] gate (b7): knobs off ⇒ pi bitwise (the b7 gate); knobs armed on pi np1 ⇒ `MP-NANSCAN ARMED`, `[mp-trace] ARMED global 100 = local 99` + per-step line, `CONSERV step= 1 heat=1.241289840326604e+19 …` (rc 0); CORE2 SLURM pending. Spec: knobs off ⇒ per-slice gate bit-identical; **knobs armed at DP ⇒ still bit-identical and each
+- [x] gate (b7): knobs off ⇒ pi bitwise (the b7 gate); knobs armed on pi np1 ⇒ `MP-NANSCAN ARMED`, `[mp-trace] ARMED global 100 = local 99` + per-step line, `CONSERV step= 1 heat=1.241289840326604e+19 …` (rc 0); CORE2 np8 SLURM PASS 2026-09-07 (job 27287828, b7). Spec: knobs off ⇒ per-slice gate bit-identical; **knobs armed at DP ⇒ still bit-identical and each
       instrument prints its own banner** (an instrument that is silent when armed is a dead knob)
 
 ### Task B7: CVMix TKE in double (class 2) + guard constants
@@ -548,7 +548,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       the same mesh and rank count is the only experiment that measures the class-2 cost
 - [x] `KPP_EPSLN` per precision (B1, July's hunk) (1e-20 SP, 1e-40 DP unchanged — July's audit found it the only sub-1e-38
       guard); re-audit for guards added since (m9/m10/m12b code)
-- [x] gate (b7): pi `tke` np1/np2 bitwise (the DP kernel is the same arithmetic); CORE2 `tke` np8 SLURM pending; give-back at Gate 2. Spec: per-slice gate with `FESOM_MIX_SCHEME=TKE` and with KPP (the DP build is unchanged by
+- [x] gate (b7): pi `tke` np1/np2 bitwise (the DP kernel is the same arithmetic); CORE2 `tke` np8 SLURM PASS 2026-09-07 (jobs 27287827/27287828); give-back at Gate 2. Spec: per-slice gate with `FESOM_MIX_SCHEME=TKE` and with KPP (the DP build is unchanged by
       construction — casts are no-ops); the `FESOM_MP_TKE_REAL` build is also DP bit-identical
 
 ### Task B8: Invariant grep, ledger close, Gate 0 **[NOW: pi + login CORE2]** / **[BLOCKED on /work: np128 + CUDA]**
@@ -603,10 +603,10 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 
 **Files:** `build_m14.sh` → `build_m16.sh` (dp/sp × serial/cuda)
 
-- [ ] `build_m16.sh` producing four binaries; CUDA half sources `env_cuda.sh` (RPATH rule); `ldd` check
-- [ ] compile on the login node if `nvcc` is available there; else queue as a job **[BLOCKED on /work]**
-- [ ] check the CUDA FTZ/denormal posture in the nvcc flags; document it in the registry
-- [ ] gate: both SP binaries exist, banner `SINGLE`; CUDA pi smoke **[BLOCKED on /work]**
+- [x] `build_m16.sh` producing four binaries; CUDA half sources `env_cuda.sh` (RPATH rule); `ldd` check (2026-09-07: `cuda` `ba6334ad`, `cuda-sp` `f3c8c4a4` after the one-line `fesom_halo_device.cpp` selfcheck fix — `std::vector<real_t>`; both link `openmpi-4.1.5/lib/libmpi.so.40`; frozen `port2/m16/bin/cuda0` + `cudasp0`)
+- [x] compiled on the login node (nvcc is there; ~10 min at -j16)
+- [x] CUDA FTZ/denormal posture: `flags.make` carries only `-O3` — no `--use_fast_math`, `-ftz`, `-prec-div`, `-prec-sqrt` ⇒ nvcc defaults `-ftz=false -prec-div=true -prec-sqrt=true -fmad=true`: denormals are NOT flushed on the GPU, i.e. the same posture as the host `-O3` build (no `-ffast-math`); documented in the registry §1 (epsilon row)
+- [x] gate: both SP binaries exist, banner `SINGLE`; **CUDA pi smoke PASS** (`jobs/job_m16_smoke_cuda`, job 27288722, gpu `-C a100_80`, 84 s): DP+SP × {default np1, default np2, zstar np2} + SP `FESOM_MP_NANSCAN=1` all rc 0, 21 snapshots, banner asserted, ARMED banner present, no non-finite. Reported (not gated): DP-CUDA vs Serial ref0 max|Δv| 3.1e-5 (CUDA atomic-scatter class); SP-CUDA vs DP-CUDA at step 20: u 5.2e-3, v 5.3e-4, T 2.0e-4, S 7.6e-5, eta 8.1e-5, Av/Kv 0.1 (mixed-layer threshold flips), lon/lat 2e-5 (WP coordinates, class 3) — the same u-sized SP gap as the Serial pi finding (hpressure running sum, registry suspects, first candidate if G3/G4 object)
 
 ### Task C3: Gate 1 — it runs past the first forcing boundary
 

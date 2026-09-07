@@ -45,6 +45,24 @@ typedef struct fesom_ssh_stiff {
     fesom::IntField colind_fld;
     fesom::Field    values_fld;
     fesom::Field    pr_values_fld;
+
+#if defined(FESOM_SINGLE_PRECISION)
+    /* M16 B3b — upstream FESOM/fesom2#997 `values_full`: the full-precision accumulator of the
+     * zstar ALE stiffness increments, SINGLE PRECISION ONLY. update_stiff_mat_ale adds a per-step
+     * increment whose size relative to the entry is ~1e-7..1e-6 — at or below float eps (1.19e-7),
+     * so in SP the update is partly or wholly swallowed and the matrix drifts (July's 1964-10-04
+     * eta runaway at step 118503, docs/PRECISION_ISLANDS.md). Accumulated here in dbl_t and
+     * rounded into `values` once per update; the CG SpMV keeps float bandwidth.
+     * Sized to the LOCAL nnz (== values_fld.size()). Seeded on the FIRST update call, not in the
+     * preconditioner build (a restart overwrites `values` after that build — upstream's reason);
+     * the SP restart reader seeds it directly from the file's NC_DOUBLE `stiff_values`
+     * (declared divergence b: the SP restart writes the shadow, not the rounded copy). */
+    fesom::FieldT<dbl_t> values_full_fld;
+    /* FESOM_DIAG_STIFF_DRIFT=N: a real_t-accumulated twin (upstream's DIAG_STIFF_DRIFT) and a
+     * `[STIFFDRIFT]` relL2(diag)/relL2(offdiag) print every N updates — the instrument that shows
+     * the defect the shadow removes. Runtime knob here (upstream: compile-time). */
+    fesom::Field         values_wp_drift_fld;
+#endif
 } fesom_ssh_stiff;
 
 /*
@@ -127,7 +145,8 @@ void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh    *mesh,
 /* M6.3 (zstar) — the per-step CUMULATIVE stiffness-matrix increment. Called ONLY under zstar,
  * and BEFORE compute_ssh_rhs (Fortran gate oce_ale.F90:3914). The base matrix is never rebuilt
  * and the preconditioner is never refreshed -- see the banner in fesom_ssh.cpp. */
-void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh);
+void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
+                                   struct fesom_partit *partit);
 
 /* Preconditioned CG on device. Same numerics as fesom_ssh_solve_cg; the SpMV is
  * a per-row CSR gather (race-free), the dots are Kokkos::parallel_reduce + the

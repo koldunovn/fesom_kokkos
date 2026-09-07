@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=m16_cuda
+#SBATCH -p gpu
+#SBATCH -C a100_80
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=2
+#SBATCH --gres=gpu:2
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:06:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/logs/cudasmoke.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/logs/cudasmoke.%j.err
+#
+# M16 Task C2 gate — CUDA pi smoke for the FP64 and FP32 CUDA binaries (never on the login node).
+# Per binary: default np1, default np2, zstar np2 (20 steps, dt 100, snapshot every step);
+# the precision banner is asserted on every log; the SP leg also runs once with FESOM_MP_NANSCAN=1
+# (must print ARMED). CUDA is not bitwise vs Serial (atomic scatter), so the diffs vs the Serial
+# ref0 oracle are REPORTED (max abs per field, head), not gated: the gate is rc 0 + banner +
+# snapshots + finite.
+#   sbatch --export=ALL,DP=<abs bin>,SP=<abs bin> jobs/job_m16_smoke_cuda
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+MESH=/home/a/a270088/port2/fesom2/test/meshes/pi
+ROOT=/work/ab0995/a270088/port2/m16/gate0_cuda; mkdir -p "$ROOT"
+DP=${DP:?abs path of the FP64 CUDA binary}; SP=${SP:?abs path of the FP32 CUDA binary}
+source "$SRC/env_cuda.sh" >/dev/null 2>&1
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_[A-Za-z0-9_]*\)=.*/\1/p')
+export FESOM_HALO_STAGE=1 FESOM_SSH_PRECOND=0
+echo "=== DP=$DP ($(md5sum "$DP" | cut -c1-8))  SP=$SP ($(md5sum "$SP" | cut -c1-8))  job=$SLURM_JOB_ID ==="
+fail=0
+leg(){ # $1 tag $2 bin $3 want $4 name $5 np [knobs...]
+  local tag=$1 bin=$2 want=$3 name=$4 np=$5; shift 5
+  local out=$ROOT/${tag}/${name}_np$np; rm -rf "$out"; mkdir -p "$out"
+  ( for kv in "$@"; do export "$kv"; done; env | grep -E '^FESOM_' | sort > "$out/ENV.txt"
+    srun -n $np --gpus-per-task=1 "$bin" "$MESH" "$out" 100 20 1 > "$out/run.log" 2> "$out/run.err"; echo $? > "$out/rc" )
+  local rc; rc=$(cat "$out/rc"); local ns; ns=$(ls "$out"/snap_*.nc 2>/dev/null | wc -l)
+  local ban; ban=$("$SRC/scripts/mp_assert_banner.sh" "$out/run.log" "$want" 2>&1 | head -1)
+  local nan; nan=$(grep -cwiE 'nan|inf' "$out/run.err" || true)
+  echo "[$tag/$name np$np] rc=$rc snaps=$ns  $ban  nonfinite_lines=$nan"
+  [ "$rc" = 0 ] && [ "$ns" -ge 2 ] && [[ "$ban" == OK* ]] || fail=1
+  local ref=/work/ab0995/a270088/port2/m16/gate0/ref0/${name}_np$np
+  if [ -d "$ref" ]; then "$PY" "$SRC/scripts/diff_snap.py" "$ref" "$out" > "$out/diff_vs_ref0.txt" 2>&1 \
+       && echo "    BYTE-IDENTICAL to Serial ref0" || { echo "    vs Serial ref0 (reported, not gated):"; head -6 "$out/diff_vs_ref0.txt" | sed 's/^/      /'; }; fi
+}
+for t in dp:$DP:DOUBLE sp:$SP:SINGLE; do IFS=: read -r tag bin want <<< "$t"
+  leg $tag "$bin" $want default 1
+  leg $tag "$bin" $want default 2
+  leg $tag "$bin" $want zstar   2 FESOM_ALE=zstar
+done
+leg sp "$SP" SINGLE nanscan 2 FESOM_MP_NANSCAN=1
+grep -q 'MP-NANSCAN ARMED' "$ROOT/sp/nanscan_np2/run.log" && echo "[sp/nanscan] ARMED banner present" || { echo "[sp/nanscan] ARMED banner MISSING"; fail=1; }
+echo "--- SP vs DP (CUDA, same job; reported):"; for n in default_np1 default_np2 zstar_np2; do echo "  $n:"; "$PY" "$SRC/scripts/diff_snap.py" "$ROOT/dp/$n" "$ROOT/sp/$n" 2>&1 | head -4 | sed 's/^/    /'; done
+[ $fail = 0 ] && echo "=== CUDA SMOKE PASS ===" || echo "=== CUDA SMOKE FAIL ==="
+exit $fail

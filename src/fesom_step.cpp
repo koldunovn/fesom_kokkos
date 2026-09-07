@@ -945,7 +945,7 @@ int fesom_timestep(int                          step_n,
      *      `if (.not. trim(which_ale)=='linfs') call update_stiff_mat_ale`).
      *      Step 1 from cold start: dhe == 0 -> a no-op by construction. */
     if (fesom_ale_is_zstar())
-        fesom_update_stiff_mat_ale_kk(ctx->stiff, mesh);
+        fesom_update_stiff_mat_ale_kk(ctx->stiff, mesh, ctx->partit);
 
     /*  7. SSH RHS (linfs + the M6.3 zstar water-flux tail) — device. CG reads ssh_rhs at OWNED
      *     rows only, so no re-push after the halo (the device owned ssh_rhs stays current). */

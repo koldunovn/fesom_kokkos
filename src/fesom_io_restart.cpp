@@ -275,13 +275,22 @@ static int stiff_max_row(const fesom_ssh_stiff *S)
 
 /* Flatten this rank's rows into (row length, global column, value) triples in
  * local row order. Caller frees. */
-static void stiff_pack(const fesom_ssh_stiff *S, const fesom_partit *p,
-                       int **len_out, int **gcol_out, real_t **val_out)
+/* M16 B3b: the value type is a template parameter. FP64 build: T = real_t = double, the
+ * matrix of record is `values`. SP build: T = dbl_t and the matrix of record is the
+ * full-precision shadow `values_full` (declared divergence b, docs/PRECISION_ISLANDS.md);
+ * `src` is that array, in `values`' CSR order. */
+template <class T> static inline MPI_Datatype rst_mpi_of();
+template <> inline MPI_Datatype rst_mpi_of<double>() { return MPI_DOUBLE; }
+template <> inline MPI_Datatype rst_mpi_of<float>()  { return MPI_FLOAT;  }
+
+template <class T>
+static void stiff_pack(const fesom_ssh_stiff *S, const T *src, const fesom_partit *p,
+                       int **len_out, int **gcol_out, T **val_out)
 {
     const int rows = S->dim, nnz = S->rowptr[rows];
     int    *len  = (int *)malloc((size_t)(rows > 0 ? rows : 1) * sizeof(int));
     int    *gcol = (int *)malloc((size_t)(nnz > 0 ? nnz : 1) * sizeof(int));
-    real_t *val  = (real_t *)malloc((size_t)(nnz > 0 ? nnz : 1) * sizeof(real_t));
+    T      *val  = (T *)malloc((size_t)(nnz > 0 ? nnz : 1) * sizeof(T));
     int    *pos  = (int *)malloc((size_t)(stiff_max_row(S) + 1) * sizeof(int));
     int    *gtmp = (int *)malloc((size_t)(stiff_max_row(S) + 1) * sizeof(int));
     FESOM_CHECK(len && gcol && val && pos && gtmp, "restart: stiff pack alloc");
@@ -290,7 +299,7 @@ static void stiff_pack(const fesom_ssh_stiff *S, const fesom_partit *p,
         len[r] = stiff_row_order(S, p, r, pos, gtmp);
         for (int i = 0; i < len[r]; ++i) {
             gcol[k] = gtmp[i];
-            val[k]  = S->values[pos[i]];
+            val[k]  = src[pos[i]];
             ++k;
         }
     }
@@ -301,12 +310,13 @@ static void stiff_pack(const fesom_ssh_stiff *S, const fesom_partit *p,
 
 /* Rank 0 assembles the global CSR, ordered by global row id. Returns the
  * global nnz; the three out arrays are allocated on rank 0 only. */
-static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
+template <class T>
+static long long stiff_gather(const fesom_ssh_stiff *S, const T *src, const gather_plan *gp,
                               const struct fesom_mesh *mesh, fesom_partit *p,
-                              int **glen, int **gcol, real_t **gval)
+                              int **glen, int **gcol, T **gval)
 {
-    int *len = NULL, *col = NULL; real_t *val = NULL;
-    stiff_pack(S, p, &len, &col, &val);
+    int *len = NULL, *col = NULL; T *val = NULL;
+    stiff_pack<T>(S, src, p, &len, &col, &val);
     const int mynnz = S->rowptr[S->dim];
 
     int *nnz_all = NULL, *nnz_displ = NULL, *len_ro = NULL;
@@ -321,18 +331,18 @@ static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
                 0, p->MPI_COMM_FESOM);
 
     long long total_nnz = 0;
-    int *col_ro = NULL; real_t *val_ro = NULL;
+    int *col_ro = NULL; T *val_ro = NULL;
     if (gp->mype == 0) {
         nnz_displ[0] = 0;
         for (int r = 1; r < gp->npes; ++r) nnz_displ[r] = nnz_displ[r-1] + nnz_all[r-1];
         total_nnz = (long long)nnz_displ[gp->npes-1] + nnz_all[gp->npes-1];
         col_ro = (int *)malloc((size_t)total_nnz * sizeof(int));
-        val_ro = (real_t *)malloc((size_t)total_nnz * sizeof(real_t));
+        val_ro = (T *)malloc((size_t)total_nnz * sizeof(T));
         FESOM_CHECK(col_ro && val_ro, "restart: stiff gather alloc (%lld nnz)", total_nnz);
     }
     MPI_Gatherv(col, mynnz, MPI_INT,    col_ro, nnz_all, nnz_displ, MPI_INT,
                 0, p->MPI_COMM_FESOM);
-    MPI_Gatherv(val, mynnz, FESOM_MPI_REAL, val_ro, nnz_all, nnz_displ, FESOM_MPI_REAL,
+    MPI_Gatherv(val, mynnz, rst_mpi_of<T>(), val_ro, nnz_all, nnz_displ, rst_mpi_of<T>(),
                 0, p->MPI_COMM_FESOM);
     free(len); free(col); free(val);
 
@@ -340,7 +350,7 @@ static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
         /* rank order -> global row order */
         *glen = (int *)malloc((size_t)mesh->nod2D * sizeof(int));
         *gcol = (int *)malloc((size_t)total_nnz * sizeof(int));
-        *gval = (real_t *)malloc((size_t)total_nnz * sizeof(real_t));
+        *gval = (T *)malloc((size_t)total_nnz * sizeof(T));
         FESOM_CHECK(*glen && *gcol && *gval, "restart: stiff assemble alloc");
         long long *start = (long long *)malloc((size_t)mesh->nod2D * sizeof(long long));
         FESOM_CHECK(start, "restart: stiff assemble alloc");
@@ -366,7 +376,7 @@ static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
                 int gid = gp->gathered_myList_n[gp->displ_n[r] + i] - 1;
                 int len_i = len_ro[gp->displ_n[r] + i];
                 memcpy(*gcol + start[gid], col_ro + off, (size_t)len_i * sizeof(int));
-                memcpy(*gval + start[gid], val_ro + off, (size_t)len_i * sizeof(real_t));
+                memcpy(*gval + start[gid], val_ro + off, (size_t)len_i * sizeof(T));
                 off += len_i;
             }
         }
@@ -378,13 +388,14 @@ static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
 
 /* The inverse: rank 0 holds the global CSR, every rank ends up with its own
  * rows' values in its own column order. */
-static void stiff_scatter(fesom_ssh_stiff *S, const gather_plan *gp,
+template <class T>
+static void stiff_scatter(fesom_ssh_stiff *S, T *dst, const gather_plan *gp,
                           const struct fesom_mesh *mesh, fesom_partit *p,
-                          const int *glen, const int *gcol, const real_t *gval)
+                          const int *glen, const int *gcol, const T *gval)
 {
     const int mynnz = S->rowptr[S->dim];
     int *nnz_all = NULL, *nnz_displ = NULL;
-    int *col_ro = NULL; real_t *val_ro = NULL;
+    int *col_ro = NULL; T *val_ro = NULL;
     if (gp->mype == 0) {
         nnz_all   = (int *)malloc((size_t)gp->npes * sizeof(int));
         nnz_displ = (int *)malloc((size_t)gp->npes * sizeof(int));
@@ -396,7 +407,7 @@ static void stiff_scatter(fesom_ssh_stiff *S, const gather_plan *gp,
         for (int r = 1; r < gp->npes; ++r) nnz_displ[r] = nnz_displ[r-1] + nnz_all[r-1];
         long long total = (long long)nnz_displ[gp->npes-1] + nnz_all[gp->npes-1];
         col_ro = (int *)malloc((size_t)total * sizeof(int));
-        val_ro = (real_t *)malloc((size_t)total * sizeof(real_t));
+        val_ro = (T *)malloc((size_t)total * sizeof(T));
         FESOM_CHECK(col_ro && val_ro, "restart: stiff scatter alloc (%lld nnz)", total);
 
         long long *start = (long long *)malloc((size_t)mesh->nod2D * sizeof(long long));
@@ -408,18 +419,18 @@ static void stiff_scatter(fesom_ssh_stiff *S, const gather_plan *gp,
             for (int i = 0; i < gp->all_n[r]; ++i) {
                 int gid = gp->gathered_myList_n[gp->displ_n[r] + i] - 1;
                 memcpy(col_ro + off, gcol + start[gid], (size_t)glen[gid] * sizeof(int));
-                memcpy(val_ro + off, gval + start[gid], (size_t)glen[gid] * sizeof(real_t));
+                memcpy(val_ro + off, gval + start[gid], (size_t)glen[gid] * sizeof(T));
                 off += glen[gid];
             }
         }
         free(start);
     }
     int *col = (int *)malloc((size_t)(mynnz > 0 ? mynnz : 1) * sizeof(int));
-    real_t *val = (real_t *)malloc((size_t)(mynnz > 0 ? mynnz : 1) * sizeof(real_t));
+    T *val = (T *)malloc((size_t)(mynnz > 0 ? mynnz : 1) * sizeof(T));
     FESOM_CHECK(col && val, "restart: stiff scatter alloc");
     MPI_Scatterv(col_ro, nnz_all, nnz_displ, MPI_INT,    col, mynnz, MPI_INT,
                  0, p->MPI_COMM_FESOM);
-    MPI_Scatterv(val_ro, nnz_all, nnz_displ, FESOM_MPI_REAL, val, mynnz, FESOM_MPI_REAL,
+    MPI_Scatterv(val_ro, nnz_all, nnz_displ, rst_mpi_of<T>(), val, mynnz, rst_mpi_of<T>(),
                  0, p->MPI_COMM_FESOM);
     if (gp->mype == 0) { free(col_ro); free(val_ro); free(nnz_all); free(nnz_displ); }
 
@@ -434,7 +445,7 @@ static void stiff_scatter(fesom_ssh_stiff *S, const gather_plan *gp,
                         "restart: stiffness sparsity differs at row %d (file column %d, "
                         "mesh column %d) — the file is for a different mesh",
                         r, col[k], gtmp[i]);
-            S->values[pos[i]] = val[k];
+            dst[pos[i]] = val[k];
             ++k;
         }
     }
@@ -554,9 +565,37 @@ void fesom_restart_write(const char                 *path,
      * the values. */
     const_cast<fesom_ssh_stiff *>(stiff)->values_fld.sync_host();
 
-    int *slen = NULL, *scol = NULL; real_t *sval = NULL;
+    int *slen = NULL, *scol = NULL;
+#if defined(FESOM_SINGLE_PRECISION)
+    /* B3b, divergence (b): the SP restart carries the dbl_t shadow `values_full` — the matrix
+     * of record — so a resumed run continues the full-precision accumulation instead of
+     * re-seeding from the rounded working copy. Under linfs (or before the first zstar update)
+     * the shadow does not exist and the working copy is widened; the file is NC_DOUBLE either
+     * way, so an SP restart reads into a DP build and vice versa. */
+    dbl_t *sval = NULL;
+    const dbl_t *stiff_src;
+    dbl_t *stiff_widened = NULL;
+    {
+        fesom_ssh_stiff *Sw = const_cast<fesom_ssh_stiff *>(stiff);
+        if (Sw->values_full_fld.allocated()) {
+            Sw->values_full_fld.sync_host();
+            stiff_src = Sw->values_full_fld.h();
+        } else {
+            const int nnz = stiff->rowptr[stiff->dim];
+            stiff_widened = (dbl_t *)malloc((size_t)(nnz > 0 ? nnz : 1) * sizeof(dbl_t));
+            FESOM_CHECK(stiff_widened, "restart: stiff widen alloc");
+            for (int q = 0; q < nnz; ++q) stiff_widened[q] = (dbl_t)stiff->values[q];
+            stiff_src = stiff_widened;
+        }
+    }
     const long long stiff_nnz =
-        stiff_gather((const fesom_ssh_stiff *)stiff, &gp, mesh, partit, &slen, &scol, &sval);
+        stiff_gather<dbl_t>(stiff, stiff_src, &gp, mesh, partit, &slen, &scol, &sval);
+    free(stiff_widened);
+#else
+    real_t *sval = NULL;
+    const long long stiff_nnz =
+        stiff_gather<real_t>(stiff, stiff->values, &gp, mesh, partit, &slen, &scol, &sval);
+#endif
 
     int ncid = -1, dim_node = -1, dim_elem = -1, dim_nz = -1, dim_nnz = -1;
     int varid[RST_MAX][2];
@@ -665,7 +704,11 @@ void fesom_restart_write(const char                 *path,
     if (partit->mype == 0) {
         NC_CHECK(nc_put_var_int   (ncid, vid_slen, slen));
         NC_CHECK(nc_put_var_int   (ncid, vid_scol, scol));
+#if defined(FESOM_SINGLE_PRECISION)
+        NC_CHECK(nc_put_var_double(ncid, vid_sval, sval));          /* the dbl_t shadow, as is */
+#else
         NC_CHECK(fesom_nc_put_var_real(ncid, vid_sval, sval, (size_t)stiff_nnz));
+#endif
         free(slen); free(scol); free(sval);
         NC_CHECK(nc_close(ncid));
     }
@@ -822,7 +865,12 @@ void fesom_restart_read(const char           *path,
 
     /* The accumulated free-surface stiffness matrix. */
     {
-        int *slen = NULL, *scol = NULL; real_t *sval = NULL;
+#if defined(FESOM_SINGLE_PRECISION)
+        typedef dbl_t  rst_stiff_t;    /* B3b: read the NC_DOUBLE values at full precision */
+#else
+        typedef real_t rst_stiff_t;
+#endif
+        int *slen = NULL, *scol = NULL; rst_stiff_t *sval = NULL;
         if (partit->mype == 0) {
             size_t nnz;
             int dimid, vid;
@@ -830,16 +878,36 @@ void fesom_restart_read(const char           *path,
             NC_CHECK(nc_inq_dimlen(ncid, dimid, &nnz));
             slen = (int *)malloc((size_t)mesh->nod2D * sizeof(int));
             scol = (int *)malloc(nnz * sizeof(int));
-            sval = (real_t *)malloc(nnz * sizeof(real_t));
+            sval = (rst_stiff_t *)malloc(nnz * sizeof(rst_stiff_t));
             FESOM_CHECK(slen && scol && sval, "restart: stiff read alloc");
             NC_CHECK(nc_inq_varid(ncid, "stiff_row_len", &vid));
             NC_CHECK(nc_get_var_int(ncid, vid, slen));
             NC_CHECK(nc_inq_varid(ncid, "stiff_colind", &vid));
             NC_CHECK(nc_get_var_int(ncid, vid, scol));
             NC_CHECK(nc_inq_varid(ncid, "stiff_values", &vid));
+#if defined(FESOM_SINGLE_PRECISION)
+            NC_CHECK(nc_get_var_double(ncid, vid, sval));
+#else
             NC_CHECK(fesom_nc_get_var_real(ncid, vid, sval, nnz));
+#endif
         }
-        stiff_scatter(stiff, &gp, mesh, partit, slen, scol, sval);
+#if defined(FESOM_SINGLE_PRECISION)
+        /* B3b: the file's full-precision matrix seeds the shadow directly (so the first
+         * update call finds it allocated and does NOT re-seed from the rounded copy), and the
+         * working copy is the shadow rounded once — exactly the state the writer had. */
+        if (!stiff->values_full_fld.allocated())
+            stiff->values_full_fld.alloc("ssh.values_full", (size_t)stiff->rowptr[stiff->dim]);
+        stiff_scatter<dbl_t>(stiff, stiff->values_full_fld.h(), &gp, mesh, partit, slen, scol, sval);
+        {
+            const int nnz = stiff->rowptr[stiff->dim];
+            const dbl_t *full = stiff->values_full_fld.h();
+            for (int q = 0; q < nnz; ++q) stiff->values[q] = (real_t)full[q];
+        }
+        stiff->values_full_fld.modify_host();
+        stiff->values_full_fld.sync_device();
+#else
+        stiff_scatter<real_t>(stiff, stiff->values, &gp, mesh, partit, slen, scol, sval);
+#endif
         /* The device CG SpMV reads values_fld; the base matrix was pushed once
          * at the end of fesom_ssh_preconditioner, and this replaces it with the
          * accumulated one from the file. */

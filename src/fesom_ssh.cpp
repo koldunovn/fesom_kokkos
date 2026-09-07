@@ -2137,7 +2137,23 @@ void fesom_compute_ssh_rhs_linfs_kk(const struct fesom_mesh    *mesh,
  * Accumulation is edge-order Kokkos::atomic_add (D22): on Serial the range is sequential, so
  * the accumulation order is exactly the C's loop order => bit-identical.
  *===========================================================================================*/
-void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh)
+#if defined(FESOM_SINGLE_PRECISION)
+/* FESOM_DIAG_STIFF_DRIFT: unset/0 = off; N >= 1 = keep the real_t twin and print every N updates
+ * (the port has no logfile_outfreq; the knob carries its own interval). */
+static int stiff_drift_every(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_DIAG_STIFF_DRIFT");
+        cached = (e && e[0]) ? atoi(e) : 0;
+        if (cached < 0) cached = 0;
+    }
+    return cached;
+}
+#endif
+
+void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
+                                   struct fesom_partit *partit)
 {
     const int N = mesh->myDim_nod2D;
     const int E = mesh->myDim_edge2D;
@@ -2154,6 +2170,31 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
     auto gsca     = mesh->gradient_sca_fld.d();
     auto ecdxdy   = mesh->edge_cross_dxdy_fld.d();
     auto dhe      = mesh->dhe_fld.d();
+#if !defined(FESOM_SINGLE_PRECISION)
+    (void)partit;
+#else
+    /* B3b (#997): seed the dbl_t shadow from the working copy on the FIRST update — after the
+     * preconditioner build AND after any restart read (the SP reader allocates+seeds it itself,
+     * so this branch is skipped on a restart: the file's full-precision values survive). */
+    const int  drift_every = stiff_drift_every();
+    const bool drift_on    = drift_every > 0;
+    if (!S->values_full_fld.allocated()) {
+        S->values_full_fld.alloc("ssh.values_full", (size_t)S->nnz);
+        auto vfull = S->values_full_fld.d();
+        Kokkos::parallel_for("fesom_stiff_full_seed", Kokkos::RangePolicy<>(0, S->nnz),
+            KOKKOS_LAMBDA(const int q) { vfull(q) = (dbl_t)values(q); });
+        S->values_full_fld.modify_device();
+    }
+    if (drift_on && !S->values_wp_drift_fld.allocated()) {
+        S->values_wp_drift_fld.alloc("ssh.values_wp_drift", (size_t)S->nnz);
+        auto vwp = S->values_wp_drift_fld.d();
+        Kokkos::parallel_for("fesom_stiff_drift_seed", Kokkos::RangePolicy<>(0, S->nnz),
+            KOKKOS_LAMBDA(const int q) { vwp(q) = values(q); });
+        S->values_wp_drift_fld.modify_device();
+    }
+    auto vfull = S->values_full_fld.d();
+    auto vwp   = S->values_wp_drift_fld.d();     /* empty view when the twin is off (never read) */
+#endif
 
     Kokkos::parallel_for("fesom_update_stiff_mat_ale", Kokkos::RangePolicy<>(0, E),
         KOKKOS_LAMBDA(const int ed) {
@@ -2184,7 +2225,15 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
                          * identical to the C's spos[] lookup (CSR columns are unique per row). */
                         for (int q = rowptr(row); q < rowptr(row + 1); ++q) {
                             if (colind(q) == en[k]) {
+#if defined(FESOM_SINGLE_PRECISION)
+                                /* the increment is computed in real_t exactly as upstream's
+                                 * `real(fy*factor, real64)` — widened, not recomputed */
+                                const real_t inc = sgn * fy[k] * factor;
+                                Kokkos::atomic_add(&vfull(q), (dbl_t)inc);
+                                if (drift_on) Kokkos::atomic_add(&vwp(q), inc);
+#else
                                 Kokkos::atomic_add(&values(q), sgn * fy[k] * factor);
+#endif
                                 break;
                             }
                         }
@@ -2192,6 +2241,40 @@ void fesom_update_stiff_mat_ale_kk(fesom_ssh_stiff *S, const struct fesom_mesh *
                 }
             }
         });
+#if defined(FESOM_SINGLE_PRECISION)
+    /* Refresh the working copy the CG solver and preconditioner read: rounded ONCE per update
+     * from the dbl_t accumulator instead of compounding the rounding over the run. */
+    S->values_full_fld.modify_device();
+    Kokkos::parallel_for("fesom_stiff_full_refresh", Kokkos::RangePolicy<>(0, S->nnz),
+        KOKKOS_LAMBDA(const int q) { values(q) = (real_t)vfull(q); });
+    if (drift_on) {
+        S->values_wp_drift_fld.modify_device();
+        static long ncall = 0;
+        ++ncall;
+        if (ncall % drift_every == 0) {
+            /* How far has the real_t-accumulated matrix drifted from the dbl_t one? relL2 over
+             * OWNED rows, diagonal and off-diagonal separately (upstream's [STIFFDRIFT] line).
+             * Host loop: a diagnostic, pulled at the print interval only. */
+            S->values_full_fld.sync_host();
+            S->values_wp_drift_fld.sync_host();
+            const dbl_t  *full = S->values_full_fld.h();
+            const real_t *wp   = S->values_wp_drift_fld.h();
+            double sums[4] = {0.0, 0.0, 0.0, 0.0}, g[4];
+            for (int row = 0; row < N; ++row)
+                for (int q = S->rowptr[row]; q < S->rowptr[row + 1]; ++q) {
+                    const double d = (double)wp[q] - (double)full[q];
+                    const double r = (double)full[q];
+                    const int    o = (S->colind[q] == row) ? 0 : 2;
+                    sums[o] += d * d; sums[o + 1] += r * r;
+                }
+            MPI_Allreduce(sums, g, 4, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+            if (partit->mype == 0)
+                printf("[STIFFDRIFT] update %8ld  relL2(diag)= %12.5e  relL2(offdiag)= %12.5e\n",
+                       ncall, sqrt(g[0] / (g[1] > 0.0 ? g[1] : 1e-300)),
+                       sqrt(g[2] / (g[3] > 0.0 ? g[3] : 1e-300)));
+        }
+    }
+#endif
     S->values_fld.modify_device();
     /* pr_values deliberately NOT refreshed -- see the banner above. */
 }
