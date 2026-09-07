@@ -64,17 +64,32 @@ else BIN=$SRC/$build/fesom_port; tag=$build; fi
 is_ref0=0; case "$BIN" in *build-m16-ref0/*) is_ref0=1; tag=ref0;; esac   # the oracle binary, by dir name or absolute path
 
 # environment: login node (vader) or inside a SLURM allocation
+# M16 E3: M16_MODE=byte (default) diffs every snapshot against ref0; M16_MODE=live skips the diff and
+# instead requires rc 0, a finite last step line and NO DEAD knob per scripts/m16_knob_signals.sh — the
+# Gate-3 "every knob live at SP" run (an SP binary can never be byte-identical to the FP64 oracle).
+# M16_ENV=serial (default) sources env.sh; M16_ENV=cuda sources env_cuda.sh + the CUDA-aware MPI
+# exports every M16 CUDA smoke ran with, and launches one GPU per task.
+MODE=${M16_MODE:-byte}; ENVK=${M16_ENV:-serial}
 source /sw/etc/profile.levante >/dev/null 2>&1 || true
-source "$SRC/env.sh" >/dev/null 2>&1
-export OMPI_MCA_btl_vader_single_copy_mechanism=none            # L18 deterministic gather
-if [ -z "${SLURM_JOB_ID:-}" ]; then
-  export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader
-  unset OMPI_MCA_osc OMPI_MCA_coll OMPI_MCA_coll_hcoll_enable HCOLL_ENABLE_MCAST_ALL \
-        HCOLL_MAIN_IB UCX_NET_DEVICES UCX_TLS UCX_IB_ADDR_TYPE UCX_UNIFIED_MODE
-  LAUNCH="mpirun -np $np"
+if [ "$ENVK" = cuda ]; then
+  source "$SRC/env_cuda.sh" >/dev/null 2>&1
+  export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1 UCX_MEMTYPE_CACHE=n \
+         OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+  [ -n "${SLURM_JOB_ID:-}" ] || { echo "M16_ENV=cuda needs a GPU allocation (never the login node)"; exit 2; }
+  LAUNCH="srun -n $np --gpus-per-task=1"
 else
-  LAUNCH="srun -n $np"
+  source "$SRC/env.sh" >/dev/null 2>&1
+  export OMPI_MCA_btl_vader_single_copy_mechanism=none            # L18 deterministic gather
+  if [ -z "${SLURM_JOB_ID:-}" ]; then
+    export OMPI_MCA_pml=ob1 OMPI_MCA_btl=self,vader
+    unset OMPI_MCA_osc OMPI_MCA_coll OMPI_MCA_coll_hcoll_enable HCOLL_ENABLE_MCAST_ALL \
+          HCOLL_MAIN_IB UCX_NET_DEVICES UCX_TLS UCX_IB_ADDR_TYPE UCX_UNIFIED_MODE
+    LAUNCH="mpirun -np $np"
+  else
+    LAUNCH="srun -n $np"
+  fi
 fi
+[ "$MODE" = live ] && ROOT=${ROOT}_live_${ENVK}
 
 run_one() {
   local c=$1 out=$ROOT/$tag/${c}_np$np ref=$ROOT/ref0/${ORACLE_OF[$c]:-$c}_np$np
@@ -95,6 +110,15 @@ run_one() {
   local nsnap; nsnap=$(ls "$out"/snap_*.nc 2>/dev/null | wc -l)
   [ "$nsnap" -ge 2 ] || { echo "[$tag/$c np$np] only $nsnap snapshots (need >=2, Z7)"; return 1; }
   if [ $is_ref0 = 1 ]; then echo "[$tag/$c np$np] ORACLE written: $nsnap snapshots"; fi
+  if [ "$MODE" = live ]; then
+    "$SRC/scripts/m16_knob_signals.sh" "$out/run.log" "$out/run.err" > "$out/knobs.txt" 2>&1
+    local dead; dead=$(grep -E '^\s+\S+\s+DEAD' "$out/knobs.txt" | awk '{print $1}' | tr '\n' ' ')
+    local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$out/run.log" | tail -n 1)
+    local bad=""; [ -n "$last" ] || bad="no-step-line"; echo "$last" | grep -qiE 'nan|inf' && bad="$bad non-finite"; echo "$last" | grep -qE 'it=0[^0-9]' && bad="$bad it=0"
+    local live; live=$(grep -cE '^\s+\S+\s+LIVE' "$out/knobs.txt")
+    if [ -z "$dead" ] && [ -z "$bad" ]; then echo "[$tag/$c np$np] LIVE ($live signals; $(echo "$last" | cut -c1-40))"; return 0
+    else echo "[$tag/$c np$np] NOT LIVE: dead='$dead' bad='$bad'"; grep -E 'DEAD|ABSENT' "$out/knobs.txt" | head -4; return 1; fi
+  fi
   [ -d "$ref" ] || { echo "[$tag/$c np$np] no oracle $ref"; return 1; }
   "$PY" "$SRC/scripts/diff_snap.py" "$ref" "$out" > "$out/diff.txt" 2>&1
   local drc=$?
@@ -107,5 +131,6 @@ list=""
 for w in $cfg; do case "$w" in all) list="$list $ALL";; five) list="$list $G0_FIVE";; *) list="$list $w";; esac; done
 fail=0
 for c in $list; do run_one "$c" || fail=1; done
-[ $fail = 0 ] && echo "=== GATE 0 PASS ($tag np$np: $list) ===" || echo "=== GATE 0 FAIL ($tag np$np) ==="
+[ "$MODE" = live ] && G="GATE 3-LIVE ($ENVK)" || G="GATE 0"
+[ $fail = 0 ] && echo "=== $G PASS ($tag np$np: $list) ===" || echo "=== $G FAIL ($tag np$np) ==="
 exit $fail
