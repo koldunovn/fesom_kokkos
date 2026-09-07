@@ -255,8 +255,8 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
  * than merely observed. All share the diagonal pr[i,i] = 1/d_i, on which every form
  * agrees.
  *
- *   0  as built           -0.5*a/(d_i*(d_i+d_j))            asym, 1/4x   [DEFAULT]
- *   1  fesom2#984 var 1   -a/(d_i*d_j)                      SYM,  ~1x
+ *   0  as built           -0.5*a/(d_i*(d_i+d_j))            asym, 1/4x
+ *   1  fesom2#984 var 1   -a/(d_i*d_j)                      SYM,  ~1x    [DEFAULT since M16]
  *   2  M10 note, 6 Aug    -0.5*a/(sqrt(d_i*d_j)*(d_i+d_j))  SYM,  1/4x
  *   3  symmetrised hdr    -2*a/(sqrt(d_i*d_j)*(d_i+d_j))    SYM,  1x
  *   4  header as written  -2*a/(d_i*(d_i+d_j))              asym, 1x
@@ -268,13 +268,25 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
  * the arithmetic/geometric-mean ratio (d_i+d_j)/(2*sqrt(d_i*d_j)) >= 1. 4 exists to
  * reproduce #984's report that the header formula diverges, i.e. that magnitude
  * without symmetry is not a fix.
+ *
+ * M16 (2026-09-07): the DEFAULT is variant 1 — upstream FESOM/fesom2#984 ships
+ * `precond_variant = 1` in namelist.dyn, and the M15 campaign measured it at
+ * -33..-39 % CG iterations / -10.45 % step (CORE2 GPU 16N) with the climate of
+ * 60-yr Fortran twins reproduced. There is NO auto mode (upstream's code default
+ * -1 = "1 in single precision, 0 in double") — one formula, stated. The byte gate
+ * against main therefore exports FESOM_SSH_PRECOND=0 explicitly (plan D3).
+ *
+ * Interaction with FESOM_SSH_SYMPRE (M10): SYMPRE symmetrises by a similarity
+ * transform, pr[i,j] *= sqrt(d_i/d_j). Applied to an already-symmetric variant it
+ * DESTROYS the symmetry, so ssh_sympre_on() is false for variants 1/2/3. On the
+ * asymmetric forms it maps 0 -> 2 and 4 -> 3 exactly.
  *===========================================================================*/
-static int ssh_precond_variant(void)
+int fesom_ssh_precond_variant(void)
 {
     static int c = -1;
     if (c < 0) {
         const char *e = getenv("FESOM_SSH_PRECOND");
-        c = 0;
+        c = 1;
         if (e && e[0]) {
             char *endp = NULL;
             long v = strtol(e, &endp, 10);
@@ -290,17 +302,20 @@ static int ssh_precond_variant(void)
     return c;
 }
 
-static const char *ssh_precond_name(int v)
+const char *fesom_ssh_precond_name(int v)
 {
     switch (v) {
-        case 0: return "0 as-built (asym, 1/4x)";
-        case 1: return "1 fesom2#984 -a/(di*dj) (sym, 1x)";
+        case 0: return "0 as-built -0.5a/(di*(di+dj)) (asym, 1/4x; the pre-M16 default)";
+        case 1: return "1 fesom2#984 -a/(di*dj) (sym, 1x; DEFAULT)";
         case 2: return "2 M10 note -0.5a/(sqrt(di*dj)*(di+dj)) (sym, 1/4x)";
         case 3: return "3 symmetrised header -2a/(sqrt(di*dj)*(di+dj)) (sym, 1x)";
         case 4: return "4 header as written -2a/(di*(di+dj)) (asym, 1x)";
     }
     return "?";
 }
+
+/* variants whose off-diagonals are symmetric BY CONSTRUCTION (no SYMPRE needed or allowed) */
+int fesom_ssh_precond_symmetric(int v) { return v == 1 || v == 2 || v == 3; }
 
 /*===========================================================================
  * Preconditioner: ssh_solve_preconditioner (solver.F90:31-95)
@@ -329,11 +344,7 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
      *   pr[diag]                 = 1 / diag(row)
      *   pr[row, col=node, n>0]   = -0.5 * (off / diag(row)) / (diag(row) + diag(node))
      */
-    const int pvar = ssh_precond_variant();
-    if (pvar != 0 && (partit == NULL || partit->mype == 0)) {   /* L80: announce, never a dead knob */
-        fprintf(stderr, "[ssh-precond] FESOM_SSH_PRECOND = %s\n", ssh_precond_name(pvar));
-        fflush(stderr);
-    }
+    const int pvar = fesom_ssh_precond_variant();
     for (int row = 0; row < N; ++row) {
         int  start = S->rowptr[row];
         int  nend  = S->rowptr[row + 1] - start;
@@ -364,6 +375,35 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
         }
     }
     free(diag_values);
+
+    /* M16: announce on EVERY run, variant 0 included (L80 — the default is no longer the
+     * as-built form, so silence would hide which formula produced a log), together with the
+     * symmetry-defect ratio max|pr_ij - pr_ji| / max|pr_ij| over owned pairs: the observable
+     * the P3 gate asserts (~0 for 1/2/3, > 0 for 0/4). Built once per run (pr_values is
+     * frozen, the Fortran precedent), so this host loop is off the hot path. */
+    {
+        double dmax = 0.0, mx = 0.0;
+        for (int r = 0; r < N; ++r)
+            for (int n = S->rowptr[r]; n < S->rowptr[r + 1]; ++n) {
+                const int c = S->colind[n];
+                if (c == r || c >= N) continue;
+                for (int m2 = S->rowptr[c]; m2 < S->rowptr[c + 1]; ++m2)
+                    if (S->colind[m2] == r) {
+                        dmax = fmax(dmax, fabs((double)S->pr_values[n] - (double)S->pr_values[m2]));
+                        mx   = fmax(mx,   fabs((double)S->pr_values[n]));
+                        break;
+                    }
+            }
+        double red[2] = { dmax, mx };
+        if (partit && partit->npes > 1)
+            MPI_Allreduce(MPI_IN_PLACE, red, 2, MPI_DOUBLE, MPI_MAX, partit->MPI_COMM_FESOM);
+        if (partit == NULL || partit->mype == 0) {
+            fprintf(stderr, "[ssh-precond] FESOM_SSH_PRECOND = %s; symmetry defect ratio %.3e "
+                            "(max|pr_ij - pr_ji| / max|pr_ij|, owned pairs)\n",
+                    fesom_ssh_precond_name(pvar), red[1] > 0 ? red[0] / red[1] : 0.0);
+            fflush(stderr);
+        }
+    }
 
     /* M4.2-a: the CSR is now final (build filled rowptr/colind/values; this routine just
      * filled pr_values). It is set-once — linfs never updates the stiffness matrix
@@ -2520,13 +2560,31 @@ static bool ssh_fallback_armed()
     return c != 0;
 }
 
-/* FESOM_SSH_SYMPRE (default 1 for non-cg solvers). */
+/* FESOM_SSH_SYMPRE (default 1 for non-cg solvers) — M16: FALSE whenever the preconditioner
+ * variant is symmetric by construction (1/2/3): the similarity transform would then destroy
+ * the symmetry it exists to create. Announced once if the user asked for it explicitly. */
 static bool ssh_sympre_on()
 {
     static int c = -1;
     if (c < 0) {
         const char *e = getenv("FESOM_SSH_SYMPRE");
-        c = (e && e[0]) ? fesom_ssh_env01("FESOM_SSH_SYMPRE") : 1;
+        const int asked = (e && e[0]) ? fesom_ssh_env01("FESOM_SSH_SYMPRE") : 1;
+        const int pvar  = fesom_ssh_precond_variant();
+        if (fesom_ssh_precond_symmetric(pvar)) {
+            c = 0;
+            if (e && e[0] && asked) {
+                int rank = 0, ini = 0;
+                MPI_Initialized(&ini);
+                if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+                if (rank == 0) {
+                    fprintf(stderr, "[ssh-sympre] skipped: FESOM_SSH_PRECOND=%d is symmetric by "
+                                    "construction (FESOM_SSH_SYMPRE=1 ignored)\n", pvar);
+                    fflush(stderr);
+                }
+            }
+        } else {
+            c = asked;
+        }
     }
     return c != 0;
 }
@@ -2659,8 +2717,17 @@ static void ssh_solver_check_interactions(int kind, int npes)
                 "silently ignoring the poly knob — a dead knob is indistinguishable from a "
                 "lever that does not pay (L80).", ssh_solver_name(kind), cgpoly_d);
 
-    FESOM_CHECK(!(kind == FESOM_SSHSOLV_PCSI && !ssh_sympre_on()),
-                "FESOM_SSH_SOLVER=pcsi requires FESOM_SSH_SYMPRE=1 — the Chebyshev/Lanczos "
+    /* pcsi needs a self-adjoint preconditioner (derivations sec 4.4): either a variant that is
+     * symmetric by construction (1/2/3, M16) or the SYMPRE transform on variant 0. Variant 4
+     * is refused outright: SYMPRE would silently turn it into variant 3, which is not what
+     * "4" asked for (a lever that runs as a different lever is the L80 trap). */
+    FESOM_CHECK(!(kind == FESOM_SSHSOLV_PCSI && fesom_ssh_precond_variant() == 4),
+                "FESOM_SSH_SOLVER=pcsi refuses FESOM_SSH_PRECOND=4 (asymmetric header form) — "
+                "use 1 (default), 2, 3, or 0 with FESOM_SSH_SYMPRE=1");
+    FESOM_CHECK(!(kind == FESOM_SSHSOLV_PCSI && !fesom_ssh_precond_symmetric(fesom_ssh_precond_variant())
+                  && !ssh_sympre_on()),
+                "FESOM_SSH_SOLVER=pcsi requires a symmetric preconditioner: FESOM_SSH_PRECOND in "
+                "{1,2,3} or FESOM_SSH_SYMPRE=1 on variant 0 — the Chebyshev/Lanczos "
                 "theory needs a self-adjoint preconditioner (derivations sec 4.4)");
 
     const bool host_halo = getenv("FESOM_HOST_HALO") != NULL;
@@ -3377,7 +3444,8 @@ static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         Kokkos::deep_copy(mv, S->values_fld.d());
         for (int i = 0; i < S->nnz; ++i) vals_h[(size_t)i] = mv(i);
     }
-    const real_t *PR = g_sympre.pr_h.data();          /* SYMPRE is mandatory for pcsi */
+    /* symmetric preconditioner: SYMPRE's rows on variant 0, the CSR's own on 1/2/3 (M16) */
+    const real_t *PR = ssh_sympre_on() ? g_sympre.pr_h.data() : S->pr_values;
     auto spmv = [&](const real_t *A_, std::vector<real_t> &v, std::vector<real_t> &y) {
         if (parallel) fesom_halo_exchange(v.data(), FESOM_HALO_NOD2D, 1, 1, partit);
         for (int r = 0; r < N; ++r) {
@@ -3512,10 +3580,12 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     const bool transport_ok = true;
 #endif
     const bool ring = ssh_ring_on() && parallel && transport_ok;
-    ssh_sympre_build(S, mesh, partit);                 /* mandatory for pcsi (checked in T5a) */
-    FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
-                "ssh-sympre: CGPIPE ring1 rows shipped with a different preconditioner");
-    cgpipe_ship_pr = g_sympre.pr_h.data();
+    if (ssh_sympre_on()) {                             /* variant 0: SYMPRE mandatory (T5a) */
+        ssh_sympre_build(S, mesh, partit);
+        FESOM_CHECK(!g_cgpipe.built || cgpipe_ship_pr == g_sympre.pr_h.data(),
+                    "ssh-sympre: CGPIPE ring1 rows shipped with a different preconditioner");
+        cgpipe_ship_pr = g_sympre.pr_h.data();
+    }                                                  /* 1/2/3: symmetric as built (M16); ring1 ships S->pr_values */
     if (ring && !g_cgpipe.built) cgpipe_build(S, si, mesh, partit);
     ssh_pcsi_alloc(mesh);
     ssh_pcsi_eig(S, si, mesh, partit);
@@ -3534,7 +3604,8 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     auto rowptr = S->rowptr_fld.d();
     auto colind = S->colind_fld.d();
     auto vals   = S->values_fld.d();
-    auto prvals = Kokkos::View<const double*>(g_sympre.pr_d);
+    auto prvals = ssh_sympre_on() ? Kokkos::View<const double*>(g_sympre.pr_d)
+                                  : Kokkos::View<const double*>(S->pr_values_fld.d());
     auto X   = dyn->d_eta_fld.d();
     auto rhs = dyn->ssh_rhs_fld.d();
     auto rr  = si->rr_fld.d();

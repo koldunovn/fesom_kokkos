@@ -85,6 +85,12 @@ void fesom_solverinfo_free(fesom_solverinfo *si);
 void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
                               struct fesom_partit *partit);
 
+/* M15/M16: the preconditioner variant (FESOM_SSH_PRECOND, 0..4; DEFAULT 1 = FESOM/fesom2#984),
+ * resolved once; its printable name; whether it is symmetric by construction (1/2/3). */
+int         fesom_ssh_precond_variant(void);
+const char *fesom_ssh_precond_name(int v);
+int         fesom_ssh_precond_symmetric(int v);
+
 /*
  * Build the SSH RHS into dyn->ssh_rhs (linfs branch). Mirror of
  * compute_ssh_rhs_ale (oce_ale.F90:1821-1956).

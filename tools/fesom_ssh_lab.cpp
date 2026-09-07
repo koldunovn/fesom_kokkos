@@ -190,13 +190,13 @@ int main(int argc, char **argv)
      * pr_values from the just-installed dumped `values` — so A is bit-for-bit the dump's
      * and only M^-1 changes. Skipped when FESOM_SSH_PRECOND is unset/0, which keeps the
      * dumped bytes and hence the bitwise CERT path exactly as before. */
-    {
-        const char *pv = getenv("FESOM_SSH_PRECOND");
-        if (pv && pv[0] && strcmp(pv, "0") != 0) {
+    {   /* M16: resolved variant (default 1) — set FESOM_SSH_PRECOND=0 for the bitwise CERT replay */
+        const int pv = fesom_ssh_precond_variant();
+        if (pv != 0) {
             fesom_ssh_preconditioner(&stiff, &mesh, &mpi);
             if (mpi.mype == 0) {
                 printf("[lab] pr_values REBUILT from the dumped matrix under "
-                       "FESOM_SSH_PRECOND=%s (A unchanged; CERT is REPORT-only)\n", pv);
+                       "FESOM_SSH_PRECOND=%d (A unchanged; CERT is REPORT-only)\n", pv);
                 fflush(stdout);
             }
         }
@@ -399,13 +399,13 @@ int main(int argc, char **argv)
     }
     if (mpi.mype == 0) {
         const char *sv = getenv("FESOM_SSH_SOLVER");
-        const char *pv = getenv("FESOM_SSH_PRECOND");
-        const bool alt_pre = pv && pv[0] && strcmp(pv, "0") != 0;
+        const int  pv = fesom_ssh_precond_variant();
+        const bool alt_pre = pv != 0;
         const bool is_baseline = !sv || !sv[0] || strcmp(sv, "cg") == 0;
         if (alt_pre)
             /* M15: a different M^-1 is a different Krylov space by construction, so an
              * iterate/iteration-count difference is the measurement, not a failure. */
-            printf("[lab] REPORT only — FESOM_SSH_PRECOND=%s rebuilt the preconditioner; "
+            printf("[lab] REPORT only — FESOM_SSH_PRECOND=%d rebuilt the preconditioner; "
                    "iteration-count and iterate differences above are the result, "
                    "not failures\n", pv);
         else if (is_baseline)
@@ -416,9 +416,7 @@ int main(int argc, char **argv)
                    "iteration-count differences above are expected, not failures\n", sv);
     }
     {   /* M15: never abort on a deliberate preconditioner swap (see above). */
-        const char *pv_ = getenv("FESOM_SSH_PRECOND");
-        const bool alt_pre_ = pv_ && pv_[0] && strcmp(pv_, "0") != 0;
-        if (worst_rc && !alt_pre_) { MPI_Abort(MPI_COMM_WORLD, 1); }
+        if (worst_rc && fesom_ssh_precond_variant() == 0) { MPI_Abort(MPI_COMM_WORLD, 1); }
     }
     }
 

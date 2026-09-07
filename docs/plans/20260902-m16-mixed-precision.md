@@ -283,12 +283,12 @@ Create `scripts/m16_gate0.sh`
 
 **Files:** Modify `src/fesom_ssh.cpp`, `src/fesom_main.cpp`, `tools/fesom_ssh_lab.cpp`
 
-- [ ] `git cherry-pick` P1's commit onto `m16-precision` (expect a clean pick — m15 == m10 HEAD, which
+- [x] `git cherry-pick` P1's commit onto `m16-precision` (expect a clean pick — m15 == m10 HEAD, which
       m14 contains)
-- [ ] `ssh_precond_variant()`: default `c = 1`; keep 0–4 and the abort on other values
-- [ ] the `[ssh-precond]` announce line prints on **every** run, including variant 0, naming the formula
+- [x] `ssh_precond_variant()` (now exported as `fesom_ssh_precond_variant()`): default `c = 1`; keep 0–4 and the abort on other values
+- [x] the `[ssh-precond]` announce line prints on **every** run, including variant 0, naming the formula
       (e.g. `variant 1 = -a/(d_i d_j) (FESOM/fesom2#984, symmetric)`)
-- [ ] **SYMPRE rule, at every site:** `ssh_sympre_on()` returns false when variant ∈ {1,2,3}, with a
+- [x] **SYMPRE rule, at every site:** `ssh_sympre_on()` returns false when variant ∈ {1,2,3}, with a
       one-time `[ssh-sympre] skipped: FESOM_SSH_PRECOND=<v> is symmetric by construction` if the user
       set `FESOM_SSH_SYMPRE=1`; the three gated build sites (`:2724`, `:2988`, `:3627`) follow; the
       **unconditional `pcsi` build at `:3428`** becomes conditional on variant 0, and the two `pcsi` reads
@@ -296,18 +296,18 @@ Create `scripts/m16_gate0.sh`
       built; the `pcsi` `FESOM_CHECK` at `:2575` accepts variant ∈ {1,2,3}; `cgpipe_ship_pr` stays `NULL`
       (`:697`) so the ring-1 rows ship `S->pr_values` (`:755`); the teardown at `:3900-3901` tolerates
       never-built
-- [ ] variant 4 (header form, asymmetric) + `pcsi` ⇒ refuse (`FESOM_CHECK`, same class as `:2575`)
-- [ ] `[m14]` knob summary (`fesom_main.cpp:290-302`): add `FESOM_SSH_PRECOND`, `FESOM_SALT_ANOMALY`,
+- [x] variant 4 (header form, asymmetric) + `pcsi` ⇒ refuse (`FESOM_CHECK`, same class as `:2575`)
+- [x] `[m14]` knob summary (`fesom_main.cpp:290-302`): add `FESOM_SSH_PRECOND`, `FESOM_SALT_ANOMALY`,
       `FESOM_MP_`, `USE_SINGLE_PRECISION` (as a build fact); the "no knobs active" branch prints the
       resolved precond variant and the precision banner line so it can no longer claim "default path
       certified against main" while variant 1 is in effect
-- [ ] lab tool: same default and announce
-- [ ] gate (Serial, pi): `m16_gate0.sh` (which exports `PRECOND=0`) **bit-identical**; default run
+- [x] lab tool: same default and announce
+- [x] gate (Serial, pi) — `scripts/m16_p3_gate.sh`, 2026-09-07: stages 1–6 PASS (gate0 np1/np2 bitwise with PRECOND=0; default differs in 235 fields; defect ratio 3.9e-14 for 1/2/3 vs 0.299 for 0/4 on pi, **0.638 on CORE2 = the M10 F1 number**; SYMPRE skipped/BUILT as specified; pcsi+4 rc=1; knob summary names the variant in both branches). CORE2 np1 login (PHC+JRA 1958, 20 steps): **CG mean iterations 133.2 → 81.3 (−39.0 %)**, pcsi 146.8 → 97.5 (−33.6 %); pcsi-vs-cg step-20 distance under v1 is the v0 class for eta/S/T/u/v (Av/Kv are KPP threshold fields, excluded; cg2/oati controls under v1 recorded in `…/m16/gate0/p3_build-m16serial/`) : `m16_gate0.sh` (which exports `PRECOND=0`) **bit-identical**; default run
       differs **and** mean CG iterations drop by the #984 class; symmetry-defect assertion (reuse
       `:2513-2528`): ≈ 0 for 1/2/3, > 0 for 0/4; `FESOM_SSH_SOLVER=pcsi` under the default converges to
       the same solution class as `cg` under the default (`mp_divergence_curve.py`); variant 4 + `pcsi`
       ⇒ `rc ≠ 0`; `FESOM_SSH_SYMPRE=1` under the default prints "skipped"; knob summary names the variant
-- [ ] ➕ one paragraph in `docs/SSH_SOLVERS_M10.md`: every M10 whole-step number is a variant-0/SYMPRE
+- [x] ➕ one paragraph in `docs/SSH_SOLVERS_M10.md`: every M10 whole-step number is a variant-0/SYMPRE
       number and re-bases under variant 1 (the M15 memory's prediction); no re-measurement here
 
 ---

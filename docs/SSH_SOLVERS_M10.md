@@ -2218,3 +2218,18 @@ gains as properties of the method AND the state it was tuned on.** Nothing here 
 as an option — it still wins at CORE2 CPU scale and it is the only variant that never fired a
 false-positive stall on farc — but its per-configuration numbers need the estimate quoted with
 them.
+
+## 🔴 M16 re-base note (2026-09-07): every number above is a variant-0 / SYMPRE number
+
+Since M16 (`m16-precision`, plan `docs/plans/20260902-m16-mixed-precision.md`) the SSH
+preconditioner default is **`FESOM_SSH_PRECOND=1`**, the symmetric `-a_ij/(d_i d_j)` form of
+FESOM/fesom2#984 (M15 measured it at −33…−39 % CG iterations and −10.45 % step on CORE2 GPU 16N).
+Every whole-step and iteration number in this ledger was produced with variant 0 (the as-built
+`-0.5 a/(d_i(d_i+d_j))`) and, for `cg2`/`pipecg`/`oati`/`pcsi`, with `FESOM_SSH_SYMPRE=1`
+(which is exactly variant 2 on top of variant 0). Under variant 1 SYMPRE is **skipped by
+construction** (it would destroy the symmetry; `pcsi` reads `S->pr_values` directly), so the CA
+solvers now run on a different, better-conditioned M⁻¹ and their payoff **re-bases**: the M15
+memory's prediction is that part of what `oati`/`pcsi` bought at large rank counts was the
+symmetry repair itself. Nothing here is re-measured on this branch; a comparison needs matched
+pairs under variant 1 (M16 Phase E5). `FESOM_SSH_PRECOND=0` restores every configuration in this
+document byte for byte.

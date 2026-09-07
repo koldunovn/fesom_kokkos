@@ -299,6 +299,11 @@ static void fesom_m14_knob_summary(const fesom_mpi *mpi)
         "FESOM_SPEED_MEVP",         /* M9   mEVP variants                      */
         "FESOM_EVPWIDE_",           /* M9   ring/selfcheck controls            */
         "FESOM_WHICH_EVP",          /* scheme choice the M9 levers require     */
+        "FESOM_SSH_PRECOND",        /* M15/M16 preconditioner variant (default 1) */
+        "FESOM_SALT_ANOMALY",       /* M16  salt anomaly (upstream #986)       */
+        "FESOM_MP_",                /* M16  mixed-precision instruments        */
+        "FESOM_DIAG_STIFF_DRIFT",   /* M16  stiffness-shadow drift diagnostic  */
+        "FESOM_FORCING_",           /* M16  forcing interpolation controls     */
     };
 
     extern char **environ;
@@ -319,11 +324,18 @@ static void fesom_m14_knob_summary(const fesom_mpi *mpi)
     }
     line[used] = '\0';
 
+    /* M16: the resolved facts a log must carry even with nothing set — the default
+     * preconditioner is variant 1 (NOT what main runs; the byte gate exports PRECOND=0)
+     * and the build's working precision. */
+    const int pvar = fesom_ssh_precond_variant();
     if (n == 0) {
-        fprintf(stderr, "[m14] no M14 knobs active — default path (this is the configuration "
-                        "the knob-off byte gate certifies against main)\n");
+        fprintf(stderr, "[m14] no M14/M16 knobs active — default path: precond variant %d, "
+                        "precision %s (%zu-byte real_t). Byte identity to main additionally needs "
+                        "FESOM_SSH_PRECOND=0.\n", pvar,
+                sizeof(real_t) == 4 ? "SINGLE" : "double", sizeof(real_t));
     } else {
-        fprintf(stderr, "[m14] %d knob(s) active: %s\n", n, line);
+        fprintf(stderr, "[m14] %d knob(s) active: %s | precond variant %d, precision %s\n", n, line,
+                pvar, sizeof(real_t) == 4 ? "SINGLE" : "double");
     }
     fflush(stderr);
 }

@@ -18,10 +18,21 @@
 # Output root: /work (standing rule) — override with M16_ROOT for the D10 read-only-/work case.
 set -u
 SRC=/home/a/a270088/port_kokkos_sp
-ROOT=${M16_ROOT:-/work/ab0995/a270088/port2/m16/gate0}
-MESH=${M16_MESH:-/home/a/a270088/port2/fesom2/test/meshes/pi}
 PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
-DT=100; NSTEPS=20; SNAP=1
+# M16_PRESET=pi (default): pi mesh, analytical forcing, dt 100, 20 steps, snapshot every step.
+# M16_PRESET=core2: private CORE2 mesh (NEVER /pool), PHC init + JRA55 1958, dt 1800, 20 steps,
+#   snapshots at 10 and 20 (Z7 satisfied; every-step would be ~10 GB per config) — the oracle for
+#   the Phase-B slices pi never executes (forcing, bulk, SSS restoring, PHC/det init). Login np1 is
+#   ~3.5 min per config; np2 needs dist_2 (present).
+PRESET=${M16_PRESET:-pi}
+case "$PRESET" in
+  pi)    ROOT=${M16_ROOT:-/work/ab0995/a270088/port2/m16/gate0}
+         MESH=/home/a/a270088/port2/fesom2/test/meshes/pi; DT=100; NSTEPS=20; SNAP=1; EXTRA=();;
+  core2) ROOT=${M16_ROOT:-/work/ab0995/a270088/port2/m16/gate0_core2}
+         MESH=/work/ab0995/a270088/port2/mesh/core2; DT=1800; NSTEPS=20; SNAP=10
+         EXTRA=(/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc 1958);;
+  *) echo "M16_PRESET must be pi|core2"; exit 2;;
+esac
 
 # config -> knobs (semicolon separated). Serial speed levers need FESOM_SPEED_FORCE_SERIAL=1.
 declare -A CONFIGS=(
@@ -36,9 +47,10 @@ declare -A CONFIGS=(
   [pipecg]="FESOM_SSH_SOLVER=pipecg"
   [oati]="FESOM_SSH_SOLVER=oati"
   [pcsi]="FESOM_SSH_SOLVER=pcsi"
+  [det]="FESOM_IC_EXTRAP=det"
 )
 G0_FIVE="default mevp zstar tke se"
-ALL="$G0_FIVE sewide evpwlean cg2 pipecg oati pcsi"
+ALL="$G0_FIVE sewide evpwlean cg2 pipecg oati pcsi det"
 
 build=${1:?build dir name or binary path}; cfg=${2:?config or all}; np=${3:-1}
 if [ -f "$build" ]; then BIN=$build; tag=$(basename "$(dirname "$build")")_$(basename "$build")
@@ -62,6 +74,7 @@ fi
 run_one() {
   local c=$1 out=$ROOT/$tag/${c}_np$np ref=$ROOT/ref0/${c}_np$np
   [ -n "${CONFIGS[$c]+x}" ] || { echo "unknown config $c"; return 2; }
+  if [ "$c" = det ] && [ "$PRESET" = pi ]; then echo "[$tag/$c np$np] skipped: the det IC fill only runs with a PHC init (core2 preset)"; return 0; fi
   if [ "$c" = evpwlean ] && [ "$np" -lt 2 ]; then echo "[$tag/$c np$np] skipped: the wide halo builds no extended zone at np1 (M9 FATAL by design)"; return 0; fi
   rm -rf "$out"; mkdir -p "$out"
   ( # subshell: knob hygiene per config
@@ -69,7 +82,7 @@ run_one() {
     export FESOM_SSH_PRECOND=0                                    # D3
     if [ -n "${CONFIGS[$c]}" ]; then IFS=';' read -ra KV <<< "${CONFIGS[$c]}"; for kv in "${KV[@]}"; do export "$kv"; done; fi
     { echo "BIN=$BIN"; md5sum "$BIN"; env | grep -E '^FESOM_' | sort; } > "$out/ENV.txt"
-    $LAUNCH "$BIN" "$MESH" "$out" $DT $NSTEPS $SNAP > "$out/run.log" 2> "$out/run.err"
+    $LAUNCH "$BIN" "$MESH" "$out" $DT $NSTEPS $SNAP "${EXTRA[@]}" > "$out/run.log" 2> "$out/run.err"
     echo $? > "$out/rc"
   )
   local rc; rc=$(cat "$out/rc")
