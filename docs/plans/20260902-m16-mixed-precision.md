@@ -725,9 +725,9 @@ divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
       selfchecks, CGPIPE/CGPOLY selfcheck 0.000e+00, EVPWIDE announce + `LEAN` running, SE announce +
       drift 0.0, `oati` iteration trace, `det` fill announce + sweep counts, `PRECOND` announce,
       `WSPLIT` announce, NANSCAN/CONSERV ARMED banners)
-- [ ] **CUDA half done 2026-09-07 (job 27289199): 12/15 live, `pipecg`/`oati`/`pcsi` fall back to CG on every solve at SP (0 fallbacks in the FP64 oracle) → the E5 class-4 promotion; Serial half job 27289198 running.** Spec: each signal reproduced at SP on CORE2 np8 (Serial, `FORCE_SERIAL=1`) and on 2 GPU nodes; the
+- [ ] **both halves run 2026-09-07 (CUDA job 27289199, Serial job 27289198): 12/15 live on each; `pipecg`/`oati`/`pcsi` fall back on every solve at SP (0 in FP64) — root cause = the SP true-residual floor (registry G3 entry); response = CA scalar chains → `dbl_t` + `FESOM_SSH_FLOOR` (announced, counted); re-test on the `e1` pair pending.** Spec: each signal reproduced at SP on CORE2 np8 (Serial, `FORCE_SERIAL=1`) and on 2 GPU nodes; the
       NaN-zombie check on every leg
-- [ ] **true-residual rank sweep**: `cg` (CORE2 128→864), CGPIPE (GPU 1→16 N) and `oati` (fArc
+- [ ] (first data point 2026-09-07, CORE2 np8 Serial+CUDA, `cg`: true/rtol 1.11 at solve 1 → 2.06 at solve 20, gap ≡ true−rec 0.82–0.90; FP64 gap 1e-11 — the bar is now measured, the sweep over ranks/meshes remains) **true-residual rank sweep**: `cg` (CORE2 128→864), CGPIPE (GPU 1→16 N) and `oati` (fArc
       512→4096, dars 1024→8192) at SP with `FESOM_SSH_VERIFY=1`; gap vs the B3 pre-registered bar; a
       failure here is the first class-3 promotion (scalars back to `dbl_t`), logged with the signature
 - [ ] 30-day CORE2 conservation, `FESOM_MP_CONSERV=10`, SP vs DP (`mp_conserv_drift.py`): heat gap vs the
