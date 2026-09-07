@@ -38,7 +38,8 @@
 #include <vector>
 #include <algorithm>
 
-static_assert(sizeof(real_t) == sizeof(double), "evpwide: real_t must be double (MPI_DOUBLE)");
+/* M16: the wide-halo ship carries real_t payloads with FESOM_MPI_REAL (the July static_assert
+ * that pinned real_t to double is gone; audits/selfchecks stay double as diagnostics). */
 
 namespace {
 
@@ -504,7 +505,7 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
         if (nw > 0) {
             ind[(size_t)q].resize((size_t)nw * 3);            /* (area0, cor, bc_index) per want */
             rq.push_back(MPI_Request());
-            MPI_Irecv(ind[(size_t)q].data(), nw * 3, MPI_DOUBLE, q, 2202, comm, &rq.back());
+            MPI_Irecv(ind[(size_t)q].data(), nw * 3, FESOM_MPI_REAL, q, 2202, comm, &rq.back());
         }
         if (ricnt[(size_t)q] > 0) {
             ini[(size_t)q].resize((size_t)ricnt[(size_t)q]);
@@ -513,7 +514,7 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
         }
         if (!rep_d[(size_t)q].empty()) {
             rq.push_back(MPI_Request());
-            MPI_Isend(rep_d[(size_t)q].data(), (int)rep_d[(size_t)q].size(), MPI_DOUBLE, q, 2202, comm, &rq.back());
+            MPI_Isend(rep_d[(size_t)q].data(), (int)rep_d[(size_t)q].size(), FESOM_MPI_REAL, q, 2202, comm, &rq.back());
         }
         if (!rep_i[(size_t)q].empty()) {
             rq.push_back(MPI_Request());
@@ -582,11 +583,11 @@ static void evpw_build(struct fesom_ice *ice, struct fesom_partit *p, struct fes
             if (nwE > 0) {
                 ine[(size_t)q].resize((size_t)nwE * 8);
                 rq.push_back(MPI_Request());
-                MPI_Irecv(ine[(size_t)q].data(), nwE * 8, MPI_DOUBLE, q, 2206, comm, &rq.back());
+                MPI_Irecv(ine[(size_t)q].data(), nwE * 8, FESOM_MPI_REAL, q, 2206, comm, &rq.back());
             }
             if (!rep_e[(size_t)q].empty()) {
                 rq.push_back(MPI_Request());
-                MPI_Isend(rep_e[(size_t)q].data(), (int)rep_e[(size_t)q].size(), MPI_DOUBLE, q, 2206,
+                MPI_Isend(rep_e[(size_t)q].data(), (int)rep_e[(size_t)q].size(), FESOM_MPI_REAL, q, 2206,
                           comm, &rq.back());
             }
         }
@@ -1083,7 +1084,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
         for (size_t q = 0; q < S.partner.size(); ++q) {
             const int rc = (S.roff[q + 1] - S.roff[q]) * nf + (S.eroff[q + 1] - S.eroff[q]) * 3;
             if (rc > 0) {
-                MPI_Irecv(rp + ((size_t)S.roff[q] * nf + (size_t)S.eroff[q] * 3), rc, MPI_DOUBLE,
+                MPI_Irecv(rp + ((size_t)S.roff[q] * nf + (size_t)S.eroff[q] * 3), rc, FESOM_MPI_REAL,
                           S.partner[q], 2200, p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
                 bytes += (double)rc * sizeof(real_t);
             }
@@ -1091,14 +1092,14 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
         for (size_t q = 0; q < S.partner.size(); ++q) {
             const int sc = (S.soff[q + 1] - S.soff[q]) * nf + (S.esoff[q + 1] - S.esoff[q]) * 3;
             if (sc > 0)
-                MPI_Isend(sp + ((size_t)S.soff[q] * nf + (size_t)S.esoff[q] * 3), sc, MPI_DOUBLE,
+                MPI_Isend(sp + ((size_t)S.soff[q] * nf + (size_t)S.esoff[q] * 3), sc, FESOM_MPI_REAL,
                           S.partner[q], 2200, p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
         }
     } else {
         for (size_t q = 0; q < S.partner.size(); ++q) {
             const int rc = (S.roff[q + 1] - S.roff[q]) * nf;
             if (rc > 0) {
-                MPI_Irecv(rp + (size_t)S.roff[q] * nf, rc, MPI_DOUBLE, S.partner[q], 2200,
+                MPI_Irecv(rp + (size_t)S.roff[q] * nf, rc, FESOM_MPI_REAL, S.partner[q], 2200,
                           p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
                 bytes += (double)rc * sizeof(real_t);
             }
@@ -1106,7 +1107,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
         for (size_t q = 0; q < S.partner.size(); ++q) {
             const int sc = (S.soff[q + 1] - S.soff[q]) * nf;
             if (sc > 0)
-                MPI_Isend(sp + (size_t)S.soff[q] * nf, sc, MPI_DOUBLE, S.partner[q], 2200,
+                MPI_Isend(sp + (size_t)S.soff[q] * nf, sc, FESOM_MPI_REAL, S.partner[q], 2200,
                           p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
         }
         if (sig) {   /* the sigma segment: second message per partner, tag 2205 */
@@ -1115,7 +1116,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             for (size_t q = 0; q < S.partner.size(); ++q) {
                 const int rc = (S.eroff[q + 1] - S.eroff[q]) * 3;
                 if (rc > 0) {
-                    MPI_Irecv(erp + (size_t)S.eroff[q] * 3, rc, MPI_DOUBLE, S.partner[q], 2205,
+                    MPI_Irecv(erp + (size_t)S.eroff[q] * 3, rc, FESOM_MPI_REAL, S.partner[q], 2205,
                               p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
                     bytes += (double)rc * sizeof(real_t);
                 }
@@ -1123,7 +1124,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             for (size_t q = 0; q < S.partner.size(); ++q) {
                 const int sc = (S.esoff[q + 1] - S.esoff[q]) * 3;
                 if (sc > 0)
-                    MPI_Isend(esp + (size_t)S.esoff[q] * 3, sc, MPI_DOUBLE, S.partner[q], 2205,
+                    MPI_Isend(esp + (size_t)S.esoff[q] * 3, sc, FESOM_MPI_REAL, S.partner[q], 2205,
                               p->MPI_COMM_FESOM, &S.reqs[(size_t)nreq++]);
             }
         }

@@ -424,7 +424,8 @@ int main(void)
         check(defect_orig > 1e-3,
               "variable-diagonal fixture DOES expose the asymmetry (else the test is vacuous)",
               defect_orig, 1e-3);
-        check(defect_sym < 1e-14, "symmetrised preconditioner IS symmetric", defect_sym, 0.0);
+        /* M16: rounding-level bound scales with the working precision (SP measured 7.9e-8) */
+        check(defect_sym < (sizeof(real_t) == 4 ? 1e-6 : 1e-14), "symmetrised preconditioner IS symmetric (rounding level)", defect_sym, 0.0);
 
         /* §0.5 similarity: D^{1/2}(D⁻¹C)D^{-1/2} = D^{-1/2}CD^{-1/2}, so M̃⁻¹ and M⁻¹ have
          * IDENTICAL spectra. That statement is about the PRECONDITIONER; the preconditioned
@@ -458,7 +459,7 @@ int main(void)
         const double da = worst_drift(Ta), db = worst_drift(Tb);
         printf("        sigma drift: as-built %.3e (%d it), symmetrised %.3e (%d it)\n",
                da, (int)Ta.resid.size(), db, (int)Tb.resid.size());
-        check(db < 1e-9, "symmetric M: the sigma recurrence is EXACT (rounding level)", db, 0.0);
+        check(db < (sizeof(real_t) == 4 ? 1e-6 : 1e-9), "symmetric M: the sigma recurrence is EXACT (rounding level)", db, 0.0);
         check(da > 1e3 * std::max(db, 1e-15),
               "NON-symmetric M: the sigma recurrence DRIFTS (derivations sec 0.4 confirmed)",
               da, db);

@@ -12,6 +12,7 @@
  * and other cadences/rollovers wired in Task 7.
  */
 #include "fesom_io_stream.h"
+#include "fesom_nc_real.h"     /* M8: real_t -> NC_DOUBLE boundary writers */
 #include <Kokkos_Core.hpp>     /* M514: device mean accumulators (fesom_io_stream.cpp is fesom_port-only) */
 #include <type_traits>
 #include "fesom_io.h"          /* full fesom_state typedef */
@@ -300,9 +301,9 @@ static void open_var_file(fesom_io_stream_t *s, int v, const fesom_calendar_t *c
     }
     if (n_layers > 0) {
         if (kind == FESOM_VAR_3D_NODE_IFACE || kind == FESOM_VAR_3D_ELEM_IFACE) {
-            NC_CHECK(nc_put_var_double(ncid, var_z, mesh->zbar));
+            NC_CHECK(fesom_nc_put_var_real(ncid, var_z, mesh->zbar, (size_t)n_layers));
         } else {
-            NC_CHECK(nc_put_var_double(ncid, var_z, mesh->Z));
+            NC_CHECK(fesom_nc_put_var_real(ncid, var_z, mesh->Z, (size_t)n_layers));
         }
     }
 
@@ -350,15 +351,15 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     int local_n = mesh->myDim_nod2D;
     int local_e = mesh->myDim_elem2D;
     size_t accum_n = s->accum_sz[v];
-    real_t *accum = s->accum[v];
+    fesom_io_acc_t *accum = s->accum[v];
 
     /* M514: device-resident var accumulated on-device — pull the device sum into
      * the host accum buffer ONCE here (the only D2H; per-month, not per-step). The
      * rest of flush (normalize/gather/write) is unchanged and host-side. */
     if (s->output_kind == FESOM_OUT_MEAN && s->vars[v].dev_resolve && io_use_dev_accum()) {
-        Kokkos::View<real_t*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+        Kokkos::View<fesom_io_acc_t*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
             h(accum, accum_n);
-        Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+        Kokkos::View<fesom_io_acc_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
             d(s->accum_dev[v], accum_n);
         Kokkos::deep_copy(h, d);
     }
@@ -366,15 +367,15 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     /* Divide running sum by sample count to yield the mean. INSTANT
      * skips this branch (Task 7). */
     if (s->output_kind == FESOM_OUT_MEAN && s->n_accum > 0) {
-        const real_t inv = (real_t)1.0 / (real_t)s->n_accum;
+        const fesom_io_acc_t inv = (fesom_io_acc_t)1.0 / (fesom_io_acc_t)s->n_accum;
         for (size_t i = 0; i < accum_n; ++i) accum[i] *= inv;
     }
 
     /* Allocate global output (only meaningful on rank 0). */
-    real_t *global = NULL;
+    fesom_io_acc_t *global = NULL;   /* M16: gathered as double, written as double */
     if (s->mype == 0) {
         size_t gsz = fesom_io_stream_global_size(kind, mesh->nod2D, mesh->elem2D, nl);
-        global = (decltype(global))malloc(gsz * sizeof(real_t));
+        global = (decltype(global))malloc(gsz * sizeof(fesom_io_acc_t));
         FESOM_CHECK(global, "io_stream: oom (global buf)");
     }
 
@@ -382,21 +383,21 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     int n_layers = fesom_io_stream_n_layers_written(kind, nl);
     switch (kind) {
         case FESOM_VAR_2D_NODE:
-            gather_node(accum, 1, &s->gp, global, s->comm);
+            gather_node_d(accum, 1, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_3D_NODE_MID:
         case FESOM_VAR_3D_NODE_IFACE:
-            gather_node(accum, nl, &s->gp, global, s->comm);
+            gather_node_d(accum, nl, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_2D_ELEM:
-            gather_elem(accum, 1, &s->gp, global, s->comm);
+            gather_elem_d(accum, 1, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_3D_ELEM_MID:
         case FESOM_VAR_3D_ELEM_IFACE:
-            gather_elem(accum, nl, &s->gp, global, s->comm);
+            gather_elem_d(accum, nl, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_2D_ELEM_VEC:
-            gather_elem(accum, 2, &s->gp, global, s->comm);
+            gather_elem_d(accum, 2, &s->gp, global, s->comm);
             break;
     }
     (void)local_n; (void)local_e;
@@ -413,12 +414,13 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
         if (kind == FESOM_VAR_2D_NODE || kind == FESOM_VAR_2D_ELEM) {
             size_t start[2] = {t_idx, 0};
             size_t count[2] = {1, (size_t)((kind == FESOM_VAR_2D_NODE) ? mesh->nod2D : mesh->elem2D)};
-            NC_CHECK(nc_put_vara_double(s->ncid[v], s->var_id[v], start, count, global));
+            NC_CHECK(nc_put_vara_double(s->ncid[v], s->var_id[v], start, count, global));   /* dbl_t */
         } else if (kind == FESOM_VAR_2D_ELEM_VEC) {
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, 2, (size_t)mesh->elem2D};
-            /* gather_elem laid out global as [elem][2]; transpose to [2][elem]. */
-            real_t *xy = (real_t *)malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(real_t));
+            /* gather_elem laid out global as [elem][2]; transpose to [2][elem].
+             * M8: scratch is DOUBLE (write-side staging; the copy converts under SP). */
+            double *xy = (double *)malloc((size_t)2 * (size_t)mesh->elem2D * sizeof(double));
             FESOM_CHECK(xy, "io_stream: oom (uv transpose)");
             for (int e = 0; e < mesh->elem2D; ++e) {
                 xy[(size_t)0 * mesh->elem2D + e] = global[(size_t)e * 2 + 0];
@@ -432,7 +434,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
             int N = kind_is_node(kind) ? mesh->nod2D : mesh->elem2D;
             size_t start[3] = {t_idx, 0, 0};
             size_t count[3] = {1, (size_t)n_layers, (size_t)N};
-            real_t *t = (real_t *)malloc((size_t)n_layers * (size_t)N * sizeof(real_t));
+            double *t = (double *)malloc((size_t)n_layers * (size_t)N * sizeof(double));
             FESOM_CHECK(t, "io_stream: oom (3D transpose)");
             for (int n = 0; n < N; ++n) {
                 for (int k = 0; k < n_layers; ++k) {
@@ -500,11 +502,11 @@ static void flush_all(fesom_io_stream_t *s,
             /* M514: dev-resident var sums live on-device — zero the device buffer
              * (the hot path accumulates there); host accum[v] is re-filled at flush. */
             if (s->vars[v].dev_resolve && io_use_dev_accum()) {
-                Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+                Kokkos::View<fesom_io_acc_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
                     d(s->accum_dev[v], s->accum_sz[v]);
                 Kokkos::deep_copy(d, (real_t)0.0);
             } else {
-                memset(s->accum[v], 0, s->accum_sz[v] * sizeof(real_t));
+                memset(s->accum[v], 0, s->accum_sz[v] * sizeof(fesom_io_acc_t));
             }
         }
     }
@@ -565,12 +567,12 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
     /* Always allocate per-variable accum buffers. MEAN streams accumulate
      * into them across the period; INSTANT streams reuse them as scratch
      * (zero-then-resolver-fill on each flush trigger). */
-    s->accum = (decltype(s->accum))calloc((size_t)nvars, sizeof(real_t *));
+    s->accum = (decltype(s->accum))calloc((size_t)nvars, sizeof(fesom_io_acc_t *));
     FESOM_CHECK(s->accum, "io_stream: oom (accum array)");
 
     /* M514: per-var device accumulators (raw device ptrs; NULL for non-dev vars).
      * Filled below only for vars with a dev_resolve. */
-    s->accum_dev = (decltype(s->accum_dev))calloc((size_t)nvars, sizeof(real_t *));
+    s->accum_dev = (decltype(s->accum_dev))calloc((size_t)nvars, sizeof(fesom_io_acc_t *));
     FESOM_CHECK(s->accum_dev, "io_stream: oom (accum_dev array)");
 
     for (int v = 0; v < nvars; ++v) {
@@ -584,16 +586,16 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
                                                        mesh->myDim_nod2D,
                                                        mesh->myDim_elem2D,
                                                        mesh->nl);
-        s->accum[v] = (std::remove_reference_t<decltype(s->accum[v])>)calloc(s->accum_sz[v], sizeof(real_t));
+        s->accum[v] = (std::remove_reference_t<decltype(s->accum[v])>)calloc(s->accum_sz[v], sizeof(fesom_io_acc_t));
         FESOM_CHECK(s->accum[v], "io_stream: oom (accum[%d] %zu)",
                     v, s->accum_sz[v]);
         /* M514: device accumulator only for device-resident vars (dev_resolve set).
          * Raw device buffer via kokkos_malloc (default = device space), zeroed. */
         if (vars[v].dev_resolve) {
-            s->accum_dev[v] = (real_t *)Kokkos::kokkos_malloc("io_accum_dev",
-                                                              s->accum_sz[v] * sizeof(real_t));
+            s->accum_dev[v] = (fesom_io_acc_t *)Kokkos::kokkos_malloc("io_accum_dev",
+                                                              s->accum_sz[v] * sizeof(fesom_io_acc_t));
             FESOM_CHECK(s->accum_dev[v], "io_stream: oom (accum_dev[%d])", v);
-            Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+            Kokkos::View<fesom_io_acc_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>>
                 d(s->accum_dev[v], s->accum_sz[v]);
             Kokkos::deep_copy(d, (real_t)0.0);
         }
@@ -632,7 +634,7 @@ void fesom_io_stream_step(fesom_io_stream_t      *s,
              * because INSTANT records carry the instant time, not a
              * period midpoint. */
             for (int v = 0; v < s->nvars; ++v) {
-                memset(s->accum[v], 0, s->accum_sz[v] * sizeof(real_t));
+                memset(s->accum[v], 0, s->accum_sz[v] * sizeof(fesom_io_acc_t));
                 s->vars[v].resolve(state, s->accum[v], s->accum_sz[v]);
             }
             s->n_accum = 1;          /* division by 1 in flush is a no-op */

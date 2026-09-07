@@ -1438,6 +1438,13 @@ skip_rest_state:
             TP_BEG();
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
+            /* M8/M16 Gate-3 conservation diagnostic at its own cadence (FESOM_MP_CONSERV=N;
+             * collective — all ranks call, rank 0 prints; dbl_t sums + MPI_DOUBLE). */
+            {
+                const int ce = fesom_mp_conserv_every();
+                if (ce > 0 && (n == 1 || n % ce == 0 || n == nsteps))
+                    fesom_mp_conserv(n, &mesh, &tracers, ctx.partit);
+            }
             TP_END(tp_ocean);
             fesom_phasestats_mark(FESOM_PH_OTHER);   /* io/calendar/snapshot tail of the step */
             if (mpi.mype == 0) {
@@ -1560,15 +1567,17 @@ skip_rest_state:
                         if (a > Av_max) Av_max = a;
                     }
                 }
-                /* Global reductions across ranks. */
+                /* Global reductions across ranks. M16 class 3: real_t buffers under FESOM_MPI_REAL
+                 * (upstream write_step_info is MPI_WP). SP1: a real_t buffer under MPI_DOUBLE was the
+                 * July stack smash. */
                 if (mpi.npes > 1) {
                     real_t buf_max[16] = {uv_max, eta_max, w_max, T_max, S_max,
                         stress_max, hflux_max, wflux_max, vsalt_max, rsalt_max,
                         hpres_max, pgf_max, dens_max, bv_max, Kv_max, Av_max};
                     real_t buf_min[3]  = {T_min, S_min, bv_min};
                     real_t out_max[16], out_min[3];
-                    MPI_Allreduce(buf_max, out_max, 16, MPI_DOUBLE, MPI_MAX, mpi.MPI_COMM_FESOM);
-                    MPI_Allreduce(buf_min, out_min, 3,  MPI_DOUBLE, MPI_MIN, mpi.MPI_COMM_FESOM);
+                    MPI_Allreduce(buf_max, out_max, 16, FESOM_MPI_REAL, MPI_MAX, mpi.MPI_COMM_FESOM);
+                    MPI_Allreduce(buf_min, out_min, 3,  FESOM_MPI_REAL, MPI_MIN, mpi.MPI_COMM_FESOM);
                     uv_max=out_max[0]; eta_max=out_max[1]; w_max=out_max[2];
                     T_max=out_max[3];  S_max=out_max[4];
                     stress_max=out_max[5]; hflux_max=out_max[6]; wflux_max=out_max[7];
@@ -1630,7 +1639,7 @@ skip_rest_state:
                         }
                         real_t cz_max = cz_loc;
                         if (mpi.npes > 1) {
-                            MPI_Allreduce(&cz_loc, &cz_max, 1, MPI_DOUBLE, MPI_MAX, mpi.MPI_COMM_FESOM);
+                            MPI_Allreduce(&cz_loc, &cz_max, 1, FESOM_MPI_REAL, MPI_MAX, mpi.MPI_COMM_FESOM);
                         }
                         if (cz_loc == cz_max && cz_max > 0.0 && cz_node >= 0) {
                             double glon = mesh.geo_coord_nod2D[2*cz_node + 0] * 180.0 / M_PI;

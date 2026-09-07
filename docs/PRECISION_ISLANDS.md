@@ -37,9 +37,9 @@ Status legend: `pre-registered` · `suspect-fp32` (runs FP32 until a gate object
 | Stiffness accumulation shadow `values_full` (`FieldT<dbl_t>`, local nnz, device) | zstar ALE | 1 (+ whole-field device promotion, declared divergence b) | `MOD_MESH.F90` `values_full` real64 under `#ifdef` SP; `oce_ale.F90 update_stiff_mat_ale` seeds on first call, accumulates real64, refreshes `%values` per step; `DIAG_STIFF_DRIFT` | 118k-step open-loop CSR increments in float de-tune the operator (July's 1964-10-04 death, `ssh-stiff-ale-acc`); upstream #997 has the same island | pre-registered |
 | Guard epsilons: `KPP_EPSLN` 1e-20 in SP (1e-40 flushes under FTZ), every additive `+eps` audited against denormal flush **and** overflow of the expression it feeds | constants | 1 | `oce_ale_mixing_kpp.F90` `epsln = 1e-20` in SP (upstream's headline SP bug, commit 48c37328) | SP4 | pre-registered |
 | On-disk schema: restarts and means stay `NC_DOUBLE`; values cast at the I/O boundary; fill value cast to `real_t` **before** comparison | I/O | 1 | `io_meandata.F90` / restart: 8-byte streams accumulate real64, 4-byte real32; `note_output_precision` | double holds every float exactly ⇒ SP→disk→SP bit-exact; DP→SP truncates by design | pre-registered |
-| Output / time-mean accumulators for 8-byte streams | buffers | 1 | `io_meandata.F90` `local_values_r8` | FP64 sums of FP32 samples over ~1e4 steps | pre-registered |
+| Output / time-mean accumulators (`fesom_io_acc_t = dbl_t`: host `accum[v]`, device `accum_dev[v]`, 34 resolvers, `gather_*_d`, `nc_put_vara_double`) | buffers | 1 | `io_meandata.F90` `local_values_r8` (8-byte streams accumulate real64; every port stream is NC_DOUBLE) | FP64 sums of FP32 samples over ~1e4 steps | pre-registered; **implemented B2 2026-09-07** |
 | Global integrals (`integrate_nod` class: area/volume-weighted global sums, conservation diagnostics) + their `MPI_DOUBLE` reductions | scalars | 1 | `oce_modules.F90` `WP_full`; `integrate_nod_2D/3D` real64 with matching MPI type | FP32 sum over 1e6–1e9 elements loses ~n·2⁻²⁴ | pre-registered |
-| CVMix-derived TKE arithmetic inside the kernel (`fesom_cvmix_tke.hpp`): `dbl_t` locals, `real_t` in/out | kernel | **2** | `gen_modules_cvmix_tke.F90`: CVMix is fixed real64, WP↔`cvmix_r8` shims at the call boundary | upstream stricter; July ran it FP32 and listed it "highest-probability promotion" without a failing gate; give-back measured with `FESOM_MP_TKE_REAL` (Task B7, Gate 2) | pre-registered (class 2) |
+| CVMix-derived TKE arithmetic inside the kernel (`fesom_cvmix_tke.hpp`): `dbl_t` locals, `real_t` in/out | kernel | **2** | `gen_modules_cvmix_tke.F90`: CVMix is fixed real64, WP↔`cvmix_r8` shims at the call boundary | upstream stricter; July ran it FP32 and listed it "highest-probability promotion" without a failing gate; give-back measured with `FESOM_MP_TKE_REAL` (Task B7, Gate 2) | **implemented B7 2026-09-07** (`tke_t`) |
 | Calendar day/month/year bookkeeping, integer seconds (`fesom_calendar.*`) | module | 1 for the integer/Julian part | `gen_modules_clock.F90` (integers + real64 day) | integers are precision-free; the real64 day joins the forcing chain above | pre-registered |
 
 ## 2. July islands that go to `real_t` in Phase B (class 3 — flip, then re-earn)
@@ -49,9 +49,9 @@ the **detector** column names the gate that would send it back.
 
 | July island | files | upstream placement | detector that re-earns `dbl_t` | status |
 |---|---|---|---|---|
-| CG scalar chain: residual, `rtol`, α, β; `cg_dot` accumulators; `Allreduce` scalars of dots/norms | `fesom_ssh.cpp` (`cg_dot` :601-607, `rtol` :449/:2781/:3049/:3509 on m14) | `solver.F90` / `oce_ale_ssh`: all WP, `MPI_WP` | `[ssh-verify]` true-residual gap SP vs DP across a rank sweep (bar: gap(SP) ≤ 10×gap(DP); no solve past `rtol` by more than DP's worst); false convergence, not extra iterations, is the risk | flip-B |
-| CGPIPE / CGPOLY eigen-bounds (λmax power iteration, Chebyshev coefficients) | `fesom_ssh.cpp` | port-only (class 4 by content) — upstream has no pipelined CG | same detector + `pcsi`/`oati` liveness on farc (the M10 stall was recurrence rounding) | flip-B |
-| Mesh metrics precompute (areas, gradient coefficients, `ocean_area` local sum) | `fesom_mesh.cpp` | `oce_mesh_setup.F90`: WP after `-r4`; coordinates read as real64 then WP | mesh-metric byte gate is impossible at SP; detector = SE wide-halo drift 0.0 and the G4 pattern-correlation bar | flip-B |
+| CG scalar chain: residual, `rtol`, α, β; `cg_dot` accumulators; `Allreduce` scalars of dots/norms | `fesom_ssh.cpp` (`cg_dot` :601-607, `rtol` :449/:2781/:3049/:3509 on m14) | `solver.F90` / `oce_ale_ssh`: all WP, `MPI_WP` | `[ssh-verify]` true-residual gap SP vs DP across a rank sweep (bar: gap(SP) ≤ 10×gap(DP); no solve past `rtol` by more than DP's worst); false convergence, not extra iterations, is the risk | **flipped B3 2026-09-07** (`cg_dot`, recurrence scalars, `ALLREDUCE_SUM` → `FESOM_MPI_REAL`; cg2/pipecg/oati fused reduces; Lanczos; pcsi; `[ssh-verify]` retyped `dbl_t`) |
+| CGPIPE / CGPOLY eigen-bounds (λmax power iteration, Chebyshev coefficients) | `fesom_ssh.cpp` | port-only (class 4 by content) — upstream has no pipelined CG | same detector + `pcsi`/`oati` liveness on farc (the M10 stall was recurrence rounding) | **flipped B3 2026-09-07** |
+| Mesh metrics precompute (areas, gradient coefficients, `ocean_area` local sum) | `fesom_mesh.cpp` | `oce_mesh_setup.F90`: WP after `-r4`; coordinates read as real64 then WP | mesh-metric byte gate is impossible at SP; detector = SE wide-halo drift 0.0 and the G4 pattern-correlation bar | **flipped B2 2026-09-07** (`ocean_area` real_t + `FESOM_MPI_REAL`; Bcasts) |
 | PHC climatology / init path | `fesom_phc.cpp` (`:310`, `:555` Allreduce → `FESOM_MPI_REAL`) | `oce_setup_step.F90` / `gen_ic` WP | same-IC gate (det fill at SP equals DP fill to the rounding class) | flip-B |
 | Min/max step diagnostics (the 16-scalar Allreduce) | `fesom_main.cpp` (`:334`, `:421`) | `write_step_info.F90` WP, `MPI_WP` | none needed (diagnostic); the SP1 stack-smash class is prevented by pairing the buffer type with the MPI type | flip-B |
 | Mesh volume sums used by diagnostics (not the global-integral class) | `fesom_mesh.cpp` | WP | G4 conservation screen (`FESOM_MP_CONSERV`) | flip-B |
@@ -108,7 +108,7 @@ Compile-time FP64 gate — `fesom_ice_evpwide.cpp:41`. Every one of these is a P
 
 | element | upstream | port | control |
 |---|---|---|---|
-| Point-slope forcing interpolation `atm = coef_b + (rdate − time_t0)·coef_a` | `gen_surface_forcing.F90` (unconditional, changes FP64 rounding) | compiled under `FESOM_SINGLE_PRECISION` only; FP64 keeps the affine line bit-for-bit | `FESOM_FORCING_POINTSLOPE` DP define; one DP control leg in Gate 3 bounds the confound |
+| Point-slope forcing interpolation `atm = coef_b + (rdate − time_t0)·coef_a` | `gen_surface_forcing.F90` (unconditional, changes FP64 rounding) | compiled under `FESOM_SINGLE_PRECISION` only; FP64 keeps the affine line bit-for-bit (**implemented B6b 2026-09-07**: `FESOM_JRA_POINTSLOPE`, `coef_a/b` WP, `time_t0` dbl_t per field) | `FESOM_FORCING_POINTSLOPE` DP define; one DP control leg in Gate 3 bounds the confound |
 
 ## 5. Suspects (FP32 until a gate objects — promotion order on failure)
 
@@ -369,5 +369,13 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   shadow into `stiff_values`.
 - **2026-09-07 — M16 baseline.** Registry restructured as the conformance table; class-3 rows flip in
   Phase B; class-2 (CVMix TKE) enters as `dbl_t`; the m14-only code enters as class 4.
+
+- **2026-09-07 — Phase B flips (no promotions).** Class-3 rows flipped to `real_t` in B2 (`ocean_area`,
+  mesh Bcasts), B3 (CG scalar chain, `cg_dot`, `ALLREDUCE_SUM`, cg2/pipecg/oati/pcsi/Lanczos/cgpoly
+  scalars), B6a (PHC polynomials + weights, det-fill reduces), B6c (step-diag 16/3 and `[cflzmax]`
+  reduces). Class 1 kept: forcing time chain (with `coef_a/b` back to WP + `time_t0` dbl_t for the
+  SP-only point-slope form, B6b), `[ssh-verify]` retyped `dbl_t` (B3), mean accumulators `dbl_t`
+  (B2, new), CVMix TKE `tke_t = dbl_t` (B7, class 2). FP64 byte gates green on pi np1/np2 for every
+  slice; CORE2 np8 SLURM gates pending at the time of writing. Give-backs are measured in Gate 2.
 
 *(further entries: date, gate + signature, island added, pinned-pair give-back)*

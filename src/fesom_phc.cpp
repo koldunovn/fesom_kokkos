@@ -53,9 +53,9 @@ static int binarysearch_d(int length, const double *arr, double value)
  * adiabatic temperature gradient and potential-T integration via 4th-order
  * Runge-Kutta. Identical numerical recipe; verified against Fortran.
  */
-static double atg(double s, double t, double p)
+static real_t atg(real_t s, real_t t, real_t p)
 {
-    double ds = s - 35.0;
+    real_t ds = s - 35.0;
     return (((-2.1687e-16*t + 1.8676e-14)*t - 4.6206e-13)*p
            +((2.7759e-12*t - 1.1351e-10)*ds + ((-5.4481e-14*t
            + 8.733e-12)*t - 6.7795e-10)*t + 1.8741e-8))*p
@@ -63,9 +63,9 @@ static double atg(double s, double t, double p)
            +((6.6228e-10*t - 6.836e-8)*t + 8.5258e-6)*t + 3.5803e-5;
 }
 
-static double ptheta(double s, double t, double p, double pr)
+static real_t ptheta(real_t s, real_t t, real_t p, real_t pr)
 {
-    double h, xk, q;
+    real_t h, xk, q;
     h = pr - p;
     xk = h * atg(s, t, p);
     t  = t + 0.5 * xk;
@@ -187,31 +187,31 @@ static void load_one_variable(int ncid, const char *varname,
 
         /* Skip if the surface (depth index 0) of any of the 4 corners is
            dummy — Fortran line 415 (any(ncdata(i:ip1, j:jp1, 1) > 0.99*dummy)). */
-        double s00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
-        double s10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
-        double s01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
-        double s11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
+        real_t s00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
+        real_t s10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
+        real_t s01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
+        real_t s11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
         if (s00 > 0.99*PHC_DUMMY || s10 > 0.99*PHC_DUMMY ||
             s01 > 0.99*PHC_DUMMY || s11 > 0.99*PHC_DUMMY) continue;
 
         /* Geographic node coords for interp weights. */
-        double x = (double)mesh->geo_coord_nod2D[2*ii + 0] / FESOM_RAD;
-        double y = (double)mesh->geo_coord_nod2D[2*ii + 1] / FESOM_RAD;
+        real_t x = (double)mesh->geo_coord_nod2D[2*ii + 0] / FESOM_RAD;
+        real_t y = (double)mesh->geo_coord_nod2D[2*ii + 1] / FESOM_RAD;
         if (x < 0.0)   x += 360.0;
         if (x > 360.0) x -= 360.0;
 
-        double x1 = nc_lon[i];
-        double x2 = nc_lon[ip1];
-        double y1 = nc_lat[j];
-        double y2 = nc_lat[jp1];
-        double denom = (x2 - x1) * (y2 - y1);
+        real_t x1 = nc_lon[i];
+        real_t x2 = nc_lon[ip1];
+        real_t y1 = nc_lat[j];
+        real_t y2 = nc_lat[jp1];
+        real_t denom = (x2 - x1) * (y2 - y1);
 
         /* Bilinear interp per depth — entire column (Fortran lines 423-428). */
         for (int k = 0; k < Ndepth; ++k) {
-            double v00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
-            double v10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
-            double v01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
-            double v11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
+            real_t v00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
+            real_t v10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
+            real_t v01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
+            real_t v11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
             data1d[k] = (v00 * (x2 - x) * (y2 - y)
                        + v10 * (x  - x1) * (y2 - y)
                        + v01 * (x2 - x) * (y  - y1)
@@ -229,16 +229,16 @@ static void load_one_variable(int ncid, const char *varname,
              * though its own comment cites the Fortran's Z_3d_n -- so we do too (golden rule:
              * faithful to the C, never "fix" its asymmetries). Inert either way: PHC runs once at
              * IC, where hbar==0 => Z_3d_n == Z BITWISE. */
-            double depth_pos = -(double)mesh->Z[k];
+            real_t depth_pos = -(double)mesh->Z[k];
             int d_indx = binarysearch_d(Ndepth, nc_depth, depth_pos);
             if (d_indx >= 0 && d_indx < Ndepth - 1) {
                 int d_indx_p1 = d_indx + 1;
-                double delta_d = nc_depth[d_indx + 1] - nc_depth[d_indx];
-                double d1 = data1d[d_indx];
-                double d2 = data1d[d_indx_p1];
+                real_t delta_d = nc_depth[d_indx + 1] - nc_depth[d_indx];
+                real_t d1 = data1d[d_indx];
+                real_t d2 = data1d[d_indx_p1];
                 if (d1 < 0.99*PHC_DUMMY && d2 < 0.99*PHC_DUMMY) {
-                    double cf_a = (d2 - d1) / delta_d;
-                    double cf_b = d1 - cf_a * nc_depth[d_indx];
+                    real_t cf_a = (d2 - d1) / delta_d;
+                    real_t cf_b = d1 - cf_a * nc_depth[d_indx];
                     /* Fortran: -cf_a * Z_3d_n[k, ii] + cf_b. C reads static Z (fesom_phc.c:240). */
                     out[FESOM_NODE3D(ii, k, nl)] =
                         (real_t)(-cf_a * (double)mesh->Z[k] + cf_b);
@@ -307,7 +307,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
         }
         real_t glob_max = loc_max;
         if (partit && partit->npes > 1) {
-            MPI_Allreduce(&loc_max, &glob_max, 1, MPI_DOUBLE, MPI_MAX,
+            MPI_Allreduce(&loc_max, &glob_max, 1, FESOM_MPI_REAL, MPI_MAX,
                           partit->MPI_COMM_FESOM);
         }
         if (glob_max <= 0.99 * PHC_DUMMY) break;
@@ -552,7 +552,7 @@ static void extrap_nod3D_det(const struct fesom_mesh *mesh,
                 }
             }
             if (partit && partit->npes > 1)
-                MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, MPI_DOUBLE, MPI_MAX,
+                MPI_Allreduce(MPI_IN_PLACE, &dmax, 1, FESOM_MPI_REAL, MPI_MAX,
                               partit->MPI_COMM_FESOM);
             if (dmax <= s_tol) break;
             ++tot_relax_sweeps;
@@ -779,9 +779,9 @@ void fesom_phc_load_ic(const char                  *path,
             int nzmax = mesh->nlevels_nod2D[n] - 1;
             for (int nz = nzmin; nz < nzmax; ++nz) {
                 size_t k = FESOM_NODE3D(n, nz, mesh->nl);
-                double tt = (double)T[k];
-                double ss = (double)S[k];
-                double pp = fabs((double)mesh->Z[nz]);
+                real_t tt = (double)T[k];
+                real_t ss = (double)S[k];
+                real_t pp = fabs((double)mesh->Z[nz]);
                 T[k] = (real_t)ptheta(ss, tt, pp, 0.0);
             }
         }

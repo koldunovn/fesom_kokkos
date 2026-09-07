@@ -8,6 +8,7 @@
  * can be opened together via `xarray.open_mfdataset(...)`.
  */
 #include "fesom_io.h"
+#include "fesom_nc_real.h"   /* M16: real_t -> NC_DOUBLE boundary writers (July's helpers) */
 #include "fesom_speed.hpp"   // M7 Task 1.0b: FESOM_SPEED_IOACC
 #include <type_traits>
 #include "fesom_aux.h"
@@ -113,17 +114,23 @@ void gather_plan_free(gather_plan *gp)
     memset(gp, 0, sizeof(*gp));
 }
 
+/* M16: the MPI datatype that matches a storage type — never spelled by hand at a call site. */
+template <class T> static inline MPI_Datatype fesom_mpi_of();
+template <> inline MPI_Datatype fesom_mpi_of<double>() { return MPI_DOUBLE; }
+template <> inline MPI_Datatype fesom_mpi_of<float>()  { return MPI_FLOAT;  }
+
 /* Gather an [my_n × stride] node-indexed buffer to rank 0's
  * [total_n × stride] global buffer indexed by global node id (0-based). */
-void gather_node(const real_t *local, int stride,
-                 const gather_plan *gp,
-                 real_t *global,
-                 MPI_Comm comm)
+template <class T>
+static void gather_node_T(const T *local, int stride,
+                          const gather_plan *gp,
+                          T *global,
+                          MPI_Comm comm)
 {
-    real_t *recv = NULL;
+    T *recv = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = (decltype(recv))malloc((size_t)gp->total_n * (size_t)stride * sizeof(real_t));
+        recv   = (decltype(recv))malloc((size_t)gp->total_n * (size_t)stride * sizeof(T));
         counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
         displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_node: oom");
@@ -132,15 +139,15 @@ void gather_node(const real_t *local, int stride,
             displs[r] = gp->displ_n[r] * stride;
         }
     }
-    MPI_Gatherv((void *)local, gp->myDim_n * stride, MPI_DOUBLE,
-                recv, counts, displs, MPI_DOUBLE, 0, comm);
+    MPI_Gatherv((void *)local, gp->myDim_n * stride, fesom_mpi_of<T>(),
+                recv, counts, displs, fesom_mpi_of<T>(), 0, comm);
     if (gp->mype == 0) {
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_n[r]; ++i) {
                 int gid = gp->gathered_myList_n[gp->displ_n[r] + i] - 1;
                 memcpy(global + (size_t)gid * stride,
                        recv + ((size_t)gp->displ_n[r] + i) * stride,
-                       (size_t)stride * sizeof(real_t));
+                       (size_t)stride * sizeof(T));
             }
         }
         free(recv); free(counts); free(displs);
@@ -148,15 +155,16 @@ void gather_node(const real_t *local, int stride,
 }
 
 /* Same for element-indexed [my_e × stride] → [total_e × stride]. */
-void gather_elem(const real_t *local, int stride,
-                 const gather_plan *gp,
-                 real_t *global,
-                 MPI_Comm comm)
+template <class T>
+static void gather_elem_T(const T *local, int stride,
+                          const gather_plan *gp,
+                          T *global,
+                          MPI_Comm comm)
 {
-    real_t *recv = NULL;
+    T *recv = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        recv   = (decltype(recv))malloc((size_t)gp->total_e * (size_t)stride * sizeof(real_t));
+        recv   = (decltype(recv))malloc((size_t)gp->total_e * (size_t)stride * sizeof(T));
         counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
         displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(recv && counts && displs, "gather_elem: oom");
@@ -165,8 +173,8 @@ void gather_elem(const real_t *local, int stride,
             displs[r] = gp->displ_e[r] * stride;
         }
     }
-    MPI_Gatherv((void *)local, gp->myDim_e * stride, MPI_DOUBLE,
-                recv, counts, displs, MPI_DOUBLE, 0, comm);
+    MPI_Gatherv((void *)local, gp->myDim_e * stride, fesom_mpi_of<T>(),
+                recv, counts, displs, fesom_mpi_of<T>(), 0, comm);
     if (gp->mype == 0) {
         /* gid < elem2D <= total_e, so total_e is a safe size for the flag. */
         char *seen = dupcheck_on()
@@ -175,13 +183,13 @@ void gather_elem(const real_t *local, int stride,
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_e[r]; ++i) {
                 int gid = gp->gathered_myList_e[gp->displ_e[r] + i] - 1;
-                const real_t *src = recv + ((size_t)gp->displ_e[r] + i) * stride;
-                real_t       *dst = global + (size_t)gid * stride;
+                const T *src = recv + ((size_t)gp->displ_e[r] + i) * stride;
+                T       *dst = global + (size_t)gid * stride;
                 if (seen) {
                     if (seen[gid]) {
                         ++ndup;
                         for (int k = 0; k < stride; ++k) {
-                            if (memcmp(&dst[k], &src[k], sizeof(real_t)) != 0) {
+                            if (memcmp(&dst[k], &src[k], sizeof(T)) != 0) {
                                 double d = fabs((double)dst[k] - (double)src[k]);
                                 if (d > maxd) maxd = d;
                                 ++ndiff;
@@ -191,7 +199,7 @@ void gather_elem(const real_t *local, int stride,
                     }
                     seen[gid] = 1;
                 }
-                memcpy(dst, src, (size_t)stride * sizeof(real_t));
+                memcpy(dst, src, (size_t)stride * sizeof(T));
             }
         }
         if (seen) {
@@ -210,15 +218,16 @@ void gather_elem(const real_t *local, int stride,
  * scatter_node / scatter_elem — the inverse of the two gathers.      *
  * See the contract in fesom_io_gather.h.                             *
  * ------------------------------------------------------------------ */
-void scatter_node(const real_t *global, int stride,
-                  const gather_plan *gp,
-                  real_t *local,
-                  MPI_Comm comm)
+template <class T>
+static void scatter_node_T(const T *global, int stride,
+                           const gather_plan *gp,
+                           T *local,
+                           MPI_Comm comm)
 {
-    real_t *send = NULL;
+    T *send = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        send   = (decltype(send))malloc((size_t)gp->total_n * (size_t)stride * sizeof(real_t));
+        send   = (decltype(send))malloc((size_t)gp->total_n * (size_t)stride * sizeof(T));
         counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
         displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(send && counts && displs, "scatter_node: oom");
@@ -229,24 +238,25 @@ void scatter_node(const real_t *global, int stride,
                 int gid = gp->gathered_myList_n[gp->displ_n[r] + i] - 1;
                 memcpy(send + ((size_t)gp->displ_n[r] + i) * stride,
                        global + (size_t)gid * stride,
-                       (size_t)stride * sizeof(real_t));
+                       (size_t)stride * sizeof(T));
             }
         }
     }
-    MPI_Scatterv(send, counts, displs, MPI_DOUBLE,
-                 local, gp->myDim_n * stride, MPI_DOUBLE, 0, comm);
+    MPI_Scatterv(send, counts, displs, fesom_mpi_of<T>(),
+                 local, gp->myDim_n * stride, fesom_mpi_of<T>(), 0, comm);
     if (gp->mype == 0) { free(send); free(counts); free(displs); }
 }
 
-void scatter_elem(const real_t *global, int stride,
-                  const gather_plan *gp,
-                  real_t *local,
-                  MPI_Comm comm)
+template <class T>
+static void scatter_elem_T(const T *global, int stride,
+                           const gather_plan *gp,
+                           T *local,
+                           MPI_Comm comm)
 {
-    real_t *send = NULL;
+    T *send = NULL;
     int *counts = NULL, *displs = NULL;
     if (gp->mype == 0) {
-        send   = (decltype(send))malloc((size_t)gp->total_e * (size_t)stride * sizeof(real_t));
+        send   = (decltype(send))malloc((size_t)gp->total_e * (size_t)stride * sizeof(T));
         counts = (decltype(counts))malloc((size_t)gp->npes * sizeof(int));
         displs = (decltype(displs))malloc((size_t)gp->npes * sizeof(int));
         FESOM_CHECK(send && counts && displs, "scatter_elem: oom");
@@ -257,14 +267,31 @@ void scatter_elem(const real_t *global, int stride,
                 int gid = gp->gathered_myList_e[gp->displ_e[r] + i] - 1;
                 memcpy(send + ((size_t)gp->displ_e[r] + i) * stride,
                        global + (size_t)gid * stride,
-                       (size_t)stride * sizeof(real_t));
+                       (size_t)stride * sizeof(T));
             }
         }
     }
-    MPI_Scatterv(send, counts, displs, MPI_DOUBLE,
-                 local, gp->myDim_e * stride, MPI_DOUBLE, 0, comm);
+    MPI_Scatterv(send, counts, displs, fesom_mpi_of<T>(),
+                 local, gp->myDim_e * stride, fesom_mpi_of<T>(), 0, comm);
     if (gp->mype == 0) { free(send); free(counts); free(displs); }
 }
+
+
+/* Public instances: real_t (snapshots, restart; FESOM_MPI_REAL) and dbl_t (the time-mean
+ * accumulators; MPI_DOUBLE). One template, two element types — the MPI type follows the
+ * storage type by construction (rule SP1). */
+void gather_node(const real_t *local, int stride, const gather_plan *gp, real_t *global, MPI_Comm comm)
+{ gather_node_T<real_t>(local, stride, gp, global, comm); }
+void gather_elem(const real_t *local, int stride, const gather_plan *gp, real_t *global, MPI_Comm comm)
+{ gather_elem_T<real_t>(local, stride, gp, global, comm); }
+void gather_node_d(const dbl_t *local, int stride, const gather_plan *gp, dbl_t *global, MPI_Comm comm)
+{ gather_node_T<dbl_t>(local, stride, gp, global, comm); }
+void gather_elem_d(const dbl_t *local, int stride, const gather_plan *gp, dbl_t *global, MPI_Comm comm)
+{ gather_elem_T<dbl_t>(local, stride, gp, global, comm); }
+void scatter_node(const real_t *global, int stride, const gather_plan *gp, real_t *local, MPI_Comm comm)
+{ scatter_node_T<real_t>(global, stride, gp, local, comm); }
+void scatter_elem(const real_t *global, int stride, const gather_plan *gp, real_t *local, MPI_Comm comm)
+{ scatter_elem_T<real_t>(global, stride, gp, local, comm); }
 
 /* Integer variants for nlevels / elem_nodes. */
 static void gather_node_int(const int *local, int stride,
@@ -332,7 +359,9 @@ static void gather_elem_int(const int *local, int stride,
 /* ------------------------------------------------------------------ */
 /* Transpose helpers (rank-0 only — operate on global arrays)         */
 /* ------------------------------------------------------------------ */
-static void transpose_node_columns(const real_t *src, real_t *dst,
+/* M16: dst is DOUBLE — these feed nc_put_vara_double directly (write-side staging stays FP64
+ * on disk; the copy converts under SP, no-op at FP64 — class 1, docs/PRECISION_ISLANDS.md). */
+static void transpose_node_columns(const real_t *src, double *dst,
                                    int n, int nl, int n_layers)
 {
     for (int i = 0; i < n; ++i) {
@@ -342,7 +371,7 @@ static void transpose_node_columns(const real_t *src, real_t *dst,
     }
 }
 
-static void extract_uv_component(const real_t *uv, real_t *dst,
+static void extract_uv_component(const real_t *uv, double *dst,
                                  int n_elem, int nl, int n_layers, int comp)
 {
     for (int e = 0; e < n_elem; ++e) {
@@ -727,16 +756,16 @@ void fesom_io_write_snapshot(const char                  *path,
         NC_CHECK(nc_put_var_double(ncid, var_lat, lat_d));
         free(lon_d); free(lat_d);
     }
-    NC_CHECK(nc_put_var_double(ncid, var_zbar, mesh->zbar));
-    NC_CHECK(nc_put_var_double(ncid, var_Z,    mesh->Z));
+    NC_CHECK(fesom_nc_put_var_real(ncid, var_zbar, mesh->zbar, (size_t)mesh->nl));
+    NC_CHECK(fesom_nc_put_var_real(ncid, var_Z,    mesh->Z,    (size_t)(mesh->nl - 1)));
     NC_CHECK(nc_put_var_int   (ncid, var_elnodes,   g_elem_nodes));
     NC_CHECK(nc_put_var_int   (ncid, var_nlev_nod,  g_nlev_nod));
     NC_CHECK(nc_put_var_int   (ncid, var_nlev_elem, g_nlev_elem));
 
     /* ---- transposed time-varying state at time index 0 ------------- */
-    real_t *buf_nl   = (real_t *)malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(real_t));
-    real_t *buf_nl_e = (real_t *)malloc((size_t)n_lay  * (size_t)elem2D * sizeof(real_t));
-    real_t *buf_w    = (real_t *)malloc((size_t)nl     * (size_t)nod2D  * sizeof(real_t));
+    double *buf_nl   = (double *)malloc((size_t)n_lay  * (size_t)nod2D  * sizeof(double));
+    double *buf_nl_e = (double *)malloc((size_t)n_lay  * (size_t)elem2D * sizeof(double));
+    double *buf_w    = (double *)malloc((size_t)nl     * (size_t)nod2D  * sizeof(double));
     FESOM_CHECK(buf_nl && buf_nl_e && buf_w, "io: oom (transpose buffers)");
 
     /* Slab-write: start at time=0, count=1 along time, full extent for the rest. */
@@ -750,7 +779,7 @@ void fesom_io_write_snapshot(const char                  *path,
     transpose_node_columns(g_S,    buf_nl, nod2D, nl, n_lay);
     NC_CHECK(nc_put_vara_double(ncid, var_S, startT, countT, buf_nl));
 
-    NC_CHECK(nc_put_vara_double(ncid, var_eta, start1, count1, g_eta));
+    NC_CHECK(fesom_nc_put_vara_real(ncid, var_eta, start1, count1, g_eta, (size_t)nod2D));
 
     transpose_node_columns(g_w,    buf_w, nod2D, nl, nl);
     NC_CHECK(nc_put_vara_double(ncid, var_w, startW, countW, buf_w));
@@ -781,13 +810,13 @@ void fesom_io_write_snapshot(const char                  *path,
     free(buf_nl); free(buf_nl_e); free(buf_w);
 
     if (ice) {
-        NC_CHECK(nc_put_vara_double(ncid, var_aice,  start1, count1, g_aice));
-        NC_CHECK(nc_put_vara_double(ncid, var_mice,  start1, count1, g_mice));
-        NC_CHECK(nc_put_vara_double(ncid, var_msnow, start1, count1, g_msnow));
-        NC_CHECK(nc_put_vara_double(ncid, var_uice,  start1, count1, g_uice));
-        NC_CHECK(nc_put_vara_double(ncid, var_vice,  start1, count1, g_vice));
-        NC_CHECK(nc_put_vara_double(ncid, var_hice,  start1, count1, g_hice));
-        NC_CHECK(nc_put_vara_double(ncid, var_hsnow, start1, count1, g_hsnow));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_aice,  start1, count1, g_aice, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_mice,  start1, count1, g_mice, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_msnow, start1, count1, g_msnow, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_uice,  start1, count1, g_uice, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_vice,  start1, count1, g_vice, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_hice,  start1, count1, g_hice, (size_t)nod2D));
+        NC_CHECK(fesom_nc_put_vara_real(ncid, var_hsnow, start1, count1, g_hsnow, (size_t)nod2D));
     }
 
     NC_CHECK(nc_close(ncid));
@@ -812,35 +841,35 @@ void fesom_io_write_snapshot(const char                  *path,
 /* indexing.                                                             */
 /* ====================================================================== */
 
-static void resolve_temp(const fesom_state *s, real_t *out, size_t n)
+static void resolve_temp(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->tracers->data[FESOM_TRACER_T].values;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_salt(const fesom_state *s, real_t *out, size_t n)
+static void resolve_salt(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->tracers->data[FESOM_TRACER_S].values;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_sst(const fesom_state *s, real_t *out, size_t n)
+static void resolve_sst(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     /* Surface slice of T tracer; tracer storage stride is `nl`. */
     const real_t *T = s->tracers->data[FESOM_TRACER_T].values;
     const int nl = s->mesh->nl;
     for (size_t i = 0; i < n; ++i) out[i] += T[i * (size_t)nl + 0];
 }
-static void resolve_sss(const fesom_state *s, real_t *out, size_t n)
+static void resolve_sss(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *S = s->tracers->data[FESOM_TRACER_S].values;
     const int nl = s->mesh->nl;
     for (size_t i = 0; i < n; ++i) out[i] += S[i * (size_t)nl + 0];
 }
-static void resolve_ssh(const fesom_state *s, real_t *out, size_t n)
+static void resolve_ssh(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->dyn->eta_n;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_u(const fesom_state *s, real_t *out, size_t n)
+static void resolve_u(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     /* uv layout: [elem][nl][2]. 3D_ELEM_MID accumulator: [elem][nl].
      * Halo-exchanged at fesom_step.c:127 — replicated-element values
@@ -855,7 +884,7 @@ static void resolve_u(const fesom_state *s, real_t *out, size_t n)
         }
     }
 }
-static void resolve_v(const fesom_state *s, real_t *out, size_t n)
+static void resolve_v(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     /* Same exchange-status note as resolve_u; both components share uv. */
     const real_t *uv = s->dyn->uv;
@@ -867,54 +896,54 @@ static void resolve_v(const fesom_state *s, real_t *out, size_t n)
         }
     }
 }
-static void resolve_w(const fesom_state *s, real_t *out, size_t n)
+static void resolve_w(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->dyn->w;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_Kv(const fesom_state *s, real_t *out, size_t n)
+static void resolve_Kv(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->aux->Kv;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_Av(const fesom_state *s, real_t *out, size_t n)
+static void resolve_Av(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     /* aux->Av is element-replicated; halo-exchanged at fesom_step.c:92,96.
      * Local-only mean accumulation is correct (see resolve_u banner). */
     const real_t *src = s->aux->Av;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_density(const fesom_state *s, real_t *out, size_t n)
+static void resolve_density(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->aux->density_m_rho0;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_bvfreq(const fesom_state *s, real_t *out, size_t n)
+static void resolve_bvfreq(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->aux->bvfreq;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_a_ice(const fesom_state *s, real_t *out, size_t n)
+static void resolve_a_ice(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->ice->data[FESOM_ICE_AICE].values;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_m_ice(const fesom_state *s, real_t *out, size_t n)
+static void resolve_m_ice(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->ice->data[FESOM_ICE_MICE].values;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_m_snow(const fesom_state *s, real_t *out, size_t n)
+static void resolve_m_snow(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->ice->data[FESOM_ICE_MSNOW].values;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_uice(const fesom_state *s, real_t *out, size_t n)
+static void resolve_uice(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->ice->uice;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
-static void resolve_vice(const fesom_state *s, real_t *out, size_t n)
+static void resolve_vice(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *src = s->ice->vice;
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
@@ -931,9 +960,9 @@ static void resolve_vice(const fesom_state *s, real_t *out, size_t n)
  * ---------------------------------------------------------------------- */
 /* out_dev is a raw DEVICE pointer (the stream's per-var device accumulator);
  * wrap it unmanaged in the default (device) space, then accumulate field.d(). */
-typedef Kokkos::View<real_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>> io_acc_dev_t;
+typedef Kokkos::View<fesom_io_acc_t*, Kokkos::MemoryTraits<Kokkos::Unmanaged>> io_acc_dev_t;   /* M16: dbl_t accumulators */
 
-static void resolve_temp_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_temp_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->tracers->data[FESOM_TRACER_T].values_fld.d();
@@ -941,20 +970,20 @@ static void resolve_temp_dev(const fesom_state *s, real_t *out_dev, size_t n)
 }
 /* M5.14 (S flip): salt/sss now read S on the device (S is device-resident from
  * the trdiff + the device salinity floor — no per-step D2H). Mirror temp/sst. */
-static void resolve_salt_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_salt_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->tracers->data[FESOM_TRACER_S].values_fld.d();
     Kokkos::parallel_for("io_acc_salt", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_sst_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_sst_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto T = s->tracers->data[FESOM_TRACER_T].values_fld.d();
     const int nl = s->mesh->nl;
     Kokkos::parallel_for("io_acc_sst", n, KOKKOS_LAMBDA(const size_t i){ out(i) += T(i * (size_t)nl + 0); });
 }
-static void resolve_sss_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_sss_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto S = s->tracers->data[FESOM_TRACER_S].values_fld.d();
@@ -981,7 +1010,7 @@ static bool m7_io_flat_on()
     return fesom_speed_on("FLAT", &c);
 }
 
-static void resolve_u_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_u_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto uv = s->dyn->uv_fld.d();
@@ -999,7 +1028,7 @@ static void resolve_u_dev(const fesom_state *s, real_t *out_dev, size_t n)
             out(e * (size_t)nl + (size_t)k) += uv(e * (size_t)nl * 2 + (size_t)k * 2 + 0);
     });
 }
-static void resolve_v_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_v_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto uv = s->dyn->uv_fld.d();
@@ -1017,32 +1046,32 @@ static void resolve_v_dev(const fesom_state *s, real_t *out_dev, size_t n)
             out(e * (size_t)nl + (size_t)k) += uv(e * (size_t)nl * 2 + (size_t)k * 2 + 1);
     });
 }
-static void resolve_w_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_w_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->dyn->w_fld.d();
     Kokkos::parallel_for("io_acc_w", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_Kv_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_Kv_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->aux->Kv_fld.d();
     Kokkos::parallel_for("io_acc_Kv", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_Av_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_Av_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->aux->Av_fld.d();
     Kokkos::parallel_for("io_acc_Av", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_bvfreq_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_bvfreq_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->aux->bvfreq_fld.d();
     Kokkos::parallel_for("io_acc_bvfreq", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
 /* M5.14 (density flip): density_m_rho0 is device-resident (no per-step D2H) → mean on device. */
-static void resolve_density_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_density_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->aux->density_m_rho0_fld.d();
@@ -1061,37 +1090,37 @@ static void resolve_density_dev(const fesom_state *s, real_t *out_dev, size_t n)
  * these are pure M5.14-pattern twins. Bit-identical: a per-element time-sum, no
  * reduction, no reassociation (Serial device == host).
  * ---------------------------------------------------------------------- */
-static void resolve_ssh_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_ssh_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->dyn->eta_n_fld.d();
     Kokkos::parallel_for("io_acc_ssh", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_a_ice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_a_ice_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->ice->data[FESOM_ICE_AICE].values_fld.d();
     Kokkos::parallel_for("io_acc_a_ice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_m_ice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_m_ice_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->ice->data[FESOM_ICE_MICE].values_fld.d();
     Kokkos::parallel_for("io_acc_m_ice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_m_snow_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_m_snow_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->ice->data[FESOM_ICE_MSNOW].values_fld.d();
     Kokkos::parallel_for("io_acc_m_snow", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_uice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_uice_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->ice->uice_fld.d();
     Kokkos::parallel_for("io_acc_uice", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
 }
-static void resolve_vice_dev(const fesom_state *s, real_t *out_dev, size_t n)
+static void resolve_vice_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->ice->vice_fld.d();
@@ -1256,6 +1285,22 @@ void fesom_io_init(fesom_io_t                  *io,
         for (int p = 0; p < 5; ++p) {
             if (!io->stream_active[p]) continue;
             printf("[fesom_io]   %-7s : %d vars\n", names[p], io->owned_nvars[p]);
+        }
+        /* M16 once-per-run I/O precision report (upstream #940 `note_output_precision`, plan
+         * D6): per stream, the on-disk type and the accumulator kind, so a log states what the
+         * files hold. On-disk type is NC_DOUBLE for every data variable (fesom_io_stream.cpp
+         * open_var_file); the MEAN accumulators are real_t buffers (host `accum[v]`, device
+         * `accum_dev[v]`) divided by n_accum at flush — their promotion to dbl_t (upstream's
+         * 8-byte streams accumulate real64) is Task B2's fesom_io.cpp item. */
+        printf("[fesom_io] precision report: real_t=%zu-byte %s; on-disk type NC_DOUBLE (8-byte) for "
+               "every data variable; conversion at the write boundary (fesom_nc_real.h)\n",
+               sizeof(real_t), sizeof(real_t) == 4 ? "float" : "double");
+        for (int p = 0; p < 5; ++p) {
+            if (!io->stream_active[p]) continue;
+            const fesom_io_stream_t *st = &io->streams[p];
+            printf("[fesom_io]   %-7s : disk NC_DOUBLE, %s%s\n", names[p],
+                   st->output_kind == FESOM_OUT_MEAN ? "MEAN accumulated in " : "INSTANT, no accumulator",
+                   st->output_kind == FESOM_OUT_MEAN ? (sizeof(*st->accum[0]) == 4 ? "float (real_t)" : "double") : "");
         }
     }
 }

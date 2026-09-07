@@ -539,22 +539,22 @@ void fesom_se_startup(const struct fesom_mesh *mesh, struct fesom_partit *p)
      * admissible Courant number is a G3 calibration item, not startup logic).
      * mesh_resolution is the Voronoi diameter; mesh->depth is input metadata
      * only (fesom_mesh.h:79-80), so depth comes from the level grid. */
-    double dtbt_lim = 1e30;
+    real_t dtbt_lim = 1e30;
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         if (mesh->ulevels_nod2D[n] != 1) continue;               /* cavity column */
         const int nlev = mesh->nlevels_nod2D[n];
         if (nlev < 2) continue;
-        const double H = -(double)mesh->zbar[nlev - 1];          /* zbar<0 down */
+        const real_t H = -(double)mesh->zbar[nlev - 1];          /* zbar<0 down */
         if (!(H > 0.0)) continue;
-        const double c   = sqrt((double)FESOM_G * H);
-        const double lim = 0.5 * (double)mesh->mesh_resolution[n] / c;
+        const real_t c   = sqrt((double)FESOM_G * H);
+        const real_t lim = 0.5 * (double)mesh->mesh_resolution[n] / c;
         if (lim < dtbt_lim) dtbt_lim = lim;
     }
-    MPI_Allreduce(MPI_IN_PLACE, &dtbt_lim, 1, MPI_DOUBLE, MPI_MIN, p->MPI_COMM_FESOM);
+    MPI_Allreduce(MPI_IN_PLACE, &dtbt_lim, 1, FESOM_MPI_REAL, MPI_MIN, p->MPI_COMM_FESOM);
 
-    const double tau   = (double)FESOM_PHASE1_DT;
+    const real_t tau   = (double)FESOM_PHASE1_DT;
     const int    M     = fesom_se_m();
-    const double dtbt  = tau / (double)M;
+    const real_t dtbt  = tau / (double)M;
     const int    M_min = (dtbt_lim > 0.0 && dtbt_lim < 1e29)
                        ? (int)ceil(tau / dtbt_lim) : 1;
 
@@ -933,10 +933,10 @@ static void se_div_gather_device(const fesom_se_state *S,
 static void se_wide_ship_rows(const struct fesom_mesh *mesh, struct fesom_partit *p,
                               const std::vector<int>    &h_off,
                               const std::vector<int>    &h_elem,
-                              const std::vector<double> &h_c,
+                              const std::vector<real_t> &h_c,
                               std::vector<int>    &g_off,
                               std::vector<int>    &g_elem,
-                              std::vector<double> &g_c)
+                              std::vector<real_t> &g_c)
 {
     const fesom_com_struct *cs = &p->com_nod2D;
     const int eDim  = mesh->eDim_nod2D;
@@ -995,7 +995,7 @@ static void se_wide_ship_rows(const struct fesom_mesh *mesh, struct fesom_partit
     const long rtot = rpay_off[(size_t)cs->rPEnum];
 
     std::vector<long>   sgid((size_t)(stot > 0 ? stot : 1), 0), rgid((size_t)(rtot > 0 ? rtot : 1), 0);
-    std::vector<double> scof((size_t)(stot > 0 ? 2*stot : 1), 0.0), rcof((size_t)(rtot > 0 ? 2*rtot : 1), 0.0);
+    std::vector<real_t> scof((size_t)(stot > 0 ? 2*stot : 1), 0.0), rcof((size_t)(rtot > 0 ? 2*rtot : 1), 0.0);
     {
         long w = 0;
         for (int k = 0; k < cs->sPEnum; ++k) {
@@ -1021,7 +1021,7 @@ static void se_wide_ship_rows(const struct fesom_mesh *mesh, struct fesom_partit
             MPI_Irecv(&rgid[(size_t)rpay_off[(size_t)k]], (int)n, MPI_LONG, cs->rPE[k], 2301,
                       p->MPI_COMM_FESOM, &req.back());
             req.push_back(MPI_REQUEST_NULL);
-            MPI_Irecv(&rcof[(size_t)(2*rpay_off[(size_t)k])], (int)(2*n), MPI_DOUBLE,
+            MPI_Irecv(&rcof[(size_t)(2*rpay_off[(size_t)k])], (int)(2*n), FESOM_MPI_REAL,
                       cs->rPE[k], 2302, p->MPI_COMM_FESOM, &req.back());
         }
         for (int k = 0; k < cs->sPEnum; ++k) {
@@ -1031,7 +1031,7 @@ static void se_wide_ship_rows(const struct fesom_mesh *mesh, struct fesom_partit
             MPI_Isend(&sgid[(size_t)spay_off[(size_t)k]], (int)n, MPI_LONG, cs->sPE[k], 2301,
                       p->MPI_COMM_FESOM, &req.back());
             req.push_back(MPI_REQUEST_NULL);
-            MPI_Isend(&scof[(size_t)(2*spay_off[(size_t)k])], (int)(2*n), MPI_DOUBLE,
+            MPI_Isend(&scof[(size_t)(2*spay_off[(size_t)k])], (int)(2*n), FESOM_MPI_REAL,
                       cs->sPE[k], 2302, p->MPI_COMM_FESOM, &req.back());
         }
         if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
@@ -1103,10 +1103,10 @@ static void se_build_operators(const struct fesom_mesh *mesh,
     const int nl   = mesh->nl;
 
     /* --- div CSR ------------------------------------------------------- */
-    struct Ent { long gid; int el; double cx, cy; };
+    struct Ent { long gid; int el; real_t cx, cy; };
     std::vector<std::vector<Ent>> rows((size_t)Nown);
 
-    auto add = [&](int n, int el, double cx, double cy) {
+    auto add = [&](int n, int el, real_t cx, real_t cy) {
         if (n >= Nown || el < 0) return;                  /* halo row / boundary */
         auto &r = rows[(size_t)n];
         for (auto &e : r)                                  /* ≤ ~8 entries: linear scan */
@@ -1119,10 +1119,10 @@ static void se_build_operators(const struct fesom_mesh *mesh,
         const int n2  = mesh->edges[2*ed + 1];
         const int el1 = mesh->edge_tri[2*ed + 0];
         const int el2 = mesh->edge_tri[2*ed + 1];
-        const double dx1 = (double)mesh->edge_cross_dxdy[4*ed + 0];
-        const double dy1 = (double)mesh->edge_cross_dxdy[4*ed + 1];
-        const double dx2 = (double)mesh->edge_cross_dxdy[4*ed + 2];
-        const double dy2 = (double)mesh->edge_cross_dxdy[4*ed + 3];
+        const real_t dx1 = (double)mesh->edge_cross_dxdy[4*ed + 0];
+        const real_t dy1 = (double)mesh->edge_cross_dxdy[4*ed + 1];
+        const real_t dx2 = (double)mesh->edge_cross_dxdy[4*ed + 2];
+        const real_t dy2 = (double)mesh->edge_cross_dxdy[4*ed + 3];
         /* c1 = Ū_el1·(−dy1, dx1); c2 = Ū_el2·(dy2, −dx2); n1 += c1+c2, n2 −= */
         add(n1, el1, -dy1,  dx1);   add(n2, el1,  dy1, -dx1);
         add(n1, el2,  dy2, -dx2);   add(n2, el2, -dy2,  dx2);
@@ -1141,10 +1141,10 @@ static void se_build_operators(const struct fesom_mesh *mesh,
      * additionally depend on areasvol agreeing at the halo node. */
     std::vector<int>    h_off((size_t)Nown + 1, 0);
     std::vector<int>    h_elem; h_elem.reserve(nnz);
-    std::vector<double> h_c;    h_c.reserve(2 * nnz);
+    std::vector<real_t> h_c;    h_c.reserve(2 * nnz);
     for (int n = 0; n < Nown; ++n) {
         h_off[(size_t)n] = (int)h_elem.size();
-        const double inv_a = rows[(size_t)n].empty() ? 0.0
+        const real_t inv_a = rows[(size_t)n].empty() ? 0.0
             : 1.0 / (double)mesh->areasvol[FESOM_NODE3D(n, mesh->ulevels_nod2D[n] - 1, nl)];
         for (const auto &e : rows[(size_t)n]) {
             h_elem.push_back(e.el);
@@ -1158,7 +1158,7 @@ static void se_build_operators(const struct fesom_mesh *mesh,
     const int  eDim  = mesh->eDim_nod2D;
     const int  Nrows = Nown + ((fesom_se_wide() && p->npes > 1) ? eDim : 0);
     std::vector<int>    g_off, g_elem;
-    std::vector<double> g_c;
+    std::vector<real_t> g_c;
     if (Nrows > Nown)
         se_wide_ship_rows(mesh, p, h_off, h_elem, h_c, g_off, g_elem, g_c);
 
@@ -1416,13 +1416,13 @@ static void se_wide_reconcile_F(struct fesom_partit *p)
     for (size_t k = 0; k < nR; ++k) {
         const int o = s_se.rec_r_off[k], n = s_se.rec_r_off[k + 1] - o;
         req.push_back(MPI_REQUEST_NULL);
-        MPI_Irecv(rv + 2 * o, 2 * n, MPI_DOUBLE, s_se.rec_r_rank[k], 2303,
+        MPI_Irecv(rv + 2 * o, 2 * n, FESOM_MPI_REAL, s_se.rec_r_rank[k], 2303,
                   p->MPI_COMM_FESOM, &req.back());
     }
     for (size_t k = 0; k < nS; ++k) {
         const int o = s_se.rec_s_off[k], n = s_se.rec_s_off[k + 1] - o;
         req.push_back(MPI_REQUEST_NULL);
-        MPI_Isend(const_cast<real_t *>(sv) + 2 * o, 2 * n, MPI_DOUBLE,
+        MPI_Isend(const_cast<real_t *>(sv) + 2 * o, 2 * n, FESOM_MPI_REAL,
                   s_se.rec_s_rank[k], 2303, p->MPI_COMM_FESOM, &req.back());
     }
     if (!req.empty()) MPI_Waitall((int)req.size(), req.data(), MPI_STATUSES_IGNORE);
@@ -2138,18 +2138,18 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                 const int    *nbh = s_se.elem_nb.h();
                 std::vector<real_t> vm((size_t)(2*Eown), 0.0), vn((size_t)(2*Eown), 0.0);
                 for (int e = 0; e < Eown; ++e) {
-                    const double He_e = (double)Hh[e];
-                    double mxx = 0.0, mxy = 0.0, nxx = 0.0, nxy = 0.0;
+                    const real_t He_e = (double)Hh[e];
+                    real_t mxx = 0.0, mxy = 0.0, nxx = 0.0, nxy = 0.0;
                     for (int s = 0; s < 3; ++s) {
                         const int nb = nbh[3*e + s];
                         if (nb < 0) continue;
-                        const double len = sqrt((double)mesh->elem_area[e]
+                        const real_t len = sqrt((double)mesh->elem_area[e]
                                               + (double)mesh->elem_area[nb]);
-                        const double ihh = 1.0 / (0.5 * (He_e + (double)Hh[nb]));
-                        double dux = (double)U0h[2*e+0] - (double)U0h[2*nb+0];
-                        double duy = (double)U0h[2*e+1] - (double)U0h[2*nb+1];
-                        double spd = sqrt(dux*dux + duy*duy) * ihh;
-                        double vi  = sqrt(fmax((double)vg0, (double)vg1 * spd) * len);
+                        const real_t ihh = 1.0 / (0.5 * (He_e + (double)Hh[nb]));
+                        real_t dux = (double)U0h[2*e+0] - (double)U0h[2*nb+0];
+                        real_t duy = (double)U0h[2*e+1] - (double)U0h[2*nb+1];
+                        real_t spd = sqrt(dux*dux + duy*duy) * ihh;
+                        real_t vi  = sqrt(fmax((double)vg0, (double)vg1 * spd) * len);
                         mxx -= dux * vi;  mxy -= duy * vi;
                         dux = (double)Unh[2*e+0] - (double)Unh[2*nb+0];
                         duy = (double)Unh[2*e+1] - (double)Unh[2*nb+1];
@@ -2157,7 +2157,7 @@ int fesom_se_step(int step_n, struct fesom_mesh *mesh,
                         vi  = sqrt(fmax((double)vg0, (double)vg1 * spd) * len);
                         nxx += dux * vi;  nxy += duy * vi;
                     }
-                    const double ia = 1.0 / (double)mesh->elem_area[e];
+                    const real_t ia = 1.0 / (double)mesh->elem_area[e];
                     vm[(size_t)(2*e)+0] = (real_t)(mxx * ia);
                     vm[(size_t)(2*e)+1] = (real_t)(mxy * ia);
                     vn[(size_t)(2*e)+0] = (real_t)(nxx * ia);

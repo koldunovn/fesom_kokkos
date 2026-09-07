@@ -78,6 +78,19 @@ void gather_elem(const real_t *local, int stride,
                  real_t *global,
                  MPI_Comm comm);
 
+/* M16: dbl_t variants for the time-mean accumulators (fesom_io_stream), which accumulate in
+ * FP64 like upstream's 8-byte output streams (io_meandata.F90 real64 sums) and are gathered and
+ * written as double. Same permutation, MPI_DOUBLE over dbl_t storage. In the FP64 build dbl_t
+ * == real_t and these are the same code path as the real_t pair (byte gate). */
+void gather_node_d(const dbl_t *local, int stride,
+                   const gather_plan *gp,
+                   dbl_t *global,
+                   MPI_Comm comm);
+void gather_elem_d(const dbl_t *local, int stride,
+                   const gather_plan *gp,
+                   dbl_t *global,
+                   MPI_Comm comm);
+
 /* Names the field in gather_elem's duplicate-check line (FESOM_IO_GATHER_DUPCHECK=1).
  * Reset to "?" after each report, so a writer that does not set one cannot
  * inherit another's label. Costs nothing when the knob is unset. */

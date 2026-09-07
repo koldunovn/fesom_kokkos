@@ -4,6 +4,7 @@
 #include "fesom_types.h"
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>   /* M8: common_type in tke_min2/max2 */
 
 /*
  * CVMix classical-TKE column core — port of the C oracle's fesom_cvmix_tke.{c,h}
@@ -127,17 +128,41 @@ static_assert(FESOM_TKE_PARAMS.tke_mxl_choice == 2,
  * the template form cannot be mis-called). Compare-select, NOT fmin/fmax: the Fortran
  * min/max map to maxsd/minsd operand semantics for finite values.
  *===========================================================================================*/
-template <class T>
-KOKKOS_INLINE_FUNCTION constexpr T tke_min2(T a, T b) { return (a < b) ? a : b; }
-template <class T>
-KOKKOS_INLINE_FUNCTION constexpr T tke_max2(T a, T b) { return (a > b) ? a : b; }
+/* M8: two-type form with common_type promotion — mixed (double literal, real_t)
+ * calls compute in double exactly like the Fortran r8 literals demand (see the
+ * 6.6 note below); at FP64 both types are double, bit-identical to the old form. */
+template <class A, class B>
+KOKKOS_INLINE_FUNCTION constexpr typename std::common_type<A, B>::type
+tke_min2(A a, B b)
+{
+    using T = typename std::common_type<A, B>::type;
+    return ((T)a < (T)b) ? (T)a : (T)b;
+}
+template <class A, class B>
+KOKKOS_INLINE_FUNCTION constexpr typename std::common_type<A, B>::type
+tke_max2(A a, B b)
+{
+    using T = typename std::common_type<A, B>::type;
+    return ((T)a > (T)b) ? (T)a : (T)b;
+}
+
+/* M16 (plan class 2, upstream #940): CVMix is fixed real64 upstream with WP<->cvmix_r8 shims at
+ * the call boundary, so the TKE column kernel computes in tke_t = dbl_t with real_t in/out
+ * (inputs copied into dbl_t column arrays at entry, outputs narrowed once at exit). FP64:
+ * tke_t == real_t == double, byte-identical. -DFESOM_MP_TKE_REAL keeps the July real_t form
+ * for the Gate-2 give-back measurement only (never a shipped default). */
+#if defined(FESOM_MP_TKE_REAL)
+typedef real_t tke_t;
+#else
+typedef dbl_t  tke_t;
+#endif
 
 /* The 6.6 literal at :717 — plain double (the -r8 rule). */
-inline constexpr real_t TKE_C66 = 6.6;
+inline constexpr tke_t TKE_C66 = 6.6;
 
 /* x**(3./2.) at :793 / :886 — a pow call, not x*sqrt(x). Kokkos::pow is std::pow on the
  * host backend (so Serial is bit-identical to the C oracle) and libdevice pow on CUDA. */
-KOKKOS_INLINE_FUNCTION real_t tke_pow32(real_t x) { return Kokkos::pow(x, 1.5); }
+KOKKOS_INLINE_FUNCTION tke_t tke_pow32(tke_t x) { return Kokkos::pow(x, (tke_t)1.5); }
 
 /*
  * Budget-diagnostic copy-out targets — each pointer is a [nlev+1] column slice, or nullptr
@@ -166,15 +191,15 @@ struct fesom_cvmix_tke_diag {
  * form. n = nlev+1 equations, 0-based. ⚠️ `fxa = 1.0/m; cp = c*fxa` — NOT `cp = c/m`.
  */
 KOKKOS_INLINE_FUNCTION
-void tke_solve_tridiag(const real_t *a, const real_t *b, const real_t *c, const real_t *d,
-                       real_t *x, int n)
+void tke_solve_tridiag(const tke_t *a, const tke_t *b, const tke_t *c, const tke_t *d,
+                       tke_t *x, int n)
 {
-    real_t cp[TKE_NL_MAX + 1], dp[TKE_NL_MAX + 1];
+    tke_t cp[TKE_NL_MAX + 1], dp[TKE_NL_MAX + 1];
     cp[0] = c[0] / b[0];                                         /* :134 */
     dp[0] = d[0] / b[0];                                         /* :135 */
     for (int i = 1; i < n; ++i) {                                /* :137 */
-        real_t m   = b[i] - cp[i - 1] * a[i];
-        real_t fxa = 1.0 / m;                                    /* :139  RECIPROCAL */
+        tke_t m   = b[i] - cp[i - 1] * a[i];
+        tke_t fxa = 1.0 / m;                                     /* :139  RECIPROCAL */
         cp[i] = c[i] * fxa;
         dp[i] = (d[i] - dp[i - 1] * a[i]) * fxa;
     }
@@ -202,26 +227,40 @@ void tke_solve_tridiag(const real_t *a, const real_t *b, const real_t *c, const 
 template <bool WITH_DIAG>
 KOKKOS_INLINE_FUNCTION
 void fesom_cvmix_integrate_tke(int           nlev,
-                               real_t        dtime,
-                               real_t        rho_ref,
-                               real_t        grav,
-                               const real_t *dzw,        /* [nlev]   */
-                               const real_t *dzt,        /* [nlev+1] */
-                               const real_t *tke_old,    /* [nlev+1] */
-                               const real_t *Ssqr,       /* [nlev+1] */
-                               const real_t *Nsqr,       /* [nlev+1] */
+                               real_t        dtime_r,
+                               real_t        rho_ref_r,
+                               real_t        grav_r,
+                               const real_t *dzw_r,        /* [nlev]   */
+                               const real_t *dzt_r,        /* [nlev+1] */
+                               const real_t *tke_old_r,    /* [nlev+1] */
+                               const real_t *Ssqr_r,       /* [nlev+1] */
+                               const real_t *Nsqr_r,       /* [nlev+1] */
                                const real_t *alpha_c,    /* gated (.not.only_tke) — unread */
                                const real_t *E_iw,       /* gated (.not.only_tke) — unread */
-                               const real_t *iw_diss,    /* [nlev+1] READ UNCONDITIONALLY  */
+                               const real_t *iw_diss_r,  /* [nlev+1] READ UNCONDITIONALLY  */
                                const real_t *tke_plc,    /* gated (l_lc) — unread          */
-                               real_t        forc_tke_surf,
-                               real_t        forc_rho_surf,
+                               real_t        forc_tke_surf_r,
+                               real_t        forc_rho_surf_r,
                                real_t        bottom_fric, /* unread in the executed body   */
-                               real_t       *tke_new,    /* out [nlev+1] */
-                               real_t       *KappaM_out, /* out [nlev+1] */
-                               real_t       *KappaH_out, /* out [nlev+1] */
+                               real_t       *tke_new_r,    /* out [nlev+1] */
+                               real_t       *KappaM_out_r, /* out [nlev+1] */
+                               real_t       *KappaH_out_r, /* out [nlev+1] */
                                const fesom_cvmix_tke_diag *diag)
 {
+    /* M16 class 2: the column computes in tke_t (dbl_t). Inputs are copied into tke_t column
+     * arrays here (the upstream WP->cvmix_r8 shim), outputs narrowed once at the end. */
+    tke_t dzw[TKE_NL_MAX + 1], dzt[TKE_NL_MAX + 1], tke_old[TKE_NL_MAX + 1];
+    tke_t Ssqr[TKE_NL_MAX + 1], Nsqr[TKE_NL_MAX + 1], iw_diss[TKE_NL_MAX + 1];
+    tke_t tke_new[TKE_NL_MAX + 1], KappaM_out[TKE_NL_MAX + 1], KappaH_out[TKE_NL_MAX + 1];
+    if (nlev + 1 > TKE_NL_MAX)
+        Kokkos::abort("fesom_cvmix_integrate_tke: nlev exceeds TKE_NL_MAX");
+    for (int q = 0; q <= nlev; ++q) {
+        dzt[q] = (tke_t)dzt_r[q]; tke_old[q] = (tke_t)tke_old_r[q];
+        Ssqr[q] = (tke_t)Ssqr_r[q]; Nsqr[q] = (tke_t)Nsqr_r[q]; iw_diss[q] = (tke_t)iw_diss_r[q];
+        dzw[q] = (q < nlev) ? (tke_t)dzw_r[q] : (tke_t)0.0;
+    }
+    const tke_t dtime = (tke_t)dtime_r, rho_ref = (tke_t)rho_ref_r, grav = (tke_t)grav_r;
+    const tke_t forc_tke_surf = (tke_t)forc_tke_surf_r, forc_rho_surf = (tke_t)forc_rho_surf_r;
     (void)alpha_c;      /* read only under .not.only_tke (:711) — gate-only */
     (void)E_iw;         /* read only under .not.only_tke (:711) — gate-only */
     (void)tke_plc;      /* read only under l_lc (:737-739) — gate-only */
@@ -230,38 +269,35 @@ void fesom_cvmix_integrate_tke(int           nlev,
     /* local column scratch (:535-581). The 13 diag terms are ALWAYS computed here in
      * Fortran order and copied to the nullable targets at the END — never written through
      * `diag` mid-computation. */
-    real_t tke_unrest[TKE_NL_MAX + 1], tke_upd[TKE_NL_MAX + 1];
-    real_t mxl[TKE_NL_MAX + 1], sqrttke[TKE_NL_MAX + 1];
-    real_t prandtl[TKE_NL_MAX + 1], Rinum[TKE_NL_MAX + 1];
-    real_t K_diss_v[TKE_NL_MAX + 1], P_diss_v[TKE_NL_MAX + 1];
-    real_t forc[TKE_NL_MAX + 1];
-    real_t a_dif[TKE_NL_MAX + 1], b_dif[TKE_NL_MAX + 1], c_dif[TKE_NL_MAX + 1];
-    real_t a_tri[TKE_NL_MAX + 1], b_tri[TKE_NL_MAX + 1], c_tri[TKE_NL_MAX + 1];
-    real_t d_tri[TKE_NL_MAX + 1], ke[TKE_NL_MAX + 1];
-    real_t d_Tbpr[TKE_NL_MAX + 1], d_Tspr[TKE_NL_MAX + 1];
-    real_t d_Tdif[TKE_NL_MAX + 1], d_Tdis[TKE_NL_MAX + 1];
-    real_t d_Twin[TKE_NL_MAX + 1], d_Tiwf[TKE_NL_MAX + 1];
-    real_t d_Tbck[TKE_NL_MAX + 1], d_Ttot[TKE_NL_MAX + 1];
-    real_t d_Lmix[TKE_NL_MAX + 1], d_Pr[TKE_NL_MAX + 1];
-    real_t d_int1[TKE_NL_MAX + 1], d_int2[TKE_NL_MAX + 1], d_int3[TKE_NL_MAX + 1];
-    real_t tke_surf, diff_surf_forc, diff_bott_forc;
+    tke_t tke_unrest[TKE_NL_MAX + 1], tke_upd[TKE_NL_MAX + 1];
+    tke_t mxl[TKE_NL_MAX + 1], sqrttke[TKE_NL_MAX + 1];
+    tke_t prandtl[TKE_NL_MAX + 1], Rinum[TKE_NL_MAX + 1];
+    tke_t K_diss_v[TKE_NL_MAX + 1], P_diss_v[TKE_NL_MAX + 1];
+    tke_t forc[TKE_NL_MAX + 1];
+    tke_t a_dif[TKE_NL_MAX + 1], b_dif[TKE_NL_MAX + 1], c_dif[TKE_NL_MAX + 1];
+    tke_t a_tri[TKE_NL_MAX + 1], b_tri[TKE_NL_MAX + 1], c_tri[TKE_NL_MAX + 1];
+    tke_t d_tri[TKE_NL_MAX + 1], ke[TKE_NL_MAX + 1];
+    tke_t d_Tbpr[TKE_NL_MAX + 1], d_Tspr[TKE_NL_MAX + 1];
+    tke_t d_Tdif[TKE_NL_MAX + 1], d_Tdis[TKE_NL_MAX + 1];
+    tke_t d_Twin[TKE_NL_MAX + 1], d_Tiwf[TKE_NL_MAX + 1];
+    tke_t d_Tbck[TKE_NL_MAX + 1], d_Ttot[TKE_NL_MAX + 1];
+    tke_t d_Lmix[TKE_NL_MAX + 1], d_Pr[TKE_NL_MAX + 1];
+    tke_t d_int1[TKE_NL_MAX + 1], d_int2[TKE_NL_MAX + 1], d_int3[TKE_NL_MAX + 1];
+    tke_t  tke_surf, diff_surf_forc, diff_bott_forc;
     int    k;
 
     /* :590 tke_constants_saved; :629-642 the local aliases. */
-    constexpr real_t alpha_tke  = FESOM_TKE_PARAMS.alpha_tke;
-    constexpr real_t c_eps      = FESOM_TKE_PARAMS.c_eps;
-    constexpr real_t cd         = FESOM_TKE_PARAMS.cd;
-    constexpr real_t KappaM_max = FESOM_TKE_PARAMS.kappaM_max;
-    constexpr real_t mxl_min    = FESOM_TKE_PARAMS.mxl_min;
-    constexpr real_t c_k        = FESOM_TKE_PARAMS.c_k;
-    constexpr real_t tke_min    = FESOM_TKE_PARAMS.tke_min;
+    constexpr tke_t  alpha_tke  = FESOM_TKE_PARAMS.alpha_tke;
+    constexpr tke_t  c_eps      = FESOM_TKE_PARAMS.c_eps;
+    constexpr tke_t  cd         = FESOM_TKE_PARAMS.cd;
+    constexpr tke_t  KappaM_max = FESOM_TKE_PARAMS.kappaM_max;
+    constexpr tke_t  mxl_min    = FESOM_TKE_PARAMS.mxl_min;
+    constexpr tke_t  c_k        = FESOM_TKE_PARAMS.c_k;
+    constexpr tke_t  tke_min    = FESOM_TKE_PARAMS.tke_min;
     constexpr int    only_tke   = FESOM_TKE_PARAMS.only_tke;
     constexpr int    l_lc       = FESOM_TKE_PARAMS.l_lc;
     /* tke_surf_min (:636) is used only in the gated Dirichlet branch; kappaM_min = 0.0
      * (:662) with the :663 clamp commented out in the Fortran. */
-
-    if (nlev + 1 > TKE_NL_MAX)
-        Kokkos::abort("fesom_cvmix_integrate_tke: nlev exceeds TKE_NL_MAX");
 
     /* initialise diagnostics + work arrays (:602-623). Entries not later overwritten keep 0. */
     for (k = 0; k <= nlev; ++k) {
@@ -440,6 +476,12 @@ void fesom_cvmix_integrate_tke(int           nlev,
         d_int3[k] = Nsqr[k];
     }
     /* :916-986 — the if(.false.) debug print block: dead. */
+
+    /* M16: narrow the three outputs once (the cvmix_r8 -> WP shim). */
+    for (k = 0; k <= nlev; ++k) {
+        tke_new_r[k] = (real_t)tke_new[k]; KappaM_out_r[k] = (real_t)KappaM_out[k];
+        KappaH_out_r[k] = (real_t)KappaH_out[k];
+    }
 
     /* End-of-column diag copy-out — the ONLY writes through `diag`. (The C memcpy's; a loop
      * is the same value copy and is device-callable.) */

@@ -72,7 +72,7 @@ void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
 /* DEVICE twin (M5.5, lever B): same smoother on-device (no host round-trip).
  * arr_fld DEVICE-current with a valid halo in; DEVICE-authoritative + halo'd out. */
 #ifdef __cplusplus
-namespace fesom { template <class> class FieldT; using Field = FieldT<double>; }
+namespace fesom { template <class> class FieldT; using Field = FieldT<real_t>; }
 void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                            const struct fesom_mesh *mesh, struct fesom_partit *p,
                            std::size_t base = 0,           /* slab offset for multi-channel fields */

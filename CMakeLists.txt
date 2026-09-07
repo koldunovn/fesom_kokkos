@@ -177,7 +177,7 @@ endif()
 # only; links the active backend (Serial/OpenMP/CUDA) so the round trip is exercised per build.
 add_executable(test_field tests/test_field.cpp)
 target_include_directories(test_field PRIVATE src)
-target_link_libraries(test_field PRIVATE Kokkos::kokkos)
+target_link_libraries(test_field PRIVATE Kokkos::kokkos MPI::MPI_CXX)   # M16: fesom_field.hpp includes fesom_types.h (mpi.h) for real_t
 add_test(NAME field COMMAND test_field)
 
 # M10 T4: solver testbed — SPD Laplacian fixture with analytic spectrum, reference PCG, the

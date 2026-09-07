@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     Kokkos::initialize(argc, argv);
     {
         std::printf("[test_field] backend: %s\n", Kokkos::DefaultExecutionSpace::name());
-        roundtrip<fesom::Field,    double>("Field_double");
+        roundtrip<fesom::Field,    real_t>("Field_real_t");   /* M16: Field is FieldT<real_t> */
         roundtrip<fesom::IntField, int   >("IntField_int");
     }
     Kokkos::finalize();

@@ -1,0 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=m16_gate
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/logs/gate.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/logs/gate.%j.err
+#
+# M16 FP64 byte gate on a COMPUTE node (the login node is for seconds-long pi runs only).
+# Wraps scripts/m16_gate0.sh, which uses srun inside an allocation.
+#
+#   sbatch --ntasks=8 --export=ALL,BIN=<abs path>,PRESET=core2,CONFIGS=all,NP=8 jobs/job_m16_gate_serial
+#
+# BIN must be an ABSOLUTE, PINNED binary (a frozen copy under …/m16/bin/<tag>/ or the ref0 build);
+# PRESET=pi|core2; CONFIGS="all"|"five"|"<space-separated list>"; NP = ranks (== --ntasks).
+set -u
+ROOT=/home/a/a270088/port_kokkos_sp
+source /sw/etc/profile.levante
+BIN=${BIN:?pin the binary (absolute path)}; PRESET=${PRESET:-core2}; CONFIGS=${CONFIGS:-all}; NP=${NP:-$SLURM_NTASKS}
+echo "=== m16 gate: BIN=$BIN ($(md5sum "$BIN" | cut -c1-8)) preset=$PRESET configs='$CONFIGS' np=$NP job=$SLURM_JOB_ID ==="
+M16_PRESET=$PRESET "$ROOT/scripts/m16_gate0.sh" "$BIN" "$CONFIGS" "$NP"
+rc=$?
+echo "=== gate rc=$rc ==="
+exit $rc

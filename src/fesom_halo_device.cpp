@@ -207,10 +207,10 @@ namespace {
 struct DevHaloScratch {
     Kokkos::View<int*>    slist_d;   // device copy of cs->slist (1-based local idx)
     Kokkos::View<int*>    rlist_d;   // device copy of cs->rlist (1-based local idx)
-    Kokkos::View<double*> send_d;    // device send buffer (grown on demand)
-    Kokkos::View<double*> recv_d;    // device recv buffer
-    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> send_h;  // FESOM_HALO_STAGE pinned mirrors
-    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> recv_h;  //   (allocated only when staged)
+    Kokkos::View<real_t*> send_d;    // device send buffer (grown on demand)
+    Kokkos::View<real_t*> recv_d;    // device recv buffer
+    Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace> send_h;  // FESOM_HALO_STAGE pinned mirrors
+    Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace> recv_h;  //   (allocated only when staged)
     bool                  built = false;
     std::vector<MPI_Request> reqs;
 };
@@ -317,11 +317,11 @@ inline void halo_fence_pre_mpi()
  * A deep_copy with no exec-space argument fences, so the NOFENCE2 audit holds
  * unchanged: MPI never touches device memory in this mode, and the H2D copy
  * into recv_d is stream-ordered against the following unpack. */
-inline void grow_pinned(Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &v,
+inline void grow_pinned(Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace> &v,
                         size_t need, const char *label)
 {
     if (v.extent(0) < need)
-        v = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>(std::string(label), need);
+        v = Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace>(std::string(label), need);
 }
 inline void stage_announce(fesom_partit *p)
 {
@@ -334,20 +334,20 @@ inline void stage_announce(fesom_partit *p)
         fflush(stderr);
     }
 }
-inline void stage_d2h(const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h,
-                      const Kokkos::View<double*> &d, size_t n)
+inline void stage_d2h(const Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace> &h,
+                      const Kokkos::View<real_t*> &d, size_t n)
 {
     if (n) Kokkos::deep_copy(Kokkos::subview(h, std::make_pair((size_t)0, n)),
                              Kokkos::subview(d, std::make_pair((size_t)0, n)));
 }
-inline void stage_h2d(const Kokkos::View<double*> &d,
-                      const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h, size_t n)
+inline void stage_h2d(const Kokkos::View<real_t*> &d,
+                      const Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace> &h, size_t n)
 {
     if (n) Kokkos::deep_copy(Kokkos::subview(d, std::make_pair((size_t)0, n)),
                              Kokkos::subview(h, std::make_pair((size_t)0, n)));
 }
 
-inline void grow(Kokkos::View<double*> &v, size_t need, const char *label)
+inline void grow(Kokkos::View<real_t*> &v, size_t need, const char *label)
 {
     if (v.extent(0) < need) {
         /* Audit item (4). With fence[B] gone, a PREVIOUS exchange's unpack kernel may still
@@ -361,7 +361,7 @@ inline void grow(Kokkos::View<double*> &v, size_t need, const char *label)
          * high-water mark during warmup (379 reallocs in a whole 35-step NG5 run), so this
          * costs nothing in steady state. */
         if (halo_nofence2()) { Kokkos::fence(); if (syncstats_on()) ++s_ss_fence_grow; }
-        v = Kokkos::View<double*>(std::string(label), need);
+        v = Kokkos::View<real_t*>(std::string(label), need);
     }
 }
 
@@ -372,10 +372,10 @@ void fesom_halo_device_free()
     for (int i = 0; i < 5; ++i) {
         g_dev[i].slist_d = Kokkos::View<int*>();
         g_dev[i].rlist_d = Kokkos::View<int*>();
-        g_dev[i].send_d  = Kokkos::View<double*>();
-        g_dev[i].recv_d  = Kokkos::View<double*>();
-        g_dev[i].send_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
-        g_dev[i].recv_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
+        g_dev[i].send_d  = Kokkos::View<real_t*>();
+        g_dev[i].recv_d  = Kokkos::View<real_t*>();
+        g_dev[i].send_h  = Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace>();
+        g_dev[i].recv_h  = Kokkos::View<real_t*, Kokkos::CudaHostPinnedSpace>();
         g_dev[i].reqs.clear();
         g_dev[i].built = false;
     }
@@ -407,7 +407,7 @@ void fesom_halo_exchange_device(fesom::Field   &f,
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
     const size_t recv_total = (size_t)recv_count * stride;
-    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));   // M5.17
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(real_t));   // M5.17
 
     grow(s.send_d, send_total, "halo.send_d");
     grow(s.recv_d, recv_total, "halo.recv_d");
@@ -445,19 +445,19 @@ void fesom_halo_exchange_device(fesom::Field   &f,
         grow_pinned(s.recv_h, recv_total, "halo.recv_h");
         stage_d2h(s.send_h, s.send_d, send_total);
     }
-    double *send_ptr = staged ? s.send_h.data() : send.data();
-    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
+    real_t *send_ptr = staged ? s.send_h.data() : send.data();
+    real_t *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg  = cs->rptr[k + 1] - cs->rptr[k];
         const size_t off   = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
-        MPI_Irecv(recv_ptr + off, nseg * stride, MPI_DOUBLE, cs->rPE[k], tag,
+        MPI_Irecv(recv_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->rPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     for (int k = 0; k < cs->sPEnum; ++k) {
         const int    nseg  = cs->sptr[k + 1] - cs->sptr[k];
         const size_t off   = (size_t)(cs->sptr[k] - cs->sptr[0]) * stride;
-        MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
+        MPI_Isend(send_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->sPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());   // M5.17: timed (gated FESOM_HALO_MPI_PROF)
@@ -508,7 +508,7 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
     const size_t recv_total = (size_t)recv_count * stride;
-    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));   // M5.17
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(real_t));   // M5.17
 
     grow(s.send_d, send_total, "halo.send_d");
     grow(s.recv_d, recv_total, "halo.recv_d");
@@ -547,19 +547,19 @@ void fesom_halo_exchange_device2(fesom::Field   &f0,
         grow_pinned(s.recv_h, recv_total, "halo.recv_h");
         stage_d2h(s.send_h, s.send_d, send_total);
     }
-    double *send_ptr = staged ? s.send_h.data() : send.data();
-    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
+    real_t *send_ptr = staged ? s.send_h.data() : send.data();
+    real_t *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
         const size_t off  = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
-        MPI_Irecv(recv_ptr + off, nseg * stride, MPI_DOUBLE, cs->rPE[k], tag,
+        MPI_Irecv(recv_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->rPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     for (int k = 0; k < cs->sPEnum; ++k) {
         const int    nseg = cs->sptr[k + 1] - cs->sptr[k];
         const size_t off  = (size_t)(cs->sptr[k] - cs->sptr[0]) * stride;
-        MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
+        MPI_Isend(send_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->sPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());
@@ -613,7 +613,7 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
     const int    recv_count = cs->rptr[cs->rPEnum] - cs->rptr[0];
     const size_t send_total = (size_t)send_count * stride;
     const size_t recv_total = (size_t)recv_count * stride;
-    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(double));
+    fesom_halo_prof_bytes((double)(send_total + recv_total) * sizeof(real_t));
 
     grow(s.send_d, send_total, "halo.send_d");
     grow(s.recv_d, recv_total, "halo.recv_d");
@@ -653,19 +653,19 @@ void fesom_halo_exchange_deviceN(fesom::Field *const *fields, int nf,
         grow_pinned(s.recv_h, recv_total, "halo.recv_h");
         stage_d2h(s.send_h, s.send_d, send_total);
     }
-    double *send_ptr = staged ? s.send_h.data() : send.data();
-    double *recv_ptr = staged ? s.recv_h.data() : recv.data();
+    real_t *send_ptr = staged ? s.send_h.data() : send.data();
+    real_t *recv_ptr = staged ? s.recv_h.data() : recv.data();
 
     for (int k = 0; k < cs->rPEnum; ++k) {
         const int    nseg = cs->rptr[k + 1] - cs->rptr[k];
         const size_t off  = (size_t)(cs->rptr[k] - cs->rptr[0]) * stride;
-        MPI_Irecv(recv_ptr + off, nseg * stride, MPI_DOUBLE, cs->rPE[k], tag,
+        MPI_Irecv(recv_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->rPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     for (int k = 0; k < cs->sPEnum; ++k) {
         const int    nseg = cs->sptr[k + 1] - cs->sptr[k];
         const size_t off  = (size_t)(cs->sptr[k] - cs->sptr[0]) * stride;
-        MPI_Isend(send_ptr + off, nseg * stride, MPI_DOUBLE, cs->sPE[k], tag,
+        MPI_Isend(send_ptr + off, nseg * stride, FESOM_MPI_REAL, cs->sPE[k], tag,
                   p->MPI_COMM_FESOM, &s.reqs[nreq++]);
     }
     fesom_halo_prof_waitall(nreq, s.reqs.data());

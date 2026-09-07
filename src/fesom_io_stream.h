@@ -56,7 +56,13 @@ typedef enum {
     FESOM_OUT_MEAN    = 1,         /* sum / n_accum at flush                 */
 } fesom_output_kind_t;
 
-/* Variable resolver: fills `n` real_t elements at `out` from the model
+/* M16: the time-mean accumulator element type. Upstream (#940, io_meandata.F90) accumulates
+ * 8-byte output streams in real64 and 4-byte ones in real32; every stream here is written
+ * NC_DOUBLE, so the accumulators are dbl_t — a registry island (docs/PRECISION_ISLANDS.md §1).
+ * FP64 build: dbl_t == real_t, byte-identical. */
+typedef dbl_t fesom_io_acc_t;
+
+/* Variable resolver: fills `n` accumulator elements at `out` from the model
  * state, ADDING to whatever's already there. For MEAN this means
  * `accum[i] += value[i]` per call; for INSTANT (Task 7) the caller
  * zeros the buffer first, so the same function works as a pure write.
@@ -66,7 +72,7 @@ typedef enum {
  * surface slice of the 3D T tracer (strided at nl), and `u` / `v` are
  * components of the [E × nl × 2] uv array. The resolver does the
  * extraction loop. For 1:1 fields it's just `for i: out[i] += src[i]`. */
-typedef void (*fesom_resolve_fn)(const struct fesom_state *state, real_t *out, size_t n);
+typedef void (*fesom_resolve_fn)(const struct fesom_state *state, fesom_io_acc_t *out, size_t n);
 
 /* M514 — device-resident variant. Accumulates ON-DEVICE into `out_dev` reading the
  * field's device view (`field.d()`), so a device-resident output field is never
@@ -75,7 +81,7 @@ typedef void (*fesom_resolve_fn)(const struct fesom_state *state, real_t *out, s
  * device-resident u/v/w/Kv/Av/bvfreq (their host copies were only refreshed on snapshot
  * steps). A NULL `dev_resolve` => keep the host `resolve` (host-authored fields: ssh). */
 typedef void (*fesom_resolve_dev_fn)(const struct fesom_state *state,
-                                     real_t *out_dev, size_t n);   /* out_dev = DEVICE ptr */
+                                     fesom_io_acc_t *out_dev, size_t n);   /* out_dev = DEVICE ptr */
 
 /* Variable descriptor. Lifetime = run; held by reference, never copied. */
 typedef struct fesom_var_desc {
@@ -111,14 +117,14 @@ typedef struct fesom_io_stream {
     /* Accumulator buffers, one per variable.
      * For MEAN: holds running sum; flush divides by n_accum.
      * For INSTANT: NULL (per-step path samples + writes immediately). */
-    real_t                 **accum;
+    fesom_io_acc_t         **accum;             /* M16: dbl_t sums */
     size_t                  *accum_sz;          /* [nvars] elements per accum */
     int                      n_accum;           /* # of step() calls in window */
 
     /* M514: per-var DEVICE accumulator (raw device pointer via Kokkos::kokkos_malloc;
      * NULL for non-dev vars). Host `accum[v]` stays the gather/flush buffer, filled by
      * one deep_copy(accum[v] <- accum_dev[v]) at flush. Kokkos lives only in the .cpp. */
-    real_t                 **accum_dev;
+    fesom_io_acc_t         **accum_dev;
 
     /* netCDF handles per variable. ncid == -1 means file not open yet
      * (lazy open on first flush of the rollover window). */

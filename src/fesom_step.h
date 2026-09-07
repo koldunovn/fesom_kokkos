@@ -89,4 +89,21 @@ int fesom_timestep(int                          step_n,
  * (fesom_ice.cpp:634) gate their hbar push on it. */
 bool fesom_sshrails_on(void);
 
+
+/* M8/M16 forensic instrument (FESOM_MP_NANSCAN=1) — see fesom_step.cpp.
+ * Non-finite (NaN|Inf) tripwire per phase; _elem/_node variants decode culprit position. */
+int  fesom_mp_nanscan_enabled(void);
+void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n);
+void fesom_mp_nanscan_elem(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh);
+void fesom_mp_nanscan_node(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh, int nlev);
+
+/* M8/M16 Gate-3 conservation diagnostic (FESOM_MP_CONSERV=N) — see fesom_step.cpp.
+ * dbl_t accumulation + MPI_DOUBLE regardless of real_t; collective — call on ALL ranks. */
+struct fesom_tracers;
+int  fesom_mp_conserv_every(void);
+void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
+                      struct fesom_tracers *tracers, struct fesom_partit *partit);
+
 #endif /* FESOM_STEP_H */

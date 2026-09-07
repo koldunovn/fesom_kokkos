@@ -27,14 +27,14 @@
  * fesom_sss_runoff.c — a small duplication kept to avoid widening any API
  * for a 10-line helper.)
  */
-static real_t integrate_nod_2D(const real_t            *data,
-                               const struct fesom_mesh *mesh,
-                               struct fesom_partit     *partit)
+static dbl_t integrate_nod_2D(const real_t            *data,
+                              const struct fesom_mesh *mesh,
+                              struct fesom_partit     *partit)
 {
-    real_t lval = 0.0;
+    dbl_t lval = 0.0;   /* M8 island: global area-weighted sum accumulates FP64 */
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int ul = mesh->ulevels_nod2D[n] - 1;   /* 0-based */
-        lval += data[n] * mesh->areasvol[FESOM_NODE3D(n, ul, mesh->nl)];
+        lval += (dbl_t)data[n] * (dbl_t)mesh->areasvol[FESOM_NODE3D(n, ul, mesh->nl)];
     }
     if (partit && partit->npes > 1) {
         MPI_Allreduce(MPI_IN_PLACE, &lval, 1, MPI_DOUBLE, MPI_SUM,
@@ -316,20 +316,20 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
 
 /* integrate_nod_2D on device: Σ_{n<myDim} data(n)·areasvol(node3d(n,ulevels-1)) + Allreduce.
  * The first ice device reduction; Serial sums in index order == the C loop → bit-identical. */
-static real_t integrate_nod_2D_kk(fesom::Field            &dfld,
-                                  const struct fesom_mesh *mesh,
-                                  struct fesom_partit     *partit)
+static dbl_t integrate_nod_2D_kk(fesom::Field            &dfld,
+                                 const struct fesom_mesh *mesh,
+                                 struct fesom_partit     *partit)
 {
     const int myDim = mesh->myDim_nod2D;
     const int nl    = mesh->nl;
     auto data     = dfld.d();
     auto areasvol = mesh->areasvol_fld.d();
     auto ulev_n   = mesh->ulevels_nod2D_fld.d();
-    real_t lval = 0.0;
+    dbl_t lval = 0.0;   /* M8 island: global area-weighted sum accumulates FP64 */
     Kokkos::parallel_reduce("ice_integrate_nod2D", Kokkos::RangePolicy<>(0, myDim),
-        KOKKOS_LAMBDA(const int n, real_t &s) {
+        KOKKOS_LAMBDA(const int n, double &s) {
             const int ul = ulev_n(n) - 1;          /* 0-based surface level */
-            s += data(n) * areasvol(FESOM_NODE3D(n, ul, nl));
+            s += (double)data(n) * (double)areasvol(FESOM_NODE3D(n, ul, nl));
         }, lval);
     if (partit && partit->npes > 1)
         MPI_Allreduce(MPI_IN_PLACE, &lval, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);

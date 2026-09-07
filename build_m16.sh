@@ -27,6 +27,7 @@ case "$which" in
     cmake -S . -B build-m16-ref0 -DCMAKE_BUILD_TYPE=Release \
           -DKokkos_ENABLE_SERIAL=ON -DBUILD_TESTING=ON \
           -DFESOM_KK_SYNCCHECK=OFF -DFESOM_SYNC_LOG=OFF
+    rm -f build-m16-ref0/fesom_port
     cmake --build build-m16-ref0 -j 16
     ;;
   serial|serial-sp)
@@ -36,6 +37,7 @@ case "$which" in
     cmake -S . -B "$dir" -DCMAKE_BUILD_TYPE=Release \
           -DKokkos_ENABLE_SERIAL=ON -DBUILD_TESTING=ON \
           -DFESOM_KK_SYNCCHECK=OFF -DFESOM_SYNC_LOG=OFF -DUSE_SINGLE_PRECISION=$sp
+    rm -f "$dir/fesom_port"            # a failed build must leave NO binary (a stale one passed a gate once)
     cmake --build "$dir" -j 16
     ;;
   cuda|cuda-sp)
@@ -47,6 +49,7 @@ case "$which" in
           -DBUILD_TESTING=ON -DFESOM_KK_SYNCCHECK=OFF -DFESOM_SYNC_LOG=OFF \
           -DUSE_SINGLE_PRECISION=$sp \
           -DCMAKE_CXX_COMPILER=/home/a/a270088/port_kokkos_sp/externals/kokkos/bin/nvcc_wrapper
+    rm -f "$dir/fesom_port"
     cmake --build "$dir" -j 16
     ldd "$dir/fesom_port" | grep -E 'libmpi\.so' || true
     ;;

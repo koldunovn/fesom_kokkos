@@ -35,6 +35,143 @@
 #include <cstring>   /* strstr — FESOM_KK_VERIFY substring match (M2.1) */
 #include <vector>    /* M2.2: mo_convect verify pre-kernel Kv/Av capture (host-only diagnostic) */
 
+#include <cmath>
+
+/* M8/M16 forensic instrument (FESOM_MP_NANSCAN=1): per-phase NaN scan over host aliases.
+ * Meaningful on the Serial backend (host==device alias — the np1 login repro shape);
+ * dies at the FIRST poisoned phase so the report names the producer, not the spread.
+ * Off by default: one static getenv + a branch per probe — FP64/production inert. */
+int fesom_mp_nanscan_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("FESOM_MP_NANSCAN");
+        on = (e && e[0] == '1') ? 1 : 0;
+        /* L80 banner=truth: the armed state must be provable from the log. */
+        if (on) {
+            int rank = 0, inited = 0;
+            MPI_Initialized(&inited);
+            if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+            if (rank == 0) {
+                printf("[fesom_port] MP-NANSCAN ARMED (per-phase NaN tripwire, host aliases)\n");
+                fflush(stdout);
+            }
+        }
+    }
+    return on;
+}
+void fesom_mp_nanscan(const char *phase, const real_t *a, size_t n, int step_n)
+{
+    /* s4 upgrade: NON-FINITE scan (NaN OR Inf) — the vel-rhs verdict left open the
+     * classic SP overflow story (x→inf a step earlier, inf−inf→NaN later); a
+     * NaN-only scan is blind to the inf stage. */
+    if (!fesom_mp_nanscan_enabled() || !a) return;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i])) {
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at flat=%zu (of %zu)\n",
+                    step_n, phase, (double)a[i], i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, flat %zu)",
+                      phase, step_n, i);
+        }
+    }
+}
+
+/* Located variants: same tripwire, but the report decodes the culprit's position and
+ * geographic coordinates (the hunt needs "WHERE" — is it the Maud Rise storm cell?).
+ * ELEMVEC layout e*nl*2 + nz*2 + c; NODE3D n*nl + nz (pass nl=1 for 2D node arrays). */
+void fesom_mp_nanscan_elem(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh)
+{
+    if (!fesom_mp_nanscan_enabled() || !a) return;
+    const int nl = mesh->nl;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i])) {
+            const size_t e = i / ((size_t)nl * 2), rem = i % ((size_t)nl * 2);
+            const int nz = (int)(rem / 2), c = (int)(rem % 2);
+            const int v0 = mesh->elem_nodes[e * 3];
+            const double lon = mesh->geo_coord_nod2D[v0 * 2] * 180.0 / M_PI;
+            const double lat = mesh->geo_coord_nod2D[v0 * 2 + 1] * 180.0 / M_PI;
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at "
+                    "elem=%zu nz=%d comp=%d geo=(%.2f, %.2f) owned=%s (flat=%zu of %zu)\n",
+                    step_n, phase, (double)a[i], e, nz, c, lon, lat,
+                    e < (size_t)mesh->myDim_elem2D ? "yes" : "HALO", i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, elem %zu nz %d "
+                      "comp %d at %.2f/%.2f)", phase, step_n, e, nz, c, lon, lat);
+        }
+    }
+}
+void fesom_mp_nanscan_node(const char *phase, const real_t *a, size_t n, int step_n,
+                           const struct fesom_mesh *mesh, int nlev)
+{
+    if (!fesom_mp_nanscan_enabled() || !a) return;
+    for (size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(a[i])) {
+            const size_t nd = i / (size_t)nlev;
+            const int nz = (int)(i % (size_t)nlev);
+            const double lon = mesh->geo_coord_nod2D[nd * 2] * 180.0 / M_PI;
+            const double lat = mesh->geo_coord_nod2D[nd * 2 + 1] * 180.0 / M_PI;
+            fprintf(stderr, "[mp-nanscan] step %d phase %-20s FIRST non-finite %g at "
+                    "node=%zu nz=%d geo=(%.2f, %.2f) owned=%s (flat=%zu of %zu)\n",
+                    step_n, phase, (double)a[i], nd, nz, lon, lat,
+                    nd < (size_t)mesh->myDim_nod2D ? "yes" : "HALO", i, n);
+            FESOM_DIE("mp-nanscan: non-finite produced by phase %s (step %d, node %zu nz %d "
+                      "at %.2f/%.2f)", phase, step_n, nd, nz, lon, lat);
+        }
+    }
+}
+
+/* M8/M16 Gate-3 diagnostic (FESOM_MP_CONSERV=N): global ∫dV, ∫T·dV, ∫S·dV over owned wet
+ * columns (areasvol·hnode), every N steps. Accumulation is dbl_t and the Allreduce is
+ * MPI_DOUBLE regardless of real_t (SP1) — the FP32 run is judged in FP64 units.
+ * Reads DEVICE-current views (valid on CUDA, where the host step-diag aliases are stale);
+ * collective — call on ALL ranks. Units: vol m³, heat °C·m³, salt PSU·m³ (constant ρ₀·c_p
+ * omitted — the Gate-3b bar is FP32-vs-FP64 twin drift, a relative measure).
+ * Off by default (env unset ⇒ zero calls ⇒ FP64/production inert). */
+int fesom_mp_conserv_every(void)
+{
+    static int ev = -1;
+    if (ev < 0) {
+        const char *e = getenv("FESOM_MP_CONSERV");
+        ev = e ? atoi(e) : 0;
+        if (ev < 0) ev = 0;
+    }
+    return ev;
+}
+void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
+                      struct fesom_tracers *tracers, struct fesom_partit *partit)
+{
+    const int myDim = mesh->myDim_nod2D;
+    const int nl    = mesh->nl;
+    auto T        = tracers->data[FESOM_TRACER_T].values_fld.d();
+    auto S        = tracers->data[FESOM_TRACER_S].values_fld.d();
+    auto areasvol = mesh->areasvol_fld.d();
+    auto hnode    = mesh->hnode_fld.d();
+    auto ulev_n   = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n   = mesh->nlevels_nod2D_fld.d();
+    dbl_t vol = 0.0, heat = 0.0, salt = 0.0;   /* M8 islands: FP64 accumulators */
+    Kokkos::parallel_reduce("mp_conserv", Kokkos::RangePolicy<>(0, myDim),
+        KOKKOS_LAMBDA(const int n, double &v, double &h, double &s) {
+            const int nzmin = ulev_n(n) - 1;
+            const int nzmax = nlev_n(n) - 1;
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                const size_t i  = FESOM_NODE3D(n, nz, nl);
+                const double dv = (double)areasvol(i) * (double)hnode(i);
+                v += dv;
+                h += dv * (double)T(i);
+                s += dv * (double)S(i);
+            }
+        }, vol, heat, salt);
+    dbl_t sums[3] = {vol, heat, salt};
+    if (partit->npes > 1)
+        MPI_Allreduce(MPI_IN_PLACE, sums, 3, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+    if (partit->mype == 0) {
+        printf("[fesom_port] CONSERV step=%6d heat=%.15e salt=%.15e vol=%.15e\n",
+               step_n, sums[1], sums[2], sums[0]);
+        fflush(stdout);
+    }
+}
+
+
 #ifdef FESOM_KK_SYNCCHECK
 /* M1.5 plumbing proof (docs/SYNC_MAP.md §"Proving the rails"). Bounce a representative set of the
  * ocean step's evolving-state Fields through a host->device->host round-trip at the END of the
@@ -176,6 +313,25 @@ int fesom_timestep(int                          step_n,
 {
     fesom_partit *p = ctx->partit;
     int nl = mesh->nl;
+
+    /* M8/M16 nanscan probes (FESOM_MP_NANSCAN=1; Serial host-alias reads; env-gated, inert
+     * otherwise). Walk the chain the 1964-storm hunt needed: state at entry, the SSH solve,
+     * the FCT advection, the end of the step. */
+    const size_t mp_n3  = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)mesh->nl;
+    const size_t mp_n2  = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
+    const size_t mp_e3v = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D)
+                          * (size_t)mesh->nl * 2;
+    const real_t *mp_T = tracers->data[FESOM_TRACER_T].values;
+    const real_t *mp_S = tracers->data[FESOM_TRACER_S].values;
+    if (fesom_mp_nanscan_enabled()) {
+        fesom_mp_nanscan_node("step-entry(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("step-entry(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_elem("step-entry(uv)", dyn->uv, mp_e3v, step_n, mesh);
+        fesom_mp_nanscan_elem("step-entry(uvAB)", dyn->uv_rhsAB, mp_e3v, step_n, mesh);
+        fesom_mp_nanscan_node("step-entry(eta)", dyn->eta_n, mp_n2, step_n, mesh, 1);
+        fesom_mp_nanscan_node("step-entry(hf)", forcing->heat_flux, mp_n2, step_n, mesh, 1);
+        fesom_mp_nanscan_node("step-entry(wf)", forcing->water_flux, mp_n2, step_n, mesh, 1);
+    }
 
     /* Phase G8 — env-gated master switch for GM/Redi.
      *   FESOM_NO_GMREDI=1 → treat ctx->gm as NULL for the rest of this step.
@@ -807,6 +963,10 @@ int fesom_timestep(int                          step_n,
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
     fesom_phasestats_mark(FESOM_PH_CG);      /* M7 E.IMB.0: the solve is its own phase */
     cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);   /* M12: decl hoisted above the SI/SE split */
+    if (fesom_mp_nanscan_enabled()) {
+        dyn->d_eta_fld.sync_host();
+        fesom_mp_nanscan_node("ssh-solve(eta)", dyn->d_eta, mp_n2, step_n, mesh, 1);
+    }
     fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
@@ -1229,6 +1389,12 @@ int fesom_timestep(int                          step_n,
                                   tracers->data[FESOM_TRACER_S].valuesold + (size_t)N_redi * nl);
             }
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers, p);
+            if (fesom_mp_nanscan_enabled()) {
+                tracers->data[FESOM_TRACER_T].values_fld.sync_host();
+                tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+                fesom_mp_nanscan_node("adv-fct(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
+                fesom_mp_nanscan_node("adv-fct(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
+            }
             /* M5.14 (S flip): S values + valuesold both device-resident - no FCT OUT sync_host. */
             if (s_verify_tradv) fesom_tracer_fct_verify(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn,
                                                         tracers, p, step_n, fct_pre_v, fct_pre_vo);
@@ -1402,5 +1568,50 @@ int fesom_timestep(int                          step_n,
     ocean_synccheck_roundtrip(dyn, tracers, aux);
 #endif
 
+    if (fesom_mp_nanscan_enabled()) {
+        tracers->data[FESOM_TRACER_T].values_fld.sync_host();
+        tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+        aux->Kv_fld.sync_host();
+        fesom_mp_nanscan_node("step-end(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("step-end(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
+        fesom_mp_nanscan_node("step-end(Kv)", aux->Kv, mp_n3, step_n, mesh, mesh->nl);
+    }
+    /* M8/M16 storm forensics: per-step single-node trace (FESOM_MP_TRACE_NODE=<global id>,
+     * FESOM_MP_TRACE_FROM=<step>). Owner rank prints one end-of-step line. Env-unset => one
+     * static getenv, zero calls — FP64/production inert. */
+    {
+        static int tr_gid = -2, tr_from = 0, tr_loc = -1;
+        if (tr_gid == -2) {
+            const char *e = getenv("FESOM_MP_TRACE_NODE");
+            tr_gid = e ? atoi(e) : -1;
+            const char *f = getenv("FESOM_MP_TRACE_FROM");
+            tr_from = f ? atoi(f) : 0;
+            if (tr_gid >= 0) {
+                for (int nn = 0; nn < mesh->myDim_nod2D; ++nn)
+                    if (p->myList_nod2D[nn] == tr_gid) { tr_loc = nn; break; }
+                if (tr_loc >= 0)
+                    fprintf(stderr, "[mp-trace] ARMED global %d = local %d, geo=(%.2f, %.2f)\n",
+                            tr_gid, tr_loc,
+                            mesh->geo_coord_nod2D[tr_loc * 2] * 180.0 / M_PI,
+                            mesh->geo_coord_nod2D[tr_loc * 2 + 1] * 180.0 / M_PI);
+            }
+        }
+        if (tr_loc >= 0 && step_n >= tr_from) {
+            tracers->data[FESOM_TRACER_T].values_fld.sync_host();
+            tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+            dyn->eta_n_fld.sync_host(); dyn->d_eta_fld.sync_host(); dyn->ssh_rhs_fld.sync_host();
+            mesh->hnode_fld.sync_host(); aux->density_m_rho0_fld.sync_host(); aux->Kv_fld.sync_host();
+            dyn->w_fld.sync_host();
+            const size_t k0 = FESOM_NODE3D(tr_loc, 0, nl);
+            fprintf(stderr, "[mp-trace] step %d eta=%.7g deta=%.7g rhs=%.7g hn0=%.7g "
+                    "T0=%.7g S0=%.7g rho0=%.7g Kv0=%.7g w0=%.7g\n",
+                    step_n, (double)dyn->eta_n[tr_loc], (double)dyn->d_eta[tr_loc],
+                    (double)dyn->ssh_rhs[tr_loc], (double)mesh->hnode[k0],
+                    (double)tracers->data[FESOM_TRACER_T].values[k0],
+                    (double)tracers->data[FESOM_TRACER_S].values[k0],
+                    (double)aux->density_m_rho0[k0], (double)aux->Kv[k0],
+                    (double)dyn->w[k0]);
+        }
+    }
     return cg_iters;
 }

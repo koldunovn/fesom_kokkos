@@ -583,9 +583,9 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
      * => the arithmetic is byte-for-byte unchanged. This is a re-execution elimination, NOT a
      *    coherence invariant, so the FORCE_SERIAL byte proof IS meaningful here (contrast L86). */
     static int s_scratch = -1;
-    static Kokkos::View<double*> s_vol, s_work;
+    static Kokkos::View<real_t*> s_vol, s_work;
     const std::size_t need = (std::size_t)nslab * Nmy * NL;
-    Kokkos::View<double*> vol, work;
+    Kokkos::View<real_t*> vol, work;
     if (fesom_speed_on("SMOOTHSCRATCH", &s_scratch)) {
         if (s_vol.extent(0) < need) {          /* grows once, then never again for a given run */
             /* Session-9 fix, UNCONDITIONAL like the getcoeffld precedent: these function-scope
@@ -596,13 +596,13 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
              * registered once on first allocation, so they never outlive the runtime. */
             if (s_vol.extent(0) == 0)
                 Kokkos::push_finalize_hook([] { s_vol = {}; s_work = {}; });
-            s_vol  = Kokkos::View<double*>("smooth.vol",  need);
-            s_work = Kokkos::View<double*>("smooth.work", need);
+            s_vol  = Kokkos::View<real_t*>("smooth.vol",  need);
+            s_work = Kokkos::View<real_t*>("smooth.work", need);
         }
         vol = s_vol; work = s_work;
     } else {
-        vol  = Kokkos::View<double*>("smooth.vol",  need);   /* legacy: allocate + free per call */
-        work = Kokkos::View<double*>("smooth.work", need);
+        vol  = Kokkos::View<real_t*>("smooth.vol",  need);   /* legacy: allocate + free per call */
+        work = Kokkos::View<real_t*>("smooth.work", need);
     }
 
     auto arr    = arr_fld.d();
@@ -630,14 +630,14 @@ void fesom_smooth_nod3D_kk(fesom::Field &arr_fld, int n_smooth,
                 const int uln = uln_n(n) - 1, nlnz = nln_n(n) - 1;
                 if (nz < uln || nz > nlnz) return;          /* mask: level outside node's column */
                 const std::size_t sb = base + (std::size_t)s * stride;
-                double w = 0.0, vacc = 0.0;
+                real_t w = 0.0, vacc = 0.0;
                 const int o0 = off(n), o1 = off(n + 1);
                 for (int k = o0; k < o1; ++k) {
                     const int el = nie(k);
                     int ule = ule_e(el) - 1; if (ule < uln)  ule = uln;
                     int nle = nle_e(el) - 1; if (nle > nlnz) nle = nlnz;
                     if (nz < ule || nz > nle) continue;     /* element doesn't reach this level */
-                    const double a = ea(el);
+                    const real_t a = ea(el);
                     const int v0 = en(3*el+0), v1 = en(3*el+1), v2 = en(3*el+2);
                     if (sw == 0) vacc += a;
                     w += a * ( arr(sb + (size_t)v0*NL + nz)

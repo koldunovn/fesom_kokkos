@@ -48,15 +48,20 @@ declare -A CONFIGS=(
   [oati]="FESOM_SSH_SOLVER=oati"
   [pcsi]="FESOM_SSH_SOLVER=pcsi"
   [det]="FESOM_IC_EXTRAP=det"
+  [cgpipe]="FESOM_SPEED=1;FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_CGPIPE=1"
+  [cgpoly]="FESOM_SPEED=1;FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_CGPOLY=2"
+  [verify]="FESOM_SSH_VERIFY=1"
 )
+# configs whose oracle is another config's (bit-neutral instruments compare against the plain run)
+declare -A ORACLE_OF=( [verify]=default )
 G0_FIVE="default mevp zstar tke se"
-ALL="$G0_FIVE sewide evpwlean cg2 pipecg oati pcsi det"
+ALL="$G0_FIVE sewide evpwlean cg2 pipecg oati pcsi det cgpipe cgpoly"
 
 build=${1:?build dir name or binary path}; cfg=${2:?config or all}; np=${3:-1}
 if [ -f "$build" ]; then BIN=$build; tag=$(basename "$(dirname "$build")")_$(basename "$build")
 else BIN=$SRC/$build/fesom_port; tag=$build; fi
 [ -x "$BIN" ] || { echo "no binary: $BIN"; exit 2; }
-is_ref0=0; [ "$tag" = build-m16-ref0 ] && { is_ref0=1; tag=ref0; }
+is_ref0=0; case "$BIN" in *build-m16-ref0/*) is_ref0=1; tag=ref0;; esac   # the oracle binary, by dir name or absolute path
 
 # environment: login node (vader) or inside a SLURM allocation
 source /sw/etc/profile.levante >/dev/null 2>&1 || true
@@ -72,7 +77,7 @@ else
 fi
 
 run_one() {
-  local c=$1 out=$ROOT/$tag/${c}_np$np ref=$ROOT/ref0/${c}_np$np
+  local c=$1 out=$ROOT/$tag/${c}_np$np ref=$ROOT/ref0/${ORACLE_OF[$c]:-$c}_np$np
   [ -n "${CONFIGS[$c]+x}" ] || { echo "unknown config $c"; return 2; }
   if [ "$c" = det ] && [ "$PRESET" = pi ]; then echo "[$tag/$c np$np] skipped: the det IC fill only runs with a PHC init (core2 preset)"; return 0; fi
   if [ "$c" = evpwlean ] && [ "$np" -lt 2 ]; then echo "[$tag/$c np$np] skipped: the wide halo builds no extended zone at np1 (M9 FATAL by design)"; return 0; fi
@@ -97,11 +102,9 @@ run_one() {
   else echo "[$tag/$c np$np] DIFFERS from ref0:"; head -8 "$out/diff.txt"; return 1; fi
 }
 
-case "$cfg" in
-  all)  list=$ALL;;
-  five) list=$G0_FIVE;;
-  *)    list=$cfg;;
-esac
+# expand the words all / five anywhere in the list ("all verify" = every config plus the verify alias)
+list=""
+for w in $cfg; do case "$w" in all) list="$list $ALL";; five) list="$list $G0_FIVE";; *) list="$list $w";; esac; done
 fail=0
 for c in $list; do run_one "$c" || fail=1; done
 [ $fail = 0 ] && echo "=== GATE 0 PASS ($tag np$np: $list) ===" || echo "=== GATE 0 FAIL ($tag np$np) ==="

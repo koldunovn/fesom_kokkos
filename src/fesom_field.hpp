@@ -27,11 +27,13 @@
 // ELEMVEC index macros to become layout-agnostic accessor functions over the View. A flat rank-1
 // LayoutLeft == LayoutRight buys no coalescing. See plan section M5 and lesson L6.
 //
-// real_t is double (== Fortran WP=8); Field == FieldT<double>, IntField == FieldT<int>.
+// real_t is the WORKING precision (M8: double by default, float under FESOM_SINGLE_PRECISION —
+// see fesom_types.h); Field == FieldT<real_t> is the model-state field type, IntField == FieldT<int>.
 //
 #include <Kokkos_Core.hpp>
 #include <Kokkos_DualView.hpp>
 #include <cstddef>
+#include "fesom_types.h"
 #ifdef FESOM_KK_SYNCCHECK
 #  include <cstdio>
 #  include <cstdlib>
@@ -119,7 +121,7 @@ private:
     Auth        auth_ = Auth::Synced;
 };
 
-using Field    = FieldT<double>;
+using Field    = FieldT<real_t>;   /* M8: the single edit that flips the model state precision */
 using IntField = FieldT<int>;
 
 } // namespace fesom

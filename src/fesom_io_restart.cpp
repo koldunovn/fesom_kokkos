@@ -38,6 +38,7 @@
  * fesom_io.cpp next to the gathers they invert.
  */
 #include "fesom_io_restart.h"
+#include "fesom_nc_real.h"   /* M16: NC_DOUBLE <-> real_t at the boundary */
 
 #include "fesom_dyn.h"
 #include "fesom_field.hpp"
@@ -331,7 +332,7 @@ static long long stiff_gather(const fesom_ssh_stiff *S, const gather_plan *gp,
     }
     MPI_Gatherv(col, mynnz, MPI_INT,    col_ro, nnz_all, nnz_displ, MPI_INT,
                 0, p->MPI_COMM_FESOM);
-    MPI_Gatherv(val, mynnz, MPI_DOUBLE, val_ro, nnz_all, nnz_displ, MPI_DOUBLE,
+    MPI_Gatherv(val, mynnz, FESOM_MPI_REAL, val_ro, nnz_all, nnz_displ, FESOM_MPI_REAL,
                 0, p->MPI_COMM_FESOM);
     free(len); free(col); free(val);
 
@@ -418,7 +419,7 @@ static void stiff_scatter(fesom_ssh_stiff *S, const gather_plan *gp,
     FESOM_CHECK(col && val, "restart: stiff scatter alloc");
     MPI_Scatterv(col_ro, nnz_all, nnz_displ, MPI_INT,    col, mynnz, MPI_INT,
                  0, p->MPI_COMM_FESOM);
-    MPI_Scatterv(val_ro, nnz_all, nnz_displ, MPI_DOUBLE, val, mynnz, MPI_DOUBLE,
+    MPI_Scatterv(val_ro, nnz_all, nnz_displ, FESOM_MPI_REAL, val, mynnz, FESOM_MPI_REAL,
                  0, p->MPI_COMM_FESOM);
     if (gp->mype == 0) { free(col_ro); free(val_ro); free(nnz_all); free(nnz_displ); }
 
@@ -655,7 +656,7 @@ void fesom_restart_write(const char                 *path,
                     for (int lev = 0; lev < vars[i].levels; ++lev)
                         plane[(size_t)lev * count + e] =
                             global[e * (size_t)stride + (size_t)lev * vars[i].ncomp + c];
-                NC_CHECK(nc_put_var_double(ncid, varid[i][c], plane));
+                NC_CHECK(fesom_nc_put_var_real(ncid, varid[i][c], plane, count * (size_t)vars[i].levels));
             }
             free(global); free(plane);
         }
@@ -664,7 +665,7 @@ void fesom_restart_write(const char                 *path,
     if (partit->mype == 0) {
         NC_CHECK(nc_put_var_int   (ncid, vid_slen, slen));
         NC_CHECK(nc_put_var_int   (ncid, vid_scol, scol));
-        NC_CHECK(nc_put_var_double(ncid, vid_sval, sval));
+        NC_CHECK(fesom_nc_put_var_real(ncid, vid_sval, sval, (size_t)stiff_nnz));
         free(slen); free(scol); free(sval);
         NC_CHECK(nc_close(ncid));
     }
@@ -796,7 +797,7 @@ void fesom_restart_read(const char           *path,
             FESOM_CHECK(global && plane, "restart: scatter buffer alloc for %s",
                         vars[i].name[0]);
             for (int c = 0; c < vars[i].ncomp; ++c) {
-                NC_CHECK(nc_get_var_double(ncid, varid[i][c], plane));
+                NC_CHECK(fesom_nc_get_var_real(ncid, varid[i][c], plane, count * (size_t)vars[i].levels));
                 for (size_t e = 0; e < count; ++e)
                     for (int lev = 0; lev < vars[i].levels; ++lev)
                         global[e * (size_t)stride + (size_t)lev * vars[i].ncomp + c] =
@@ -836,7 +837,7 @@ void fesom_restart_read(const char           *path,
             NC_CHECK(nc_inq_varid(ncid, "stiff_colind", &vid));
             NC_CHECK(nc_get_var_int(ncid, vid, scol));
             NC_CHECK(nc_inq_varid(ncid, "stiff_values", &vid));
-            NC_CHECK(nc_get_var_double(ncid, vid, sval));
+            NC_CHECK(fesom_nc_get_var_real(ncid, vid, sval, nnz));
         }
         stiff_scatter(stiff, &gp, mesh, partit, slen, scol, sval);
         /* The device CG SpMV reads values_fld; the base matrix was pushed once
