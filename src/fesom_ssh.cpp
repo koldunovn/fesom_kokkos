@@ -2511,6 +2511,14 @@ static void ssh_dump_write(const fesom_ssh_stiff *S, const fesom_solverinfo *si,
  * −allreduces with (plan T2). Rank-0 only; not collective. */
 void fesom_ssh_wire_report(void)
 {
+    /* M16 G3: the SP float-floor acceptances are printed UNCONDITIONALLY (rank 0) — a knob that
+     * changes what "converged" means must announce itself (L80). 0 in FP64 by construction. */
+    if (g_ssh_floor_hits > 0) {
+        int ini = 0, rk = 0; MPI_Initialized(&ini); if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0) fprintf(stderr, "[ssh-solver] SP float-floor acceptances: floor-hits=%ld of %ld solves "
+                                     "(stall with resid < %.3g x rtol; FESOM_SSH_FLOOR)\n",
+                             g_ssh_floor_hits, g_sshwire.solves, ssh_floor_factor());
+    }
     if (!ssh_stats_on()) return;
     SshWireState &w = g_sshwire;
     int rank = 0, ini = 0;

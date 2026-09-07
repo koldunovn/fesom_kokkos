@@ -385,6 +385,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   `m16_knob_signals.sh` (`solver-floor`). This puts the CA solvers on the same footing as cg, no better: the SP
   SSH solution is float-resolution-limited by construction, whichever solver produced it. The G4 twin decides
   whether that resolution is climate-acceptable (it was in July's 63-yr arms, which ran plain cg).
+  **Re-test (`e1`, jobs 27289394/27289407):** `pcsi` live (0 fallbacks, ~2× FP64 iterations via the floor rule);
+  `pipecg`/`oati` still fall back on 13/20 solves — now the DIVERGENCE exit (recurred residual grows to 1e1–1e4
+  at ~130 iterations): the float VECTOR recurrences of the pipelined methods drift from the true residual; a
+  wider scalar chain cannot fix that, residual replacement can (E5). At SP the two are declared unusable as built.
 - **2026-09-07 — G1 FIRST ATTEMPT FAILED, root-caused, fixed (pending re-run): CORE2 SP died at step 5.**
   Jobs 27288894/27288895 (`d0sp` `8ad967fe`, np8, JRA 1958): both SP arms (with and without the salt
   anomaly) hit `CG_kk: pp·App is -nan` at step 5; DP arms clean for 60 steps. `FESOM_MP_NANSCAN=1`
