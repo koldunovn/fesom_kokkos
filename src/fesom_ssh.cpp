@@ -2364,6 +2364,7 @@ static SshWireState g_sshwire;
 /* Fold the per-solve counters into the totals + the rank-0 per-solve line.
  * Every rank counts identically (exchanges/reductions are collective events). */
 static long g_ssh_floor_hits = 0;      /* M16 G3: solves accepted at the SP float floor (ssh_floor_factor below) */
+static double ssh_floor_factor(void);   /* defined with the stall helpers below */
 static void ssh_wire_close_solve(int iters, double res, double rtol, fesom_partit *partit)
 {
     SshWireState &w = g_sshwire;
@@ -3536,7 +3537,7 @@ static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
 
     /* explicit override wins (FESOM_PCSI_EIG="nu,mu") */
     if (const char *e = getenv("FESOM_PCSI_EIG")) {
-        real_t a = 0.0, b = 0.0;
+        double a = 0.0, b = 0.0;   /* M16: %lf needs a double — into a real_t=float this was an 8-byte write into 4 bytes under SP */
         FESOM_CHECK(sscanf(e, "%lf,%lf", &a, &b) == 2 && a > 0.0 && b > a,
                     "FESOM_PCSI_EIG='%s' — expected \"nu,mu\" with 0 < nu < mu", e);
         s.nu = a; s.mu = b; s.built = true;
@@ -3559,7 +3560,7 @@ static void ssh_pcsi_eig(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         m = atoi(e);
         FESOM_CHECK(m >= 4 && m <= 500, "FESOM_PCSI_LANCZOS=%d out of range [4,500]", m);
     }
-    real_t mg[2] = { 0.10, 0.05 };
+    double mg[2] = { 0.10, 0.05 };
     if (const char *e = getenv("FESOM_PCSI_EIGMARGIN"))
         FESOM_CHECK(sscanf(e, "%lf,%lf", &mg[0], &mg[1]) == 2 && mg[0] >= 0.0 && mg[1] >= 0.0,
                     "FESOM_PCSI_EIGMARGIN='%s' — expected \"deflate_nu,inflate_mu\"", e);

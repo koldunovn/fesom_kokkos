@@ -367,6 +367,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-07 — SP-only memory bug class found by `-Wformat`: `sscanf("%lf", &real_t)`** at two `FESOM_PCSI_EIG` /
+  `FESOM_PCSI_MARGIN` override sites (`fesom_ssh.cpp` ~3540/3565) — an 8-byte write into a 4-byte float under SP
+  (stack corruption whenever the override is set). Fixed: parse into `double`, assign. Rule for the registry: every
+  `scanf`-family `%lf`/`%le` target must be `double`, never `real_t` (the mesh readers already are).
 - **2026-09-07 — G3 FINDING: the SP true-residual floor of the SSH solve, and the class-4 promotion it forced.**
   Gate-3 liveness (CORE2 np8, 20 steps, `PRECOND=0`): CUDA job 27289199 and Serial job 27289198 agree — the
   port-only communication-avoiding solvers `pipecg`/`oati` fall back to cg on 20/20 solves, `pcsi` on 19/20
