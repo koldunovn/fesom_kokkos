@@ -367,6 +367,24 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-07 — G3 FINDING: the SP true-residual floor of the SSH solve, and the class-4 promotion it forced.**
+  Gate-3 liveness (CORE2 np8, 20 steps, `PRECOND=0`): CUDA job 27289199 and Serial job 27289198 agree — the
+  port-only communication-avoiding solvers `pipecg`/`oati` fall back to cg on 20/20 solves, `pcsi` on 19/20
+  (`[ssh-solver] !! FALLBACK … residual stalled or grew`), 0 fallbacks in the FP64 oracle; `cg`, `cg2`,
+  `cgpipe`, `cgpoly`, SE and every non-solver knob are live. `FESOM_SSH_VERIFY=1` gives the mechanism: at SP
+  plain cg's TRUE residual sits at 1.1–2.1× rtol on every solve (solve 1: true 4.82, rec 4.00, rtol 4.34; solve
+  20: true 1.67, rec 0.77, rtol 0.81; identical on Serial and CUDA), while in FP64 true ≡ rec (gap 1e-11). The
+  requested `soltol = 1e-5` is below what a float `eta` can resolve on CORE2; upstream #940 says exactly this in
+  `namelist.dyn` ("soltol … cannot see the float32 residual floor, so the solver will report success it has not
+  achieved") and ships it. cg "converges" on its recurrence; the honest solvers (pcsi recurs the TRUE residual)
+  stall at the floor and the M10 fallback fires. **Port response (class 4, SP-only, announced + counted):**
+  (a) the scalar chains of `pipecg`/`oati`/`pcsi` (dots, α/β/γ/δ recurrences, Chebyshev ω, residual bookkeeping)
+  → `dbl_t`/`MPI_DOUBLE` (the plan's prescribed promotion; vectors stay `real_t`; FP64 bitwise by construction);
+  (b) `FESOM_SSH_FLOOR` (default 8, 0 = off, compiled out in FP64): a stall with resid < 8×rtol is accepted as
+  converged-at-the-float-floor, counted in the `[ssh-wire] AGGREGATE … floor-hits=N` line and shown by
+  `m16_knob_signals.sh` (`solver-floor`). This puts the CA solvers on the same footing as cg, no better: the SP
+  SSH solution is float-resolution-limited by construction, whichever solver produced it. The G4 twin decides
+  whether that resolution is climate-acceptable (it was in July's 63-yr arms, which ran plain cg).
 - **2026-09-07 — G1 FIRST ATTEMPT FAILED, root-caused, fixed (pending re-run): CORE2 SP died at step 5.**
   Jobs 27288894/27288895 (`d0sp` `8ad967fe`, np8, JRA 1958): both SP arms (with and without the salt
   anomaly) hit `CG_kk: pp·App is -nan` at step 5; DP arms clean for 60 steps. `FESOM_MP_NANSCAN=1`

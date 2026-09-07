@@ -38,7 +38,7 @@ per config (CORE2 np8, 20 steps, `FESOM_SSH_PRECOND=0` + the config's knobs, the
 | backend | job | verdict | detail |
 |---|---|---|---|
 | CUDA SP, 2 nodes (`e0/sp/fesom_port_cuda`) | 27289199 | 12 / 15 live; **pipecg, oati, pcsi DEAD** | every config rc 0 and finite; CG iterations at step 20 within 2 of the FP64 oracle for cg/cg2/cgpipe/cgpoly/se; **`[ssh-solver] !! FALLBACK … residual stalled or grew` on 20/20 solves (pipecg), 20/20 (oati), 19/20 (pcsi)** — the FP64 Serial oracle has 0 fallbacks in all three. The first liveness pass called them LIVE because the announce line prints before the fallback; `m16_knob_signals.sh` now has a `solver-fallback` row and `m14_zombie_check.sh` rejects a leg with a fallback. |
-| Serial SP, np8 (`e0/sp/fesom_port_serial`) | 27289198 | running | separates SP-generic from CUDA-specific for the three solvers |
+| Serial SP, np8 (`e0/sp/fesom_port_serial`) | 27289198 | same 12 / 15; **pipecg 20/20, oati 20/20, pcsi 19/20 fallbacks** | SP-generic, not CUDA: the true-residual floor is the same on both backends (verify solve 1 true 4.823 Serial / 4.830 CUDA vs rtol 4.339; FP64 true = rec = 4.002). Mechanism + response in the registry log (2026-09-07 G3 entry): `soltol=1e-5` is below float `eta` resolution (upstream #940 says so and ships it); port: CA-solver scalar chains → `dbl_t` + `FESOM_SSH_FLOOR` acceptance (announced, counted). Re-test pending on the `e1` pair. |
 
 **Reading:** the port-only communication-avoiding solvers carry their recurrence scalars in `real_t` (class 4,
 "real_t except global integrals") — the pipelined/Chebyshev recurrences lose the residual in float. Upstream
