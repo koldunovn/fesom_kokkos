@@ -680,7 +680,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 - [x] **measured 2026-09-07** (`core2_all/REPORT.txt`, DP np8 60 steps): on vs off S relL2 1.9e-4, mean −1.9e-4 psu (≈3e-6 psu/step — the upstream freshwater-driven surface residual class), T relL2 1.2e-3, eta relL2 1.0e-3, CG |Δit| mean 0.10. Spec: gate (DP, CORE2, on vs off): `mp_divergence_curve.py` solution-class
       comparison, expecting the surface conservation residual upstream reports (~8e-6/step,
       freshwater-driven, 99.4 % cancelled by the `S_ref·water_flux` term)
-- [x] **measured 2026-09-07 (30 h, np8): improves, does not regress** — SP-vs-DP twin error with the anomaly (dp_on vs sp_on) S mean +9.2e-7 psu, relL2 1.11e-5; without (dp_off vs sp_off) S mean +3.6e-6, relL2 1.15e-5 ⇒ mean salt error −74 % (upstream −38 %), rms −3.5 %; T mean 6.2e-7→7.9e-7 (noise), eta relL2 1.2e-4→1.0e-4, w relL2 4.5e-2→3.9e-2. Spec: gate (SP, CORE2, 1 day, on vs DP reference): mean/rms salt error vs the SP
+- [x] **measured 2026-09-07 (30 h, np8): improves, does not regress; and at 30 DAYS (conservation twin, jobs 27290582/27290583): the SP salt-integral drift goes from 1.7× FP64 (gap 0.71 of the drift) to 0.4 % — the anomaly is in the SP recipe** — SP-vs-DP twin error with the anomaly (dp_on vs sp_on) S mean +9.2e-7 psu, relL2 1.11e-5; without (dp_off vs sp_off) S mean +3.6e-6, relL2 1.15e-5 ⇒ mean salt error −74 % (upstream −38 %), rms −3.5 %; T mean 6.2e-7→7.9e-7 (noise), eta relL2 1.2e-4→1.0e-4, w relL2 4.5e-2→3.9e-2. Spec: gate (SP, CORE2, 1 day, on vs DP reference): mean/rms salt error vs the SP
       run without the knob; expect the ~38 % mean-error reduction (1.55e-5 → 0.96e-5 psu upstream);
       report the number, pass/fail is "improves, does not regress"
 
@@ -730,7 +730,7 @@ divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
 - [ ] (first data point 2026-09-07, CORE2 np8 Serial+CUDA, `cg`: true/rtol 1.11 at solve 1 → 2.06 at solve 20, gap ≡ true−rec 0.82–0.90; FP64 gap 1e-11 — the bar is now measured, the sweep over ranks/meshes remains) **true-residual rank sweep**: `cg` (CORE2 128→864), CGPIPE (GPU 1→16 N) and `oati` (fArc
       512→4096, dars 1024→8192) at SP with `FESOM_SSH_VERIFY=1`; gap vs the B3 pre-registered bar; a
       failure here is the first class-3 promotion (scalars back to `dbl_t`), logged with the signature
-- [x] **measured 2026-09-07 (jobs 27289583/27289584): heat gap 0.2 % of the FP64 drift (July reproduced); salt: SP drift 1.7× FP64, linear (a drift) → salt-anomaly twin jobs 27290582/27290583 submitted; volume exact.** Spec: 30-day CORE2 conservation, `FESOM_MP_CONSERV=10`, SP vs DP (`mp_conserv_drift.py`): heat gap vs the
+- [x] **measured 2026-09-07 (jobs 27289583/27289584): heat gap 0.2 % of the FP64 drift (July reproduced); salt: SP drift 1.7× FP64, linear (a drift) → **with `FESOM_SALT_ANOMALY=1` the SP salt drift matches FP64 to 0.4 % (gap 6.8e-9), FP64 on-vs-off 0.1 %** — salt-anomaly twin jobs 27290582/27290583 submitted; volume exact.** Spec: 30-day CORE2 conservation, `FESOM_MP_CONSERV=10`, SP vs DP (`mp_conserv_drift.py`): heat gap vs the
       physical 30-d signal, salt/volume random-walk vs drift — July: 0.2 %, sign-changing
 - [ ] divergence curve vs the FP64 dt-seed **ensemble** envelope (`mp_envelope_verdict.py`; single seeds
       are non-monotone — July's finding), **plus one DP leg built with `FESOM_FORCING_POINTSLOPE`** so

@@ -370,7 +370,7 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
 - **2026-09-07 — 30-day CORE2 conservation twin (np8, jobs 27289583 FP64 / 27289584 SP):** heat drift gap 0.2 % of the
   FP64 drift (July's number); **salt: SP drift −2.98e-6 vs FP64 −1.75e-6 at day 30, growing linearly** — the salt
   integral at SP carries a genuine drift (float `S` ≈ 35 ± 1.9e-6 psu ulp, the #986 motivation); the salt-anomaly twin
-  (jobs 27290582/27290583) measures whether `FESOM_SALT_ANOMALY=1` removes it. Volume exact in both.
+  (jobs 27290582/27290583) **measured: with `FESOM_SALT_ANOMALY=1` the SP salt drift is −1.739e-6 vs FP64 −1.746e-6 (gap 0.4 % of the drift; 71 % without), FP64 on-vs-off 0.1 %, heat unchanged — the #986 island is confirmed on the port at 30 days and the knob joins the SP recipe.** Volume exact in both.
 - **2026-09-07 — SP-only memory bug class found by `-Wformat`: `sscanf("%lf", &real_t)`** at two `FESOM_PCSI_EIG` /
   `FESOM_PCSI_MARGIN` override sites (`fesom_ssh.cpp` ~3540/3565) — an 8-byte write into a 4-byte float under SP
   (stack corruption whenever the override is set). Fixed: parse into `double`, assign. Rule for the registry: every
