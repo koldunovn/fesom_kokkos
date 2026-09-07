@@ -730,7 +730,7 @@ divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
 - [ ] (first data point 2026-09-07, CORE2 np8 Serial+CUDA, `cg`: true/rtol 1.11 at solve 1 → 2.06 at solve 20, gap ≡ true−rec 0.82–0.90; FP64 gap 1e-11 — the bar is now measured, the sweep over ranks/meshes remains) **true-residual rank sweep**: `cg` (CORE2 128→864), CGPIPE (GPU 1→16 N) and `oati` (fArc
       512→4096, dars 1024→8192) at SP with `FESOM_SSH_VERIFY=1`; gap vs the B3 pre-registered bar; a
       failure here is the first class-3 promotion (scalars back to `dbl_t`), logged with the signature
-- [ ] 30-day CORE2 conservation, `FESOM_MP_CONSERV=10`, SP vs DP (`mp_conserv_drift.py`): heat gap vs the
+- [x] **measured 2026-09-07 (jobs 27289583/27289584): heat gap 0.2 % of the FP64 drift (July reproduced); salt: SP drift 1.7× FP64, linear (a drift) → salt-anomaly twin jobs 27290582/27290583 submitted; volume exact.** Spec: 30-day CORE2 conservation, `FESOM_MP_CONSERV=10`, SP vs DP (`mp_conserv_drift.py`): heat gap vs the
       physical 30-d signal, salt/volume random-walk vs drift — July: 0.2 %, sign-changing
 - [ ] divergence curve vs the FP64 dt-seed **ensemble** envelope (`mp_envelope_verdict.py`; single seeds
       are non-monotone — July's finding), **plus one DP leg built with `FESOM_FORCING_POINTSLOPE`** so

@@ -50,7 +50,15 @@ Plain `cg`, `cg2`, `cgpipe`, `cgpoly` are live at SP as built.
 Floor announcement verified on CORE2 (job 27289526, `d3sp`): `[ssh-solver] SP float-floor acceptances: floor-hits=19 of
 20 solves (stall with resid < 8 x rtol; FESOM_SSH_FLOOR)`; pcsi iterations 155/280/230 at steps 1/10/20 (FP64 155/145/140).
 
-30-day conservation twin (`jobs/job_m16_conserv`, CORE2 np8, 1440 steps, `FESOM_MP_CONSERV=10`): jobs in the handoff.
+### 30-day conservation twin (`jobs/job_m16_conserv`, CORE2 np8, 1440 steps dt 1800, `FESOM_MP_CONSERV=10`, `d3`/`d3sp`)
+Jobs 27289583 (FP64) / 27289584 (SP), both rc 0, no non-finite; `scripts/mp_conserv_drift.py` → `m16/conserv_drift.csv`.
+
+| quantity | FP64 drift @1440 | SP drift @1440 | gap | \|gap\|/\|FP64 drift\| | reading |
+|---|---|---|---|---|---|
+| heat | −4.358e-4 | −4.367e-4 | −9.4e-7 | **0.002** | July's 0.2 % reproduced; the physical 30-d signal dominates both |
+| salt | −1.748e-6 | −2.983e-6 | −1.24e-6 | **0.71** | SP salt drift 1.7× FP64, and it GROWS LINEARLY (−1e-8 @10, −5.9e-7 @720, −1.2e-6 @1440) — a drift, not a random walk; the salt-anomaly twin (jobs 27290582 FP64-on / 27290583 SP-on) is the direct test |
+| volume | 0 | 0 | 0 | 0 | exact in both (linfs) |
+
 
 ## 3. Gate 4 — screens and the 1-year twin (pending)
 ## 4. Untested list (kept honest)

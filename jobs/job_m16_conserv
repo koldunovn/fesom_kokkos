@@ -27,6 +27,6 @@ if [ -n "${KNOBS:-}" ]; then IFS=',' read -ra KV <<< "$KNOBS"; for kv in "${KV[@
 { echo "BIN=$BIN"; md5sum "$BIN"; env | grep -E '^FESOM_' | sort; } > "$OUT/ENV.txt"
 echo "=== m16 conserv $TAG job=$SLURM_JOB_ID bin=$(md5sum "$BIN" | cut -c1-8) nsteps=$NSTEPS out=$OUT ==="
 srun -n 8 "$BIN" "$MESH" "$OUT" 1800 $NSTEPS -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"; rc=$?
-echo "rc=$rc  $(grep -o 'PRECISION: [A-Z]*' "$OUT/run.log" | head -1)  steps=$(grep -cE '^\s+[0-9]+\s+it=' "$OUT/run.log")  conserv-lines=$(grep -c '^CONSERV' "$OUT/run.log" "$OUT/run.err" | awk -F: '{s+=$2} END {print s}')  nonfinite=$(grep -cwiE 'nan|inf' "$OUT/run.err")"
+echo "rc=$rc  $(grep -o 'PRECISION: [A-Z]*' "$OUT/run.log" | head -1)  steps=$(grep -cE '^\s+[0-9]+\s+it=' "$OUT/run.log")  conserv-lines=$(grep -ch 'CONSERV step=' "$OUT/run.log" "$OUT/run.err" | awk '{s+=$1} END {print s}')  nonfinite=$(grep -cwiE 'nan|inf' "$OUT/run.err")"
 "$SRC/scripts/m16_knob_signals.sh" "$OUT/run.log" "$OUT/run.err" | grep -E 'precision|conserv|floor|fallback|last-step'
 exit $rc
