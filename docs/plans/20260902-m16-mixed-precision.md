@@ -710,7 +710,7 @@ divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
 
 ### Task E2: Gate 2 — prize sizing (D9)
 
-- [ ] pairs, 300 steps, `WSPLIT=1` where the mesh needs it: CORE2 4N + 16N GPU · fArc CPU at 4096 ·
+- [ ] **in progress 2026-09-07** — CORE2 1N GPU (4 A100): DP 0.0618 / SP 0.0531 s/step, **SP/DP 0.859**, CG 60/62, job 27289143 (`docs/MIXED_PRECISION_M16.md` §1); CORE2 16N GPU job 27289163 submitted; NG5 16N next; **fArc 4096 / dars 8192 CPU exceed the 16-node cap → user decision**. Spec: pairs, 300 steps, `WSPLIT=1` where the mesh needs it: CORE2 4N + 16N GPU · fArc CPU at 4096 ·
       dars CPU at 8192 · NG5 16N GPU · device memory per GPU (dars 2N sampled mid-run, July 23.2 → 11.9 GB)
 - [ ] knobs-off pairs **and** recipe pairs (D8) — July's headline: SP and the speed stack overlap in the
       communication bytes (SP under the stack 1.11–1.24× vs 1.26–1.48× knobs-off); both rows go on the board
