@@ -28,6 +28,7 @@ row ssh-se "$(st "$s" 'ABSENT')" "$(echo "$sm" | grep -oE 'M = [0-9]+ -> dtbt = 
 o=$(both | grep -m1 'ssh-solver\] FESOM_SSH_SOLVER = '); row ssh-solver "$(st "$o" 'ABSENT(cg default)')" "$(echo "$o" | grep -oE 'SOLVER = [a-z0-9]+')"
 fb=$(both | grep -c 'ssh-solver\] !! FALLBACK'); fb1=$(both | grep -m1 'ssh-solver\] !! FALLBACK' | cut -c1-110)
 row solver-fallback "$([ "$fb" = 0 ] && echo none || echo DEAD)" "$([ "$fb" = 0 ] || echo "$fb fallback(s): $fb1")"   # a solver that fell back is NOT the solver under test (G3 2026-09-07: SP CUDA pcsi)
+fl=$(both | grep -oE 'floor-hits=[0-9]+' | tail -n 1); row solver-floor "$([ -z "$fl" ] || [ "$fl" = floor-hits=0 ] && echo none || echo LIVE)" "${fl:-} (SP float-floor acceptances, FESOM_SSH_FLOOR)"
 v=$(both | grep -m1 'ssh-verify\] FESOM_SSH_VERIFY = ON'); va=$(both | grep -oE 'ssh-verify\] AGGREGATE: max true-res=[0-9.e+-]+ +max \|true-rec\| gap=[0-9.e+-]+' | tail -n 1)
 row ssh-verify "$(st "$v" 'ABSENT')" "${va:-${v:0:60}}"
 n=$(both | grep -m1 'MP-NANSCAN ARMED'); row mp-nanscan "$(st "$n" 'ABSENT')" "$(both | grep -m1 'mp-nanscan\].*FIRST non-finite' | cut -c1-90)"

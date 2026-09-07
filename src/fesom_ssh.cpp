@@ -2363,6 +2363,7 @@ static SshWireState g_sshwire;
 
 /* Fold the per-solve counters into the totals + the rank-0 per-solve line.
  * Every rank counts identically (exchanges/reductions are collective events). */
+static long g_ssh_floor_hits = 0;      /* M16 G3: solves accepted at the SP float floor (ssh_floor_factor below) */
 static void ssh_wire_close_solve(int iters, double res, double rtol, fesom_partit *partit)
 {
     SshWireState &w = g_sshwire;
@@ -2520,9 +2521,9 @@ void fesom_ssh_wire_report(void)
         const double s = (double)w.solves;
         fprintf(stderr,
             "[ssh-wire] AGGREGATE over %ld solves: iters/solve=%.2f exch/solve=%.2f "
-            "ar_blk/solve=%.2f ar_i/solve=%.2f body-launches/solve=%.2f fallbacks=%ld\n",
+            "ar_blk/solve=%.2f ar_i/solve=%.2f body-launches/solve=%.2f fallbacks=%ld floor-hits=%ld\n",
             w.solves, (double)w.t_iters / s, (double)w.t_exch / s, (double)w.t_arb / s,
-            (double)w.t_ari / s, (double)w.t_launch / s, w.t_fallback);
+            (double)w.t_ari / s, (double)w.t_launch / s, w.t_fallback, g_ssh_floor_hits);
         if (ssh_verify_on())
             fprintf(stderr, "[ssh-verify] AGGREGATE: max true-res=%.6e  max |true-rec| gap=%.3e  "
                             "true>rtol events=%ld\n", w.v_maxtrue, w.v_maxgap, w.v_fail);
@@ -2873,6 +2874,26 @@ static void ssh_fb_announce(int reason, int iters, double res, fesom_partit *par
  * `fallbacks=0` on the cg path is structurally guaranteed rather than earned — the variants
  * are the only monitored path. Widening this window is how "would the variant have converged
  * if the guard had not aborted it?" gets measured (M10 open item 3). */
+/* M16 G3 (2026-09-07, jobs 27289198/27289199): at SP the TRUE SSH residual has a float floor
+ * ~1.2-2x rtol (eta's float resolution; upstream #940's namelist says so in words: soltol "cannot see
+ * the float32 residual floor, so the solver will report success it has not achieved"). Plain cg
+ * "converges" on its recurrence anyway; the honest port-only solvers (pcsi recurs the true residual,
+ * pipecg/oati recur it tightly) STALL there and fell back to cg on every solve. SP-only rule, announced
+ * and counted: a stall with resid < FESOM_SSH_FLOOR x rtol (default 8; 0 = off = fall back as before)
+ * is accepted as converged-at-the-float-floor. Compiled to "never" in FP64 (byte gate). */
+static double ssh_floor_factor(void)
+{
+#if defined(FESOM_SINGLE_PRECISION)
+    static double cached = -1.0;
+    if (cached < 0.0) { const char *e = getenv("FESOM_SSH_FLOOR"); cached = (e && e[0]) ? atof(e) : 8.0; if (cached < 0.0) cached = 0.0; }
+    return cached;
+#else
+    return 0.0;
+#endif
+}
+#define SSH_FLOOR_ACCEPT(resid_, rtol_) \
+    ((ssh_floor_factor() > 0.0) && ((double)(resid_) < ssh_floor_factor() * (double)(rtol_)))
+
 static int ssh_stall_window(int dflt)
 {
     static int cached = -1;                          /* 0 = unset, >0 = the override */
@@ -3332,40 +3353,45 @@ static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         KOKKOS_LAMBDA(const int row) { zz(row) = 0.0; qq(row) = 0.0; ss(row) = 0.0; pp(row) = 0.0; });
     g_pipe.ww.modify_device();
 
-    real_t gamma_prev = 0.0, alpha_prev = 0.0, resid = 0.0;
+    /* M16 G3: the scalar chain (dots, gamma/delta/alpha/beta, resid) is dbl_t — class-4 promotion;
+     * the vectors stay real_t; dbl_t == real_t in FP64 (byte gate by construction). */
+    dbl_t gamma_prev = 0.0, alpha_prev = 0.0, resid = 0.0;
     int fb = SSH_FB_NONE, iter = 0;
-    real_t best = 1e300; int stall = 0;
+    dbl_t best = 1e300; int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(20);
 
     for (iter = 1; iter <= si->maxiter; ++iter) {
-        real_t d3[3] = { 0.0, 0.0, 0.0 };
+        double d3[3] = { 0.0, 0.0, 0.0 };
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_reduce("fesom_pipe_dots", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int i, real_t &l0, real_t &l1, real_t &l2) {
-                l0 += rr(i) * uu(i); l1 += ww(i) * uu(i); l2 += rr(i) * rr(i);
+            KOKKOS_LAMBDA(const int i, double &l0, double &l1, double &l2) {
+                l0 += (double)rr(i) * (double)uu(i); l1 += (double)ww(i) * (double)uu(i); l2 += (double)rr(i) * (double)rr(i);
             }, d3[0], d3[1], d3[2]);
 
         MPI_Request req = MPI_REQUEST_NULL;
         if (parallel) {
-            MPI_Iallreduce(MPI_IN_PLACE, d3, 3, FESOM_MPI_REAL, MPI_SUM,
+            MPI_Iallreduce(MPI_IN_PLACE, d3, 3, MPI_DOUBLE, MPI_SUM,
                            partit->MPI_COMM_FESOM, &req);
             ++g_sshwire.s_ari;
         }
         payload();                                    /* the overlap window (R2: no progression) */
         if (parallel) MPI_Wait(&req, MPI_STATUS_IGNORE);
 
-        const real_t gamma = (double)d3[0], delta = (double)d3[1];
-        resid = sqrt((double)d3[2] / (double)N_global);
+        const dbl_t gamma = d3[0], delta = d3[1];
+        resid = sqrt(d3[2] / (double)N_global);
         if (!(gamma == gamma) || !(delta == delta) || !(resid == resid)) { fb = SSH_FB_NAN; break; }
         if (resid < rtol) break;
         if (gamma <= 0.0)                                                { fb = SSH_FB_INDEF; break; }
         if (resid < best * 0.999) { best = resid; stall = 0; }
-        else if (++stall >= STALL_WINDOW || resid > 1e3 * best)          { fb = SSH_FB_STALL; break; }
+        else if (++stall >= STALL_WINDOW || resid > 1e3 * best) {
+            if (resid <= 1e3 * best && SSH_FLOOR_ACCEPT(resid, rtol)) { ++g_ssh_floor_hits; break; }   /* SP float floor */
+            fb = SSH_FB_STALL; break;
+        }
 
-        real_t beta = 0.0, alpha = 0.0;
+        dbl_t beta = 0.0, alpha = 0.0;
         if (iter > 1) {
             beta = gamma / gamma_prev;
-            const real_t inv = delta / gamma - beta / alpha_prev;
+            const dbl_t inv = delta / gamma - beta / alpha_prev;
             if (!(inv == inv) || inv == 0.0)                             { fb = SSH_FB_NAN; break; }
             alpha = 1.0 / inv;
         } else {
@@ -3746,12 +3772,12 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         si->rr_fld.modify_device();
     };
     auto resid_norm = [&]() {
-        real_t t = 0.0;
+        double t = 0.0;                                   /* M16 G3: dbl_t norm (class-4 promotion) */
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_reduce("fesom_pcsi_rnorm", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int i, real_t &l) { l += rr(i) * rr(i); }, t);
-        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &t, 1, FESOM_MPI_REAL, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
-        return sqrt((double)t / (double)N_global);
+            KOKKOS_LAMBDA(const int i, double &l) { l += (double)rr(i) * (double)rr(i); }, t);
+        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, &t, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+        return sqrt(t / (double)N_global);
     };
 
     SSH_WIRE_LAUNCH(1);
@@ -3768,10 +3794,10 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         return 0;
     }
 
-    const real_t gmm = 0.5 * (g_pcsi.mu + g_pcsi.nu);
-    const real_t alp = 2.0 / (g_pcsi.mu - g_pcsi.nu);
-    const real_t c4  = 1.0 / (4.0 * alp * alp);        /* ⭐ T-6: 1/(4α²), NOT (1/4)α² */
-    real_t omega = 2.0 / gmm;
+    const dbl_t gmm = 0.5 * (g_pcsi.mu + g_pcsi.nu);   /* M16 G3: Chebyshev scalars in dbl_t */
+    const dbl_t alp = 2.0 / (g_pcsi.mu - g_pcsi.nu);
+    const dbl_t c4  = 1.0 / (4.0 * alp * alp);        /* ⭐ T-6: 1/(4α²), NOT (1/4)α² */
+    dbl_t omega = 2.0 / gmm;
 
     exch(dyn->d_eta_fld);
     true_resid();
@@ -3786,10 +3812,10 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         if (!ring) { dyn->d_eta_fld.modify_device(); exch(dyn->d_eta_fld); }
     }
     true_resid();
-    real_t resid = resid_norm();
+    dbl_t resid = resid_norm();
 
     int fb = SSH_FB_NONE, iter = 0;
-    real_t best = resid; int stall = 0;
+    dbl_t best = resid; int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(10);      /* in CHECK events, not iterations */
     /* M13 — NaN-BLIND ENTRY. `NaN >= rtol` is false, so a solve entered with a non-finite
      * state used to skip the loop entirely and report "converged in 0 iterations": the run
@@ -3819,7 +3845,10 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             if (!(resid == resid))                        { fb = SSH_FB_NAN;   break; }
             if (resid < rtol) break;
             if (resid < best * 0.999) { best = resid; stall = 0; }
-            else if (++stall >= STALL_WINDOW || resid > 1e3 * best) { fb = SSH_FB_STALL; break; }
+            else if (++stall >= STALL_WINDOW || resid > 1e3 * best) {
+                if (resid <= 1e3 * best && SSH_FLOOR_ACCEPT(resid, rtol)) { ++g_ssh_floor_hits; break; }   /* SP float floor */
+                fb = SSH_FB_STALL; break;
+            }
         }
     }
     if (fb == SSH_FB_NONE && iter > maxit) fb = SSH_FB_MAXITER;
@@ -3931,14 +3960,14 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             });
     };
     /* the ONE reduction: γ, δ, ρ and the seven Λ's, all from the CURRENT vector state */
-    real_t L[10];
+    double L[10];                                     /* M16 G3: the 10 dots in double (class-4 promotion) */
     auto reduce10 = [&]() {
-        real_t a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0,a8=0,a9=0;
+        double a0=0,a1=0,a2=0,a3=0,a4=0,a5=0,a6=0,a7=0,a8=0,a9=0;
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_reduce("fesom_oati_dots", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int i, real_t &g_, real_t &d_, real_t &r_,
-                          real_t &su, real_t &wm, real_t &wq, real_t &sq,
-                          real_t &nm, real_t &nq, real_t &zq) {
+            KOKKOS_LAMBDA(const int i, double &g_, double &d_, double &r_,
+                          double &su, double &wm, double &wq, double &sq,
+                          double &nm, double &nq, double &zq) {
                 const real_t r_i = rr(i), u_i = uu(i), w_i = ww(i);
                 const real_t m_i = mm(i), n_i = nn(i);
                 const real_t s_p = ss(i), q_p = qq(i), z_p = zz(i);   /* previous index */
@@ -3948,10 +3977,10 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             }, a0,a1,a2,a3,a4,a5,a6,a7,a8,a9);
         L[0]=a0; L[1]=a1; L[2]=a2; L[3]=a3; L[4]=a4;
         L[5]=a5; L[6]=a6; L[7]=a7; L[8]=a8; L[9]=a9;
-        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, L, 10, FESOM_MPI_REAL, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
+        if (parallel) { MPI_Allreduce(MPI_IN_PLACE, L, 10, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); ++g_sshwire.s_arb; }
     };
     /* one half-iteration: recurrences with (α,β) then the four state updates */
-    auto half_step = [&](real_t alpha, real_t beta) {
+    auto half_step = [&](dbl_t alpha, dbl_t beta) {
         const real_t al = (real_t)alpha, be = (real_t)beta;
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_for("fesom_oati_step", Kokkos::RangePolicy<>(0, N),
@@ -4015,10 +4044,10 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     payload();                                  /* m₀, n₀ */
     reduce10();
 
-    real_t gamma = L[0], delta = L[1], resid = sqrt(L[2] / (double)N_global);
-    real_t gamma_prev = 0.0, alpha_prev = 0.0;
+    dbl_t gamma = L[0], delta = L[1], resid = sqrt(L[2] / (double)N_global);   /* M16 G3: dbl_t chain */
+    dbl_t gamma_prev = 0.0, alpha_prev = 0.0;
     int fb = SSH_FB_NONE, iter = 0;
-    real_t best = resid; int stall = 0;
+    dbl_t best = resid; int stall = 0;
     const int STALL_WINDOW = ssh_stall_window(10);  /* in PAIRS */
 
     /* M13 — NaN-blind entry (see the pcsi guard above): a non-finite entry residual must
@@ -4027,10 +4056,10 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     else if (resid >= rtol)
     while (iter < si->maxiter) {
         /* ---- even half: (α_j, β_j) from the reduced γ_j, δ_j ---- */
-        real_t beta = 0.0, alpha = 0.0;
+        dbl_t beta = 0.0, alpha = 0.0;
         if (iter > 0) {
             beta = gamma / gamma_prev;
-            const real_t inv = delta / gamma - beta / alpha_prev;
+            const dbl_t inv = delta / gamma - beta / alpha_prev;
             if (!(inv == inv) || inv == 0.0) { fb = SSH_FB_NAN; break; }
             alpha = 1.0 / inv;
         } else {
@@ -4041,24 +4070,24 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
             fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=%.17g\n",
                     iter + 1, alpha, beta, resid);
         /* γ_{j+1}, δ_{j+1} by recurrence — NO communication (the point of the method) */
-        const real_t su = L[3], wm = L[4], wq = L[5], sq = L[6],
-                     nm = L[7], nq = L[8], zq = L[9];
-        const real_t s_u = delta + beta * su;                       /* (s_j, u_j) */
-        const real_t w_q = wm + beta * wq;                          /* (w_j, q_j) */
-        const real_t s_q = wm + 2.0 * beta * wq + beta * beta * sq; /* (s_j, q_j) */
-        const real_t z_q = nm + 2.0 * beta * nq + beta * beta * zq; /* (z_j, q_j) */
-        const real_t gamma1 = gamma - 2.0 * alpha * s_u + alpha * alpha * s_q;
-        const real_t delta1 = delta - 2.0 * alpha * w_q + alpha * alpha * z_q;
+        const dbl_t su = L[3], wm = L[4], wq = L[5], sq = L[6],
+                    nm = L[7], nq = L[8], zq = L[9];
+        const dbl_t s_u = delta + beta * su;                       /* (s_j, u_j) */
+        const dbl_t w_q = wm + beta * wq;                          /* (w_j, q_j) */
+        const dbl_t s_q = wm + 2.0 * beta * wq + beta * beta * sq; /* (s_j, q_j) */
+        const dbl_t z_q = nm + 2.0 * beta * nq + beta * beta * zq; /* (z_j, q_j) */
+        const dbl_t gamma1 = gamma - 2.0 * alpha * s_u + alpha * alpha * s_q;
+        const dbl_t delta1 = delta - 2.0 * alpha * w_q + alpha * alpha * z_q;
 
         half_step(alpha, beta);                 /* → index j+1 */
         ++iter;
         if (!(gamma1 == gamma1) || !(delta1 == delta1) || gamma1 <= 0.0) { fb = SSH_FB_INDEF; break; }
 
         /* ---- odd half: (α_{j+1}, β_{j+1}) from the RECURRED scalars ---- */
-        const real_t beta1 = gamma1 / gamma;
-        const real_t inv1  = delta1 / gamma1 - beta1 / alpha;
+        const dbl_t beta1 = gamma1 / gamma;
+        const dbl_t inv1  = delta1 / gamma1 - beta1 / alpha;
         if (!(inv1 == inv1) || inv1 == 0.0) { fb = SSH_FB_NAN; break; }
-        const real_t alpha1 = 1.0 / inv1;
+        const dbl_t alpha1 = 1.0 / inv1;
         payload();                              /* m_{j+1}, n_{j+1} — 1 exchange */
         if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
             fprintf(stderr, "[ssh-trace] it=%d al=%.17g be=%.17g res=(recurred)\n",
@@ -4075,7 +4104,10 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
         if (resid < rtol) break;
         if (gamma <= 0.0)                                      { fb = SSH_FB_INDEF; break; }
         if (resid < best * 0.999) { best = resid; stall = 0; }
-        else if (++stall >= STALL_WINDOW || resid > 1e3 * best) { fb = SSH_FB_STALL; break; }
+        else if (++stall >= STALL_WINDOW || resid > 1e3 * best) {
+            if (resid <= 1e3 * best && SSH_FLOOR_ACCEPT(resid, rtol)) { ++g_ssh_floor_hits; break; }   /* SP float floor */
+            fb = SSH_FB_STALL; break;
+        }
     }
     if (fb == SSH_FB_NONE && iter >= si->maxiter && resid >= rtol) fb = SSH_FB_MAXITER;
     if (fb != SSH_FB_NONE) { ssh_fb_announce(fb, iter, resid, partit, solve_id); return -1; }
