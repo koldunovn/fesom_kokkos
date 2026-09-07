@@ -82,7 +82,8 @@ preflight_bin () {            # preflight_bin <bin> <dp|sp>: refuse a binary who
 }
 want_of () { [ "$1" = sp ] && echo SINGLE || echo DOUBLE; }
 bin_of  () { [ "$1" = sp ] && echo "$BIN_SP" || echo "$BIN_DP"; }
-case " ${ARMS:-base} " in *" sp "*) preflight_bin "$BIN_SP" sp; preflight_bin "$BIN_DP" dp;; *) preflight_bin "$(bin_of $PREC)" $PREC; BIN=$(bin_of $PREC);; esac
+case " ${ARMS:-base} " in *" sp "*) preflight_bin "$BIN_SP" sp; preflight_bin "$BIN_DP" dp; BIN=$BIN_DP;; *) preflight_bin "$(bin_of $PREC)" $PREC; BIN=$(bin_of $PREC);; esac
+# (BIN is what the discarded warm-up leg runs: the dp binary of the pair — job 27289077 ran the M14 default there and segfaulted)
 [ -n "${DRYRUN:-}" ] && { echo "DRYRUN OK: PREC=$PREC ARMS='${ARMS:-base}' BIN_DP=$BIN_DP BIN_SP=${BIN_SP:-}"; exit 0; }
 
 [ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N does not exist"; exit 2; }
