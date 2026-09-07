@@ -863,6 +863,29 @@ void fesom_restart_read(const char           *path,
         if (vars[i].fld) { vars[i].fld->modify_host(); vars[i].fld->sync_device(); }
     }
 
+    /* M16 D3 (upstream #986 fesom_module.F90:438-459): a restart may hold ABSOLUTE salinity
+     * (migrating from a run without the knob) or the anomaly (a chain of anomaly runs writes
+     * the state as stored). Detect by the global maximum: absolute peaks near 41 psu, the
+     * anomaly near 41 - S_ref. Convert once when migrating; every AB level shifts alike. */
+    if (fesom_salt_anomaly_on()) {
+        fesom_tracer_data *Sd = &tracers->data[FESOM_TRACER_S];
+        const size_t n = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)mesh->nl;
+        real_t smax_loc = (real_t)-1e30, smax = (real_t)-1e30;
+        for (size_t i = 0; i < n; ++i) if (Sd->values[i] > smax_loc) smax_loc = Sd->values[i];
+        MPI_Allreduce(&smax_loc, &smax, 1, FESOM_MPI_REAL, MPI_MAX, partit->MPI_COMM_FESOM);
+        if (smax > 20.0) {
+            const real_t sref = fesom_S_ref_anomaly;
+            for (size_t i = 0; i < n; ++i) { Sd->values[i] -= sref; Sd->valuesAB[i] -= sref; Sd->valuesold[i] -= sref; }
+            Sd->values_fld.modify_host();    Sd->values_fld.sync_device();
+            Sd->valuesAB_fld.modify_host();  Sd->valuesAB_fld.sync_device();
+            Sd->valuesold_fld.modify_host(); Sd->valuesold_fld.sync_device();
+            if (partit->mype == 0)
+                printf("[fesom_port] use_salt_anomaly: absolute-salinity restart detected -> converted to S - S_ref\n");
+        } else if (partit->mype == 0) {
+            printf("[fesom_port] use_salt_anomaly: anomaly-salinity restart -> no conversion\n");
+        }
+    }
+
     /* The accumulated free-surface stiffness matrix. */
     {
 #if defined(FESOM_SINGLE_PRECISION)

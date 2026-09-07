@@ -78,9 +78,11 @@ static real_t bc_surface(int n,
          * linfs: virtual_salt = rsss*water_flux (balanced), real_salt_flux = 0.
          * zstar: virtual_salt = 0 (its whole block is skipped), and real_salt_flux carries the
          *        sea-ice brine-rejection / melt salt flux that REPLACES it. */
+        /* M16 D2 (#986 oce_ale_tracer :1740): the use_salt_anomaly background-dilution term
+         * S_ref*water_flux (0 unless the knob is on) — see upstream's derivation note there. */
         bc = dt * (forcing->virtual_salt[n]
                   + forcing->relax_salt[n]
-                  + forcing->real_salt_flux[n] * is_nonlinfs);
+                  + (forcing->real_salt_flux[n] + fesom_S_ref_anomaly * forcing->water_flux[n]) * is_nonlinfs);
     }
     return bc;
 }
@@ -380,7 +382,7 @@ KOKKOS_INLINE_FUNCTION
 static real_t bc_surface_kk(int n, int id, real_t sval, real_t dt, real_t vcpw,
                             const DV &heat_flux, const DV &water_flux,
                             const DV &virtual_salt, const DV &relax_salt,
-                            const DV &real_salt_flux, real_t is_nonlinfs)
+                            const DV &real_salt_flux, real_t is_nonlinfs, real_t s_ref)
 {
     /* M6.3: is_nonlinfs is PASSED IN (a device kernel cannot call the host getter). 0.0 under
      * linfs => both new terms vanish identically => the linfs path stays byte-locked. */
@@ -391,7 +393,7 @@ static real_t bc_surface_kk(int n, int id, real_t sval, real_t dt, real_t vcpw,
     } else if (id == 2) {
         bc = dt * (virtual_salt(n)
                   + relax_salt(n)
-                  + real_salt_flux(n) * is_nonlinfs);
+                  + (real_salt_flux(n) + s_ref * water_flux(n)) * is_nonlinfs);   /* M16 D2 (#986 :1740) */
     }
     return bc;
 }
@@ -436,6 +438,7 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
      * linfs (rsf is a hard 0 from therm_ice, and is_nonlinfs is 0.0). */
     auto rsflux     = forcing->real_salt_flux_fld.d();
     const real_t is_nonlinfs = fesom_is_nonlinfs();
+    const real_t s_ref       = fesom_S_ref_anomaly;   /* M16 D2 */
     auto vsalt      = forcing->virtual_salt_fld.d();
     auto rsalt      = forcing->relax_salt_fld.d();
     auto sw         = forcing->sw_3d_fld.d();
@@ -613,7 +616,7 @@ static void diff_ver_part_impl_ale_kk(int                          tr_num,
                 const real_t sval = trv(FESOM_NODE3D(n, nz, nl));
                 tr[nz] += bc_surface_kk(n, id, sval, dt, vcpw,
                                         heat_flux, water_flux, vsalt, rsalt,
-                                        rsflux, is_nonlinfs);
+                                        rsflux, is_nonlinfs, s_ref);
             }
 
             /* Shortwave penetration (Fortran 990; id==1, sw_3d flux divergence). */
@@ -675,7 +678,7 @@ void fesom_salinity_floor_kk(const struct fesom_mesh *mesh,
 {
     const int    nl      = mesh->nl;
     const int    N_full  = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    const real_t S_FLOOR = (real_t)0.5;
+    const real_t S_FLOOR = (real_t)0.5 - fesom_S_ref_anomaly;   /* M16 D2: the floor is absolute (anomaly space) */
     auto Sv     = tracers->data[FESOM_TRACER_S].values_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
     Kokkos::parallel_for("fesom_salinity_floor",

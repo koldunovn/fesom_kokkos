@@ -144,6 +144,7 @@ void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
     const int nl    = mesh->nl;
     auto T        = tracers->data[FESOM_TRACER_T].values_fld.d();
     auto S        = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D3 */
     auto areasvol = mesh->areasvol_fld.d();
     auto hnode    = mesh->hnode_fld.d();
     auto ulev_n   = mesh->ulevels_nod2D_fld.d();
@@ -158,7 +159,7 @@ void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
                 const double dv = (double)areasvol(i) * (double)hnode(i);
                 v += dv;
                 h += dv * (double)T(i);
-                s += dv * (double)S(i);
+                s += dv * (double)(S(i) + s_ref);   /* M16 D3: absolute salt content */
             }
         }, vol, heat, salt);
     dbl_t sums[3] = {vol, heat, salt};
@@ -1608,7 +1609,7 @@ int fesom_timestep(int                          step_n,
                     step_n, (double)dyn->eta_n[tr_loc], (double)dyn->d_eta[tr_loc],
                     (double)dyn->ssh_rhs[tr_loc], (double)mesh->hnode[k0],
                     (double)tracers->data[FESOM_TRACER_T].values[k0],
-                    (double)tracers->data[FESOM_TRACER_S].values[k0],
+                    (double)(tracers->data[FESOM_TRACER_S].values[k0] + fesom_S_ref_anomaly),
                     (double)aux->density_m_rho0[k0], (double)aux->Kv[k0],
                     (double)dyn->w[k0]);
         }

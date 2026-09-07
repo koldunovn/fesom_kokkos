@@ -367,6 +367,17 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-07 — Phase D PORTED: `FESOM_SALT_ANOMALY` (upstream #986 `use_salt_anomaly`).** Every
+  `FESOM_TRACER_S].values` reader carries `+ fesom_S_ref_anomaly` (0 unless on): EOS/sw_alpha_beta host+device,
+  ocean2ice, rsss/relax_salt (coupling + sss_runoff twins), the surface-BC dilution term `S_ref·water_flux`, KPP Bo,
+  the port-only 0.5-psu floor, salt/sss resolvers + the snapshot writer, restart detection (`max S > 20`), the
+  step-diagnostic bounds. **S_ref invariance (pi np2, 20 steps, DP):** off / 35 / 10 agree to T ≤ 3.2e-10,
+  S ≤ 1.4e-13, eta ≤ 4.2e-10 under linfs and zstar (rounding class — no missed consumer); knob unset ≡ `=0`
+  bitwise; knob unset ⇒ all 14 gate-0 configs bitwise vs ref0 (the `+0.0` no-ops hold). SP: off vs on
+  differ by T ~1e-4, S ~8e-5 (20 float ulps at 35), eta ~3e-5 — the float rounding class, as expected;
+  whether the anomaly REDUCES the SP salt error is the CORE2 question (jobs `core2_g1` / `core2_danom`).
+  Port-only divergences: the snapshot writer adds the offset (upstream has no snapshot); the knob carries
+  a measurement-only non-35 reference; `density_linear`/3-45 clip/`s<0` screen do not exist here.
 - **2026-09-07 — B3b PORTED and measured: the stiffness shadow.** SP pi zstar np2, 200 steps dt 100:
   the real_t-accumulated twin drifts from the dbl_t shadow monotonically, relL2(offdiag) 1.9e-7 → 1.25e-6
   (diag 5e-9 → 7e-8) — the instrument sees the defect at 200 steps that killed July's run at 118k; the

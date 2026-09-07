@@ -595,6 +595,8 @@ void fesom_io_write_snapshot(const char                  *path,
      * before this call; the guard catches a missing sync (docs/SYNC_MAP.md §4, §7). */
     gather_node(tracers->data[FESOM_TRACER_T].values_fld.h_checked(), nl, &gp, g_T,  comm);
     gather_node(tracers->data[FESOM_TRACER_S].values_fld.h_checked(), nl, &gp, g_S,  comm);
+    if (g_S && fesom_S_ref_anomaly != 0.0)   /* M16 D3 (port-only writer): the snapshot shows absolute salinity */
+        for (size_t i = 0; i < (size_t)nod2D * (size_t)nl; ++i) g_S[i] += fesom_S_ref_anomaly;
     gather_node(dyn->eta_n_fld.h_checked(),            1, &gp, g_eta, comm);
     gather_node(dyn->w_fld.h_checked(),               nl, &gp, g_w,  comm);
     gather_elem(dyn->uv_fld.h_checked(),            nl*2, &gp, g_uv, comm);
@@ -848,8 +850,10 @@ static void resolve_temp(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 }
 static void resolve_salt(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
+    /* M16 D3 (#986 io_meandata `offset`): the state stores S - S_ref; the file stays absolute. */
     const real_t *src = s->tracers->data[FESOM_TRACER_S].values;
-    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+    const real_t  off = fesom_S_ref_anomaly;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i] + off;
 }
 static void resolve_sst(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
@@ -862,7 +866,8 @@ static void resolve_sss(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
     const real_t *S = s->tracers->data[FESOM_TRACER_S].values;
     const int nl = s->mesh->nl;
-    for (size_t i = 0; i < n; ++i) out[i] += S[i * (size_t)nl + 0];
+    const real_t off = fesom_S_ref_anomaly;   /* M16 D3 */
+    for (size_t i = 0; i < n; ++i) out[i] += S[i * (size_t)nl + 0] + off;
 }
 static void resolve_ssh(const fesom_state *s, fesom_io_acc_t *out, size_t n)
 {
@@ -974,7 +979,8 @@ static void resolve_salt_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size
 {
     io_acc_dev_t out(out_dev, n);
     auto src = s->tracers->data[FESOM_TRACER_S].values_fld.d();
-    Kokkos::parallel_for("io_acc_salt", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i); });
+    const real_t off = fesom_S_ref_anomaly;   /* M16 D3 */
+    Kokkos::parallel_for("io_acc_salt", n, KOKKOS_LAMBDA(const size_t i){ out(i) += src(i) + off; });
 }
 static void resolve_sst_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_t n)
 {
@@ -988,7 +994,8 @@ static void resolve_sss_dev(const fesom_state *s, fesom_io_acc_t *out_dev, size_
     io_acc_dev_t out(out_dev, n);
     auto S = s->tracers->data[FESOM_TRACER_S].values_fld.d();
     const int nl = s->mesh->nl;
-    Kokkos::parallel_for("io_acc_sss", n, KOKKOS_LAMBDA(const size_t i){ out(i) += S(i * (size_t)nl + 0); });
+    const real_t off = fesom_S_ref_anomaly;   /* M16 D3 */
+    Kokkos::parallel_for("io_acc_sss", n, KOKKOS_LAMBDA(const size_t i){ out(i) += S(i * (size_t)nl + 0) + off; });
 }
 /* M7 Task A.1 — FESOM_SPEED_FLAT (one knob, four sites; io is two of them).
  *

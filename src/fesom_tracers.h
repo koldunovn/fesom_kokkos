@@ -56,4 +56,21 @@ typedef struct fesom_tracers {
 void fesom_tracers_alloc(fesom_tracers *t, const struct fesom_mesh *mesh);
 void fesom_tracers_free (fesom_tracers *t);
 
+/* M16 Phase D — upstream FESOM/fesom2#986 `use_salt_anomaly` (o_PARAM `S_ref_anomaly`):
+ * store the salinity state as the anomaly S - S_ref so the float32 spacing at open-ocean
+ * values (|S-35| < ~2) is 30-250x finer than at S~35 (ulp 1.9e-6 psu). S_ref is 0 unless the
+ * knob is on, so every `+ fesom_S_ref_anomaly` below is a bit-identical no-op when off.
+ *   FESOM_SALT_ANOMALY  unset/0 = off; 1 = on with S_ref = 35 (upstream); any other positive
+ *                       number = on with that reference (MEASUREMENT ONLY — the S_ref invariance
+ *                       gate); anything else aborts (the FESOM_WSPLIT house rule).
+ * Consumers carrying the offset (each cites its Fortran hunk): EOS densityJM + sw_alpha_beta,
+ * ocean2ice S_oc, rsss / relax_salt (ice_oce_coupling + sss_runoff twins), the salinity surface
+ * BC dilution term S_ref*water_flux, KPP surface buoyancy flux, the salinity floor, the
+ * `salt`/`sss` streams + the snapshot writer (absolute psu on disk), restart detection, the
+ * step-diagnostic bounds. Port-only consumers with no offset: none found (the S gradient in
+ * GM is offset-invariant to rounding, as upstream). */
+extern real_t fesom_S_ref_anomaly;
+int  fesom_salt_anomaly_on(void);      /* valid after fesom_salt_anomaly_setup */
+void fesom_salt_anomaly_setup(fesom_tracers *t, const struct fesom_mesh *mesh, int mype);
+
 #endif /* FESOM_TRACERS_H */

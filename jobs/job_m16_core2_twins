@@ -1,0 +1,36 @@
+#!/bin/bash
+#SBATCH --job-name=m16_twins
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --time=00:14:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/logs/twins.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/logs/twins.%j.err
+#
+# M16 CORE2 twin runs on a COMPUTE node (never the login node): the same 60-step CORE2 np8 leg
+# (PHC init, JRA55 1958, dt 1800 → 30 h, past several 3-h forcing records; snapshots at 30 and
+# 60; FESOM_PRINT_EVERY=1 so every step prints its CG iteration count) for a list of
+# (name, pinned binary, knobs) arms. Analysis is a separate login-node step:
+#   scripts/m16_core2_twins_report.py <out root> <name>=<name> ...
+#   sbatch --export=ALL,LEGS="dp_off:/abs/bin: sp_off:/abs/bin: dp_on:/abs/bin:FESOM_SALT_ANOMALY=1",TAG=g1 jobs/job_m16_core2_twins
+# LEGS = space-separated name:bin:knobs (knobs = comma-separated KEY=VAL, may be empty).
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+MESH=/work/ab0995/a270088/port2/mesh/core2         # private copy — NEVER /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+TAG=${TAG:-twins}; ROOT=/work/ab0995/a270088/port2/m16/core2_$TAG; mkdir -p "$ROOT"
+NSTEPS=${NSTEPS:-60}; SNAP=${SNAP:-30}
+source /sw/etc/profile.levante; source "$SRC/env.sh" >/dev/null 2>&1
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+echo "=== m16 twins tag=$TAG job=$SLURM_JOB_ID nsteps=$NSTEPS legs: $LEGS ==="
+for leg in $LEGS; do IFS=: read -r name bin knobs <<< "$leg"
+  out=$ROOT/$name; rm -rf "$out"; mkdir -p "$out"
+  ( while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_[A-Za-z0-9_]*\)=.*/\1/p')
+    export FESOM_PRINT_EVERY=1
+    if [ -n "$knobs" ]; then IFS=',' read -ra KV <<< "$knobs"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+    { echo "BIN=$bin"; md5sum "$bin"; env | grep -E '^FESOM_' | sort; } > "$out/ENV.txt"
+    srun -n 8 "$bin" "$MESH" "$out" 1800 $NSTEPS $SNAP "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"; echo $? > "$out/rc" )
+  echo "[$TAG/$name] rc=$(cat "$out/rc") bin=$(md5sum "$bin" | cut -c1-8) knobs='$knobs' snaps=$(ls "$out"/snap_*.nc 2>/dev/null | wc -l) $(grep -o 'PRECISION: [A-Z]*' "$out/run.log" | head -1)"
+done
+echo "=== runs done; report: $SRC/scripts/m16_core2_twins_report.py $ROOT ==="

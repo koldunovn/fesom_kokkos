@@ -21,7 +21,7 @@ struct fesom_partit;
  *
  * Mirror of densityJM_components (oce_ale_pressure_bv.F90:2605-2669).
  */
-void fesom_eos_jm_components(real_t t, real_t s,
+void fesom_eos_jm_components(real_t t, real_t s, real_t s_ref,
                              real_t *bulk_0, real_t *bulk_pz, real_t *bulk_pz2,
                              real_t *rhopot);
 

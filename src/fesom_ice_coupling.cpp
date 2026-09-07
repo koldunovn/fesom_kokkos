@@ -67,7 +67,7 @@ void fesom_ocean2ice(fesom_ice                  *ice,
         for (int n = 0; n < N; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;
             ice->srfoce_temp[n] = tracers->data[FESOM_TRACER_T].values[n * nl + 0];
-            ice->srfoce_salt[n] = tracers->data[FESOM_TRACER_S].values[n * nl + 0];
+            ice->srfoce_salt[n] = tracers->data[FESOM_TRACER_S].values[n * nl + 0] + fesom_S_ref_anomaly;   /* M16 D2 (#986 ice_oce_coupling :196) */
             ice->srfoce_ssh [n] = mesh->hbar[n];
         }
     } else {
@@ -79,7 +79,7 @@ void fesom_ocean2ice(fesom_ice                  *ice,
             ice->srfoce_temp[n] = (ice->srfoce_temp[n] * sf
                                    + tracers->data[FESOM_TRACER_T].values[n * nl + 0]) / sn;
             ice->srfoce_salt[n] = (ice->srfoce_salt[n] * sf
-                                   + tracers->data[FESOM_TRACER_S].values[n * nl + 0]) / sn;
+                                   + tracers->data[FESOM_TRACER_S].values[n * nl + 0] + fesom_S_ref_anomaly) / sn;   /* M16 D2 (#986 :205) */
             ice->srfoce_ssh [n] = (ice->srfoce_ssh [n] * sf + mesh->hbar[n]) / sn;
         }
     }
@@ -148,6 +148,7 @@ void fesom_ocean2ice_kk(fesom_ice                  *ice,
 
     auto trT     = tracers->data[FESOM_TRACER_T].values_fld.d();
     auto trS     = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D2: the ice sees ABSOLUTE S (#986 :196/:205) */
     auto hbar    = mesh->hbar_fld.d();
     auto uv      = dyn->uv_fld.d();
     auto ulev_n  = mesh->ulevels_nod2D_fld.d();
@@ -168,10 +169,10 @@ void fesom_ocean2ice_kk(fesom_ice                  *ice,
             const real_t T = trT(FESOM_NODE3D(n, 0, nl));
             const real_t S = trS(FESOM_NODE3D(n, 0, nl));
             const real_t H = hbar(n);
-            if (ice_update) { srf_t(n) = T; srf_s(n) = S; srf_h(n) = H; }
+            if (ice_update) { srf_t(n) = T; srf_s(n) = S + s_ref; srf_h(n) = H; }
             else {
                 srf_t(n) = (srf_t(n) * sf + T) / sn;
-                srf_s(n) = (srf_s(n) * sf + S) / sn;
+                srf_s(n) = (srf_s(n) * sf + S + s_ref) / sn;
                 srf_h(n) = (srf_h(n) * sf + H) / sn;
             }
         });
@@ -272,7 +273,7 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
         real_t rsss_default = sr->ref_sss;
         for (int n = 0; n < N; ++n) {
             real_t rsss = sr->ref_sss_local
-                            ? tracers->data[FESOM_TRACER_S].values[n * nl + 0]
+                            ? tracers->data[FESOM_TRACER_S].values[n * nl + 0] + fesom_S_ref_anomaly   /* M16 D2 (#986 :440) */
                             : rsss_default;
             forcing->virtual_salt[n] = rsss * forcing->water_flux[n];
         }
@@ -288,7 +289,7 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
     /* SSS restoring — Fortran lines 498-528. */
     for (int n = 0; n < N; ++n) {
         forcing->relax_salt[n] = sr->surf_relax_S
-                                 * (forcing->Ssurf[n]
+                                 * (forcing->Ssurf[n] - fesom_S_ref_anomaly   /* M16 D2 (#986 :504): Ssurf is absolute */
                                     - tracers->data[FESOM_TRACER_S].values[n * nl + 0]);
     }
     real_t net_relax = integrate_nod_2D(forcing->relax_salt, mesh, partit)
@@ -362,6 +363,7 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
     auto flxh  = ice->flx_h_fld.d();
     auto flxfw = ice->flx_fw_fld.d();
     auto trS   = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D2 */
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
 
     /* heat_flux/water_flux = -flx_h/-flx_fw over [0,N) (C lines 259-262). */
@@ -372,7 +374,7 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
         /* virtual_salt = rsss·water_flux over [0,N) (C lines 270-275). */
         Kokkos::parallel_for("ice_ocefl_vs", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int n) {
-                const real_t rsss = rssl ? trS(FESOM_NODE3D(n, 0, nl)) : rsss_def;
+                const real_t rsss = rssl ? trS(FESOM_NODE3D(n, 0, nl)) + s_ref : rsss_def;   /* M16 D2 (#986 :440) */
                 vs(n) = rsss * wf(n);
             });
         forcing->virtual_salt_fld.modify_device();
@@ -384,7 +386,7 @@ void fesom_ice_oce_fluxes_kk(fesom_ice                     *ice,
 
     /* relax_salt = surf_relax_S·(Ssurf − S) over [0,N) (C lines 286-290). */
     Kokkos::parallel_for("ice_ocefl_rs", Kokkos::RangePolicy<>(0, N),
-        KOKKOS_LAMBDA(const int n) { rs(n) = srlx * (ssurf(n) - trS(FESOM_NODE3D(n, 0, nl))); });
+        KOKKOS_LAMBDA(const int n) { rs(n) = srlx * (ssurf(n) - s_ref - trS(FESOM_NODE3D(n, 0, nl))); });   /* M16 D2 (#986 :504) */
     forcing->relax_salt_fld.modify_device();
     const real_t net_relax = integrate_nod_2D_kk(forcing->relax_salt_fld, mesh, partit) / ocean_area;
     /* subtract net_relax over OWNED (C lines 293-295 — NO cavity skip, unlike virtual_salt). */

@@ -1392,7 +1392,7 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
                    * ( aux->sw_alpha[FESOM_NODE3D(n, nzmin, nl)]
                          * forcing->heat_flux[n] / (real_t)FESOM_VCPW
                      + aux->sw_beta[FESOM_NODE3D(n, nzmin, nl)]
-                         * forcing->water_flux[n] * S[FESOM_NODE3D(n, nzmin, nl)] ); /* :409-410 */
+                         * forcing->water_flux[n] * (S[FESOM_NODE3D(n, nzmin, nl)] + fesom_S_ref_anomaly) ); /* :409-410; M16 D2 (#986 :362) absolute S */
     }
 
     /* interior mixing (ri_iwmix, :419) */
@@ -1546,6 +1546,7 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
     auto heat_flux  = forcing->heat_flux_fld.d();
     auto water_flux = forcing->water_flux_fld.d();
     auto Sval     = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D2 */
     auto ulev_n = mesh->ulevels_nod2D_fld.d();
     auto nlev_n = mesh->nlevels_nod2D_fld.d();
     auto ulev_e = mesh->ulevels_fld.d();
@@ -1584,7 +1585,7 @@ void fesom_kpp_mixing_kk(fesom_kpp                  *k,
             ustarV(n) = Kokkos::sqrt( Kokkos::sqrt(sx*sx + sy*sy) * density_0_r );
             BoV(n) = -G * ( sw_alpha(FESOM_NODE3D(n, nzmin, nl)) * heat_flux(n) / VCPW
                           + sw_beta(FESOM_NODE3D(n, nzmin, nl))
-                              * water_flux(n) * Sval(FESOM_NODE3D(n, nzmin, nl)) );
+                              * water_flux(n) * (Sval(FESOM_NODE3D(n, nzmin, nl)) + s_ref) );   /* M16 D2 (#986 :362) */
         });
 
     /* interior mixing (ri_iwmix, :419) */

@@ -37,3 +37,43 @@ void fesom_tracers_free(fesom_tracers *t)
     // PODs — do NOT free() the aliases (D13). Mirrors fesom_mesh_free.
     *t = fesom_tracers{};
 }
+
+/* ---- M16 Phase D: use_salt_anomaly (upstream #986 oce_setup_step.F90:255-282) ------------ */
+real_t fesom_S_ref_anomaly = 0.0;
+static int s_salt_anomaly = 0;
+int fesom_salt_anomaly_on(void) { return s_salt_anomaly; }
+
+void fesom_salt_anomaly_setup(fesom_tracers *t, const struct fesom_mesh *mesh, int mype)
+{
+    const char *e = getenv("FESOM_SALT_ANOMALY");
+    real_t sref = 0.0;
+    if (!e || !e[0] || strcmp(e, "0") == 0) {
+        s_salt_anomaly = 0;
+    } else if (strcmp(e, "1") == 0) {
+        s_salt_anomaly = 1; sref = 35.0;                     /* upstream: S_ref_anomaly = 35.0_WP */
+    } else {
+        char *end = NULL;
+        const double v = strtod(e, &end);
+        if (!end || *end || !(v > 0.0)) {
+            fprintf(stderr, "FESOM_SALT_ANOMALY=%s not supported (0 | 1 | <positive S_ref, "
+                            "measurement only>) — refusing to guess\n", e);
+            exit(1);
+        }
+        s_salt_anomaly = 1; sref = (real_t)v;
+    }
+    fesom_S_ref_anomaly = sref;
+    if (!s_salt_anomaly) return;
+    /* Initial conditions arrive absolute -> convert ONCE here, after the PHC load and
+     * insitu2pot (which need absolute S), before the AB copies (init_tracers_AB at step 1).
+     * Whole array, as upstream (`tracers%data(2)%values = ... - S_ref_anomaly`); every output
+     * path adds S_ref back to the whole array, so below-bottom slots read 0 on disk either way.
+     * Restart reads convert (or not) by detection in fesom_restart_read. */
+    const size_t n = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)mesh->nl;
+    real_t *S = t->data[FESOM_TRACER_S].values;
+    for (size_t i = 0; i < n; ++i) S[i] -= sref;
+    t->data[FESOM_TRACER_S].values_fld.modify_host();
+    t->data[FESOM_TRACER_S].values_fld.sync_device();
+    if (mype == 0)
+        printf("[fesom_port] use_salt_anomaly: salinity state = S - %g%s\n", (double)sref,
+               (sref == 35.0) ? "" : "  (non-standard S_ref: measurement only)");
+}

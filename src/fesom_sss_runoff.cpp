@@ -402,7 +402,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
         for (int n = 0; n < N_full; ++n) {
             if (sr->ref_sss_local) {
                 int ul = mesh->ulevels_nod2D[n] - 1;
-                rsss = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
+                rsss = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)] + fesom_S_ref_anomaly;   /* M16 D2 (#986 :440) */
             }
             forcing->virtual_salt[n] = rsss * forcing->water_flux[n];
         }
@@ -421,7 +421,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
         for (int n = 0; n < N_full; ++n) {
             int ul = mesh->ulevels_nod2D[n] - 1;
             real_t Stop = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
-            forcing->relax_salt[n] = sr->surf_relax_S * (forcing->Ssurf[n] - Stop);
+            forcing->relax_salt[n] = sr->surf_relax_S * (forcing->Ssurf[n] - fesom_S_ref_anomaly - Stop);   /* M16 D2 (#986 :504) */
         }
         real_t net = integrate_nod_2D(forcing->relax_salt, mesh, partit) / mesh->ocean_area;
         for (int n = 0; n < N_full; ++n) {

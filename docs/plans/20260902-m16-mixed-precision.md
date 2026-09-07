@@ -626,15 +626,15 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 
 **Files:** Modify `src/fesom_tracers.h` (or `fesom_constants.h`), `src/fesom_main.cpp`, `src/fesom_phc.cpp`
 
-- [ ] `FESOM_SALT_ANOMALY` env knob: unset/0 = off; `1` = on with `S_ref = 35`; any other positive number
+- [x] (2026-09-07: `fesom_tracers.{h,cpp}` `fesom_S_ref_anomaly` + `fesom_salt_anomaly_setup`, abort on other values) `FESOM_SALT_ANOMALY` env knob: unset/0 = off; `1` = on with `S_ref = 35`; any other positive number
       = on with that reference (**measurement-only**, for the invariance gate); abort on other values
       (the wsplit precedent); a global `S_ref_anomaly` (`real_t`) set **once** in setup
-- [ ] conversion `S -= S_ref` **after** the PHC load and `insitu2pot` (`fesom_phc.cpp:773` — it needs
+- [x] (called in `fesom_main.cpp` after the PHC/blob IC, before the ice IC and the restart read; whole array as upstream) conversion `S -= S_ref` **after** the PHC load and `insitu2pot` (`fesom_phc.cpp:773` — it needs
       absolute S), before the AB copies are made; rank-0 line `use_salt_anomaly: salinity state = S - 35`
-- [ ] refuse-to-start guard for every port feature whose consumer carries no offset — enumerate them by
+- [x] (enumerated 2026-09-07 by grepping every `FESOM_TRACER_S].values` reader: EOS ×2, sw_alpha_beta ×2, ocean2ice ×2, oce_fluxes rsss/relax ×2, sss_runoff rsss/relax, bc_surface ×2, KPP Bo ×2, the port-only salinity floor, io salt/sss ×2 + the snapshot writer, restart read, step/probe/conserv diagnostics — ALL carry the offset; GM's S gradient is offset-invariant to rounding as upstream; ddmix is `#error`-guarded, KPP nonlocal is never consumed, no cavities/icebergs/age/clim_relax exist ⇒ **no guard needed, none added**) refuse-to-start guard for every port feature whose consumer carries no offset — enumerate them by
       grepping the D2 list against the port's option set (cavities/icebergs/age tracer do not exist here;
       check GM, KPP nonlocal, 3-D relaxation, any salt diagnostic)
-- [ ] gate: off ⇒ pi np1/np2 bit-identical to the SP binary built at the same commit in `~/m16_scratch`
+- [x] **PASS 2026-09-07** (`scripts/m16_salt_anomaly_gate.sh`, frozen `bin/d0` DP `7c1d83df` / `bin/d0sp` SP `8ad967fe`): knob unset ⇒ `m16_gate0.sh all` np1 14/14 BYTE-IDENTICAL to ref0; unset ≡ `=0` bitwise (DP and SP); DP restart round-trip (no knob) bitwise. Spec: off ⇒ pi np1/np2 bit-identical to the SP binary built at the same commit in `~/m16_scratch`
       (SP) and to `ref0` via `m16_gate0.sh` (DP)
 
 ### Task D2: Consumers add the offset back — line by line against the Fortran
@@ -643,20 +643,20 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 `src/fesom_ice_coupling.cpp`, `src/fesom_sss_runoff.cpp`, `src/fesom_tracer_diff.cpp`, `src/fesom_kpp.cpp`,
 `src/fesom_ice_thermo.cpp` (if it reads S directly)
 
-- [ ] for each hunk in `pr986.diff` + the `S_ref_anomaly` hunks of `pr940.diff` (`oce_ale_pressure_bv`,
+- [x] (every hunk applied, each site comments its Fortran line; `density_linear`, the 3/45 clip and the `s<0` blow-up screen do not exist in the port — only the port's own 0.5 floor, shifted) for each hunk in `pr986.diff` + the `S_ref_anomaly` hunks of `pr940.diff` (`oce_ale_pressure_bv`,
       `ice_oce_coupling`, `oce_ale_tracer`, `oce_ale_mixing_kpp`, `oce_setup_step`, `write_step_info`):
       find the port twin, apply `+ S_ref_anomaly` in the **same expression**, cite the Fortran line in a
       comment; the checklist is the diff, not July's notes
-- [ ] EOS: `s_abs = s + S_ref` then the polynomial in `s_abs` (both host twin and device kernel); the
+- [x] (`s_ref` is a parameter of `fesom_eos_jm_components{,_kk}` — a device lambda cannot read the host global) EOS: `s_abs = s + S_ref` then the polynomial in `s_abs` (both host twin and device kernel); the
       McDougall `sw_alpha_beta` `s1 = SF1 + S_ref`; linear/`density_linear` forms `(s_abs − 35)`
-- [ ] ice–ocean: `S_oc = salt + S_ref` (both the direct and the running-mean branches), `rsss =
+- [x] ice–ocean: `S_oc = salt + S_ref` (both the direct and the running-mean branches), `rsss =
       salt(top) + S_ref` under `ref_sss_local`, `relax_salt = surf_relax_S·(Ssurf − S_ref − S_top)`,
       `dens_flux` with `(salt + S_ref)`
-- [ ] surface BC: `flux = virtual_salt + relax_salt + (real_salt_flux + S_ref·water_flux)·is_nonlinfs`
+- [x] surface BC: `flux = virtual_salt + relax_salt + (real_salt_flux + S_ref·water_flux)·is_nonlinfs`
       (both the host path `:77-83` and the device functor `:392-394`)
-- [ ] KPP surface buoyancy flux: `sw_beta·water_flux·(S_top + S_ref)` (`:1385`, `:1577`)
-- [ ] clipping 3/45 psu and the `pressure_bv` "blows up" screen shifted by `−S_ref`
-- [ ] gate (the one that can actually find a missed site — **S_ref invariance, DP, pi, NOW**): three
+- [x] KPP surface buoyancy flux: `sw_beta·water_flux·(S_top + S_ref)` (`:1385`, `:1577`)
+- [x] (not in the port; the port-only `fesom_salinity_floor_kk` 0.5 psu floor shifted instead) clipping 3/45 psu and the `pressure_bv` "blows up" screen shifted by `−S_ref`
+- [x] **PASS 2026-09-07** (DP pi np2, 20 steps, snapshots 10+20; linfs: off/35/10 pairwise T ≤ 3.2e-10, S ≤ 1.4e-13, eta ≤ 3.3e-13; zstar: T ≤ 1.3e-10, S ≤ 1.4e-13, eta ≤ 4.3e-10 — rounding class, all pairs; SP reported: T ~1e-4, S ~8e-5, eta ~3e-5 = float rounding class). Spec: gate (the one that can actually find a missed site — **S_ref invariance, DP, pi, NOW**): three
       runs, off / `FESOM_SALT_ANOMALY=1` (35) / `=10`, 20 steps; `mp_divergence_curve.py` pairwise:
       all three agree to the rounding class (relative L2 ≲ 1e-13 on T/S/η) — a missed consumer shows
       as an O(1) error that scales with the reference; plus off ⇒ still bit-identical
@@ -666,14 +666,14 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 **Files:** Modify `src/fesom_io_restart.cpp`, `src/fesom_io.cpp`, `src/fesom_io_stream.cpp`,
 `src/fesom_main.cpp`
 
-- [ ] restart read: global `max(salt)` (`FESOM_MPI_REAL`, `MPI_MAX`); `> 20` ⇒ subtract `S_ref` from
+- [x] restart read: global `max(salt)` (`FESOM_MPI_REAL`, `MPI_MAX`); `> 20` ⇒ subtract `S_ref` from
       `values`, `valuesAB`, `valuesold` once, print "absolute-salinity restart detected → converted";
       else "anomaly restart → no conversion"; restart **write** stores the state as held (upstream)
-- [ ] output: per-stream additive offset applied at accumulation; `salt` and `sss` register `S_ref`
+- [x] (offset added inside the four salt/sss resolvers — the port's equivalent of upstream's per-stream `offset` at accumulation — plus the port-only snapshot writer) output: per-stream additive offset applied at accumulation; `salt` and `sss` register `S_ref`
       so files stay absolute psu (both the host and the device accumulation paths)
-- [ ] step-diag `S[min,max]` bounds shifted by `−S_ref` (upstream `write_step_info`); the `Ssurf` read at
+- [x] (the step line prints `S_min/max + S_ref`, i.e. absolute psu; the IC print at `:600` runs BEFORE the conversion and is left alone; probe/mp-trace/conserv diagnostics add `S_ref`) step-diag `S[min,max]` bounds shifted by `−S_ref` (upstream `write_step_info`); the `Ssurf` read at
       `fesom_main.cpp:574` gets `+ S_ref`
-- [ ] gate (DP, pi, on): restart at step 10 written in anomaly, read back, "no conversion" printed,
+- [x] **PASS 2026-09-07** (zstar np2: anomaly restart @10 → "no conversion" → run to 20 BIT-IDENTICAL to the straight anomaly run; absolute restart @10 read with the knob → "converted" → T 1.2e-10, S 7e-14, eta 4.2e-10 vs the anomaly run; same shape in SP, T 1.1e-4 / bitwise; the `salt` stream check needs an io config and is deferred to CORE2). Spec: gate (DP, pi, on): restart at step 10 written in anomaly, read back, "no conversion" printed,
       run to 20 bit-identical to the straight anomaly run; a restart written **without** the knob read
       **with** it prints "converted" and the run then matches the anomaly run to the rounding class; the
       `salt` stream mean equals the off run's to rounding (absolute psu on disk)

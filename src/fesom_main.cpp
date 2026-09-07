@@ -967,6 +967,10 @@ skip_rest_state:
                                /*amp_C=*/      5.0);
     }
 
+    /* M16 D1 (#986 oce_setup_step.F90:255-282): the salinity anomaly conversion — after the PHC
+     * load + insitu2pot (absolute S), before the ice IC / restart read / AB copies. */
+    fesom_salt_anomaly_setup(&tracers, &mesh, mpi.mype);
+
     /* Sea-ice cold-start IC: must run AFTER tracer IC so SST is set.
      * Mirrors Fortran ice_initial_state at ice_setup_step.F90:500-521. */
     fesom_ice_initial_state(&ice, &tracers, &mpi, &mesh);
@@ -1591,7 +1595,8 @@ skip_rest_state:
                            "stress=%.2e hf=%.2e wf=%.2e vs=%.2e rs=%.2e | "
                            "hp=%.2e pgf=%.2e rho=%.2e bv[%.1e,%.1e] Kv=%.2e Av=%.2e\n",
                            n, iters, (double)uv_max, (double)eta_max, (double)w_max,
-                           (double)T_min, (double)T_max, (double)S_min, (double)S_max,
+                           (double)T_min, (double)T_max,
+                           (double)(S_min + fesom_S_ref_anomaly), (double)(S_max + fesom_S_ref_anomaly),   /* M16 D3: absolute psu in the log */
                            (double)stress_max, (double)hflux_max, (double)wflux_max,
                            (double)vsalt_max, (double)rsalt_max,
                            (double)hpres_max, (double)pgf_max, (double)dens_max,
@@ -1715,7 +1720,7 @@ skip_rest_state:
                                     k, mpi.myList_nod2D[ln], (double)dyn.eta_n[ln],
                                     (double)aux.hpressure[i3], (double)aux.density_m_rho0[i3],
                                     (double)tracers.data[FESOM_TRACER_T].values[i3],
-                                    (double)tracers.data[FESOM_TRACER_S].values[i3],
+                                    (double)(tracers.data[FESOM_TRACER_S].values[i3] + fesom_S_ref_anomaly),
                                     (double)aux.Kv[i3], (double)dyn.w[i3], (double)dyn.w_i[i3]);
                         }
                         if (n == 1) {            /* one-time IC columns: T,S per node */
@@ -1727,7 +1732,7 @@ skip_rest_state:
                                     fprintf(stderr, " %.6f", (double)tracers.data[FESOM_TRACER_T].values[FESOM_NODE3D(ln, z2, nl)]);
                                 fprintf(stderr, "\n[elemprobe-ic] n%d gid=%d Scol:", k, mpi.myList_nod2D[ln]);
                                 for (int z2 = 0; z2 < mesh.nlevels_nod2D[ln] - 1; ++z2)
-                                    fprintf(stderr, " %.6f", (double)tracers.data[FESOM_TRACER_S].values[FESOM_NODE3D(ln, z2, nl)]);
+                                    fprintf(stderr, " %.6f", (double)(tracers.data[FESOM_TRACER_S].values[FESOM_NODE3D(ln, z2, nl)] + fesom_S_ref_anomaly));
                                 fprintf(stderr, "\n");
                             }
                         }

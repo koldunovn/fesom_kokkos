@@ -20,7 +20,7 @@
  * Literal port of densityJM_components (oce_ale_pressure_bv.F90:2605-2669).
  * All constants reproduced verbatim — do NOT round, fold, or "simplify."
  */
-void fesom_eos_jm_components(real_t t, real_t s,
+void fesom_eos_jm_components(real_t t, real_t s, real_t s_ref,
                              real_t *bulk_0, real_t *bulk_pz, real_t *bulk_pz2,
                              real_t *rhopot)
 {
@@ -49,22 +49,23 @@ void fesom_eos_jm_components(real_t t, real_t s,
     static const real_t bss  = -5.72466e-3, bsst = 1.02270e-4;
     static const real_t bsst2 = -1.65460e-6, bss2 = 4.8314e-4;
 
-    real_t s_sqrt = sqrt(s);
+    const real_t s_abs = s + s_ref;   /* M16 D2 (#986 :2744): EOS needs absolute S; s_ref = 0 unless use_salt_anomaly */
+    real_t s_sqrt = sqrt(s_abs);
 
     *bulk_0 =  a0      + t*(at   + t*(at2  + t*(at3 + t*at4)))
-             + s* (as  + t*(ast  + t*(ast2 + t*ast3))
+             + s_abs* (as  + t*(ast  + t*(ast2 + t*ast3))
                   + s_sqrt*(ass  + t*(asst + t*asst2)));
 
     *bulk_pz =  ap  + t*(apt  + t*(apt2 + t*apt3))
-                    + s*(aps + t*(apst + t*apst2) + s_sqrt*apss);
+                    + s_abs*(aps + t*(apst + t*apst2) + s_sqrt*apss);
 
     *bulk_pz2 = ap2 + t*(ap2t + t*ap2t2)
-                   + s *(ap2s + t*(ap2st + t*ap2st2));
+                   + s_abs *(ap2s + t*(ap2st + t*ap2st2));
 
     *rhopot =  b0 + t*(bt + t*(bt2 + t*(bt3  + t*(bt4  + t*bt5))))
-                  + s*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4))))
-                  + s*s_sqrt*(bss + t*(bsst + t*bsst2))
-                  + s*s* bss2;
+                  + s_abs*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4))))
+                  + s_abs*s_sqrt*(bss + t*(bsst + t*bsst2))
+                  + s_abs*s_abs* bss2;
     /* Note: Fortran wrote s*(... + s_sqrt*(...) + s*bss2) which is identical
        to s*(...) + s*s_sqrt*(...) + s*s*bss2 — expanded here for clarity. */
 }
@@ -82,7 +83,7 @@ void fesom_eos_jm_components(real_t t, real_t s,
  * Do NOT round, fold, or "simplify" — see PORTING_LESSONS §1/§2.
  */
 KOKKOS_INLINE_FUNCTION
-void fesom_eos_jm_components_kk(real_t t, real_t s,
+void fesom_eos_jm_components_kk(real_t t, real_t s, real_t s_ref,
                                 real_t *bulk_0, real_t *bulk_pz, real_t *bulk_pz2,
                                 real_t *rhopot)
 {
@@ -111,22 +112,23 @@ void fesom_eos_jm_components_kk(real_t t, real_t s,
     constexpr real_t bss  = -5.72466e-3, bsst = 1.02270e-4;
     constexpr real_t bsst2 = -1.65460e-6, bss2 = 4.8314e-4;
 
-    real_t s_sqrt = Kokkos::sqrt(s);
+    const real_t s_abs = s + s_ref;   /* M16 D2 (#986 :2744) */
+    real_t s_sqrt = Kokkos::sqrt(s_abs);
 
     *bulk_0 =  a0      + t*(at   + t*(at2  + t*(at3 + t*at4)))
-             + s* (as  + t*(ast  + t*(ast2 + t*ast3))
+             + s_abs* (as  + t*(ast  + t*(ast2 + t*ast3))
                   + s_sqrt*(ass  + t*(asst + t*asst2)));
 
     *bulk_pz =  ap  + t*(apt  + t*(apt2 + t*apt3))
-                    + s*(aps + t*(apst + t*apst2) + s_sqrt*apss);
+                    + s_abs*(aps + t*(apst + t*apst2) + s_sqrt*apss);
 
     *bulk_pz2 = ap2 + t*(ap2t + t*ap2t2)
-                   + s *(ap2s + t*(ap2st + t*ap2st2));
+                   + s_abs *(ap2s + t*(ap2st + t*ap2st2));
 
     *rhopot =  b0 + t*(bt + t*(bt2 + t*(bt3  + t*(bt4  + t*bt5))))
-                  + s*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4))))
-                  + s*s_sqrt*(bss + t*(bsst + t*bsst2))
-                  + s*s* bss2;
+                  + s_abs*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4))))
+                  + s_abs*s_sqrt*(bss + t*(bsst + t*bsst2))
+                  + s_abs*s_abs* bss2;
 }
 
 /*--- pressure_bv (Phase 1 subset) -------------------------------------------
@@ -177,7 +179,7 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
         /* Pass 1: JM-EOS components per layer. */
         for (int nz = nzmin; nz < nzmax; ++nz) {
             size_t i = FESOM_NODE3D(n, nz, nl);
-            fesom_eos_jm_components(T[i], S[i],
+            fesom_eos_jm_components(T[i], S[i], fesom_S_ref_anomaly,
                                     &bulk_0[nz], &bulk_pz[nz], &bulk_pz2[nz],
                                     &rhopot[nz]);
         }
@@ -326,6 +328,7 @@ void fesom_pressure_bv_kk(const struct fesom_tracers *tracers,
     /* Device views (LayoutRight; host-current inputs pushed by the driver rail). */
     auto T    = tracers->data[FESOM_TRACER_T].values_fld.d();
     auto S    = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D2: captured (a device lambda cannot read the host global) */
     auto Z    = mesh->Z_fld.d();
     /* M6.3 (Z7): the C reads the LIVE per-node Z_3d_n everywhere here (fesom_eos.c:124,154,
      * 190,196). Under linfs Z_3d_n(nz,n) == Z(nz) by construction, so this is a no-op for the
@@ -359,7 +362,7 @@ void fesom_pressure_bv_kk(const struct fesom_tracers *tracers,
             /* Pass 1: JM-EOS components per layer. */
             for (int nz = nzmin; nz < nzmax; ++nz) {
                 size_t i = FESOM_NODE3D(n, nz, nl);
-                fesom_eos_jm_components_kk(T(i), S(i),
+                fesom_eos_jm_components_kk(T(i), S(i), s_ref,
                                            &bulk_0[nz], &bulk_pz[nz], &bulk_pz2[nz],
                                            &rhopot[nz]);
             }
@@ -893,7 +896,7 @@ void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
         int nzmin = mesh->ulevels_nod2D[n] - 1;     /* 0-based */
         for (int nz = nzmin; nz < nzmax; ++nz) {
             real_t t1 = T[FESOM_NODE3D(n, nz, nl)] * 1.00024;
-            real_t s1 = S[FESOM_NODE3D(n, nz, nl)];
+            real_t s1 = S[FESOM_NODE3D(n, nz, nl)] + fesom_S_ref_anomaly;   /* M16 D2 (#986 :2896): McDougall wants absolute S */
             /* M6.3 (Z7): the C reads Z_3d_n, LIVE under zstar (fesom_eos.c:530). */
             real_t p1 = fabs(mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)]);
 
@@ -950,6 +953,7 @@ void fesom_compute_sw_alpha_beta_kk(const struct fesom_tracers *tracers,
     const int myDim = mesh->myDim_nod2D;
     auto T  = tracers->data[FESOM_TRACER_T].values_fld.d();
     auto S  = tracers->data[FESOM_TRACER_S].values_fld.d();
+    const real_t s_ref = fesom_S_ref_anomaly;   /* M16 D2 */
     auto Z  = mesh->Z_fld.d();
     auto Z3d = mesh->Z_3d_n_fld.d();   /* M6.3 (Z7): the C uses abs(Z_3d_n(nz,n)) here */
     auto ulev = mesh->ulevels_nod2D_fld.d();
@@ -963,7 +967,7 @@ void fesom_compute_sw_alpha_beta_kk(const struct fesom_tracers *tracers,
             int nzmin = ulev(n) - 1;            /* 0-based */
             for (int nz = nzmin; nz < nzmax; ++nz) {
                 real_t t1 = T(FESOM_NODE3D(n, nz, nl)) * 1.00024;
-                real_t s1 = S(FESOM_NODE3D(n, nz, nl));
+                real_t s1 = S(FESOM_NODE3D(n, nz, nl)) + s_ref;   /* M16 D2 (#986 :2896) */
                 real_t p1 = Kokkos::fabs(Z3d(FESOM_NODE3D(n, nz, nl)));
 
                 real_t t1_2 = t1*t1;
