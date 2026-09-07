@@ -302,7 +302,7 @@ Create `scripts/m16_gate0.sh`
       resolved precond variant and the precision banner line so it can no longer claim "default path
       certified against main" while variant 1 is in effect
 - [x] lab tool: same default and announce
-- [x] gate (Serial, pi) — `scripts/m16_p3_gate.sh`, 2026-09-07: stages 1–6 PASS (gate0 np1/np2 bitwise with PRECOND=0; default differs in 235 fields; defect ratio 3.9e-14 for 1/2/3 vs 0.299 for 0/4 on pi, **0.638 on CORE2 = the M10 F1 number**; SYMPRE skipped/BUILT as specified; pcsi+4 rc=1; knob summary names the variant in both branches). CORE2 np1 login (PHC+JRA 1958, 20 steps): **CG mean iterations 133.2 → 81.3 (−39.0 %)**, pcsi 146.8 → 97.5 (−33.6 %); pcsi-vs-cg step-20 distance under v1 is the v0 class for eta/S/T/u/v (Av/Kv are KPP threshold fields, excluded; cg2/oati controls under v1 recorded in `…/m16/gate0/p3_build-m16serial/`) : `m16_gate0.sh` (which exports `PRECOND=0`) **bit-identical**; default run
+- [x] gate (Serial, pi) — `scripts/m16_p3_gate.sh`, 2026-09-07: stages 1–6 PASS (gate0 np1/np2 bitwise with PRECOND=0; default differs in 235 fields; defect ratio 3.9e-14 for 1/2/3 vs 0.299 for 0/4 on pi, **0.638 on CORE2 = the M10 F1 number**; SYMPRE skipped/BUILT as specified; pcsi+4 rc=1; knob summary names the variant in both branches). CORE2 np1 login (PHC+JRA 1958, 20 steps): **CG mean iterations 133.2 → 81.3 (−39.0 %)**, pcsi 146.8 → 97.5 (−33.6 %); pcsi-vs-cg step-20 distance under v1 is the v0 class for eta/S/T/u/v (Av/Kv are KPP threshold fields, excluded; **controls settle it**: cg2-vs-cg and oati-vs-cg under v1 show the SAME Av/Kv jumps at the same nodes (9.8e-2/9.7e-2 @352202/160815) — mixed-layer threshold sensitivity of this 20-step CORE2 np1 config, not a pcsi property; pcsi's eta/T/S/u/v are within 3× of the cg2 control; `[ssh-verify]` true residual below rtol on every solve for pcsi/cg2/oati; a pcsi rerun is bit-identical (Serial repro)) : `m16_gate0.sh` (which exports `PRECOND=0`) **bit-identical**; default run
       differs **and** mean CG iterations drop by the #984 class; symmetry-defect assertion (reuse
       `:2513-2528`): ≈ 0 for 1/2/3, > 0 for 0/4; `FESOM_SSH_SOLVER=pcsi` under the default converges to
       the same solution class as `cg` under the default (`mp_divergence_curve.py`); variant 4 + `pcsi`
@@ -319,43 +319,45 @@ Create `scripts/m16_gate0.sh`
 **Files:** Modify `src/fesom_types.h`, `CMakeLists.txt`, `src/fesom_main.cpp`; Create
 `scripts/mp_assert_banner.sh` (from M8)
 
-- [ ] `fesom_types.h`: apply July's diff — `#if defined(FESOM_SINGLE_PRECISION)` → `real_t = float`,
+- [x] `fesom_types.h`: apply July's diff — `#if defined(FESOM_SINGLE_PRECISION)` → `real_t = float`,
       `FESOM_MPI_REAL = MPI_FLOAT` else `double`/`MPI_DOUBLE`; `typedef double dbl_t;` with the comment
       "deliberate FP64 island — never flips; every use is a row in PRECISION_ISLANDS.md"
-- [ ] `CMakeLists.txt`: `option(USE_SINGLE_PRECISION "Build the model state in single precision (real_t=float)" OFF)`
+- [x] `CMakeLists.txt` (directory-scoped `add_compile_definitions` so every TU sees one `real_t`): `option(USE_SINGLE_PRECISION "Build the model state in single precision (real_t=float)" OFF)`
       → `target_compile_definitions(... FESOM_SINGLE_PRECISION)`; `message(STATUS ...)`; **no alias**
       (D6); reject any non-boolean value
-- [ ] banner (rank 0, after MPI init, before Kokkos init) in the upstream shape:
+- [x] banner (rank 0, after MPI init, before Kokkos init) in the upstream shape:
       `[fesom_port] PRECISION: SINGLE|DOUBLE  real_t=float|double  storage=32|64 bits  digits=6|15  epsilon=1.19e-07|2.22e-16`
 - [ ] `scripts/mp_assert_banner.sh <log> <SINGLE|DOUBLE>` (July's), exercised on np1 and np2 logs
-- [ ] gate: FP64 Serial build, `m16_gate0.sh` on pi np1 + np2 **bit-identical**; SP configure succeeds
-      **and** `FESOM_SINGLE_PRECISION` appears in every TU of `compile_commands.json` (July: 43/43);
-      `USE_SINGLE_PRECISION=maybe` is rejected
+- [x] gate (2026-09-07): FP64 Serial build, `m16_gate0.sh` on pi np1 + np2 **bit-identical**; SP configure succeeds
+      **and** `FESOM_SINGLE_PRECISION` appears in every TU of `compile_commands.json` (July: 43/43) — **54/54 model TUs** carry it, the 20 without are `externals/kokkos` + generated;
+      `USE_SINGLE_PRECISION=maybe` is rejected (FATAL_ERROR); gate0 all 11 configs np1+np2 bitwise; banner DOUBLE asserted on np1 and np2 logs
 
 ### Task A2: The conformance table — classify before sweeping
 
 **Files:** Create `docs/PRECISION_ISLANDS.md` (from M8, restructured); Modify `docs/reference/upstream_sp/README.md`
 
-- [ ] move July's registry over; add the column **"upstream (#940) placement / Fortran line"** and the
+- [x] move July's registry over; add the column **"upstream (#940) placement / Fortran line"** and the
       class tag (1–5, Technical details)
-- [ ] classify **every** existing row and every `dbl_t` July introduced; the class-3 rows (CG scalar
+- [x] classify **every** existing row and every `dbl_t` July introduced; the class-3 rows (CG scalar
       chain + dot accumulators + Allreduce scalars, mesh metrics precompute, PHC init path, min/max
       diagnostics, mesh volume sums, calendar seconds-in-day) are marked **"flip to real_t in Phase B"**
-- [ ] add rows for the m14-only code (class 4): SE barotropic state and its `H0e`/wide-halo buffers,
+- [x] add rows for the m14-only code (class 4): SE barotropic state and its `H0e`/wide-halo buffers,
       EVPWIDE lean buffers, CGPIPE/CGPOLY payloads and eigenbounds, M10 CA-solver recurrences (`cg2`,
       `pipecg`, `oati`, `pcsi` Lanczos/Chebyshev), det IC fill + `FESOM_IC_EXTRAP_TOL`, restart I/O staging,
       dumps/verify twins
-- [ ] add the class-2 row (CVMix TKE → `dbl_t` inside the kernel), the class-5 row (point-slope forcing,
+- [x] add the class-2 row (CVMix TKE → `dbl_t` inside the kernel), the class-5 row (point-slope forcing,
       SP-only), and the **stiffness shadow as a whole-field device `dbl_t` promotion** (memory give-back
       = one nnz-sized double array, measured at G2)
-- [ ] carry the **accumulation ledger** over and extend it with every `+=` site in `fesom_ssh_se.cpp`
+- [x] carry the **accumulation ledger** over and extend it with every `+=` site in `fesom_ssh_se.cpp`
       (the barotropic subcycle: 20–90 substeps per step is the stiffness-drift class) and
       `fesom_io_restart.cpp`; **the ledger is grep-generated** (`+=` over `real_t` state), not hand-written
-- [ ] gate: every `dbl_t` that will exist after Phase B has a row; every row has a class; every class-1,
+- [x] gate (2026-09-07): `docs/PRECISION_ISLANDS.md` committed before Phase B; ledger = `scripts/m16_accum_ledger.py` (215 indexed `+=`/`-=` sites, embedded verbatim, count printed by `--count`); the inventory's MPI/disk pairing audit lists every `MPI_DOUBLE`-over-`real_t`, `nc_*_double`-over-`real_t`, hard-`double` device view and `sizeof(double)` accounting line by line; every `dbl_t` that will exist after Phase B has a row; every row has a class; every class-1,
       -2 and -5 row has a **non-empty Fortran-line cell**; the ledger's site count equals the grep count;
       the table is committed **before** the first Phase-B slice (placement is pre-registered)
 
 ---
+
+➕ **Finding (2026-09-07, P2 oracle):** the UNMODIFIED `d4a9fe0` Serial binary segfaults with the EVPWIDE-lean arm on **CORE2 at np2** on the login node (`ref0/evpwlean_np2`, rc 139, after the extended zone is built: K=8 R=8 ext-nodes 3286); pi np2 and every other CORE2 config at np2 run. M14 only ever ran this arm at ≥8 ranks. Not an M16 defect; the CORE2 evpwlean oracle will be taken at np8 under SLURM. To be understood before the E-phase ladders (a 2-rank ring that wraps onto itself is the first suspect).
 
 # Phase B — the sweep, slice by slice, each slice FP64 bit-identical **[NOW]** (CUDA envelope legs **[BLOCKED on /work]**)
 

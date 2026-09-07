@@ -1,3 +1,4 @@
+#include <limits>
 #include "fesom_ale.h"
 #include "fesom_aux.h"
 #include "fesom_bulk.h"
@@ -368,6 +369,19 @@ int main(int argc, char **argv)
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, mesh_dir, argc, argv);
+
+    /* M16 precision banner (upstream FESOM/fesom2#940 shape: kind, storage bits, digits,
+     * epsilon; L80 — a build dimension must self-certify in-band). Gate scripts assert this
+     * exact line (scripts/mp_assert_banner.sh) so a wrong-precision binary fails every test
+     * loudly instead of silently running the wrong experiment. Stdout only. */
+    if (mpi.mype == 0) {
+        printf("[fesom_port] PRECISION: %s  real_t=%s  storage=%zu bits  digits=%d  epsilon=%.2e  "
+               "(dbl_t islands=double, %zu bits)\n",
+               sizeof(real_t) == 4 ? "SINGLE" : "DOUBLE", sizeof(real_t) == 4 ? "float" : "double",
+               8 * sizeof(real_t), std::numeric_limits<real_t>::digits10,
+               (double)std::numeric_limits<real_t>::epsilon(), 8 * sizeof(dbl_t));
+        fflush(stdout);
+    }
 
     /* Kokkos after MPI_Init: bind each MPI rank to its OWN GPU (M3.1). The device
      * id must be the NODE-LOCAL rank, not the global rank — every node exposes

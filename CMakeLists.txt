@@ -108,6 +108,25 @@ target_link_libraries(fesom_ssh_lab PRIVATE fesom_core)
 # production build is unchanged. Build the diagnostic as a SEPARATE -O3 Release dir so it still
 # matches the golden bit-for-bit: cmake -S . -B build-synccheck -DKokkos_ENABLE_SERIAL=ON
 #   -DCMAKE_BUILD_TYPE=Release -DFESOM_KK_SYNCCHECK=ON   (the guard is NDEBUG-independent — L21).
+# M16 mixed precision (docs/plans/20260902-m16-mixed-precision.md; upstream FESOM/fesom2#940):
+# the working precision of the model state, upstream's option name. OFF (default) MUST stay
+# bit-identical to the pre-M16 base — the define is absent, fesom_types.h resolves as before.
+# ON flips real_t->float and FESOM_MPI_REAL->MPI_FLOAT; dbl_t islands (docs/PRECISION_ISLANDS.md)
+# stay double. Directory-scoped so EVERY translation unit (fesom_core, fesom_port, the lab tool,
+# the unit tests that compile src/*.cpp on their own) sees one real_t — an ODR split between
+# TUs would be silent. The binary banners its precision at startup and gate scripts assert it
+# (scripts/mp_assert_banner.sh, L80). No alias, no auto mode (plan D6).
+option(USE_SINGLE_PRECISION "Build the model state in single precision (real_t=float)" OFF)
+if(NOT USE_SINGLE_PRECISION MATCHES "^(ON|OFF|TRUE|FALSE|YES|NO|Y|N|1|0)$")
+  message(FATAL_ERROR "USE_SINGLE_PRECISION must be a boolean (ON/OFF), got: '${USE_SINGLE_PRECISION}'")
+endif()
+if(USE_SINGLE_PRECISION)
+  add_compile_definitions(FESOM_SINGLE_PRECISION)
+  message(STATUS "USE_SINGLE_PRECISION=ON — real_t=float, FESOM_MPI_REAL=MPI_FLOAT (M16; dbl_t islands stay double)")
+else()
+  message(STATUS "USE_SINGLE_PRECISION=OFF — real_t=double (the byte-gated default)")
+endif()
+
 option(FESOM_KK_SYNCCHECK "Assert Field host/device coherence + per-step round-trip (diagnostic)" OFF)
 if(FESOM_KK_SYNCCHECK)
   target_compile_definitions(fesom_core PUBLIC FESOM_KK_SYNCCHECK)   # PUBLIC: fesom_field.hpp is in every consumer (ODR)
