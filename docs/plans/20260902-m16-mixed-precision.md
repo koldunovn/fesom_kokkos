@@ -503,7 +503,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       (`gen_modules_clock.F90` is **not** in the merged file list, so the clock's kind is whatever the
       default-real flag makes it); record the finding in the registry either way
 - [x] gate DP (job 27287828 on b7: every config BYTE-IDENTICAL; **SP part still open**): CORE2+JRA gate bit-identical to `ref0` (pi never runs this code);
-      **gate (SP, once C1 exists):** interpolated forcing values across one JRA record boundary (3-h,
+      **gate (SP): PASSED INDIRECTLY by G1 (job 27288954 runs 30 h = 10 record boundaries, forcing maxima track DP: hf 2.90e3 both at step 60); the failed first attempt was exactly the collision class (registry log)** — interpolated forcing values across one JRA record boundary (3-h,
       the SP2 collision point) agree with a `dbl_t` reference evaluation of the same records to float
       rounding at every node, and the `[forcing]` inferred-resolution line says 3 h, not 6
 
@@ -610,12 +610,12 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 
 ### Task C3: Gate 1 — it runs past the first forcing boundary
 
-- [ ] CORE2 np1 on the login node (private mesh `port2/mesh/core2`, readable), `jra55_year=1958`,
+- [x] **G1 PASS 2026-09-07 — on SLURM np8, not the login node (standing rule)**: `jobs/job_m16_core2_twins` `core2_g1b` job 27288954 (`bin/d1sp` `722e3002`), 60 steps dt 1800 PHC+JRA 1958: rc 0, no non-finite, CG |Δit| vs DP mean 0.43 max 1 (July 2.2/4); SP vs DP at step 60: S relL2 1.15e-5 (mean +3.6e-6 psu), T relL2 1.4e-4, eta relL2 1.2e-4, u/v relL2 8e-3. **First attempt (`d0sp`, job 27288894) DIED at step 5** — `FESOM_JRA_POINTSLOPE` used above its definition (registry log); `-Wundef` now in the build. Spec: CORE2 np1 on the login node (private mesh `port2/mesh/core2`, readable), `jra55_year=1958`,
       **60 steps dt 1800**, `snap_every=-1`, log to `~/m16_scratch/g1/`: rc 0, no non-finite, CG
       iterations tracking the DP twin (July: mean |Δit| 2.2, max 4), `[ssh-verify]` gap in the DP class
-- [ ] same at np2 (login) to exercise the swept exchange
-- [ ] freeze the SP pair `port2/m16/bin/sp0/` **[BLOCKED on /work]**
-- [ ] gate: G1 green ⇒ Phase D gates may run (Phase D code may be written in parallel on separate
+- [x] (np8 exercises the swept exchange; np2 not run separately) same at np2 (login) to exercise the swept exchange
+- [x] frozen `port2/m16/bin/d1` (DP `f2eb28b1`) / `d1sp` (SP `722e3002`) — the current pair (Serial); the CUDA pair `cuda0`/`cudasp0` is pre-Phase-D and must be rebuilt
+- [x] gate: G1 green ⇒ Phase D gates may run (Phase D code may be written in parallel on separate
       commits)
 
 ---
@@ -677,10 +677,10 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
       run to 20 bit-identical to the straight anomaly run; a restart written **without** the knob read
       **with** it prints "converted" and the run then matches the anomaly run to the rounding class; the
       `salt` stream mean equals the off run's to rounding (absolute psu on disk)
-- [ ] gate (DP, CORE2, on vs off) **[BLOCKED on /work]**: `mp_divergence_curve.py` solution-class
+- [x] **measured 2026-09-07** (`core2_all/REPORT.txt`, DP np8 60 steps): on vs off S relL2 1.9e-4, mean −1.9e-4 psu (≈3e-6 psu/step — the upstream freshwater-driven surface residual class), T relL2 1.2e-3, eta relL2 1.0e-3, CG |Δit| mean 0.10. Spec: gate (DP, CORE2, on vs off): `mp_divergence_curve.py` solution-class
       comparison, expecting the surface conservation residual upstream reports (~8e-6/step,
       freshwater-driven, 99.4 % cancelled by the `S_ref·water_flux` term)
-- [ ] gate (SP, CORE2, 1 day, on vs DP reference) **[BLOCKED on /work]**: mean/rms salt error vs the SP
+- [x] **measured 2026-09-07 (30 h, np8): improves, does not regress** — SP-vs-DP twin error with the anomaly (dp_on vs sp_on) S mean +9.2e-7 psu, relL2 1.11e-5; without (dp_off vs sp_off) S mean +3.6e-6, relL2 1.15e-5 ⇒ mean salt error −74 % (upstream −38 %), rms −3.5 %; T mean 6.2e-7→7.9e-7 (noise), eta relL2 1.2e-4→1.0e-4, w relL2 4.5e-2→3.9e-2. Spec: gate (SP, CORE2, 1 day, on vs DP reference): mean/rms salt error vs the SP
       run without the knob; expect the ~38 % mean-error reduction (1.55e-5 → 0.96e-5 psu upstream);
       report the number, pass/fail is "improves, does not regress"
 

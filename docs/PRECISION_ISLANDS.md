@@ -367,6 +367,26 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-07 — G1 FIRST ATTEMPT FAILED, root-caused, fixed (pending re-run): CORE2 SP died at step 5.**
+  Jobs 27288894/27288895 (`d0sp` `8ad967fe`, np8, JRA 1958): both SP arms (with and without the salt
+  anomaly) hit `CG_kk: pp·App is -nan` at step 5; DP arms clean for 60 steps. `FESOM_MP_NANSCAN=1`
+  (job 27288932): first non-finite at `step-entry(hf)`, and `[bulk-nan]` shows the forcing itself was
+  garbage (`ua ~ -3e8 m/s`, `ta ~ -6e7`). Cause: in `fesom_jra55.cpp` the class-5 selector block
+  (`FESOM_JRA_POINTSLOPE` / `FESOM_JRA_AT`) was defined BELOW `getcoeffld`, whose `#if
+  FESOM_JRA_POINTSLOPE` therefore read an undefined macro (= 0) and built the affine intercept
+  `coef_b = d1 − coef_a·t1` (t1 ≈ 2.4e6 days) while the interpolation kernels below the definition
+  evaluated `coef_b + dt·coef_a` — consistent in DP (both affine, hence the byte gate never saw it), a
+  `coef_a·2.4e6` mismatch in SP from the first in-loop coefficient refresh (step 5). Fix: the block now
+  precedes every use (+ a lesson comment at the top of the file); build with `-Wundef` to catch a repeat.
+  **Second SP-only finding, same job:** `fesom_ice_fct.cpp` mass-matrix row-sum check uses the Fortran's
+  ABSOLUTE 0.1 m² tolerance — 3 orders below float ulp at 1e9 m² — so every open-ocean row printed
+  `#### MASS MATRIX PROBLEM` (66k lines/rank). SP-only slack of 32 float ulps × area added (guard-epsilon
+  class, §1); the DP check is untouched. Upstream #940 changed neither site.
+  **Re-run job 27288954 (`d1sp` 722e3002): G1 PASS** — SP 60 steps rc 0, CG |Δit| vs DP mean 0.43 max 1;
+  SP-vs-DP S relL2 1.15e-5 / T 1.4e-4 / u,v 8e-3 at 30 h. **Salt anomaly in SP (CORE2, 30 h):** mean SP-vs-DP
+  salt error 3.6e-6 → 0.92e-6 psu (−74 %; upstream −38 %), rms −3.5 %, eta/w slightly better, T unchanged —
+  improves, does not regress. DP on-vs-off residual S mean −1.9e-4 psu over 60 steps (~3e-6/step, the upstream
+  surface-freshwater class).
 - **2026-09-07 — Phase D PORTED: `FESOM_SALT_ANOMALY` (upstream #986 `use_salt_anomaly`).** Every
   `FESOM_TRACER_S].values` reader carries `+ fesom_S_ref_anomaly` (0 unless on): EOS/sw_alpha_beta host+device,
   ocean2ice, rsss/relax_salt (coupling + sss_runoff twins), the surface-BC dilution term `S_ref·water_flux`, KPP Bo,

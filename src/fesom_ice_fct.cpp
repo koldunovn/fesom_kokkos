@@ -136,7 +136,16 @@ void fesom_ice_mass_matrix_fill(fesom_ice                    *ice,
         real_t aa = 0.0;
         for (int k = rstart; k < rend; ++k) aa += mm[k];
         real_t a_node = mesh->area[q * mesh->nl + (ul - 1)];   /* area(ul, q) */
-        if (fabs(a_node - aa) > 0.1) {
+#if defined(FESOM_SINGLE_PRECISION)
+        /* M16 (registry §1 guard epsilons): the Fortran's ABSOLUTE 0.1 m² is ~1e-11 of a 1e10 m²
+         * node area — below double eps, fine — but 3 orders below float ulp (64 m² at 1e9), so in
+         * SP every open-ocean row "fails" (66k lines per rank on CORE2, job 27288894). SP-only
+         * relative slack of 32 float ulps; the DP check is untouched (byte gate). */
+        const real_t mm_tol = (real_t)0.1 + (real_t)32 * (real_t)1.1920929e-07 * fabs(a_node);
+#else
+        const real_t mm_tol = (real_t)0.1;
+#endif
+        if (fabs(a_node - aa) > mm_tol) {
             fprintf(stderr,
                     "#### MASS MATRIX PROBLEM rank=%d q=%d aa=%g area=%g ul=%d\n",
                     partit ? partit->mype : 0, q, (double)aa, (double)a_node, ul);

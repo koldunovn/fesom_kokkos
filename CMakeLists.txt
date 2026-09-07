@@ -59,6 +59,7 @@ set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 # implicit void*->T* and ignores -fpermissive anyway (lesson L1); the casts don't change codegen.
 add_compile_options(
   -Wall -Wextra -Wno-unused-parameter -Wno-write-strings
+  -Wundef   # M16 G1 lesson: an `#if MACRO` on an undefined macro silently reads 0 (fesom_jra55.cpp, 2026-09-07)
   -fno-omit-frame-pointer
   -ffp-contract=off
   "$<$<CONFIG:Debug>:-O0>"  "$<$<CONFIG:Debug>:-g3>"

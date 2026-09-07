@@ -18,6 +18,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 🔴 M16 G1 lesson (2026-09-07, CORE2 SP job 27288894 died at step 5 with ua ~ 1e8 m/s): this block
+ * MUST precede every use. It used to sit below getcoeffld, whose `#if FESOM_JRA_POINTSLOPE` then read
+ * an UNDEFINED macro (= 0) and built the affine intercept coef_b = d1 - coef_a*t1, while the
+ * interpolation kernels (below the definition) evaluated the point-slope form b + dt*a — consistent
+ * in DP (both affine), a 2.4e6-day mismatch in SP. Steps 1-4 ran on the init-time coefficients;
+ * the first in-loop refresh (step 5) produced the garbage. Build with -Wundef to catch a repeat. */
+/* M16 (plan D5 class 5): the interpolation form. FP64 keeps the affine line bit-for-bit;
+ * the SP build compiles upstream's point-slope form; FESOM_FORCING_POINTSLOPE forces the
+ * point-slope form in DP for the Gate-3 control leg only (never a shipped default). */
+#if defined(FESOM_SINGLE_PRECISION) || defined(FESOM_FORCING_POINTSLOPE)
+#  define FESOM_JRA_POINTSLOPE 1
+#  define FESOM_JRA_AT(rd, dt, a, b) ((b) + (dt) * (a))
+#else
+#  define FESOM_JRA_POINTSLOPE 0
+#  define FESOM_JRA_AT(rd, dt, a, b) ((rd) * (a) + (b))
+#endif
+
+
 #define NC_CHECK(call) do {                                              \
     int _ec = (call);                                                    \
     if (_ec != NC_NOERR) {                                               \
@@ -628,16 +646,6 @@ static void getcoeffld(fesom_jra55_field *flf,
     flf->coef_t_indx_p1 = t_indx_p1;
 }
 
-/* M16 (plan D5 class 5): the interpolation form. FP64 keeps the affine line bit-for-bit;
- * the SP build compiles upstream's point-slope form; FESOM_FORCING_POINTSLOPE forces the
- * point-slope form in DP for the Gate-3 control leg only (never a shipped default). */
-#if defined(FESOM_SINGLE_PRECISION) || defined(FESOM_FORCING_POINTSLOPE)
-#  define FESOM_JRA_POINTSLOPE 1
-#  define FESOM_JRA_AT(rd, dt, a, b) ((b) + (dt) * (a))
-#else
-#  define FESOM_JRA_POINTSLOPE 0
-#  define FESOM_JRA_AT(rd, dt, a, b) ((rd) * (a) + (b))
-#endif
 
 /* ------------------------------------------------------------------------ *
  * Public API                                                                *
