@@ -1,0 +1,1361 @@
+=== WP / WP_full / MPI_WP definitions ===
+245:+# CVMix is a fixed double-precision library (its kind is cvmix_r8 = real64). It is
+247:+# src/cvmix_driver/ convert WP<->cvmix_r8 at the CVMix call boundary, so CVMix always
+558:+!   still honoured (written as NF_DOUBLE; means accumulated in real64), but its
+716:+# real64 and still assume it:
+719:+#     buffers declared real(kind=WP) (cpl_driver.F90:608,614,620,625,627,988
+720:+#     and 8 further sites in gen_forcing_couple.F90). With WP=real32 MPI reads
+723:+#     there real64 == WP.
+726:+#     real(kind=WP), so a single-precision build would hand the coupler single
+758:+         "The coupling interfaces still assume WP is real64 and pass "
+759:+         "MPI_DOUBLE_PRECISION for real(kind=WP) buffers, which corrupts memory "
+760:+         "when WP is real32. There is no coupled test to validate a fix against, "
+824:+      set(_FESOM_CRAY_RKIND real32)
+826:+      set(_FESOM_CRAY_RKIND real64)
+894:+USE,     intrinsic    :: ISO_FORTRAN_ENV, only : int32, real64
+910:+     real(kind=real64), allocatable, dimension(:) :: values_full
+912:+     real(kind=WP),  allocatable,   dimension(:) :: values_wp_drift
+928:+integer, parameter   :: MPI_WP = MPI_REAL             ! single precision
+930:+integer, parameter   :: MPI_WP = MPI_DOUBLE_PRECISION ! double precision (default)
+964:+    ! CVMix is a fixed double-precision library (kind cvmix_r8). FESOM's WP may be real4
+965:+    ! (single precision); convert WP<->cvmix_r8 at the CVMix call boundary below so CVMix
+966:+    ! always runs in double precision. In a double-precision FESOM build cvmix_r8==WP, so
+967:+    ! the casts/temps are exact no-ops and the result is bit-identical. cvmix_r8 is provided
+978:+        call init_idemix(real(idemix_tau_v, cvmix_r8), real(idemix_tau_h, cvmix_r8), &
+979:+                         real(idemix_gamma, cvmix_r8), real(idemix_jstar, cvmix_r8), &
+980:+                         real(idemix_mu0, cvmix_r8))! ,handle_old_vals)! ,idemix_userdef_constants)
+988:+        ! double-precision (cvmix_r8) buffers for the cvmix_coeffs_idemix call boundary.
+990:+        ! the sequence association is unchanged. Exact no-op when WP==cvmix_r8.
+991:+        real(cvmix_r8) :: dzw_r8(mesh%nl), dzt_r8(mesh%nl), iwe_new_r8(mesh%nl)
+992:+        real(cvmix_r8) :: iwe_old_r8(mesh%nl), alpha_c_r8(mesh%nl)
+993:+        real(cvmix_r8) :: KappaM_r8(mesh%nl), KappaH_r8(mesh%nl), Nsqr_r8(mesh%nl)
+994:+        real(cvmix_r8) :: iwe_Ttot_r8(mesh%nl), iwe_Tdif_r8(mesh%nl), iwe_Thdi_r8(mesh%nl)
+995:+        real(cvmix_r8) :: iwe_Tdis_r8(mesh%nl), iwe_Tsur_r8(mesh%nl), iwe_Tbot_r8(mesh%nl)
+996:+        real(cvmix_r8) :: c0_r8(mesh%nl), v0_r8(mesh%nl)
+997:+        real(cvmix_r8) :: cvmix_int_1_r8(mesh%nl), cvmix_int_2_r8(mesh%nl), cvmix_int_3_r8(mesh%nl)
+1006:+            ! copy WP input/inout arrays into cvmix_r8 temps before the call
+1008:+            dzw_r8(uln:nln)        = real(helem(uln:nln, elem),     cvmix_r8)
+1009:+            dzt_r8(uln:nln+1)      = real(dz_trr(uln:nln+1),        cvmix_r8)
+1010:+            iwe_old_r8(uln:nln+1)  = real(iwe_old(uln:nln+1),       cvmix_r8)
+1011:+            Nsqr_r8(uln:nln+1)     = real(bvfreq2(uln:nln+1),       cvmix_r8)
+1012:+            iwe_Thdi_r8(uln:nln+1) = real(iwe_Thdi(uln:nln+1,elem), cvmix_r8)
+1013:+            KappaM_r8(uln:nln+1)   = real(iwe_Av(uln:nln+1, elem),  cvmix_r8) ! inout
+1014:+            KappaH_r8(uln:nln+1)   = real(iwe_Kv(uln:nln+1, elem),  cvmix_r8) ! inout
+1032:+                dtime           = real(dt, cvmix_r8),                 &
+1033:+                coriolis        = real(mesh%coriolis(elem), cvmix_r8),&
+1037:+                forc_iw_surface = real(iwe_fsrf(elem), cvmix_r8),     & ! in
+1038:+                forc_iw_bottom  = real(iwe_fbot(elem), cvmix_r8),     & ! in
+1082:+            ! copy cvmix_r8 output/inout temps back into the WP FESOM arrays
+1114:+        ! CVMix is a fixed double-precision library (kind cvmix_r8). FESOM's WP may
+1115:+        ! be real4 (single precision); convert WP<->cvmix_r8 at the CVMix call
+1117:+        ! precision FESOM build cvmix_r8==WP, so the casts/temps are exact no-ops
+1118:+        ! and the result is bit-identical. (cvmix_r8 is provided by the
+1120:+        call cvmix_init_kpp(Ri_crit                  = real(kpp_Rib_crit,       cvmix_r8), &
+1121:+                            minOBLdepth              = real(kpp_minOBLdepth,    cvmix_r8), &
+1122:+                            minVtsqr                 = real(kpp_minVtsqr,       cvmix_r8), &
+1123:+                            vonKarman                = real(kpp_vonKarman,      cvmix_r8), &
+1124:+                            surf_layer_ext           = real(kpp_surf_layer_ext, cvmix_r8), &
+1132:+        ! CVMix is a fixed double-precision library (kind cvmix_r8); FESOM's WP may be
+1133:+        ! real4. These cvmix_r8 buffers hold copy-in/copy-out of the WP actuals at the
+1134:+        ! CVMix call boundary so CVMix always runs in double precision. When WP==cvmix_r8
+1137:+        real(cvmix_r8) :: zbar_r8(mesh%nl), zcntr_r8(mesh%nl)             ! interfaces / centers
+1138:+        real(cvmix_r8) :: uE_r8(mesh%nl), vE_r8(mesh%nl)                  ! Eulerian vel (StokesXi)
+1139:+        real(cvmix_r8) :: uS_r8(mesh%nl), vS_r8(mesh%nl)                  ! Stokes drift inout (StokesXi)
+1140:+        real(cvmix_r8) :: uSbar_r8(mesh%nl), vSbar_r8(mesh%nl)            ! cell-avg Stokes inout (StokesXi)
+1141:+        real(cvmix_r8) :: obl_r8(mesh%nl), buoy_r8(mesh%nl)              ! abs(Z) / surf buoy flux
+1142:+        real(cvmix_r8) :: xi_r8(mesh%nl), ws_r8(mesh%nl)                 ! Stokes xi / turb scale w_s
+1143:+        real(cvmix_r8) :: dbuoy_r8(mesh%nl), dvsqr_r8(mesh%nl)           ! bulk Ri inputs
+1144:+        real(cvmix_r8) :: nsqr_r8(mesh%nl), bulkRi_r8(mesh%nl)           ! N^2 / bulk Ri result
+1145:+        real(cvmix_r8) :: ribulk_r8(mesh%nl), surfbuoy_r8(mesh%nl)       ! OBL-depth inputs
+1146:+        real(cvmix_r8) :: md_r8(mesh%nl), td_r8(mesh%nl), sd_r8(mesh%nl) ! coeffs_kpp M/T/S diff (in+out)
+1147:+        real(cvmix_r8) :: tnl_r8(mesh%nl), snl_r8(mesh%nl)               ! coeffs_kpp nonlocal T/S (in+out)
+1148:+        real(cvmix_r8) :: stokesXi_r8, obldep_r8, kobl_r8                ! scalar outputs
+1156:+                        ! --- CVMix boundary: copy WP actuals into cvmix_r8 buffers (no-op when WP==cvmix_r8)
+1157:+                        zbar_r8(nun:nln+1) = real(zbar_3d_n(nun:nln+1,node), cvmix_r8)
+1158:+                        zcntr_r8(nun:nln)  = real(Z_3d_n(   nun:nln,  node), cvmix_r8)
+1159:+                        uE_r8(nun:nln)     = real(UVnode(1, nun:nln,  node), cvmix_r8)
+1160:+                        vE_r8(nun:nln)     = real(UVnode(2, nun:nln,  node), cvmix_r8)
+1161:+                        uS_r8(nun:nln)     = real(kpp_uS_t( nun:nln),        cvmix_r8) ! inout
+1162:+                        vS_r8(nun:nln)     = real(kpp_VS_t( nun:nln),        cvmix_r8) ! inout
+1163:+                        uSbar_r8(nun:nln)  = real(kpp_uS_m( nun:nln),        cvmix_r8) ! inout
+1164:+                        vSbar_r8(nun:nln)  = real(kpp_VS_m( nun:nln),        cvmix_r8) ! inout
+=== epsilon / precision diagnostics ===
+34:+name: FESOM2 SP CTests (single precision)
+36:+# Single-precision (USE_SINGLE_PRECISION=ON) counterpart to the DP CTest runner.
+38:+# the mesh tools) in single precision with the SAME full config as the DP build, so
+128:+      - name: Configure FESOM2 (single precision, full config = mirrors DP)
+130:+          echo "Configuring FESOM2 single-precision build..."
+157:+            echo "✅ single-precision fesom.x created"
+172:+      - name: Run CTest (local suite, single precision)
+175:+          echo "Running local tests in single precision (excluding remote + ecbundle)..."
+245:+# CVMix is a fixed double-precision library (its kind is cvmix_r8 = real64). It is
+246:+# linked in BOTH double- and single-precision FESOM builds: the FESOM wrappers in
+248:+# runs in double precision. This keeps the available mixing schemes identical in SP and
+360:+    # caller-supplied EXTRA_SUCCESS_MARKERS (e.g. the single-precision banner).
+367:+    # Self-certify the build precision: every fesom.x run prints a working-precision
+369:+    # integration test verify it actually ran at the intended precision -- so a
+371:+    # test rather than silently running the wrong precision. Silent no-op in DP.
+537:+                                 !  -1 = auto: 1 in a single-precision build, 0 in double.
+541:+                                 ! measured up to NG5. In single precision the iteration count
+557:+!   Note: in a single-precision build (WP=4) a field requesting precision 8 is
+559:+!   samples are single-precision-sourced. FESOM prints one summary line at
+573:+use_salt_anomaly   = .false. ! store salinity as the anomaly S-35 (finer float32 spacing; helps single precision). .false. = absolute salinity, bit-identical to before
+702:+option(USE_SINGLE_PRECISION "Build FESOM in single precision (WP=4)" OFF)
+713:+# Single precision is not yet supported in any coupled configuration.
+722:+#     precision question, and invisible in a double-precision build because
+726:+#     real(kind=WP), so a single-precision build would hand the coupler single
+727:+#     precision where the partner model may expect double.
+730:+# single-precision coupled build would fail silently at runtime rather than
+738:+       "Override the guard refusing single-precision coupled builds (unvalidated)" OFF)
+762:+         "Build coupled configurations in double precision (USE_SINGLE_PRECISION=OFF), "
+876:+    ! whose shipped default is -1 = auto (1 in single precision, 0 in double).
+903:+     ! Full-precision accumulator for the SSH stiffness matrix, single precision only.
+926:+! MPI datatype matching the working precision WP (see o_PARAM)
+928:+integer, parameter   :: MPI_WP = MPI_REAL             ! single precision
+930:+integer, parameter   :: MPI_WP = MPI_DOUBLE_PRECISION ! double precision (default)
+964:+    ! CVMix is a fixed double-precision library (kind cvmix_r8). FESOM's WP may be real4
+965:+    ! (single precision); convert WP<->cvmix_r8 at the CVMix call boundary below so CVMix
+966:+    ! always runs in double precision. In a double-precision FESOM build cvmix_r8==WP, so
+988:+        ! double-precision (cvmix_r8) buffers for the cvmix_coeffs_idemix call boundary.
+1114:+        ! CVMix is a fixed double-precision library (kind cvmix_r8). FESOM's WP may
+1115:+        ! be real4 (single precision); convert WP<->cvmix_r8 at the CVMix call
+1116:+        ! boundary below so CVMix always runs in double precision. In a double-
+=== salt anomaly consumers (pr986) ===
+51:+                f%tracers%data(2)%values    = f%tracers%data(2)%values    - S_ref_anomaly
+52:+                f%tracers%data(2)%valuesAB  = f%tracers%data(2)%valuesAB  - S_ref_anomaly
+53:+                f%tracers%data(2)%valuesold = f%tracers%data(2)%valuesold - S_ref_anomaly
+73:+            S_oc_array(n) = salt(1,n) + S_ref_anomaly   ! state stores S-S_ref (0 unless use_salt_anomaly)
+82:+             S_oc_array(n) = (S_oc_array(n)*real(ice%ice_steps_since_upd,WP)+salt(1,n)+S_ref_anomaly)/real(ice%ice_steps_since_upd+1,WP)
+92:+            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
+103:+            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
+114:+            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+122:+            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+134:+            dens_flux(n)=sw_alpha(1,n) * heat_flux_in(n) / vcpw + sw_beta(1, n) * (relax_salt(n) + water_flux(n) * (salt(1,n)+S_ref_anomaly))
+147:+  use o_PARAM, only : WP, S_ref_anomaly
+155:+    real(kind=WP)                                      :: offset = 0.0_WP ! added to ptr3 at accumulation (use_salt_anomaly: salt/sss carry +S_ref_anomaly so output stays absolute)
+163:+    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+171:+    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+222:+                      + sw_beta (nzmin,node) * water_flux(node) * (tracers%data(2)%values(nzmin,node)+S_ref_anomaly))
+232:+           betaDS  = sw_beta (nz-1,node) * (tracers%data(2)%values(nz-1,node)+S_ref_anomaly)
+246:+    if( a < -S_ref_anomaly ) then
+254:+                if (salt(nz, node) < -S_ref_anomaly) write (*,*) 'the model blows up at n=', mylist_nod2D(node), ' ; ', 'nz=', nz
+272:+  s_abs = s + S_ref_anomaly   ! EOS needs absolute salinity (S_ref=0 unless use_salt_anomaly)
+302:+     s1 = SF1(nz,n) + S_ref_anomaly   ! McDougall polynomial wants absolute (S_ref=0 unless use_salt_anomaly)
+319:+  s_abs = s + S_ref_anomaly   ! linear EOS needs absolute S (S_ref=0 unless use_salt_anomaly)
+350:+    use o_PARAM, only: SPP, Fer_GM, S_ref_anomaly
+361:+        where (tracers%data(2)%values(nzmin:nzmax,node) > 45._WP - S_ref_anomaly)
+362:+               tracers%data(2)%values(nzmin:nzmax,node)= 45._WP - S_ref_anomaly
+367:+        where (tracers%data(2)%values(nzmin:nzmax,node) < 3._WP - S_ref_anomaly )
+368:+               tracers%data(2)%values(nzmin:nzmax,node) = 3._WP - S_ref_anomaly
+376:+    use o_PARAM, only: S_ref_anomaly
+388:+            flux  =  virtual_salt(n)+relax_salt(n) + (real_salt_flux(n) + S_ref_anomaly*water_flux(n))*is_nonlinfs
+396:+  use o_PARAM, only: S_ref_anomaly
+424:+                    + relax_salt(n) + (real_salt_flux(n) + S_ref_anomaly*water_flux(n))*is_nonlinfs)
+437:+! S - S_ref_anomaly, so the float32 spacing at typical open-ocean values
+438:+! (|S-35| < ~2) is 30-250x finer than at S~35 (ulp 1.9e-6 psu). S_ref_anomaly is
+441:+! bit-identical no-op when the feature is off). See the S_ref_anomaly sites.
+447:+real(kind=WP)                 :: S_ref_anomaly = 0.0_WP
+482:+    ! anomaly S - S_ref_anomaly (finer float32 spacing where the ocean lives).
+483:+    ! S_ref_anomaly stays 0 unless the toggle is on, so the subtraction and every
+484:+    ! downstream `+ S_ref_anomaly` are bit-identical no-ops when off. Initial
+492:+        S_ref_anomaly = 35.0_WP
+493:+        tracers%data(2)%values = tracers%data(2)%values - S_ref_anomaly
+494:+        if (partit%mype==0) write(*,*) 'use_salt_anomaly: salinity state = S - ', S_ref_anomaly
+523:+             tracers%data(2)%values(nz, n) < 3.0_WP - S_ref_anomaly .or. tracers%data(2)%values(nz, n) > 45.0_WP - S_ref_anomaly ) then
+=== pr986 files ===
+.gitignore
+config/namelist.oce
+src/fesom_module.F90
+src/ice_oce_coupling.F90
+src/io_meandata.F90
+src/oce_ale_mixing_kpp.F90
+src/oce_ale_pressure_bv.F90
+src/oce_ale_tracer.F90
+src/oce_modules.F90
+src/oce_setup_step.F90
+src/write_step_info.F90
+=== restart detection ===
+30-       logical mpi_is_initialized
+31-       integer              :: tr_num, n
+32:+      real(kind=WP)        :: salt_max_loc, salt_max_glob   ! use_salt_anomaly restart detect
+33- 
+34- #if defined (__recom)
+35-       type(tracers_info_type)               :: tracers_info
+36-@@ -435,6 +436,27 @@ subroutine fesom_init(fesom_total_nsteps)
+37-         !___READ INITIAL CONDITIONS IF THIS IS A RESTART RUN________________________
+38-         if (r_restart) then
+39-             call read_initial_conditions(f%which_readr, f%ice, f%dynamics, f%tracers, f%partit, f%mesh)
+40-+            if (use_salt_anomaly) then
+41-+            ! Restart files may hold ABSOLUTE salinity (migrating from a run
+42-+            ! without use_salt_anomaly) or the anomaly (a chain of anomaly
+43-+            ! runs writes the state as stored). Detect by the global maximum:
+44:+            ! absolute salinity peaks near 41 psu, the anomaly near 41-S_ref.
+45-+            ! Convert once when migrating; all AB history levels shift by the
+46-+            ! same constant.
+47-+            salt_max_loc = maxval(f%tracers%data(2)%values)
+48-+            call MPI_AllREDUCE(salt_max_loc, salt_max_glob, 1, MPI_WP, MPI_MAX, &
+49-+                               f%partit%MPI_COMM_FESOM, f%partit%MPIerr)
+50-+            if (salt_max_glob > 20.0_WP) then
+51-+                f%tracers%data(2)%values    = f%tracers%data(2)%values    - S_ref_anomaly
+52-+                f%tracers%data(2)%valuesAB  = f%tracers%data(2)%valuesAB  - S_ref_anomaly
+53-+                f%tracers%data(2)%valuesold = f%tracers%data(2)%valuesold - S_ref_anomaly
+54-+                if (f%mype==0) write(*,*) &
+55:+                    'use_salt_anomaly: absolute-salinity restart detected -> converted to S - S_ref'
+56-+            else
+57-+                if (f%mype==0) write(*,*) &
+58:+                    'use_salt_anomaly: anomaly-salinity restart -> no conversion'
+59-+            end if
+60-+            end if
+61-         end if
+62-         if (f%mype==0) f%t7=MPI_Wtime()
+63-         
+64-diff --git a/src/ice_oce_coupling.F90 b/src/ice_oce_coupling.F90
+65-index 8f72b05fc..7544b5619 100755
+66---- a/src/ice_oce_coupling.F90
+67-+++ b/src/ice_oce_coupling.F90
+68-@@ -193,7 +193,7 @@ subroutine ocean2ice(ice, dynamics, tracers, partit, mesh)
+69-         do n=1, myDim_nod2d+eDim_nod2d  
+70-             if (ulevels_nod2D(n)>1) cycle 
+--
+157-     character(100)                                     :: name
+158-     character(500)                                     :: description
+159:@@ -413,6 +414,7 @@ subroutine ini_mean_io(ice, dynamics, tracers, partit, mesh)
+160-     call def_stream(nod2D, myDim_nod2D, 'sst',      'sea surface temperature',        'C', tracers%data(1)%values(1,1:myDim_nod2D), io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh, "Sea surface temperature")
+161- CASE ('sss       ')
+162-     call def_stream(nod2D, myDim_nod2D, 'sss',      'sea surface salinity',           'psu', tracers%data(2)%values(1,1:myDim_nod2D), io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh, "Sea surface salinity")
+163-+    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+164- CASE ('ssh       ')
+165-     call def_stream(nod2D, myDim_nod2D, 'ssh',      'sea surface elevation',          'm',      dynamics%eta_n,                          io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
+166- CASE ('vve_5     ')
+167-@@ -1016,6 +1018,7 @@ subroutine ini_mean_io(ice, dynamics, tracers, partit, mesh)
+168-     call def_stream((/nl-1, nod2D/),  (/nl-1, myDim_nod2D/),  'temp',      'temperature', 'C',      tracers%data(1)%values(:,:),             io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
+169- CASE ('salt      ')
+170-     call def_stream((/nl-1, nod2D/),  (/nl-1, myDim_nod2D/),  'salt',      'salinity',    'psu',    tracers%data(2)%values(:,:),             io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
+171-+    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+--
+264- 
+265-   real(kind=WP), parameter   :: a0    = 19092.56,     at   = 209.8925
+266:   real(kind=WP), parameter   :: at2   = -3.041638,    at3  = -1.852732e-3
+267:@@ -2740,22 +2741,23 @@ SUBROUTINE densityJM_components(t, s, bulk_0, bulk_pz, bulk_pz2, rhopot)
+268- 
+269-   !compute secant bulk modulus
+270- 
+271--  s_sqrt = sqrt(s)
+272-+  s_abs = s + S_ref_anomaly   ! EOS needs absolute salinity (S_ref=0 unless use_salt_anomaly)
+273-+  s_sqrt = sqrt(s_abs)
+274- 
+275-   bulk_0 =  a0      + t*(at   + t*(at2  + t*(at3 + t*at4)))      &
+276--          + s* (as  + t*(ast  + t*(ast2 + t*ast3))               &
+277-+          + s_abs* (as  + t*(ast  + t*(ast2 + t*ast3))               &
+278-                + s_sqrt*(ass  + t*(asst + t*asst2)))
+279- 
+--
+431-+++ b/src/oce_modules.F90
+432-@@ -16,6 +16,18 @@ MODULE o_PARAM
+433: real(kind=WP), parameter      :: pi=3.14159265358979
+434- real(kind=WP), parameter      :: rad=pi/180.0_WP
+435- real(kind=WP), parameter      :: density_0=1030.0_WP
+=== stiffness shadow (pr997) ===
+4:+++ b/src/MOD_MESH.F90
+10:+USE,     intrinsic    :: ISO_FORTRAN_ENV, only : int32, real64
+18:+#if defined(USE_SINGLE_PRECISION)
+19:+     ! Full-precision accumulator for the SSH stiffness matrix, single precision only.
+20:+     ! update_stiff_mat_ale adds a per-step increment whose size relative to the
+21:+     ! entry is ~1e-7..1e-6 -- at or below float32 eps (1.19e-7), so in SP the
+22:+     ! update is partly or wholly swallowed and the matrix drifts. Accumulate here
+23:+     ! and round into %values once per step; the solver's SpMV keeps WP bandwidth.
+24:+     ! Sized to size(%values) (the LOCAL nnz), never to %nza -- see the comment at
+25:+     ! the allocation site in oce_ale.F90.
+26:+     real(kind=real64), allocatable, dimension(:) :: values_full
+27:+#if defined(DIAG_STIFF_DRIFT)
+28:+     real(kind=WP),  allocatable,   dimension(:) :: values_wp_drift
+29:+#endif
+30:+#endif
+37:+++ b/src/oce_ale.F90
+42:+    use, intrinsic :: iso_fortran_env, only: real64
+43:+#if defined(USE_SINGLE_PRECISION) && defined(DIAG_STIFF_DRIFT)
+44:+    use g_config,only: dt, logfile_outfreq
+45:+#else
+47:+#endif
+55:+#if defined(USE_SINGLE_PRECISION) && defined(DIAG_STIFF_DRIFT)
+56:+    integer, save                       :: drift_ncall = 0
+57:+    real(kind=real64)                   :: drift_d, drift_r, drift_s(4), drift_g(4)
+58:+#endif
+66:+#if defined(USE_SINGLE_PRECISION)
+67:+    !___________________________________________________________________________
+68:+    ! Seed the full-precision accumulator on first use. Deliberately here and not
+69:+    ! in init_stiff_mat_ale: init runs on every start, but on a restart the
+70:+    ! restored %values (which carries every increment the previous segment
+71:+    ! accumulated -- it is in the binary dump, see MOD_MESH) overwrites what init
+72:+    ! assembled. Seeding here, on the first update after all of that, is the one
+73:+    ! point correct for a cold start and a restart alike.
+74:+    !
+75:+    ! SIZE: size(%values), NOT %nza. init_stiff_mat_ale sets %nza to the LOCAL nnz
+76:+    ! and allocates %values with it, then later REPLACES %nza with the global sum
+77:+    ! (sum(rpnza(1:npes))) because the solver wants a global count. Allocating
+78:+    ! here with %nza would therefore over-allocate by ~npes per rank and make the
+79:+    ! whole-array assignments below nonconforming -- reading past the end of
+80:+    ! %values. size(%values) is the array we are shadowing, by construction.
+81:+    if (.not. allocated(ssh_stiff%values_full)) then
+82:+        allocate(ssh_stiff%values_full(size(ssh_stiff%values)))
+83:+        ssh_stiff%values_full = real(ssh_stiff%values, real64)
+84:+#if defined(DIAG_STIFF_DRIFT)
+85:+        allocate(ssh_stiff%values_wp_drift(size(ssh_stiff%values)))
+86:+        ssh_stiff%values_wp_drift = ssh_stiff%values
+87:+#endif
+88:+    end if
+89:+#endif
+90:+
+98:+#if defined(USE_SINGLE_PRECISION)
+99:+                   SSH_stiff%values_full(npos)=SSH_stiff%values_full(npos) + real(fy*factor, real64)
+100:+#if defined(DIAG_STIFF_DRIFT)
+101:+                   SSH_stiff%values_wp_drift(npos)=SSH_stiff%values_wp_drift(npos) + fy*factor
+102:+#endif
+103:+#else
+105:+#endif
+113:+#if defined(USE_SINGLE_PRECISION)
+114:+    !___________________________________________________________________________
+115:+    ! Refresh the working copy the CG solver and preconditioner read. The
+116:+    ! accumulation above ran in real64, so this rounds once per step instead of
+117:+    ! letting the rounding compound over the run. The solver's SpMV keeps WP
+118:+    ! bandwidth -- only the accumulator is wider.
+119:+    SSH_stiff%values = real(SSH_stiff%values_full, WP)
+120:+#if defined(DIAG_STIFF_DRIFT)
+121:+    !___________________________________________________________________________
+122:+    ! Instrument: how far has the WP-accumulated matrix drifted from the real64
+123:+    ! one? Inlined rather than a subroutine because a separate routine needs an
+124:+    ! explicit interface (target dummies), and CMake's Fortran dependency scanner
+125:+    ! does not evaluate the preprocessor -- it would demand the interface .mod in
+126:+    ! builds where the module is guarded out. In DP both accumulators are the same
+127:+    ! arithmetic, so the drift is 0.0 by construction; that is the control, and it
+128:+    ! is why this is single-precision only.
+129:+    drift_ncall = drift_ncall + 1
+130:+    if (mod(drift_ncall, max(1,logfile_outfreq)) == 0) then
+131:+        drift_s = 0.0_real64
+132:+        do n = 1, myDim_nod2D
+133:+            do k = ssh_stiff%rowptr_loc(n), ssh_stiff%rowptr_loc(n+1)-1
+134:+                drift_d = real(ssh_stiff%values_wp_drift(k), real64) - ssh_stiff%values_full(k)
+135:+                drift_r = ssh_stiff%values_full(k)
+136:+                if (ssh_stiff%colind_loc(k) == n) then
+137:+                    drift_s(1) = drift_s(1) + drift_d*drift_d
+138:+                    drift_s(2) = drift_s(2) + drift_r*drift_r
+139:+                else
+140:+                    drift_s(3) = drift_s(3) + drift_d*drift_d
+141:+                    drift_s(4) = drift_s(4) + drift_r*drift_r
+142:+                end if
+143:+            end do
+144:+        end do
+145:+        call MPI_AllREDUCE(drift_s, drift_g, 4, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+146:+        if (mype == 0) write(*,'(a,i8,a,es12.5,a,es12.5)') ' [STIFFDRIFT] update ', drift_ncall, &
+147:+            '  relL2(diag)= ',    sqrt(drift_g(1)/max(drift_g(2), tiny(1.0_real64))),            &
+148:+            '  relL2(offdiag)= ', sqrt(drift_g(3)/max(drift_g(4), tiny(1.0_real64)))
+149:+    end if
+150:+#endif
+151:+#endif
+152:+
+=== pr984 solver hunk ===
+37:+precond_variant    = 1           ! ssh CG preconditioner: 0 = pre version 2.8.0 asymetric, 
+506:+    ! Which symmetrised-Jacobi formula the preconditioner uses.
+509:+    ! See ssh_solve_preconditioner for why this switch exists.
+510:+    integer       :: precond_variant = 1
+536:+    integer        :: precond_variant = 0 ! ssh CG preconditioner formula; 0 keeps results unchanged
+550:+                                se_visc_gamma1, se_visc_gamma2, soltol, maxiter, precond_variant
+590:+    dynamics%solverinfo%precond_variant = precond_variant
+591:+    if (mype==0) write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant
+605:+          if (solverinfo%precond_variant == 0) then
+609:+             ! -c*a_ri/(a_rr*(a_rr+a_ii)) while its transpose (i,r) is
+610:+             ! -c*a_ir/(a_ii*(a_ii+a_rr)); with A symmetric those agree only
+611:+             ! where a_rr == a_ii, i.e. on a uniform mesh. CG needs an SPD M^-1,
+614:+             pr_values(n+offset)=-0.5_WP*(ssh_stiff%values(n+offset)/ssh_stiff%values(1+offset))/  &
+615:+                                  (ssh_stiff%values(1+offset)+ diag_values(node)) 
+618:+             ! off-diagonal -a_ri/(a_rr*a_ii) is symmetric by construction, and
+619:+             ! its diagonal reduces to 1/a_rr, which is what is coded above.
+620:+             pr_values(n+offset)=-ssh_stiff%values(n+offset)/                                     &
+621:+                                  (ssh_stiff%values(1+offset)*diag_values(node))
+=== pr940: solver / oce_ale_ssh / halo touched? ===
+1879:diff --git a/src/gen_halo_exchange.F90 b/src/gen_halo_exchange.F90
+=== gen_halo_exchange hunks ===
+-real(real64),   intent(inout)         :: nod_array2D(:)
++real(kind=WP),   intent(inout)         :: nod_array2D(:)
+-real(real64),   intent(inout)         :: nod_array2D(:)
++real(kind=WP),   intent(inout)         :: nod_array2D(:)
+-real(real64),   intent(inout)         :: nod1_array2D(:)
+-real(real64),   intent(inout)         :: nod2_array2D(:)
++real(kind=WP),   intent(inout)         :: nod1_array2D(:)
++real(kind=WP),   intent(inout)         :: nod2_array2D(:)
+-real(real64),   intent(inout)         :: nod1_array2D(:)
+-real(real64),   intent(inout)         :: nod2_array2D(:)
++real(kind=WP),   intent(inout)         :: nod1_array2D(:)
++real(kind=WP),   intent(inout)         :: nod2_array2D(:)
+-real(real64),   intent(inout)         :: nod1_array2D(:)
+-real(real64),   intent(inout)         :: nod2_array2D(:)
+-real(real64),   intent(inout)         :: nod3_array2D(:)
++real(kind=WP),   intent(inout)         :: nod1_array2D(:)
++real(kind=WP),   intent(inout)         :: nod2_array2D(:)
++real(kind=WP),   intent(inout)         :: nod3_array2D(:)
+-real(real64),   intent(inout)         :: nod1_array2D(:)
+-real(real64),   intent(inout)         :: nod2_array2D(:)
+-real(real64),   intent(inout)         :: nod3_array2D(:)
++real(kind=WP),   intent(inout)         :: nod1_array2D(:)
++real(kind=WP),   intent(inout)         :: nod2_array2D(:)
++real(kind=WP),   intent(inout)         :: nod3_array2D(:)
+-real(real64),   intent(inout)         :: nod_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod_array3D(:,:)
+-real(real64),   intent(inout)         :: nod_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod_array3D(:,:)
+-real(real64),   intent(inout)         :: nod1_array3D(:,:)
+-real(real64),   intent(inout)         :: nod2_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod1_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod2_array3D(:,:)
+-real(real64),   intent(inout)         :: nod1_array3D(:,:)
+-real(real64),   intent(inout)         :: nod2_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod1_array3D(:,:)
++real(kind=WP),   intent(inout)         :: nod2_array3D(:,:)
+-real(real64),   intent(inout)          :: nod_array3D(:,:,:)
++real(kind=WP),   intent(inout)          :: nod_array3D(:,:,:)
+-real(real64),   intent(inout)          :: nod_array3D(:,:,:)
++real(kind=WP),   intent(inout)          :: nod_array3D(:,:,:)
+-real(real64),   intent(inout)          :: elem_array3D(:,:)
++real(kind=WP),   intent(inout)          :: elem_array3D(:,:)
+-real(real64),   intent(inout)       :: elem_array3D(:,:)
++real(kind=WP),   intent(inout)       :: elem_array3D(:,:)
+-real(real64),   intent(inout)       :: elem_array3D(:,:,:)
++real(kind=WP),   intent(inout)       :: elem_array3D(:,:,:)
+-real(real64),   intent(inout)       :: elem_array3D(:,:,:)
++real(kind=WP),   intent(inout)       :: elem_array3D(:,:,:)
+-real(real64),   intent(inout)       :: elem_array2D(:)
++real(kind=WP),   intent(inout)       :: elem_array2D(:)
+-real(real64),   intent(inout)       :: elem_array2D(:)
++real(kind=WP),   intent(inout)       :: elem_array2D(:)
+-real(real64)                        ::  arr3D(:,:)
+-real(real64)                        ::  arr3Dglobal(:,:)
++real(kind=WP)                        ::  arr3D(:,:)
++real(kind=WP)                        ::  arr3Dglobal(:,:)
+-real(real64), ALLOCATABLE, DIMENSION(:) ::  sendbuf, recvbuf
++real(kind=WP), ALLOCATABLE, DIMENSION(:) ::  sendbuf, recvbuf
+-       CALL MPI_SEND(sendbuf(1), nTS*nl1, MPI_DOUBLE_PRECISION, &
++       CALL MPI_SEND(sendbuf(1), nTS*nl1, MPI_WP, &
+-    CALL MPI_RECV( recvbuf(1), node_size*nl1, MPI_DOUBLE_PRECISION, 0, &
++    CALL MPI_RECV( recvbuf(1), node_size*nl1, MPI_WP, 0, &
+-real(real64)                             :: arr2D(:)
+-real(real64)                             :: arr2Dglobal(:)
++real(kind=WP)                             :: arr2D(:)
++real(kind=WP)                             :: arr2Dglobal(:)
+-real(real64), ALLOCATABLE, DIMENSION(:)  :: sendbuf
++real(kind=WP), ALLOCATABLE, DIMENSION(:)  :: sendbuf
+-       CALL MPI_SEND(sendbuf(1), nTS, MPI_DOUBLE_PRECISION, &
++       CALL MPI_SEND(sendbuf(1), nTS, MPI_WP, &
+=== io_meandata precision hunks ===
+-  use o_PARAM, only : WP
++  use o_PARAM, only : WP, S_ref_anomaly
++    real(kind=WP)                                      :: offset = 0.0_WP ! added to ptr3 at accumulation (use_salt_anomaly: salt/sss carry +S_ref_anomaly so output stays absolute)
++  ! Fields whose requested output precision exceeds the working precision
++  ! (e.g. 8-byte output requested in a WP=4 single-precision build). Collected
++  ! during stream definition and reported once at the end of ini_mean_io so the
++  ! user is aware, without any per-stream or per-step printing.
++  integer, save                  :: n_wp_promoted = 0
++  character(len=20), save        :: wp_promoted_names(256)
++  ! Stream counts by requested output precision, for the same once-per-run report.
++  integer, save                  :: n_out_r4 = 0, n_out_r8 = 0
++    integer                   :: wp_bytes    ! actual byte width of WP, for the I/O precision report
+-!_______________________________________________________________________________    
++    n_wp_promoted = 0   ! reset the WP-vs-requested-precision awareness tallies
++    n_out_r4      = 0
++    n_out_r8      = 0
++!_______________________________________________________________________________
++    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
++    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+-    
++    !___________________________________________________________________________
++    ! Output-precision summary, printed once per run so the precision of what
++    ! lands on disk is visible in the log rather than implied by the file.
++    ! See note_output_precision for why the two directions are not symmetric.
++    if (mype == 0 .and. (n_out_r4 + n_out_r8) > 0) then
++        wp_bytes = storage_size(1.0_WP) / 8
++        write(*,*)
++        write(*,'(a,i0,a)') ' FESOM I/O precision (model working precision = ', wp_bytes, ' bytes):'
++        write(*,'(a,i0,a)') '     4-byte streams : ', n_out_r4, '   running mean accumulated in real32'
++        write(*,'(a,i0,a)') '     8-byte streams : ', n_out_r8, '   running mean accumulated in real64'
++        if (n_out_r4 > 0 .and. wp_bytes > 4) then
++            write(*,'(a,i0,a)') '   NOTE: ', n_out_r4, ' stream(s) are written BELOW the model working'
++            write(*,'(a)')      '         precision, and accumulate their running mean in real32 as well.'
++            write(*,'(a)')      '         The stored mean therefore carries at least the float32 floor'
++            write(*,'(a)')      '         (~1.2e-07 relative) and, over a long averaging window, more than'
++            write(*,'(a)')      '         that: a naive real32 sum of N samples grows like eps*sqrt(N).'
++            write(*,'(a)')      '         A signal under that level is quantised away and shows up as a'
++            write(*,'(a)')      '         flat baseline rather than as noise. Raise the last io_list column'
++            write(*,'(a)')      '         to 8 in namelist.io for fields you need to trust below it.'
++        end if
++        if (n_wp_promoted > 0) then
++            write(*,'(a,i0,a)') '   NOTE: ', n_wp_promoted, ' stream(s) request 8-byte output in a build whose'
++            write(*,'(a)')      '         working precision is narrower. The request is honoured (NF_DOUBLE,'
++            write(*,'(a)')      '         real64-accumulated mean), but the samples are single-precision'
++            write(*,'(a)')      '         sourced: the extra digits come from averaging, not from the model'
++            write(*,'(a)')      '         state. Affected:'
++            write(*,'(9x,*(1x,a))') (trim(wp_promoted_names(j)), &
++                j=1, min(n_wp_promoted, size(wp_promoted_names)))
++            if (n_wp_promoted > size(wp_promoted_names)) &
++                write(*,'(9x,a)') '... (list truncated)'
++        end if
++        write(*,*)
++    end if
++!_______________________________________________________________________________
++! Tally how a stream's requested output precision relates to the model's working
++! precision. Reported once per run at the end of ini_mean_io.
++!
++! `accuracy` (the last column of an io_list entry in namelist.io) selects BOTH
++! the on-disk NetCDF type AND the kind of the running-mean accumulator --
++! local_values_r8 for 8, local_values_r4 for 4. The two directions therefore are
++! not symmetric:
++!
++!   accuracy < WP  the stream is written, and averaged, below the precision the
++!                  model actually carries. This is the normal configuration (4-byte
++!                  output from a double-precision model) and is usually deliberate,
++!                  but it sets a resolution floor on the stored mean that is easy to
++!                  mistake for a physical signal -- a bias smaller than the floor
++!                  shows up as a flat baseline rather than as noise.
++!   accuracy > WP  the file and the accumulator are wider than the samples feeding
++!                  them. Nothing is lost, and the real64 mean of many float32
++!                  samples is genuinely better than a float32 mean -- but the extra
++!                  digits come from averaging, not from the model state.
++subroutine note_output_precision(name, accuracy)
++    character(len=*), intent(in) :: name
++    integer,          intent(in) :: accuracy
++    if (accuracy == i_real8) then
++      n_out_r8 = n_out_r8 + 1
++    else if (accuracy == i_real4) then
++      n_out_r4 = n_out_r4 + 1
++    end if
++    if (accuracy > WP) then
++      n_wp_promoted = n_wp_promoted + 1
++      if (n_wp_promoted <= size(wp_promoted_names)) wp_promoted_names(n_wp_promoted) = name
++    end if
++end subroutine note_output_precision
+-                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(J,I)
++                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(J,I)+entry%offset
+-                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(I,J)
++                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(I,J)+entry%offset
+-                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(J,I), real32)
++                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(J,I)+entry%offset, real32)
+-                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(I,J), real32)
++                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(I,J)+entry%offset, real32)
++    call note_output_precision(name, accuracy)
++    call note_output_precision(name, accuracy)
+-!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, xmean, ymean)
++!$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J, temp_x, temp_y, xmean, ymean)
+-                call vector_r2g(entry_x%local_values_r8(I,J), entry_y%local_values_r8(I,J), xmean, ymean, 0)
++                ! vector_r2g works in WP; round-trip through WP temps so the on-disk r8 buffer rotates correctly at WP=4 and WP=8
++                temp_x=real(entry_x%local_values_r8(I,J), kind=WP)
++                temp_y=real(entry_y%local_values_r8(I,J), kind=WP)
++                call vector_r2g(temp_x, temp_y, xmean, ymean, 0)
++                entry_x%local_values_r8(I,J)=real(temp_x, real64)
++                entry_y%local_values_r8(I,J)=real(temp_y, real64)
+=== oce_setup_step (setup + diag) ===
+-    USE g_forcing_param, only: use_virt_salt
++    USE g_forcing_param, only: use_virt_salt, use_age_tracer
++    use diagnostics,         only: ldiag_extflds, ldiag_trflx, ldiag_salt3D, ldiag_DVD
++    use cmor_variables_diag, only: ldiag_cmor
++    !___________________________________________________________________________
++    ! use_salt_anomaly (namelist &oce_dyn): store the salinity state as the
++    ! anomaly S - S_ref_anomaly (finer float32 spacing where the ocean lives).
++    ! S_ref_anomaly stays 0 unless the toggle is on, so the subtraction and every
++    ! downstream `+ S_ref_anomaly` are bit-identical no-ops when off. Initial
++    ! conditions arrive absolute -> convert ONCE here, after oce_initial_state
++    ! (insitu2pot has already used absolute S), before the AB copies below.
++    ! Restart reads are converted in fesom_init. All absolute-S consumers carry
++    ! offset corrections (EOS, sw_alpha_beta, ice gather, rsss, SSS restoring,
++    ! KPP buoyancy/double-diffusion, surface dilution term); clip and blowup
++    ! bounds shifted accordingly.
++    if (use_salt_anomaly) then
++        S_ref_anomaly = 35.0_WP
++        tracers%data(2)%values = tracers%data(2)%values - S_ref_anomaly
++        if (partit%mype==0) write(*,*) 'use_salt_anomaly: salinity state = S - ', S_ref_anomaly
++        ! configurations with absolute-salinity consumers that carry NO offset
++        ! correction yet: refuse to start instead of silently computing wrong
++        ! physics (extend the offset corrections before lifting a guard)
++        if (SPP .or. use_cavity .or. use_icebergs .or. use_age_tracer .or. use_transit &
++            .or. use_kpp_nonlclflx .or. clim_relax > 1.e-8_WP &
++            .or. ldiag_extflds .or. ldiag_trflx .or. ldiag_salt3D .or. ldiag_DVD .or. ldiag_cmor) then
++            if (partit%mype==0) write(*,*) 'use_salt_anomaly does not support yet: ', &
++                'SPP, cavities, icebergs, age tracer, transient tracers, ', &
++                'KPP nonlocal fluxes, 3D climatology relaxation, ', &
++                'salinity diagnostics (extflds/trflx/salt3D/DVD/cmor)'
++            call par_ex(partit%MPI_COMM_FESOM, partit%mype, 1)
++        end if
++    end if
+-    integer        :: precond_variant = 0 ! ssh CG preconditioner formula; 0 keeps results unchanged
++    ! ssh CG preconditioner formula. -1 = auto: resolved below to 1 in a
++    ! single-precision build and 0 in double. An explicit namelist value wins in
++    ! either direction, so a DP run can opt in to 1 and an SP run can force 0 to
++    ! reproduce an older experiment.
++    integer        :: precond_variant = -1
++    logical        :: precond_auto = .false.  ! true if the auto default was applied
++    ! Resolve the auto default. precision(0.0_WP) < precision(0.0d0) is true iff
++    ! WP is narrower than double -- a plain runtime test, so both variants stay
++    ! compiled and reachable in either build rather than one being preprocessed
++    ! out. In single precision the symmetric variant is not an optimisation but a
++    ! requirement: it costs 33-39% fewer CG iterations on every mesh measured up
++    ! to NG5, which is what keeps the SSH solve affordable when the working
++    ! precision is halved. Double precision keeps 0 until the long-run validation
++    ! of variant 1 completes.
++    if (precond_variant < 0) then
++        precond_variant = merge(1, 0, precision(0.0_WP) < precision(0.0d0))
++        precond_auto = .true.
++    end if
+-    if (mype==0) write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant
++    if (mype==0) then
++        if (precond_auto) then
++            write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant, &
++                       ' (auto: ', trim(merge('single', 'double', precision(0.0_WP) < precision(0.0d0))), ' precision)'
++        else
++            write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant, ' (from namelist)'
++        end if
++    end if
+=== write_step_info ===
+-    call MPI_AllREDUCE(loc_eta  , int_eta  , 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc_hbar , int_hbar , 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+-!PS     call MPI_AllREDUCE(loc_deta , int_deta , 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc_dhbar, int_dhbar, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc_wflux, int_wflux, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)     
++    call MPI_AllREDUCE(loc_eta  , int_eta  , 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc_hbar , int_hbar , 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++!PS     call MPI_AllREDUCE(loc_deta , int_deta , 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc_dhbar, int_dhbar, 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc_wflux, int_wflux, 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)     
+-    call MPI_AllREDUCE(loc , min_eta  , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_eta  , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_hbar , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_hbar , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_wflux, 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_wflux, 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_hflux, 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_hflux, 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_temp , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_temp , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_salt , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_salt , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-        call MPI_AllREDUCE(loc , min_dens , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++        call MPI_AllREDUCE(loc , min_dens , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_wvel , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_wvel , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_wvel2 , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_wvel2 , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_uvel , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_uvel , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_uvel2, 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_uvel2, 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_vvel , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_vvel , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_vvel2 , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_vvel2 , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_deta  , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_deta  , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_hnode , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_hnode , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , min_hnode2 , 1, MPI_DOUBLE_PRECISION, MPI_MIN, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , min_hnode2 , 1, MPI_WP, MPI_MIN, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_eta  , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_eta  , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_hbar , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_hbar , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_wflux, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_wflux, 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_hflux, 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_hflux, 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_temp , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_temp , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_salt , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_salt , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-        call MPI_AllREDUCE(loc , max_dens , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++        call MPI_AllREDUCE(loc , max_dens , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_wvel , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_wvel , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(loc , max_wvel2 , 1, MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(loc , max_wvel2 , 1, MPI_WP, MPI_MAX, MPI_COMM_FESOM, MPIerr)
+=== oce_ale (stiffness + salt) ===
++    use, intrinsic :: iso_fortran_env, only: real64
++#if defined(USE_SINGLE_PRECISION) && defined(DIAG_STIFF_DRIFT)
++    use g_config,only: dt, logfile_outfreq
++#else
++#endif
++#if defined(USE_SINGLE_PRECISION) && defined(DIAG_STIFF_DRIFT)
++    integer, save                       :: drift_ncall = 0
++    real(kind=real64)                   :: drift_d, drift_r, drift_s(4), drift_g(4)
++#endif
++#if defined(USE_SINGLE_PRECISION)
++    !___________________________________________________________________________
++    ! Seed the full-precision accumulator on first use. Deliberately here and not
++    ! in init_stiff_mat_ale: init runs on every start, but on a restart the
++    ! restored %values (which carries every increment the previous segment
++    ! accumulated -- it is in the binary dump, see MOD_MESH) overwrites what init
++    ! assembled. Seeding here, on the first update after all of that, is the one
++    ! point correct for a cold start and a restart alike.
++    !
++    ! SIZE: size(%values), NOT %nza. init_stiff_mat_ale sets %nza to the LOCAL nnz
++    ! and allocates %values with it, then later REPLACES %nza with the global sum
++    ! (sum(rpnza(1:npes))) because the solver wants a global count. Allocating
++    ! here with %nza would therefore over-allocate by ~npes per rank and make the
++    ! whole-array assignments below nonconforming -- reading past the end of
++    ! %values. size(%values) is the array we are shadowing, by construction.
++    if (.not. allocated(ssh_stiff%values_full)) then
++        allocate(ssh_stiff%values_full(size(ssh_stiff%values)))
++        ssh_stiff%values_full = real(ssh_stiff%values, real64)
++#if defined(DIAG_STIFF_DRIFT)
++        allocate(ssh_stiff%values_wp_drift(size(ssh_stiff%values)))
++        ssh_stiff%values_wp_drift = ssh_stiff%values
++#endif
++    end if
++#endif
++#if defined(USE_SINGLE_PRECISION)
++                   SSH_stiff%values_full(npos)=SSH_stiff%values_full(npos) + real(fy*factor, real64)
++#if defined(DIAG_STIFF_DRIFT)
++                   SSH_stiff%values_wp_drift(npos)=SSH_stiff%values_wp_drift(npos) + fy*factor
++#endif
++#else
++#endif
++#if defined(USE_SINGLE_PRECISION)
++    !___________________________________________________________________________
++    ! Refresh the working copy the CG solver and preconditioner read. The
++    ! accumulation above ran in real64, so this rounds once per step instead of
++    ! letting the rounding compound over the run. The solver's SpMV keeps WP
++    ! bandwidth -- only the accumulator is wider.
++    SSH_stiff%values = real(SSH_stiff%values_full, WP)
++#if defined(DIAG_STIFF_DRIFT)
++    !___________________________________________________________________________
++    ! Instrument: how far has the WP-accumulated matrix drifted from the real64
++    ! one? Inlined rather than a subroutine because a separate routine needs an
++    ! explicit interface (target dummies), and CMake's Fortran dependency scanner
++    ! does not evaluate the preprocessor -- it would demand the interface .mod in
++    ! builds where the module is guarded out. In DP both accumulators are the same
++    ! arithmetic, so the drift is 0.0 by construction; that is the control, and it
++    ! is why this is single-precision only.
++    drift_ncall = drift_ncall + 1
++    if (mod(drift_ncall, max(1,logfile_outfreq)) == 0) then
++        drift_s = 0.0_real64
++        do n = 1, myDim_nod2D
++            do k = ssh_stiff%rowptr_loc(n), ssh_stiff%rowptr_loc(n+1)-1
++                drift_d = real(ssh_stiff%values_wp_drift(k), real64) - ssh_stiff%values_full(k)
++                drift_r = ssh_stiff%values_full(k)
++                if (ssh_stiff%colind_loc(k) == n) then
++                    drift_s(1) = drift_s(1) + drift_d*drift_d
++                    drift_s(2) = drift_s(2) + drift_r*drift_r
++                else
++                    drift_s(3) = drift_s(3) + drift_d*drift_d
++                    drift_s(4) = drift_s(4) + drift_r*drift_r
++                end if
++            end do
++        end do
++        call MPI_AllREDUCE(drift_s, drift_g, 4, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++        if (mype == 0) write(*,'(a,i8,a,es12.5,a,es12.5)') ' [STIFFDRIFT] update ', drift_ncall, &
++            '  relL2(diag)= ',    sqrt(drift_g(1)/max(drift_g(2), tiny(1.0_real64))),            &
++            '  relL2(offdiag)= ', sqrt(drift_g(3)/max(drift_g(4), tiny(1.0_real64)))
++    end if
++#endif
++#endif
+=== oce_ale_pressure_bv ===
+-    if( a < 0.0_WP ) then
++    ! absolute S<0 <=> anomaly < -S_ref (S_ref=0 unless use_salt_anomaly)
++    if( a < -S_ref_anomaly ) then
+-                if (salt(nz, node) < 0) write (*,*) 'the model blows up at n=', mylist_nod2D(node), ' ; ', 'nz=', nz
++                if (salt(nz, node) < -S_ref_anomaly) write (*,*) 'the model blows up at n=', mylist_nod2D(node), ' ; ', 'nz=', nz
+-  real(kind=WP)                         :: s_sqrt
++  real(kind=WP)                         :: s_sqrt, s_abs
+-  s_sqrt = sqrt(s)
++  s_abs = s + S_ref_anomaly   ! EOS needs absolute salinity (S_ref=0 unless use_salt_anomaly)
++  s_sqrt = sqrt(s_abs)
+-          + s* (as  + t*(ast  + t*(ast2 + t*ast3))               &
++          + s_abs* (as  + t*(ast  + t*(ast2 + t*ast3))               &
+-                  + s*(aps + t*(apst + t*apst2) + s_sqrt*apss)
++                  + s_abs*(aps + t*(apst + t*apst2) + s_sqrt*apss)
+-                + s *(ap2s + t*(ap2st + t*ap2st2))
++                + s_abs *(ap2s + t*(ap2st + t*ap2st2))
+-               + s*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4)))  &
++               + s_abs*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4)))  &
+-                       + s* bss2)
++                       + s_abs* bss2)
+-     s1 = SF1(nz,n)
++     s1 = SF1(nz,n) + S_ref_anomaly   ! McDougall polynomial wants absolute (S_ref=0 unless use_salt_anomaly)
+-  real(kind=WP)                          :: rhopot, bulk
++  real(kind=WP)                          :: rhopot, bulk, s_abs
++  s_abs = s + S_ref_anomaly   ! linear EOS needs absolute S (S_ref=0 unless use_salt_anomaly)
+-      rho_out  = density_0 - density_0*0.0002052_WP*(t - 10.0_WP) + density_0*0.00079_WP*(s - 35.0_WP)
++      rho_out  = density_0 - density_0*0.0002052_WP*(t - 10.0_WP) + density_0*0.00079_WP*(s_abs - 35.0_WP)
+-          rho_out = rho_out + density_0*haline_beta*(s - 35.0_WP)
++          rho_out = rho_out + density_0*haline_beta*(s_abs - 35.0_WP)
+-      rho_out  = density_0 + 0.8_WP*(s - 34.0_WP) - 0.2*(t - 20.0_WP)
++      rho_out  = density_0 + 0.8_WP*(s_abs - 34.0_WP) - 0.2*(t - 20.0_WP)
+-    real(kind=8)                            :: T, S, auxz, x, y
++    real(kind=WP)                           :: T, S, auxz, x, y
+-    real(kind=8)                            :: ref_temp1D(mesh%nl-1), ref_salt1D(mesh%nl-1), vol1D(mesh%nl-1)
++    real(kind=WP)                           :: ref_temp1D(mesh%nl-1), ref_salt1D(mesh%nl-1), vol1D(mesh%nl-1)
+-call MPI_Allreduce(MPI_IN_PLACE, ref_temp1D, mesh%nl-1, MPI_DOUBLE, MPI_SUM, partit%MPI_COMM_FESOM, MPIerr)
+-call MPI_Allreduce(MPI_IN_PLACE, ref_salt1D, mesh%nl-1, MPI_DOUBLE, MPI_SUM, partit%MPI_COMM_FESOM, MPIerr)
+-call MPI_Allreduce(MPI_IN_PLACE,      vol1D, mesh%nl-1, MPI_DOUBLE, MPI_SUM, partit%MPI_COMM_FESOM, MPIerr)
++call MPI_Allreduce(MPI_IN_PLACE, ref_temp1D, mesh%nl-1, MPI_WP, MPI_SUM, partit%MPI_COMM_FESOM, MPIerr)
++call MPI_Allreduce(MPI_IN_PLACE, ref_salt1D, mesh%nl-1, MPI_WP, MPI_SUM, partit%MPI_COMM_FESOM, MPIerr)
+=== gen_surface_forcing ===
+-   USE iso_fortran_env, only: error_unit
++   USE iso_fortran_env, only: error_unit, real64
+-   USE g_config, only: dummy, ClimateDataPath, dt
++   USE g_config, only: dummy, ClimateDataPath, dt, flag_debug
+-   real(wp), allocatable, save, dimension(:,:)   :: coef_b ! time inerp coef. b (x=a*t+b)
+-   real(wp), allocatable, save, dimension(:,:)   :: coef_a ! time inerp coef. a (x=a*t+b)
++   ! Time interpolation uses the point-slope (offset) form
++   !    atmdata = coef_b + (rdate - time_t0)*coef_a
++   ! coef_b holds the field VALUE at the bracket start (data-scale, WP is fine and
++   ! keeps the vector rotation in vector_g2r WP-compatible); coef_a is the slope.
++   ! time_t0 is the bracket-start time (an absolute Julian day ~2.4e6) held in
++   ! real64 -- see the note on nc_time below. The earlier form stored coef_b as the
++   ! affine intercept (data1 - coef_a*nc_time), which put a ~2.4e6-magnitude value
++   ! into a WP array and lost ~7 digits to cancellation in single precision.
++   real(wp),     allocatable, save, dimension(:,:) :: coef_b ! interp base value  (x = b + (t-t0)*a)
++   real(wp),     allocatable, save, dimension(:,:) :: coef_a ! interp slope        (x = b + (t-t0)*a)
++   real(real64), allocatable, save, dimension(:)   :: time_t0 ! per-field bracket-start time t0 [days]
+-      real(wp), allocatable, dimension(:)  :: nc_lon, nc_lat, nc_time
++      real(wp),     allocatable, dimension(:)  :: nc_lon, nc_lat
++      ! The time axis holds an ABSOLUTE Julian day (~2.4e6 for modern dates). Its
++      ! float32 ulp at that magnitude is 0.25 d = 6 h, which collapses sub-6-hourly
++      ! forcing records onto a common grid (delta_t=0 -> division blow-up) and
++      ! quantises the model forcing-clock to 6 h (a silent staircase in the
++      ! interpolation). Time must therefore be real64 regardless of the working
++      ! precision WP; only the interpolated field VALUE is narrowed to WP.
++      real(real64), allocatable, dimension(:)  :: nc_time
++    ! nc_time is real64 (see its declaration) -> broadcast as double, not MPI_WP.
+-    call MPI_BCast(flf%nc_lon,   flf%nc_Nlon,   MPI_DOUBLE_PRECISION, 0, partit%MPI_COMM_FESOM, ierror)
+-    call MPI_BCast(flf%nc_lat,   flf%nc_Nlat,   MPI_DOUBLE_PRECISION, 0, partit%MPI_COMM_FESOM, ierror)
++    call MPI_BCast(flf%nc_lon,   flf%nc_Nlon,   MPI_WP, 0, partit%MPI_COMM_FESOM, ierror)
++    call MPI_BCast(flf%nc_lat,   flf%nc_Nlat,   MPI_WP, 0, partit%MPI_COMM_FESOM, ierror)
+-      real(wp)            :: rdate ! initialization date
++      real(real64)        :: rdate ! initialization date (absolute Julian day, must be real64)
++      real(real64)        :: dbg_dt_hours, dbg_dd ! [debug] inferred forcing dt reporting
+-      
++      ! [debug] Report the temporal resolution inferred from each forcing file's
++      ! time axis (finest spacing between records). Printed once at setup (nc_sbc_ini
++      ! is called once per run) on the root rank only, gated by flag_debug -- matches
++      ! the "say what routine I'm in" debug convention. Useful to confirm e.g. JRA55
++      ! resolves as 3 h and CORE2 as 6 h, and that the axis is not float32-collapsed.
++      if (flag_debug .and. mype==0) then
++         write(*,*) ' --> [forcing] inferred temporal resolution per variable:'
++         do fld_idx = 1, i_totfl
++            flf => sbc_flfi(fld_idx)
++            ! Representative record spacing from the first interior interval. The
++            ! nm_nc_tmid midpoint shift (see nc_readTimeGrid) leaves interior spacings
++            ! intact but perturbs the very last one, so avoid min/last; the first
++            ! interval reflects the native cadence (e.g. 3 h JRA55, 6 h CORE2).
++            dbg_dt_hours = -1.0_real64
++            if (flf%nc_Ntime >= 2) &
++               dbg_dt_hours = ( flf%nc_time(2) - flf%nc_time(1) )*24.0_real64
++            write(*,'(a,a12,a,i6,a,f9.3,a)') '       var = ', adjustl(trim(flf%var_name)), &
++               '   records = ', flf%nc_Ntime, '   dt = ', dbg_dt_hours, ' h'
++         end do
++      end if
+-      rdate = real(julday(yearnew, 1, 1, sbc_flfi(1)%calendar ))
+-      rdate = rdate+real(daynew-1,WP)+timenew/86400._WP 
++      ! Build in real64: in an SP build default real is real32, so casting every
++      ! term keeps the ~2.4e6 Julian day and the sub-day fraction from collapsing
++      ! onto the float32 6-hour grid. In a DP build (default real = real64) these
++      ! casts are no-ops, so the result is bit-identical.
++      rdate = real(julday(yearnew, 1, 1, sbc_flfi(1)%calendar ), real64)
++      rdate = rdate + real(daynew-1,real64) + real(timenew,real64)/86400._real64
+-      real(wp),intent(in)  :: rdate ! initialization date
++      real(real64),intent(in)  :: rdate ! initialization date (absolute Julian day)
+-      real(wp)             :: now_date
++      real(real64)         :: now_date
+-      real(wp)             :: delta_t   ! time(t_indx) - time(t_indx+1)
+-      real(wp)             :: rdatep1 ! time(t_indx) - time(t_indx+1)
++      real(real64)         :: delta_t   ! time(t_indx) - time(t_indx+1)
++      real(real64)         :: rdatep1 ! time(t_indx) - time(t_indx+1)
+-      real(wp),  pointer   :: nc_time(:), nc_lon(:), nc_lat(:)
++      real(real64), pointer :: nc_time(:)
++      real(wp),  pointer   :: nc_lon(:), nc_lat(:)
+-      call binarysearch(nc_Ntime,nc_time,now_date,t_indx)
++      call binarysearch_r8(nc_Ntime,nc_time,now_date,t_indx)
+-                    rdatep1 = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),WP)
+-                    rdatep1 = rdatep1+real(60,WP) + delta_t*0.5_WP
+-                    call binarysearch(nc_Ntime, nc_time, rdatep1, t_indx_p1)
++                    rdatep1 = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),real64)
++                    rdatep1 = rdatep1+real(60,real64) + delta_t*0.5_real64
++                    call binarysearch_r8(nc_Ntime, nc_time, rdatep1, t_indx_p1)
+-         delta_t = 1.0_wp
++         delta_t = 1.0_real64
+-         delta_t = 1.0_wp
++         delta_t = 1.0_real64
++      ! Record the bracket-start time t0 for this field (same for all nodes). Held in
++      ! real64 and subtracted from rdate at evaluation time so no absolute ~2.4e6 day
++      ! ever enters the WP interpolation.
++      time_t0(fld_idx) = nc_time(t_indx)
++         ! Point-slope (offset) form: store the slope and the base VALUE data1, and
++         ! evaluate later as coef_b + (rdate - time_t0)*coef_a. This keeps the huge
++         ! absolute time out of the WP coefficient arrays; delta_t is real64 so the
++         ! slope is formed in double.
+-         coef_b(fld_idx, ii) = data1 - coef_a(fld_idx, ii) * nc_time(t_indx)
++         coef_b(fld_idx, ii) = data1
++#ifdef FESOM_PROFILING
++      use fesom_profiler, only: fesom_profiler_start, fesom_profiler_end
++#endif
+-      real(wp),       intent(in)            :: rdate  ! seconds
++      real(real64),   intent(in)            :: rdate  ! absolute Julian day (real64)
++      real(wp)           :: dt_elapsed   ! elapsed time since bracket start [days], WP
++      ! Accumulated over the whole run (start/end sums into the named section on
++      ! every call), so the report shows total time-interpolation cost, not one step.
++#ifdef FESOM_PROFILING
++      call fesom_profiler_start("sbc_time_interp")
++#endif
++         ! Elapsed time since this field's bracket start. Formed once per field: the
++         ! subtraction is done in real64 (so no absolute ~2.4e6 Julian day enters WP)
++         ! and narrowed to WP here -- (rdate - time_t0) <= one record interval, so it
++         ! is tiny and exact in WP. Hoisting it out of the node loop keeps the inner
++         ! loop a single fused multiply-add (coef_b + dt_elapsed*coef_a), identical in
++         ! cost to the previous rdate*coef_a + coef_b.
++         dt_elapsed = real(rdate - time_t0(fld_idx), WP)
+-            ! store processed forcing data for fesom computation
+-            atmdata(fld_idx,i) = rdate * coef_a(fld_idx,i) + coef_b(fld_idx,i)
++            ! store processed forcing data for fesom computation (point-slope form)
++            atmdata(fld_idx,i) = coef_b(fld_idx,i) + dt_elapsed * coef_a(fld_idx,i)
++#ifdef FESOM_PROFILING
++      call fesom_profiler_end("sbc_time_interp")
++#endif
+-              & atmdata(i_totfl,myDim_nod2D+eDim_nod2D), &
++              & atmdata(i_totfl,myDim_nod2D+eDim_nod2D), time_t0(i_totfl), &
+-      coef_a       = 0.0_WP             
++      coef_a       = 0.0_WP
++      time_t0      = 0.0_real64
+-      real(wp)     :: rdate ! date
++      real(real64) :: rdate ! date (absolute Julian day, must be real64)
+-      real(wp),  pointer   :: nc_time(:)
++      real(real64), pointer :: nc_time(:)
+-        rdate = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),WP)
+-        rdate = rdate+real(daynew-1,WP)+timenew/86400._WP-dt/86400._WP/2._WP
++        rdate = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),real64)
++        rdate = rdate+real(daynew-1,real64)+real(timenew,real64)/86400._real64-real(dt,real64)/86400._real64/2._real64
+-                rdate = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),WP)
+-                rdate = rdate+real(daynew-1+1,WP)+timenew/86400._WP-dt/86400._WP/2._WP
++                rdate = real(julday(yearnew,1,1, sbc_flfi(fld_idx)%calendar ),real64)
++                rdate = rdate+real(daynew-1+1,real64)+real(timenew,real64)/86400._real64-real(dt,real64)/86400._real64/2._real64
+-      DEALLOCATE( coef_a, coef_b, atmdata, &
++      DEALLOCATE( coef_a, coef_b, atmdata, time_t0, &
++   SUBROUTINE binarysearch_r8(length, array, value, ind)
++      ! real64 counterpart of binarysearch(), used for the forcing TIME axis.
++      ! The time axis must stay double (an absolute Julian day loses 6 h of
++      ! resolution in float32), so the search over it needs a real64 signature.
++      ! A generic interface cannot be used because in a DP build WP == real64 and
++      ! the two module procedures would be ambiguous; hence a distinct name.
++      IMPLICIT NONE
++      integer,      intent(in)  :: length
++      real(real64), dimension(length), intent(in) :: array
++      real(real64), intent(in)  :: value
+=== cvmix_tke shims ===
++    ! cvmix_kinds_and_types provides cvmix_r8 (CVMix's fixed real64 kind), used below to
++    ! convert WP<->cvmix_r8 at the CVMix call boundary for single-precision FESOM builds.
+-        call init_tke(c_k            = tke_c_k,            &
+-                      c_eps          = tke_c_eps,          &
+-                      cd             = tke_cd,             &
+-                      alpha_tke      = tke_alpha,          &
+-                      mxl_min        = tke_mxl_min,        &
+-                      kappaM_min     = tke_kappaM_min,     &
+-                      kappaM_max     = tke_kappaM_max,     &
++        call init_tke(c_k            = real(tke_c_k,        cvmix_r8), &
++                      c_eps          = real(tke_c_eps,      cvmix_r8), &
++                      cd             = real(tke_cd,         cvmix_r8), &
++                      alpha_tke      = real(tke_alpha,      cvmix_r8), &
++                      mxl_min        = real(tke_mxl_min,    cvmix_r8), &
++                      kappaM_min     = real(tke_kappaM_min, cvmix_r8), &
++                      kappaM_max     = real(tke_kappaM_max, cvmix_r8), &
+-                      clc            = tke_clangmuir,      &
+-                      tke_min        = tke_min,            &
+-                      tke_surf_min   = tke_surf_min    )
++                      clc            = real(tke_clangmuir,  cvmix_r8), &
++                      tke_min        = real(tke_min,        cvmix_r8), &
++                      tke_surf_min   = real(tke_surf_min,   cvmix_r8) )
++        ! CVMix is a fixed double-precision library (kind cvmix_r8); FESOM's WP may be
++        ! real4. These buffers convert WP<->cvmix_r8 at the CVMix TKE call boundary so
++        ! CVMix always runs in double precision. In a DP build cvmix_r8==WP, so the
++        ! casts/copies are exact no-ops and the result is bit-identical.
++        ! input arrays (copy-in WP -> cvmix_r8 before the call):
++        real(cvmix_r8) :: dzw_r8(mesh%nl), dzt_r8(mesh%nl)
++        real(cvmix_r8) :: tke_old_r8(mesh%nl), av_old_r8(mesh%nl), kv_old_r8(mesh%nl)
++        real(cvmix_r8) :: ssqr_r8(mesh%nl), nsqr_r8(mesh%nl)
++        real(cvmix_r8) :: alphac_r8(mesh%nl), eiw_r8(mesh%nl), iwdis_r8(mesh%nl)
++        real(cvmix_r8) :: plc_r8(mesh%nl)
++        ! output arrays (copy-out cvmix_r8 -> WP after the call):
++        real(cvmix_r8) :: tke_new_r8(mesh%nl), kappam_r8(mesh%nl), kappah_r8(mesh%nl)
++        real(cvmix_r8) :: tbpr_r8(mesh%nl), tspr_r8(mesh%nl), tdif_r8(mesh%nl), tdis_r8(mesh%nl)
++        real(cvmix_r8) :: twin_r8(mesh%nl), tiwf_r8(mesh%nl), tbck_r8(mesh%nl), ttot_r8(mesh%nl)
++        real(cvmix_r8) :: lmix_r8(mesh%nl), pr_r8(mesh%nl)
++        real(cvmix_r8) :: int1_r8(mesh%nl), int2_r8(mesh%nl), int3_r8(mesh%nl)
+-            
++            ! copy-in WP -> cvmix_r8 for the double-precision CVMix TKE call
++            dzw_r8(nun:nln)       = real(hnode(nun:nln,node),                cvmix_r8)
++            dzt_r8(nun:nln+1)     = real(dz_trr(nun:nln+1),                  cvmix_r8)
++            tke_old_r8(nun:nln+1) = real(tke_old(nun:nln+1),                 cvmix_r8)
++            av_old_r8(nun:nln+1)  = real(tke_Av_old(nun:nln+1),             cvmix_r8)
++            kv_old_r8(nun:nln+1)  = real(tke_Kv_old(nun:nln+1),             cvmix_r8)
++            ssqr_r8(nun:nln+1)    = real(vshear2(nun:nln+1),                 cvmix_r8)
++            nsqr_r8(nun:nln+1)    = real(bvfreq2(nun:nln+1),                 cvmix_r8)
++            alphac_r8(nun:nln+1)  = real(tke_in3d_iwealphac(nun:nln+1,node), cvmix_r8)
++            eiw_r8(nun:nln+1)     = real(tke_in3d_iwe(nun:nln+1,node),       cvmix_r8)
++            iwdis_r8(nun:nln+1)   = real(tke_in3d_iwdis(nun:nln+1,node),     cvmix_r8)
++            plc_r8(nun:nln+1)     = real(tke_langmuir(nun:nln+1,node),       cvmix_r8)
+-                dzw          = hnode(nun:nln,node),               & ! distance between layer interface --> hnode
+-                dzt          = dz_trr(nun:nln+1),                   & ! distnace between tracer points
++                dzw          = dzw_r8(nun:nln),             & ! distance between layer interface --> hnode
++                dzt          = dzt_r8(nun:nln+1),           & ! distnace between tracer points
+-                dtime        = dt,                          &
+-                rho_ref      = density_0,                   &
+-                grav         = g,                           &
++                dtime        = real(dt,        cvmix_r8),   &
++                rho_ref      = real(density_0, cvmix_r8),   &
++                grav         = real(g,         cvmix_r8),   &
+-                tke_new      = tke(       nun:nln+1,node),                 & ! out--> turbulent kinetic energy
+-                KappaM_out   = tke_Av(    nun:nln+1,node),              & ! out
+-                KappaH_out   = tke_Kv(    nun:nln+1,node),              & ! out
+-                tke_old      = tke_old(   nun:nln+1),                  & ! in --> turbulent kinetic energy previous time step
+-                old_KappaM   = tke_Av_old(nun:nln+1),               & ! in
+-                old_KappaH   = tke_Kv_old(nun:nln+1),               & ! in
+-                Ssqr         = vshear2(   nun:nln+1),                  & ! in --> square vert. vel. shear
+-                Nsqr         = bvfreq2(   nun:nln+1),                  & ! in --> square brunt Väisälä freq
+-                alpha_c      = tke_in3d_iwealphac(nun:nln+1,node),  & ! in for IDEMIX Ri
+-                E_iw         = tke_in3d_iwe(nun:nln+1,node),        & ! in for IDEMIX Ri
++                tke_new      = tke_new_r8(nun:nln+1),       & ! out--> turbulent kinetic energy
++                KappaM_out   = kappam_r8(nun:nln+1),        & ! out
++                KappaH_out   = kappah_r8(nun:nln+1),        & ! out
++                tke_old      = tke_old_r8(nun:nln+1),       & ! in --> turbulent kinetic energy previous time step
++                old_KappaM   = av_old_r8(nun:nln+1),        & ! in
++                old_KappaH   = kv_old_r8(nun:nln+1),        & ! in
++                Ssqr         = ssqr_r8(nun:nln+1),          & ! in --> square vert. vel. shear
++                Nsqr         = nsqr_r8(nun:nln+1),          & ! in --> square brunt Väisälä freq
++                alpha_c      = alphac_r8(nun:nln+1),        & ! in for IDEMIX Ri
++                E_iw         = eiw_r8(nun:nln+1),           & ! in for IDEMIX Ri
+-                forc_tke_surf= tke_forc2d_normstress(   node), & ! in --> wind stress  
+-                forc_rho_surf= tke_forc2d_rhosurf(      node), & ! in
+-                bottom_fric  = tke_forc2d_botfrict(     node), & ! in
+-                iw_diss      = tke_in3d_iwdis(nun:nln+1,node), & ! in
++                forc_tke_surf= real(tke_forc2d_normstress(node), cvmix_r8), & ! in --> wind stress
++                forc_rho_surf= real(tke_forc2d_rhosurf(node),    cvmix_r8), & ! in
++                bottom_fric  = real(tke_forc2d_botfrict(node),   cvmix_r8), & ! in
++                iw_diss      = iwdis_r8(nun:nln+1),         & ! in
+-                tke_plc      = tke_langmuir(nun:nln+1,node),   & ! in   
+-                tke_Tbpr     = tke_Tbpr(nun:nln+1,node),            & ! buoyancy production
+-                tke_Tspr     = tke_Tspr(nun:nln+1,node),            & ! shear production 
+-                tke_Tdif     = tke_Tdif(nun:nln+1,node),            & ! vertical diffusion d/dz(k d/dz)TKE
+-                tke_Tdis     = tke_Tdis(nun:nln+1,node),            & ! dissipation
+-                tke_Twin     = tke_Twin(nun:nln+1,node),            & ! wind forcing
+-                tke_Tiwf     = tke_Tiwf(nun:nln+1,node),            & ! internal wave forcing when idemix is used
+-                tke_Tbck     = tke_Tbck(nun:nln+1,node),            & ! background forcing only active if IDEMIX is not active, forcing that results from resetting TKE to minimum background TKE value
+-                tke_Ttot     = tke_Ttot(nun:nln+1,node),            & ! sum of all terms
+-                tke_Lmix     = tke_Lmix(nun:nln+1,node),            & ! mixing length scale of the TKE scheme
+-                tke_Pr       = tke_Pr(  nun:nln+1,node),              & ! Prantl number
+=== oce_ale_mixing_kpp (native KPP) ===
++  ! KPP divide-by-zero guard added to denominators (/(wm+epsln), /(hbl+epsln),
++  ! /(dVsq+Vtsq+epsln), (ws*hbl+epsln), ...). It MUST stay a NORMAL number in the
++  ! active working precision: 1.0e-40 is a denormal in real32 and Intel -O3 flushes
++  ! it to 0 (FTZ/DAZ), which defeats every guard -> 0/0 = NaN in single precision at
++  ! the cold start. Single precision therefore uses a value that survives FTZ; double
++  ! precision keeps 1.0e-40 so the default build is numerically unchanged.
++#if defined(USE_SINGLE_PRECISION)
++  real(KIND=WP), parameter :: epsln             = 1.0e-20_WP ! a small value (SP: normal, FTZ-safe)
++#else
++#endif
++     ! buoyancy flux from the freshwater flux wants absolute S (S_ref=0 unless use_salt_anomaly)
+-                      + sw_beta (nzmin,node) * water_flux(node) * tracers%data(2)%values(nzmin,node)) 
++                      + sw_beta (nzmin,node) * water_flux(node) * (tracers%data(2)%values(nzmin,node)+S_ref_anomaly))
+=== ice_oce_coupling ===
+-            S_oc_array(n) = salt(1,n)
++            S_oc_array(n) = salt(1,n) + S_ref_anomaly   ! state stores S-S_ref (0 unless use_salt_anomaly)
+-             S_oc_array(n) = (S_oc_array(n)*real(ice%ice_steps_since_upd,WP)+salt(1,n))/real(ice%ice_steps_since_upd+1,WP)
++             S_oc_array(n) = (S_oc_array(n)*real(ice%ice_steps_since_upd,WP)+salt(1,n)+S_ref_anomaly)/real(ice%ice_steps_since_upd+1,WP)
+-            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n)
+-            virtual_salt(n)=rsss*water_flux(n) 
++            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
++            virtual_salt(n)=rsss*water_flux(n)
+-            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n)
+-            virtual_salt(n)=rsss*water_flux(n) 
++            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
++            virtual_salt(n)=rsss*water_flux(n)
+-            relax_salt(n)=surf_relax_S*(Ssurf(n)-salt(ulevels_nod2d(n),n))
++            ! Ssurf is absolute; subtract S_ref (0 unless use_salt_anomaly) to match the anomaly state
++            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+-            relax_salt(n)=surf_relax_S*(Ssurf(n)-salt(ulevels_nod2d(n),n))
++            ! Ssurf is absolute; subtract S_ref (0 unless use_salt_anomaly) to match the anomaly state
++            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+-        if (ulevels_nod2d(n) == 1) then ! --> is open ocean node 
+-            dens_flux(n)=sw_alpha(1,n) * heat_flux_in(n) / vcpw + sw_beta(1, n) * (relax_salt(n) + water_flux(n) * salt(1,n))
++        if (ulevels_nod2d(n) == 1) then ! --> is open ocean node
++            ! density-flux diagnostic wants absolute S; S_ref=0 unless use_salt_anomaly
++            dens_flux(n)=sw_alpha(1,n) * heat_flux_in(n) / vcpw + sw_beta(1, n) * (relax_salt(n) + water_flux(n) * (salt(1,n)+S_ref_anomaly))
+=== gen_ic3d + read_NetCDF + io_fesom_file + restart group ===
+--- gen_ic3d.F90
++   USE io_netcdf_nf_interface, only: nf_get_vara_x
+-         iost = nf_get_vara_double(ncid, id_lat, nf_start, nf_edges, nc_lat)
++         iost = nf_get_vara_x(ncid, id_lat, nf_start, nf_edges, nc_lat)
+-         iost = nf_get_vara_double(ncid, id_lon, nf_start, nf_edges, nc_lon(2:nc_Nlon-1))
++         iost = nf_get_vara_x(ncid, id_lon, nf_start, nf_edges, nc_lon(2:nc_Nlon-1))
+-         iost = nf_get_vara_double(ncid, id_depth, nf_start, nf_edges,nc_depth)
++         iost = nf_get_vara_x(ncid, id_depth, nf_start, nf_edges,nc_depth)
+-      call MPI_BCast(nc_lon,   nc_Nlon,   MPI_DOUBLE_PRECISION, 0, partit%MPI_COMM_FESOM, ierror)
+-      call MPI_BCast(nc_lat,   nc_Nlat,   MPI_DOUBLE_PRECISION, 0, partit%MPI_COMM_FESOM, ierror)
+-      call MPI_BCast(nc_depth, nc_Ndepth, MPI_DOUBLE_PRECISION, 0, partit%MPI_COMM_FESOM, ierror)
++      call MPI_BCast(nc_lon,   nc_Nlon,   MPI_WP, 0, partit%MPI_COMM_FESOM, ierror)
++      call MPI_BCast(nc_lat,   nc_Nlat,   MPI_WP, 0, partit%MPI_COMM_FESOM, ierror)
++      call MPI_BCast(nc_depth, nc_Ndepth, MPI_WP, 0, partit%MPI_COMM_FESOM, ierror)
++      real(wp), allocatable, dimension(:)     :: ncdata_inner ! rank-1 read buffer (generic nf_get_vara_x only resolves rank-1 actuals)
++      real(8)				      :: FILL_VALUE_r8   ! double temp: file stores fill/missing as double
+-         iost = nf_inq_var_fill(ncid, id_data, NO_FILL, FILL_VALUE) ! FillValue defined?
++         iost = nf_inq_var_fill(ncid, id_data, NO_FILL, FILL_VALUE_r8) ! FillValue defined?
+-            iost = nf_get_att_double(ncid, id_data, 'missing_value', FILL_VALUE)
++            iost = nf_get_att_double(ncid, id_data, 'missing_value', FILL_VALUE_r8)
+-               FILL_VALUE = NF_FILL_DOUBLE  ! 9.9692099683868690e+36
+-               print *, 'No _FillValue or missing_value in ', trim(filename), ', using NetCDF default:', FILL_VALUE
++               FILL_VALUE_r8 = NF_FILL_DOUBLE  ! 9.9692099683868690e+36
++               print *, 'No _FillValue or missing_value in ', trim(filename), ', using NetCDF default:', FILL_VALUE_r8
+-               print *, 'Using missing_value from ', trim(filename), ':', FILL_VALUE
++               print *, 'Using missing_value from ', trim(filename), ':', FILL_VALUE_r8
+-            print *, 'Using _FillValue from ', trim(filename), ':', FILL_VALUE
++            print *, 'Using _FillValue from ', trim(filename), ':', FILL_VALUE_r8
++         ! cast to working precision; comparison below uses the same WP rounding as the data read
++         FILL_VALUE = real(FILL_VALUE_r8, WP)
+-      call MPI_BCast(FILL_VALUE, 1, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++      call MPI_BCast(FILL_VALUE, 1, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-         iost = nf_get_vara_double(ncid, id_data, nf_start, nf_edges, ncdata(2:nc_Nlon-1,:,:))
++         ! read into a contiguous rank-1 WP buffer, then reshape into the strided destination
++         ! (generic nf_get_vara_x only resolves rank-1 actuals; NetCDF Fortran order has the first dim fastest)
++         allocate(ncdata_inner((nc_Nlon-2)*nc_Nlat*nc_Ndepth))
++         iost = nf_get_vara_x(ncid, id_data, nf_start, nf_edges, ncdata_inner)
++         ncdata(2:nc_Nlon-1,:,:) = reshape(ncdata_inner, [nc_Nlon-2, nc_Nlat, nc_Ndepth])
++         deallocate(ncdata_inner)
+-      call MPI_BCast(ncdata, nc_Nlon*nc_Nlat*nc_Ndepth, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++      call MPI_BCast(ncdata, nc_Nlon*nc_Nlat*nc_Ndepth, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-      call MPI_AllREDUCE(locTmax , glo  , 1, MPI_DOUBLE_PRECISION, MPI_MAX, partit%MPI_COMM_FESOM, partit%MPIerr)
++      call MPI_AllREDUCE(locTmax , glo  , 1, MPI_WP, MPI_MAX, partit%MPI_COMM_FESOM, partit%MPIerr)
+-      call MPI_AllREDUCE(locTmin , glo  , 1, MPI_DOUBLE_PRECISION, MPI_MIN, partit%MPI_COMM_FESOM, partit%MPIerr)
++      call MPI_AllREDUCE(locTmin , glo  , 1, MPI_WP, MPI_MIN, partit%MPI_COMM_FESOM, partit%MPIerr)
+-      call MPI_AllREDUCE(locSmax , glo  , 1, MPI_DOUBLE_PRECISION, MPI_MAX, partit%MPI_COMM_FESOM, partit%MPIerr)
+--- gen_modules_read_NetCDF.F90
+-  real(real64)               :: x, y, miss, aux, xmin, elnodes_x(3)
+-  real(real64), allocatable  :: lon(:), lat(:)
+-  real(real64), allocatable  :: ncdata(:,:), ncdata_temp(:,:)
+-  real(real64), allocatable  :: temp_x(:), temp_y(:)
+-  real(real64)               :: model_2Darray(partit%myDim_nod2d+partit%eDim_nod2D)   
++  real(kind=WP)               :: x, y, miss, aux, xmin, elnodes_x(3)
++  real(kind=WP), allocatable  :: lon(:), lat(:)
++  real(kind=WP), allocatable  :: ncdata(:,:), ncdata_temp(:,:)
++  real(kind=WP), allocatable  :: temp_x(:), temp_y(:)
++  real(kind=WP)               :: model_2Darray(partit%myDim_nod2d+partit%eDim_nod2D)   
+-  call MPI_BCast(lat, latlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)  
++  call MPI_BCast(lat, latlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)  
+-  call MPI_BCast(lon, lonlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)  
++  call MPI_BCast(lon, lonlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)  
+-  call MPI_BCast(ncdata, lonlen*latlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
+-  call MPI_BCast(miss,               1, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++  call MPI_BCast(ncdata, lonlen*latlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)
++  call MPI_BCast(miss,               1, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-  real(real64)                  :: x, y, miss
+-  real(real64), allocatable     :: lon(:), lat(:)
+-  real(real64), allocatable     :: ncdata(:,:)
+-  real(real64), allocatable     :: temp_x(:), temp_y(:)
+-  real(real64)                  :: model_2Darray(partit%myDim_nod2d+partit%eDim_nod2D)   
++  real(kind=WP)                  :: x, y, miss
++  real(kind=WP), allocatable     :: lon(:), lat(:)
++  real(kind=WP), allocatable     :: ncdata(:,:)
++  real(kind=WP), allocatable     :: temp_x(:), temp_y(:)
++  real(kind=WP)                  :: model_2Darray(partit%myDim_nod2d+partit%eDim_nod2D)   
+-  call MPI_BCast(lat, latlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)  
++  call MPI_BCast(lat, latlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)  
+-  call MPI_BCast(lon, lonlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)  
++  call MPI_BCast(lon, lonlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)  
+-  call MPI_BCast(ncdata, lonlen*latlen, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
+-  call MPI_BCast(miss,               1, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++  call MPI_BCast(ncdata, lonlen*latlen, MPI_WP, 0, MPI_COMM_FESOM, ierror)
++  call MPI_BCast(miss,               1, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-  real(real64)                  :: ncdata(mesh%nod2D)
+-  real(real64),   intent(out)	:: model_2Darray(partit%myDim_nod2D+partit%eDim_nod2D)
++  real(kind=WP)                  :: ncdata(mesh%nod2D)
++  real(kind=WP),   intent(out)	:: model_2Darray(partit%myDim_nod2D+partit%eDim_nod2D)
+-  call MPI_BCast(ncdata, nod2D, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++  call MPI_BCast(ncdata, nod2D, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+--- io_fesom_file.F90
+-    real(kind=8), pointer :: external_local_data_ptr(:,:) => null()
+-    real(kind=8), allocatable, dimension(:,:) :: local_data_copy
++    real(kind=WP), pointer :: external_local_data_ptr(:,:) => null()
++    real(kind=WP), allocatable, dimension(:,:) :: local_data_copy
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(8), pointer :: external_local_data_ptr(:,:)
++    real(kind=WP), pointer :: external_local_data_ptr(:,:)
+-    real(kind=8), target, intent(inout) :: local_data(:,:)
++    real(kind=WP), target, intent(inout) :: local_data(:,:)
+-    real(kind=8), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(8), pointer :: external_local_data_ptr(:,:)
++    real(kind=WP), pointer :: external_local_data_ptr(:,:)
+-    real(kind=8), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
+-    real(kind=8)         , intent(inout), target    :: local_data(:,:) ! todo: be able to set precision?
++    real(kind=WP)         , intent(inout), target    :: local_data(:,:) ! todo: be able to set precision?
+--- io_restart_file_group.F90
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(kind=8)             , intent(inout), target   :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP)             , intent(inout), target   :: local_data(:,:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(kind=8)             , intent(inout), target    :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP)             , intent(inout), target    :: local_data(:,:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:) ! todo: be able to set precision
+-    real(kind=8), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
++    real(kind=WP), target, intent(inout) :: local_data(:,:) ! todo: be able to set precision
+--- MOD_MESH.F90
+-USE,     intrinsic    :: ISO_FORTRAN_ENV, only : int32
++USE,     intrinsic    :: ISO_FORTRAN_ENV, only : int32, real64
++#if defined(USE_SINGLE_PRECISION)
++     ! Full-precision accumulator for the SSH stiffness matrix, single precision only.
++     ! update_stiff_mat_ale adds a per-step increment whose size relative to the
++     ! entry is ~1e-7..1e-6 -- at or below float32 eps (1.19e-7), so in SP the
++     ! update is partly or wholly swallowed and the matrix drifts. Accumulate here
++     ! and round into %values once per step; the solver's SpMV keeps WP bandwidth.
++     ! Sized to size(%values) (the LOCAL nnz), never to %nza -- see the comment at
++     ! the allocation site in oce_ale.F90.
++     real(kind=real64), allocatable, dimension(:) :: values_full
++#if defined(DIAG_STIFF_DRIFT)
++     real(kind=WP),  allocatable,   dimension(:) :: values_wp_drift
++#endif
++#endif
+--- oce_mesh.F90
+-     call MPI_BCast(rbuff(1:k,1), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
+-     call MPI_BCast(rbuff(1:k,2), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++     call MPI_BCast(rbuff(1:k,1), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
++     call MPI_BCast(rbuff(1:k,2), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-        call MPI_BCast(mesh%zbar, mesh%nl, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++        call MPI_BCast(mesh%zbar, mesh%nl, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-        call MPI_BCast(mesh%zbar, mesh%nl, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++        call MPI_BCast(mesh%zbar, mesh%nl, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-        call MPI_BCast(rbuff(1:k,1), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++        call MPI_BCast(rbuff(1:k,1), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-        call MPI_BCast(rbuff(1:k,1), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++        call MPI_BCast(rbuff(1:k,1), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-            call MPI_BCast(rbuff(1:k), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++            call MPI_BCast(rbuff(1:k), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-            call MPI_BCast(rbuff(1:k), k, MPI_DOUBLE_PRECISION, 0, MPI_COMM_FESOM, ierror)
++            call MPI_BCast(rbuff(1:k), k, MPI_WP, 0, MPI_COMM_FESOM, ierror)
+-   call MPI_AllREDUCE(aux, vol_n, mesh%nl, MPI_DOUBLE_PRECISION, MPI_SUM, &
++   call MPI_AllREDUCE(aux, vol_n, mesh%nl, MPI_WP, MPI_SUM, &
+-   call MPI_AllREDUCE(aux, vol_e, mesh%nl, MPI_DOUBLE_PRECISION, MPI_SUM, &
++   call MPI_AllREDUCE(aux, vol_e, mesh%nl, MPI_WP, MPI_SUM, &
+-    call MPI_AllREDUCE(aux, vol_n, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(aux, vol_n, 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+-    call MPI_AllREDUCE(aux, vol_e, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_FESOM, MPIerr)
++    call MPI_AllREDUCE(aux, vol_e, 1, MPI_WP, MPI_SUM, MPI_COMM_FESOM, MPIerr)
+--- gen_modules_partitioning.F90
+-            call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, &
++            call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, &
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+-            call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, &
++            call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, &
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+-            call MPI_TYPE_INDEXED(nb, blocklen, displace, MPI_DOUBLE_PRECISION, &
++            call MPI_TYPE_INDEXED(nb, blocklen, displace, MPI_WP, &
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+-            call MPI_TYPE_INDEXED(nb, blocklen, displace, MPI_DOUBLE_PRECISION, &
++            call MPI_TYPE_INDEXED(nb, blocklen, displace, MPI_WP, &
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+-         call MPI_TYPE_INDEXED(nb, blocklen,      displace,      MPI_DOUBLE_PRECISION, & 
++         call MPI_TYPE_INDEXED(nb, blocklen,      displace,      MPI_WP, & 
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+-         call MPI_TYPE_INDEXED(nb, blocklen,      displace,      MPI_DOUBLE_PRECISION, & 
++         call MPI_TYPE_INDEXED(nb, blocklen,      displace,      MPI_WP, & 
+-               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_DOUBLE_PRECISION, & 
++               call MPI_TYPE_INDEXED(nb, blocklen_tmp, displace_tmp, MPI_WP, & 
+--- MOD_PARTIT.F90
++! MPI datatype matching the working precision WP (see o_PARAM)
++#if defined(USE_SINGLE_PRECISION)
++integer, parameter   :: MPI_WP = MPI_REAL             ! single precision
++#else
++integer, parameter   :: MPI_WP = MPI_DOUBLE_PRECISION ! double precision (default)
++#endif
+--- oce_modules.F90
+-! for one, numbers real kinds 1,2,3), so WP=8 is only accidentally correct.
+-! On GNU/Intel real64==8, making this a numerical no-op.
+-integer, parameter            :: WP=real64   ! Working precision
++! for one, numbers real kinds 1,2,3), so WP=4/WP=8 is only accidentally correct.
++! Working precision is a build dimension, selected with -DUSE_SINGLE_PRECISION.
++#if defined(USE_SINGLE_PRECISION)
++integer, parameter            :: WP=real32   ! Working precision (single)
++#else
++integer, parameter            :: WP=real64   ! Working precision (double, default)
++#endif
++! use_salt_anomaly (namelist &oce_dyn): store the salinity state as the anomaly
++! S - S_ref_anomaly, so the float32 spacing at typical open-ocean values
++! (|S-35| < ~2) is 30-250x finer than at S~35 (ulp 1.9e-6 psu). S_ref_anomaly is
++! DERIVED in ocean_setup: 35.0 when the toggle is on, else 0.0 -- so every
++! absolute-salinity consumer can add it back unconditionally (`+ 0.0` is a
++! bit-identical no-op when the feature is off). See the S_ref_anomaly sites.
++! NOTE: enabling it is NOT exactly DP-neutral -- FESOM's free-surface advection
++! is not perfectly constancy-preserving, leaving a small (~8e-6/step, surface,
++! freshwater-driven) residual; see the note at the salinity surface BC in
++! oce_ale_tracer.F90 (and the PR description).
++logical                       :: use_salt_anomaly = .false.
++real(kind=WP)                 :: S_ref_anomaly = 0.0_WP
+-                    scaling_GMzexp, GMzexp_zref
++                    scaling_GMzexp, GMzexp_zref, &
++                    use_salt_anomaly
+--- MOD_DYN.F90
+-    ! 0 = as coded since 60b46bdc, used before version 2.8.0
++    ! 0 = as coded since 60b46bdc (keeps results unchanged)
+-    integer       :: precond_variant = 1
++    ! The value actually used is resolved in dynamics_init from namelist.dyn,
++    ! whose shipped default is -1 = auto (1 in single precision, 0 in double).
++    ! The 0 here is only the fallback if that never runs.
++    ! NOTE: unlike soltol and maxiter, this is deliberately NOT in
++    ! WRITE/READ_T_SOLVERINFO -- so it is re-read from the namelist on every run,
++    ! including restarts, rather than being pinned by the restart dump.
++    integer       :: precond_variant = 0
+--- fesom_module.F90
++      real(kind=WP)        :: salt_max_loc, salt_max_glob   ! use_salt_anomaly restart detect
++#if defined(USE_SINGLE_PRECISION)
++            print '(a,i0,a)'," FESOM working precision: WP=",WP," bytes (SINGLE PRECISION MODE)"
++#else
++            print '(a,i0,a)'," FESOM working precision: WP=",WP," bytes (DOUBLE PRECISION MODE)"
++#endif
++            ! Intrinsic characteristics of the DEFAULT working-precision kind (once,
++            ! root rank). Labelled "Default WP" because the model is mixed-precision:
++            ! some paths are fixed real64 (e.g. the forcing time axis) or run in double
++            ! (CVMix) regardless of WP. A stable reference if the toolchain changes.
++            print *, "   Default WP kind    :", WP
++            print *, "   Default WP storage :", storage_size(0.0_WP), "bits"
++            print *, "   Default WP digits  :", precision(0.0_WP)
++            ! spacing(1.0_WP) == machine epsilon on IEEE; the intrinsic epsilon() is
++            ! shadowed here by the AB2 offset variable 'epsilon' (oce_modules.F90).
++            print *, "   Default WP epsilon :", spacing(1.0_WP)
++            if (use_salt_anomaly) then
++            ! Restart files may hold ABSOLUTE salinity (migrating from a run
++            ! without use_salt_anomaly) or the anomaly (a chain of anomaly
++            ! runs writes the state as stored). Detect by the global maximum:
++            ! absolute salinity peaks near 41 psu, the anomaly near 41-S_ref.
++            ! Convert once when migrating; all AB history levels shift by the
++            ! same constant.
++            salt_max_loc = maxval(f%tracers%data(2)%values)
++            call MPI_AllREDUCE(salt_max_loc, salt_max_glob, 1, MPI_WP, MPI_MAX, &
++                               f%partit%MPI_COMM_FESOM, f%partit%MPIerr)
++            if (salt_max_glob > 20.0_WP) then
++                f%tracers%data(2)%values    = f%tracers%data(2)%values    - S_ref_anomaly
++                f%tracers%data(2)%valuesAB  = f%tracers%data(2)%valuesAB  - S_ref_anomaly
++                f%tracers%data(2)%valuesold = f%tracers%data(2)%valuesold - S_ref_anomaly
++                if (f%mype==0) write(*,*) &
++                    'use_salt_anomaly: absolute-salinity restart detected -> converted to S - S_ref'
++            else
++                if (f%mype==0) write(*,*) &
++                    'use_salt_anomaly: anomaly-salinity restart -> no conversion'
++            end if
++            end if

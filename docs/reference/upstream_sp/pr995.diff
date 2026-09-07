@@ -1,0 +1,98 @@
+diff --git a/config/namelist.dyn b/config/namelist.dyn
+index 58bb9ec58..23d7bff28 100644
+--- a/config/namelist.dyn
++++ b/config/namelist.dyn
+@@ -73,10 +73,21 @@ soltol             = 1e-5        ! ssh CG relative tolerance (optional; default
+                                  ! a ratio and cannot see the float32 residual floor, so
+                                  ! the solver will report success it has not achieved
+ maxiter            = 2000        ! ssh CG iteration cap (optional; default 2000 if omitted)
+-precond_variant    = 0           ! ssh CG preconditioner: 0 = as-is, 1 = symmetric
+-                                 ! 2D^-1 - D^-1*A*D^-1 (experimental; 0 keeps results unchanged)
+-                                 ! hitting the cap does not abort -- it is reported as
+-                                 ! 'non-convergences' in the end-of-run solver summary
++precond_variant    = -1          ! ssh CG preconditioner formula.
++                                 !  -1 = auto (default): 1 in a single-precision build,
++                                 !       0 in double. The resolved value is echoed at
++                                 !       startup along with where it came from.
++                                 !   0 = as coded since 60b46bdc
++                                 !   1 = symmetric 2D^-1 - D^-1*A*D^-1
++                                 ! Variant 1 costs 33-39% fewer CG iterations on every mesh
++                                 ! measured up to NG5, which is why single precision defaults
++                                 ! to it -- there the iteration count is what makes the SSH
++                                 ! solve affordable at all. Double precision stays on 0 until
++                                 ! the long-run validation of variant 1 completes.
++                                 ! Setting this explicitly overrides the auto default in BOTH
++                                 ! directions. Unlike soltol/maxiter it is re-read on restart.
++                                 ! NOTE hitting the iteration cap does not abort -- it is
++                                 ! reported as 'non-convergences' in the end-of-run summary
+ 
+ ! --- Split-Explicit Barotropic Subcycling ---
+ use_ssh_se_subcycl = .false.     ! enable split-explicit subcycling for barotropic mode
+diff --git a/src/MOD_DYN.F90 b/src/MOD_DYN.F90
+index 7871b306d..8fa47e13d 100644
+--- a/src/MOD_DYN.F90
++++ b/src/MOD_DYN.F90
+@@ -19,9 +19,15 @@ MODULE MOD_DYN
+     real(kind=WP) :: droptol = 1.e-8
+     real(kind=WP)  :: soltol  = 1e-5
+     ! Which symmetrised-Jacobi formula the preconditioner uses.
+-    ! 0 = as coded since 60b46bdc (default, keeps results unchanged)
++    ! 0 = as coded since 60b46bdc (keeps results unchanged)
+     ! 1 = textbook M^-1 = 2D^-1 - D^-1 A D^-1, which is genuinely symmetric
+     ! See ssh_solve_preconditioner for why this switch exists.
++    ! The value actually used is resolved in dynamics_init from namelist.dyn,
++    ! whose shipped default is -1 = auto (1 in single precision, 0 in double).
++    ! The 0 here is only the fallback if that never runs.
++    ! NOTE: unlike soltol and maxiter, this is deliberately NOT in
++    ! WRITE/READ_T_SOLVERINFO -- so it is re-read from the namelist on every run,
++    ! including restarts, rather than being pinned by the restart dump.
+     integer       :: precond_variant = 0
+     real(kind=WP), allocatable   :: rr(:), zz(:), pp(:), App(:)
+     !___________________________________________________________________________
+diff --git a/src/oce_setup_step.F90 b/src/oce_setup_step.F90
+index 794a58a6b..8e8a59328 100755
+--- a/src/oce_setup_step.F90
++++ b/src/oce_setup_step.F90
+@@ -588,7 +588,12 @@ SUBROUTINE dynamics_init(dynamics, partit, mesh)
+     real(kind=WP)  :: wsplit_maxcfl
+     real(kind=WP)  :: soltol = 1.e-5_WP  ! ssh CG rel. tolerance; default matches T_SOLVERINFO
+     integer        :: maxiter = 2000     ! ssh CG iteration cap; default matches T_SOLVERINFO
+-    integer        :: precond_variant = 0 ! ssh CG preconditioner formula; 0 keeps results unchanged
++    ! ssh CG preconditioner formula. -1 = auto: resolved below to 1 in a
++    ! single-precision build and 0 in double. An explicit namelist value wins in
++    ! either direction, so a DP run can opt in to 1 and an SP run can force 0 to
++    ! reproduce an older experiment.
++    integer        :: precond_variant = -1
++    logical        :: precond_auto = .false.  ! true if the auto default was applied
+     logical        :: use_ssh_se_subcycl=.false.
+     integer        :: se_BTsteps
+     real(kind=WP)  :: se_BTtheta
+@@ -705,8 +710,27 @@ SUBROUTINE dynamics_init(dynamics, partit, mesh)
+     dynamics%solverinfo%maxiter = maxiter
+     if (mype==0) write(*,*) '     ssh CG maxiter = ', dynamics%solverinfo%maxiter
+ 
++    ! Resolve the auto default. precision(0.0_WP) < precision(0.0d0) is true iff
++    ! WP is narrower than double -- a plain runtime test, so both variants stay
++    ! compiled and reachable in either build rather than one being preprocessed
++    ! out. In single precision the symmetric variant is not an optimisation but a
++    ! requirement: it costs 33-39% fewer CG iterations on every mesh measured up
++    ! to NG5, which is what keeps the SSH solve affordable when the working
++    ! precision is halved. Double precision keeps 0 until the long-run validation
++    ! of variant 1 completes.
++    if (precond_variant < 0) then
++        precond_variant = merge(1, 0, precision(0.0_WP) < precision(0.0d0))
++        precond_auto = .true.
++    end if
+     dynamics%solverinfo%precond_variant = precond_variant
+-    if (mype==0) write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant
++    if (mype==0) then
++        if (precond_auto) then
++            write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant, &
++                       ' (auto: ', trim(merge('single', 'double', precision(0.0_WP) < precision(0.0d0))), ' precision)'
++        else
++            write(*,*) '     ssh CG precond = ', dynamics%solverinfo%precond_variant, ' (from namelist)'
++        end if
++    end if
+ 
+     !___________________________________________________________________________
+     ! define local vertice & elem array size

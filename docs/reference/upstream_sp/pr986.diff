@@ -1,0 +1,526 @@
+diff --git a/.gitignore b/.gitignore
+index c7f681645..e23eed501 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -16,3 +16,4 @@ Makefile.in
+ mesh_part/build
+ test/output_pi
+ .claude/
++build_*/
+diff --git a/config/namelist.oce b/config/namelist.oce
+index 92d42c294..d28bb7727 100644
+--- a/config/namelist.oce
++++ b/config/namelist.oce
+@@ -19,6 +19,9 @@ C_d                = 0.0025  ! bottom drag coefficient (dimensionless, typical:
+ A_ver              = 1.e-4   ! background vertical viscosity [m²/s]
+ scale_area         = 5.8e9   ! reference element area for viscosity/diffusivity scaling [m²]
+ 
++! --- Salinity state representation ---
++use_salt_anomaly   = .false. ! store salinity as the anomaly S-35 (finer float32 spacing; helps single precision). .false. = absolute salinity, bit-identical to before
++
+ ! --- Salt Plume Parameterization ---
+ SPP                = .false. ! enable Salt Plume Parameterization (for brine rejection under sea ice)
+ 
+diff --git a/src/fesom_module.F90 b/src/fesom_module.F90
+index 52cb049bb..6784ef76e 100755
+--- a/src/fesom_module.F90
++++ b/src/fesom_module.F90
+@@ -139,6 +139,7 @@ subroutine fesom_init(fesom_total_nsteps)
+       ! EO parameters
+       logical mpi_is_initialized
+       integer              :: tr_num, n
++      real(kind=WP)        :: salt_max_loc, salt_max_glob   ! use_salt_anomaly restart detect
+ 
+ #if defined (__recom)
+       type(tracers_info_type)               :: tracers_info
+@@ -435,6 +436,27 @@ subroutine fesom_init(fesom_total_nsteps)
+         !___READ INITIAL CONDITIONS IF THIS IS A RESTART RUN________________________
+         if (r_restart) then
+             call read_initial_conditions(f%which_readr, f%ice, f%dynamics, f%tracers, f%partit, f%mesh)
++            if (use_salt_anomaly) then
++            ! Restart files may hold ABSOLUTE salinity (migrating from a run
++            ! without use_salt_anomaly) or the anomaly (a chain of anomaly
++            ! runs writes the state as stored). Detect by the global maximum:
++            ! absolute salinity peaks near 41 psu, the anomaly near 41-S_ref.
++            ! Convert once when migrating; all AB history levels shift by the
++            ! same constant.
++            salt_max_loc = maxval(f%tracers%data(2)%values)
++            call MPI_AllREDUCE(salt_max_loc, salt_max_glob, 1, MPI_WP, MPI_MAX, &
++                               f%partit%MPI_COMM_FESOM, f%partit%MPIerr)
++            if (salt_max_glob > 20.0_WP) then
++                f%tracers%data(2)%values    = f%tracers%data(2)%values    - S_ref_anomaly
++                f%tracers%data(2)%valuesAB  = f%tracers%data(2)%valuesAB  - S_ref_anomaly
++                f%tracers%data(2)%valuesold = f%tracers%data(2)%valuesold - S_ref_anomaly
++                if (f%mype==0) write(*,*) &
++                    'use_salt_anomaly: absolute-salinity restart detected -> converted to S - S_ref'
++            else
++                if (f%mype==0) write(*,*) &
++                    'use_salt_anomaly: anomaly-salinity restart -> no conversion'
++            end if
++            end if
+         end if
+         if (f%mype==0) f%t7=MPI_Wtime()
+         
+diff --git a/src/ice_oce_coupling.F90 b/src/ice_oce_coupling.F90
+index 8f72b05fc..7544b5619 100755
+--- a/src/ice_oce_coupling.F90
++++ b/src/ice_oce_coupling.F90
+@@ -193,7 +193,7 @@ subroutine ocean2ice(ice, dynamics, tracers, partit, mesh)
+         do n=1, myDim_nod2d+eDim_nod2d  
+             if (ulevels_nod2D(n)>1) cycle 
+             T_oc_array(n) = temp(1,n)
+-            S_oc_array(n) = salt(1,n)
++            S_oc_array(n) = salt(1,n) + S_ref_anomaly   ! state stores S-S_ref (0 unless use_salt_anomaly)
+             elevation(n)  = hbar(n)
+         end do
+ !$OMP END DO
+@@ -202,7 +202,7 @@ subroutine ocean2ice(ice, dynamics, tracers, partit, mesh)
+         do n=1, myDim_nod2d+eDim_nod2d
+             if (ulevels_nod2D(n)>1) cycle 
+              T_oc_array(n) = (T_oc_array(n)*real(ice%ice_steps_since_upd,WP)+temp(1,n))/real(ice%ice_steps_since_upd+1,WP)
+-             S_oc_array(n) = (S_oc_array(n)*real(ice%ice_steps_since_upd,WP)+salt(1,n))/real(ice%ice_steps_since_upd+1,WP)
++             S_oc_array(n) = (S_oc_array(n)*real(ice%ice_steps_since_upd,WP)+salt(1,n)+S_ref_anomaly)/real(ice%ice_steps_since_upd+1,WP)
+              elevation(n)  = (elevation(n) *real(ice%ice_steps_since_upd,WP)+  hbar(n))/real(ice%ice_steps_since_upd+1,WP)
+         end do
+ !$OMP END DO
+@@ -437,8 +437,8 @@ subroutine oce_fluxes(ice, dynamics, tracers, partit, mesh)
+         rsss=ref_sss
+ !$OMP PARALLEL DO
+         do n=1, myDim_nod2D+eDim_nod2D
+-            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n)
+-            virtual_salt(n)=rsss*water_flux(n) 
++            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
++            virtual_salt(n)=rsss*water_flux(n)
+         end do
+ !$OMP END PARALLEL DO        
+ 
+@@ -475,8 +475,8 @@ subroutine oce_fluxes(ice, dynamics, tracers, partit, mesh)
+         do n=1, myDim_nod2D+eDim_nod2D
+             virtual_salt(n)=0.0_WP
+             if (ulevels_nod2d(n) == 1) cycle ! --> is open ocean node 
+-            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n)
+-            virtual_salt(n)=rsss*water_flux(n) 
++            if (ref_sss_local) rsss = salt(ulevels_nod2d(n),n) + S_ref_anomaly   ! S_ref=0 unless use_salt_anomaly
++            virtual_salt(n)=rsss*water_flux(n)
+         end do
+ !$OMP END PARALLEL DO        
+         
+@@ -501,13 +501,15 @@ subroutine oce_fluxes(ice, dynamics, tracers, partit, mesh)
+         do n=1, myDim_nod2D+eDim_nod2D
+             relax_salt(n) = 0.0_WP
+             if (ulevels_nod2d(n) > 1) cycle ! --> is cavity node --> only do salt relaxation in open ocean
+-            relax_salt(n)=surf_relax_S*(Ssurf(n)-salt(ulevels_nod2d(n),n))
++            ! Ssurf is absolute; subtract S_ref (0 unless use_salt_anomaly) to match the anomaly state
++            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+         end do
+ !$OMP END PARALLEL DO
+     else
+ !$OMP PARALLEL DO
+         do n=1, myDim_nod2D+eDim_nod2D
+-            relax_salt(n)=surf_relax_S*(Ssurf(n)-salt(ulevels_nod2d(n),n))
++            ! Ssurf is absolute; subtract S_ref (0 unless use_salt_anomaly) to match the anomaly state
++            relax_salt(n)=surf_relax_S*(Ssurf(n)-S_ref_anomaly-salt(ulevels_nod2d(n),n))
+         end do
+ !$OMP END PARALLEL DO
+     end if 
+@@ -650,8 +652,9 @@ subroutine oce_fluxes(ice, dynamics, tracers, partit, mesh)
+     ! boundary condition) to compute the dens_flux for MOC diagnostic
+ !$OMP PARALLEL DO
+     do n=1, myDim_nod2D+eDim_nod2D    
+-        if (ulevels_nod2d(n) == 1) then ! --> is open ocean node 
+-            dens_flux(n)=sw_alpha(1,n) * heat_flux_in(n) / vcpw + sw_beta(1, n) * (relax_salt(n) + water_flux(n) * salt(1,n))
++        if (ulevels_nod2d(n) == 1) then ! --> is open ocean node
++            ! density-flux diagnostic wants absolute S; S_ref=0 unless use_salt_anomaly
++            dens_flux(n)=sw_alpha(1,n) * heat_flux_in(n) / vcpw + sw_beta(1, n) * (relax_salt(n) + water_flux(n) * (salt(1,n)+S_ref_anomaly))
+         else
+             dens_flux(n)=0.0_WP
+         end if
+diff --git a/src/io_meandata.F90 b/src/io_meandata.F90
+index 03e9d8937..cc80acdea 100644
+--- a/src/io_meandata.F90
++++ b/src/io_meandata.F90
+@@ -7,7 +7,7 @@ module io_MEANDATA
+   use recom_ciso
+ #endif
+   USE g_clock
+-  use o_PARAM, only : WP
++  use o_PARAM, only : WP, S_ref_anomaly
+   use, intrinsic :: iso_fortran_env, only: real64, real32
+   use io_data_strategy_module
+   use async_threads_module
+@@ -62,6 +62,7 @@ module io_MEANDATA
+     integer                                            :: addcounter =0
+     integer                                            :: lastcounter=0 ! before addcounter is set to 0
+     real(kind=WP), pointer                             :: ptr3(:,:) ! todo: use netcdf types, not WP
++    real(kind=WP)                                      :: offset = 0.0_WP ! added to ptr3 at accumulation (use_salt_anomaly: salt/sss carry +S_ref_anomaly so output stays absolute)
+     character(500)                                     :: filename
+     character(100)                                     :: name
+     character(500)                                     :: description
+@@ -413,6 +414,7 @@ subroutine ini_mean_io(ice, dynamics, tracers, partit, mesh)
+     call def_stream(nod2D, myDim_nod2D, 'sst',      'sea surface temperature',        'C', tracers%data(1)%values(1,1:myDim_nod2D), io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh, "Sea surface temperature")
+ CASE ('sss       ')
+     call def_stream(nod2D, myDim_nod2D, 'sss',      'sea surface salinity',           'psu', tracers%data(2)%values(1,1:myDim_nod2D), io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh, "Sea surface salinity")
++    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+ CASE ('ssh       ')
+     call def_stream(nod2D, myDim_nod2D, 'ssh',      'sea surface elevation',          'm',      dynamics%eta_n,                          io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
+ CASE ('vve_5     ')
+@@ -1016,6 +1018,7 @@ subroutine ini_mean_io(ice, dynamics, tracers, partit, mesh)
+     call def_stream((/nl-1, nod2D/),  (/nl-1, myDim_nod2D/),  'temp',      'temperature', 'C',      tracers%data(1)%values(:,:),             io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
+ CASE ('salt      ')
+     call def_stream((/nl-1, nod2D/),  (/nl-1, myDim_nod2D/),  'salt',      'salinity',    'psu',    tracers%data(2)%values(:,:),             io_list(i)%freq, io_list(i)%unit, io_list(i)%precision, partit, mesh)
++    io_stream(io_NSTREAMS)%p%offset = S_ref_anomaly   ! state stores S-S_ref; output stays absolute (S_ref=0 unless use_salt_anomaly)
+ 
+ #if defined(__recom)
+ 
+@@ -2724,7 +2727,7 @@ subroutine update_means
+ !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I,J)
+                 DO J=1, size(entry%local_values_r8,dim=2)
+                     DO I=1, size(entry%local_values_r8,dim=1)
+-                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(J,I)
++                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(J,I)+entry%offset
+                     END DO
+                 END DO
+ !$OMP END PARALLEL DO
+@@ -2732,7 +2735,7 @@ subroutine update_means
+ !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I,J)
+                 DO J=1, size(entry%local_values_r8,dim=2)
+                     DO I=1, size(entry%local_values_r8,dim=1)
+-                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(I,J)
++                        entry%local_values_r8(I,J)=entry%local_values_r8(I,J)+entry%ptr3(I,J)+entry%offset
+                     END DO
+                 END DO
+ !$OMP END PARALLEL DO
+@@ -2744,7 +2747,7 @@ subroutine update_means
+ !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I,J)
+                 DO J=1, size(entry%local_values_r4,dim=2)
+                     DO I=1, size(entry%local_values_r4,dim=1)
+-                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(J,I), real32)
++                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(J,I)+entry%offset, real32)
+                     END DO
+                 END DO
+ !$OMP END PARALLEL DO
+@@ -2752,7 +2755,7 @@ subroutine update_means
+ !$OMP PARALLEL DO DEFAULT(SHARED) PRIVATE(I, J)
+                 DO J=1, size(entry%local_values_r4,dim=2)
+                     DO I=1, size(entry%local_values_r4,dim=1)
+-                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(I,J), real32)
++                        entry%local_values_r4(I,J)=entry%local_values_r4(I,J)+real(entry%ptr3(I,J)+entry%offset, real32)
+                     END DO
+                 END DO
+ !$OMP END PARALLEL DO
+diff --git a/src/oce_ale_mixing_kpp.F90 b/src/oce_ale_mixing_kpp.F90
+index 2da1bb995..3b0b8e2bf 100755
+--- a/src/oce_ale_mixing_kpp.F90
++++ b/src/oce_ale_mixing_kpp.F90
+@@ -357,8 +357,9 @@ SUBROUTINE oce_mixing_KPP(viscAE, diffK, dynamics, tracers, partit, mesh)
+ ! Surface buoyancy forcing (eqns. A2c & A2d & A3b & A3d)
+      !!PS Bo(node)  = -g * ( sw_alpha(1,node) * heat_flux(node)  / vcpw             &   !heat_flux & water_flux: positive up
+      !!PS                  + sw_beta (1,node) * water_flux(node) * tr_arr(1,node,2))
++     ! buoyancy flux from the freshwater flux wants absolute S (S_ref=0 unless use_salt_anomaly)
+      Bo(node)  = -g * ( sw_alpha(nzmin,node) * heat_flux(node)  / vcpw             &   !heat_flux & water_flux: positive up
+-                      + sw_beta (nzmin,node) * water_flux(node) * tracers%data(2)%values(nzmin,node)) 
++                      + sw_beta (nzmin,node) * water_flux(node) * (tracers%data(2)%values(nzmin,node)+S_ref_anomaly))
+   END DO
+       
+ ! compute interior mixing coefficients everywhere, due to constant 
+@@ -886,7 +887,8 @@ subroutine ddmix(diffK, tracers, partit, mesh)
+         nzmax = nlevels_nod2D(node)
+         DO nz=nzmin+1,nzmax-1
+            alphaDT = sw_alpha(nz-1,node) * tracers%data(1)%values(nz-1,node)
+-           betaDS  = sw_beta (nz-1,node) * tracers%data(2)%values(nz-1,node)
++           ! double-diffusion density ratio wants absolute S (S_ref=0 unless use_salt_anomaly)
++           betaDS  = sw_beta (nz-1,node) * (tracers%data(2)%values(nz-1,node)+S_ref_anomaly)
+ 
+            IF (alphaDT > betaDS .and. betaDS > 0.0_WP) THEN
+ 
+diff --git a/src/oce_ale_pressure_bv.F90 b/src/oce_ale_pressure_bv.F90
+index 2f02e4ebe..9b022c020 100644
+--- a/src/oce_ale_pressure_bv.F90
++++ b/src/oce_ale_pressure_bv.F90
+@@ -246,14 +246,15 @@ subroutine pressure_bv(tracers, partit, mesh)
+ 
+     !___________________________________________________________________________
+     ! model explodes, no OpenMP parallelization !
+-    if( a < 0.0_WP ) then
++    ! absolute S<0 <=> anomaly < -S_ref (S_ref=0 unless use_salt_anomaly)
++    if( a < -S_ref_anomaly ) then
+         write (*,*)' --> pressure_bv: s<0 happens!', a
+         pe_status=1
+         do node=1, myDim_nod2D+eDim_nod2D
+             nzmin = ulevels_nod2D(node)
+             nzmax = nlevels_nod2D(node)
+             do nz=nzmin, nzmax-1
+-                if (salt(nz, node) < 0) write (*,*) 'the model blows up at n=', mylist_nod2D(node), ' ; ', 'nz=', nz
++                if (salt(nz, node) < -S_ref_anomaly) write (*,*) 'the model blows up at n=', mylist_nod2D(node), ' ; ', 'nz=', nz
+             end do
+         end do
+     endif
+@@ -2711,7 +2712,7 @@ SUBROUTINE densityJM_components(t, s, bulk_0, bulk_pz, bulk_pz2, rhopot)
+   
+   real(kind=WP),  intent(IN)            :: t,s
+   real(kind=WP),  intent(OUT)           :: bulk_0, bulk_pz, bulk_pz2, rhopot
+-  real(kind=WP)                         :: s_sqrt
++  real(kind=WP)                         :: s_sqrt, s_abs
+ 
+   real(kind=WP), parameter   :: a0    = 19092.56,     at   = 209.8925
+   real(kind=WP), parameter   :: at2   = -3.041638,    at3  = -1.852732e-3
+@@ -2740,22 +2741,23 @@ SUBROUTINE densityJM_components(t, s, bulk_0, bulk_pz, bulk_pz2, rhopot)
+ 
+   !compute secant bulk modulus
+ 
+-  s_sqrt = sqrt(s)
++  s_abs = s + S_ref_anomaly   ! EOS needs absolute salinity (S_ref=0 unless use_salt_anomaly)
++  s_sqrt = sqrt(s_abs)
+ 
+   bulk_0 =  a0      + t*(at   + t*(at2  + t*(at3 + t*at4)))      &
+-          + s* (as  + t*(ast  + t*(ast2 + t*ast3))               &
++          + s_abs* (as  + t*(ast  + t*(ast2 + t*ast3))               &
+                + s_sqrt*(ass  + t*(asst + t*asst2)))
+ 
+   bulk_pz =  ap  + t*(apt  + t*(apt2 + t*apt3))                  &
+-                  + s*(aps + t*(apst + t*apst2) + s_sqrt*apss)
++                  + s_abs*(aps + t*(apst + t*apst2) + s_sqrt*apss)
+ 
+   bulk_pz2 = ap2 + t*(ap2t + t*ap2t2)		                 &
+-                + s *(ap2s + t*(ap2st + t*ap2st2))
++                + s_abs *(ap2s + t*(ap2st + t*ap2st2))
+ 
+   rhopot =  b0 + t*(bt + t*(bt2 + t*(bt3  + t*(bt4  + t*bt5))))	 &
+-               + s*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4)))  &
++               + s_abs*(bs + t*(bst + t*(bst2 + t*(bst3 + t*bst4)))  &
+                   + s_sqrt*(bss + t*(bsst + t*bsst2))            &
+-                       + s* bss2)
++                       + s_abs* bss2)
+ end subroutine densityJM_components
+ !
+ !
+@@ -2891,7 +2893,7 @@ subroutine sw_alpha_beta(TF1,SF1, partit, mesh)
+      do nz=nzmin, nzmax-1
+ 
+      t1 = TF1(nz,n)*1.00024_WP
+-     s1 = SF1(nz,n)
++     s1 = SF1(nz,n) + S_ref_anomaly   ! McDougall polynomial wants absolute (S_ref=0 unless use_salt_anomaly)
+     !!PS      p1 = abs(Z(nz))
+      p1 = abs(Z_3d_n(nz,n))
+ 
+@@ -3219,7 +3221,7 @@ SUBROUTINE density_linear(t, s, bulk_0, bulk_pz, bulk_pz2, rho_out)
+ IMPLICIT NONE
+   real(kind=WP),  intent(IN)             :: t,s
+   real(kind=WP),  intent(OUT)            :: rho_out
+-  real(kind=WP)                          :: rhopot, bulk
++  real(kind=WP)                          :: rhopot, bulk, s_abs
+   real(kind=WP), intent(OUT)             :: bulk_0, bulk_pz, bulk_pz2
+ 
+   !compute secant bulk modulus
+@@ -3228,17 +3230,19 @@ SUBROUTINE density_linear(t, s, bulk_0, bulk_pz, bulk_pz2, rho_out)
+   bulk_pz  = 0
+   bulk_pz2 = 0
+ 
++  s_abs = s + S_ref_anomaly   ! linear EOS needs absolute S (S_ref=0 unless use_salt_anomaly)
++
+   IF((toy_ocean) .AND. (TRIM(which_toy)=="soufflet")) THEN
+       rho_out  = density_0 - 0.00025_WP*(t - 10.0_WP)*density_0
+-      
++
+   ELSE IF((toy_ocean) .AND. (TRIM(which_toy)=="dbgyre")) THEN
+-      rho_out  = density_0 - density_0*0.0002052_WP*(t - 10.0_WP) + density_0*0.00079_WP*(s - 35.0_WP)
+-      
+-  ELSE IF((toy_ocean) .AND. (TRIM(which_toy)=="neverworld2")) THEN    
++      rho_out  = density_0 - density_0*0.0002052_WP*(t - 10.0_WP) + density_0*0.00079_WP*(s_abs - 35.0_WP)
++
++  ELSE IF((toy_ocean) .AND. (TRIM(which_toy)=="neverworld2")) THEN
+       rho_out  = density_0 - 0.0002_WP*(t - 10.0_WP)*density_0
+-      
++
+   ELSE
+-      rho_out  = density_0 + 0.8_WP*(s - 34.0_WP) - 0.2*(t - 20.0_WP)
++      rho_out  = density_0 + 0.8_WP*(s_abs - 34.0_WP) - 0.2*(t - 20.0_WP)
+   END IF
+ 
+ end subroutine density_linear
+diff --git a/src/oce_ale_tracer.F90 b/src/oce_ale_tracer.F90
+index 9c4fb7a37..9c022726b 100644
+--- a/src/oce_ale_tracer.F90
++++ b/src/oce_ale_tracer.F90
+@@ -134,7 +134,7 @@ end module solve_tracers_ale_interface
+ ! Driving routine    Here with ALE changes!!!
+ subroutine solve_tracers_ale(ice, dynamics, tracers, partit, mesh)
+     use g_config
+-    use o_PARAM, only: SPP, Fer_GM
++    use o_PARAM, only: SPP, Fer_GM, S_ref_anomaly
+     use mod_mesh
+     USE MOD_PARTIT
+     USE MOD_PARSUP
+@@ -352,12 +352,12 @@ subroutine solve_tracers_ale(ice, dynamics, tracers, partit, mesh)
+     do node=1,myDim_nod2D+eDim_nod2D
+         nzmax=nlevels_nod2D(node)-1
+         nzmin=ulevels_nod2D(node)
+-        where (tracers%data(2)%values(nzmin:nzmax,node) > 45._WP)
+-               tracers%data(2)%values(nzmin:nzmax,node)=45._WP
++        ! clip bounds shifted to anomaly space (S_ref=0 unless use_salt_anomaly)
++        where (tracers%data(2)%values(nzmin:nzmax,node) > 45._WP - S_ref_anomaly)
++               tracers%data(2)%values(nzmin:nzmax,node)= 45._WP - S_ref_anomaly
+         end where
+-
+-        where (tracers%data(2)%values(nzmin:nzmax,node) < 3._WP )
+-               tracers%data(2)%values(nzmin:nzmax,node) = 3._WP
++        where (tracers%data(2)%values(nzmin:nzmax,node) < 3._WP - S_ref_anomaly )
++               tracers%data(2)%values(nzmin:nzmax,node) = 3._WP - S_ref_anomaly
+         end where
+     end do
+ !$OMP END PARALLEL DO
+@@ -688,6 +688,7 @@ end subroutine diff_tracers_ale
+ !===============================================================================
+ !Vertical diffusive flux(explicit scheme):
+ subroutine diff_ver_part_expl_ale(tr_num, tracers, partit, mesh)
++    use o_PARAM, only: S_ref_anomaly
+     use o_ARRAYS
+     use g_forcing_arrays
+     use MOD_MESH
+@@ -726,7 +727,10 @@ subroutine diff_ver_part_expl_ale(tr_num, tracers, partit, mesh)
+             rdata =  Tsurf(n)
+             rlx   =  surf_relax_T
+         elseif (tracers%data(tr_num)%ID==2) then
+-            flux  =  virtual_salt(n)+relax_salt(n) + real_salt_flux(n)*is_nonlinfs
++            ! use_salt_anomaly background-dilution term (S_ref=0 unless enabled).
++            ! See bc_surface (implicit path) below for the derivation and the note
++            ! on the ~8e-6/step constancy-error residual it leaves.
++            flux  =  virtual_salt(n)+relax_salt(n) + (real_salt_flux(n) + S_ref_anomaly*water_flux(n))*is_nonlinfs
+         else
+             flux  = 0._WP
+             rdata = 0._WP
+@@ -1668,6 +1672,7 @@ FUNCTION bc_surface(n, id, sval, nzmin, partit, mesh, sst, sss, aice)
+   use MOD_MESH
+   USE MOD_PARTIT
+   USE MOD_PARSUP
++  use o_PARAM, only: S_ref_anomaly
+   USE o_ARRAYS
+   USE g_forcing_arrays
+   USE g_config
+@@ -1716,8 +1721,26 @@ FUNCTION bc_surface(n, id, sval, nzmin, partit, mesh, sst, sss, aice)
+     CASE (2)
+         ! --> real_salt_flux(:): salt flux due to containment/releasing of salt
+         !     by forming/melting of sea ice
++        ! use_salt_anomaly background-dilution term (S_ref=0 unless enabled, so
++        ! this reduces to the original salinity BC). WHY it is needed and where a
++        ! residual error comes from:
++        !   Storing S = S' + S_ref should be invisible in DP: advection is linear
++        !   and, by continuity, adv(S_ref) = -S_ref*dh/dt exactly cancels the
++        !   -S_ref*dh/dt from the anomaly transform, leaving the same equation in
++        !   S'. That holds ONLY if the free-surface advection preserves a constant
++        !   exactly. FESOM's does not: with no correction the DP anomaly-vs-absolute
++        !   salt error is ~1.3e-3, a constancy error for the offset S_ref localised
++        !   where the surface freshwater flux enters. The S_ref*water_flux term
++        !   below cancels ~99.4% of it, leaving a ~8e-6/step residual (the part not
++        !   proportional to water_flux: the grid-divergence / FCT-limiter part).
++        !   An exact fix would carry S'+S_ref in the surface ADVECTIVE flux across
++        !   all schemes, not add a surface source here (a per-layer thickness term
++        !   was tried and does not help; it makes it worse combined with this term).
++        ! real_salt_flux / relax_salt / virtual_salt are already anomaly-consistent
++        ! (real_salt_flux is built from the corrected absolute ice gather; relax_salt
++        ! subtracts S_ref from the absolute Ssurf; virtual_salt is 0 in zstar/zlevel).
+         bc_surface= dt*(virtual_salt(n) & !--> is zeros for zlevel/zstar
+-                    + relax_salt(n) + real_salt_flux(n)*is_nonlinfs)
++                    + relax_salt(n) + (real_salt_flux(n) + S_ref_anomaly*water_flux(n))*is_nonlinfs)
+             
+     !___Transient tracers (cases ##6,11,12,14,39)__________________________________
+     CASE (6) ! SF6
+diff --git a/src/oce_modules.F90 b/src/oce_modules.F90
+index dfa0f8cfe..4da9fdfb7 100755
+--- a/src/oce_modules.F90
++++ b/src/oce_modules.F90
+@@ -16,6 +16,18 @@ MODULE o_PARAM
+ real(kind=WP), parameter      :: pi=3.14159265358979
+ real(kind=WP), parameter      :: rad=pi/180.0_WP
+ real(kind=WP), parameter      :: density_0=1030.0_WP
++! use_salt_anomaly (namelist &oce_dyn): store the salinity state as the anomaly
++! S - S_ref_anomaly, so the float32 spacing at typical open-ocean values
++! (|S-35| < ~2) is 30-250x finer than at S~35 (ulp 1.9e-6 psu). S_ref_anomaly is
++! DERIVED in ocean_setup: 35.0 when the toggle is on, else 0.0 -- so every
++! absolute-salinity consumer can add it back unconditionally (`+ 0.0` is a
++! bit-identical no-op when the feature is off). See the S_ref_anomaly sites.
++! NOTE: enabling it is NOT exactly DP-neutral -- FESOM's free-surface advection
++! is not perfectly constancy-preserving, leaving a small (~8e-6/step, surface,
++! freshwater-driven) residual; see the note at the salinity surface BC in
++! oce_ale_tracer.F90 (and the PR description).
++logical                       :: use_salt_anomaly = .false.
++real(kind=WP)                 :: S_ref_anomaly = 0.0_WP
+ real(kind=WP), parameter      :: density_0_r=1.0_WP/density_0 ! [m^3/kg]
+ real(kind=WP), parameter      :: g=9.81_WP
+ real(kind=WP), parameter      :: r_earth=6367500.0_WP
+@@ -205,7 +217,8 @@ MODULE o_PARAM
+                     scaling_ODM95, ODM95_Scr, ODM95_Sd, &
+                     scaling_LDD97, LDD97_c, LDD97_rmin, LDD97_rmax, &
+                     scaling_GINsea, GINsea_fac, GMzexp_smin, &
+-                    scaling_GMzexp, GMzexp_zref
++                    scaling_GMzexp, GMzexp_zref, &
++                    use_salt_anomaly
+ 
+  NAMELIST /tracer_phys/ diff_sh_limit, Kv0_const, double_diffusion, K_ver, K_hor, surf_relax_T, surf_relax_S, &
+             balance_salt_water, clim_relax, ref_sss_local, ref_sss, &
+diff --git a/src/oce_setup_step.F90 b/src/oce_setup_step.F90
+index 48a5c84a1..7bfa883b6 100755
+--- a/src/oce_setup_step.F90
++++ b/src/oce_setup_step.F90
+@@ -83,7 +83,9 @@ subroutine ocean_setup(dynamics, tracers, partit, mesh)
+     USE o_PARAM
+     USE o_ARRAYS
+     USE g_config
+-    USE g_forcing_param, only: use_virt_salt
++    USE g_forcing_param, only: use_virt_salt, use_age_tracer
++    use diagnostics,         only: ldiag_extflds, ldiag_trflx, ldiag_salt3D, ldiag_DVD
++    use cmor_variables_diag, only: ldiag_cmor
+     use o_mixing_KPP_mod
+ #if defined (__cvmix)       
+     use g_cvmix_tke
+@@ -250,6 +252,34 @@ subroutine ocean_setup(dynamics, tracers, partit, mesh)
+        call oce_initial_state(tracers, partit, mesh)   ! Use it if not running tests
+     end if
+ 
++    !___________________________________________________________________________
++    ! use_salt_anomaly (namelist &oce_dyn): store the salinity state as the
++    ! anomaly S - S_ref_anomaly (finer float32 spacing where the ocean lives).
++    ! S_ref_anomaly stays 0 unless the toggle is on, so the subtraction and every
++    ! downstream `+ S_ref_anomaly` are bit-identical no-ops when off. Initial
++    ! conditions arrive absolute -> convert ONCE here, after oce_initial_state
++    ! (insitu2pot has already used absolute S), before the AB copies below.
++    ! Restart reads are converted in fesom_init. All absolute-S consumers carry
++    ! offset corrections (EOS, sw_alpha_beta, ice gather, rsss, SSS restoring,
++    ! KPP buoyancy/double-diffusion, surface dilution term); clip and blowup
++    ! bounds shifted accordingly.
++    if (use_salt_anomaly) then
++        S_ref_anomaly = 35.0_WP
++        tracers%data(2)%values = tracers%data(2)%values - S_ref_anomaly
++        if (partit%mype==0) write(*,*) 'use_salt_anomaly: salinity state = S - ', S_ref_anomaly
++        ! configurations with absolute-salinity consumers that carry NO offset
++        ! correction yet: refuse to start instead of silently computing wrong
++        ! physics (extend the offset corrections before lifting a guard)
++        if (SPP .or. use_cavity .or. use_icebergs .or. use_age_tracer .or. use_transit &
++            .or. use_kpp_nonlclflx .or. clim_relax > 1.e-8_WP &
++            .or. ldiag_extflds .or. ldiag_trflx .or. ldiag_salt3D .or. ldiag_DVD .or. ldiag_cmor) then
++            if (partit%mype==0) write(*,*) 'use_salt_anomaly does not support yet: ', &
++                'SPP, cavities, icebergs, age tracer, transient tracers, ', &
++                'KPP nonlocal fluxes, 3D climatology relaxation, ', &
++                'salinity diagnostics (extflds/trflx/salt3D/DVD/cmor)'
++            call par_ex(partit%MPI_COMM_FESOM, partit%mype, 1)
++        end if
++    end if
+     if (.not.r_restart) then
+        do n=1, tracers%num_tracers
+           do i=1, tracers%data(n)%AB_order-1
+diff --git a/src/write_step_info.F90 b/src/write_step_info.F90
+index d05362f3b..ffcc3c0df 100644
+--- a/src/write_step_info.F90
++++ b/src/write_step_info.F90
+@@ -591,8 +591,10 @@ subroutine check_blowup(istep, ice, dynamics, tracers, partit, mesh)
+           
+           !_______________________________________________________________
+           ! check salt
++          ! blowup bounds shifted to anomaly space like the clip in oce_ale_tracer
++          ! (S_ref=0 unless use_salt_anomaly)
+           if ( (tracers%data(2)%values(nz, n) /= tracers%data(2)%values(nz, n)) .or.  &
+-             tracers%data(2)%values(nz, n) <3.0_WP .or. tracers%data(2)%values(nz, n) >45.0_WP ) then
++             tracers%data(2)%values(nz, n) < 3.0_WP - S_ref_anomaly .or. tracers%data(2)%values(nz, n) > 45.0_WP - S_ref_anomaly ) then
+ !$OMP CRITICAL
+              found_blowup_loc=1
+              write(*,*) '___CHECK FOR BLOW UP___________ --> mstep=',istep
