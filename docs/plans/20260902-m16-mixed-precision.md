@@ -701,7 +701,7 @@ divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
       allocation, warm-up discarded, **equal leg counts**, min over legs; `cfg=` stamps `prec=`; the
       collector refuses a log without the banner **and** the per-step timer; the banner precision must
       match the requested arm (L80/SP10)
-- [x] (`jobs/m16_bins.sh <tag>` → `bin/<tag>/{dp,sp}/{fesom_port_serial,fesom_port_cuda}` + PROVENANCE; **`e0` = commit `f95eaef`: dp serial f2eb28b1 / cuda 40374895, sp serial 722e3002 / cuda c21fd52b**) `m16_bins.sh`: sha-named frozen pairs under `port2/m16/bin/<tag>/{fesom_port_serial,fesom_port_cuda}`,
+- [x] (`jobs/m16_bins.sh <tag>` → `bin/<tag>/{dp,sp}/{fesom_port_serial,fesom_port_cuda}` + PROVENANCE; **`e0` = commit `f95eaef`: dp serial f2eb28b1 / cuda 40374895, sp serial 722e3002 / cuda c21fd52b; CUDA smoke on this pair job 27289067 PASS**) `m16_bins.sh`: sha-named frozen pairs under `port2/m16/bin/<tag>/{fesom_port_serial,fesom_port_cuda}`,
       `PROVENANCE.txt` with commit, flags, Kokkos version
 - [x] zombie check extended: non-finite step diag, `it=0`, CGPIPE-INACTIVE, **and** a `SINGLE` banner
       where `sp` was requested, **and** an `[ssh-verify]` gap above the pre-registered bar
