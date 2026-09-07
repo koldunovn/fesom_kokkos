@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=m16_conserv
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --time=02:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/logs/conserv.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/logs/conserv.%j.err
+#
+# M16 Task E3 — 30-day CORE2 conservation leg (plan: "30-day CORE2 conservation, FESOM_MP_CONSERV=10, SP vs DP
+# (mp_conserv_drift.py): heat gap vs the physical 30-d signal, salt/volume random-walk vs drift").
+# One arm per job (np8, 1440 steps at dt 1800 = 30 d, no snapshots, CONSERV every 10 steps, step line every 10).
+#   sbatch --export=ALL,BIN=<abs pinned binary>,TAG=dp|sp [,KNOBS="K=V,K=V"] jobs/job_m16_conserv
+# Analysis on the login node: scripts/mp_conserv_drift.py <dp run.log> <sp run.log>
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+MESH=/work/ab0995/a270088/port2/mesh/core2                # private copy — NEVER /pool
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${BIN:?pinned absolute binary}; TAG=${TAG:?dp|sp}; NSTEPS=${NSTEPS:-1440}
+OUT=/work/ab0995/a270088/port2/m16/conserv_${TAG}_$SLURM_JOB_ID; mkdir -p "$OUT"
+source /sw/etc/profile.levante; source "$SRC/env.sh" >/dev/null 2>&1
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_[A-Za-z0-9_]*\)=.*/\1/p')
+export FESOM_MP_CONSERV=10 FESOM_PRINT_EVERY=10 FESOM_IC_EXTRAP=det
+if [ -n "${KNOBS:-}" ]; then IFS=',' read -ra KV <<< "$KNOBS"; for kv in "${KV[@]}"; do export "$kv"; done; fi
+{ echo "BIN=$BIN"; md5sum "$BIN"; env | grep -E '^FESOM_' | sort; } > "$OUT/ENV.txt"
+echo "=== m16 conserv $TAG job=$SLURM_JOB_ID bin=$(md5sum "$BIN" | cut -c1-8) nsteps=$NSTEPS out=$OUT ==="
+srun -n 8 "$BIN" "$MESH" "$OUT" 1800 $NSTEPS -1 "$PHC" 1958 > "$OUT/run.log" 2> "$OUT/run.err"; rc=$?
+echo "rc=$rc  $(grep -o 'PRECISION: [A-Z]*' "$OUT/run.log" | head -1)  steps=$(grep -cE '^\s+[0-9]+\s+it=' "$OUT/run.log")  conserv-lines=$(grep -c '^CONSERV' "$OUT/run.log" "$OUT/run.err" | awk -F: '{s+=$2} END {print s}')  nonfinite=$(grep -cwiE 'nan|inf' "$OUT/run.err")"
+"$SRC/scripts/m16_knob_signals.sh" "$OUT/run.log" "$OUT/run.err" | grep -E 'precision|conserv|floor|fallback|last-step'
+exit $rc

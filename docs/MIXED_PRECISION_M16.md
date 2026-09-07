@@ -45,6 +45,11 @@ per config (CORE2 np8, 20 steps, `FESOM_SSH_PRECOND=0` + the config's knobs, the
 has none of these solvers, so this is the class-4 promotion the plan reserved for E5: the scalar chains of
 `pipecg`/`oati`/`pcsi` (dots, α/β/γ recurrences, Lanczos estimates) → `dbl_t`, measured give-back per solver.
 Plain `cg`, `cg2`, `cgpipe`, `cgpoly` are live at SP as built.
+Floor announcement verified on CORE2 (job 27289526, `d3sp`): `[ssh-solver] SP float-floor acceptances: floor-hits=19 of
+20 solves (stall with resid < 8 x rtol; FESOM_SSH_FLOOR)`; pcsi iterations 155/280/230 at steps 1/10/20 (FP64 155/145/140).
+
+30-day conservation twin (`jobs/job_m16_conserv`, CORE2 np8, 1440 steps, `FESOM_MP_CONSERV=10`): jobs in the handoff.
+
 ## 3. Gate 4 — screens and the 1-year twin (pending)
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
