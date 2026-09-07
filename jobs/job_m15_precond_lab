@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH --job-name=m15_pre
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port2/m15/lab.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m15/lab.%j.err
+#
+# M15 — preconditioner-variant sweep on a dumped SSH system, at the dump's own np.
+# Submit: sbatch -N <n> --ntasks=<np> --export=ALL,MESH=...,DUMP=...,TAG=...,BIN=... jobs/job_m15_precond_lab
+set -u
+ROOT=${M15_ROOT:-$HOME/port_kokkos_pre}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+MESH=${MESH:?}; DUMP=${DUMP:?}; TAG=${TAG:?}
+export BIN=${BIN:?pin the lab binary}
+OUT=/work/ab0995/a270088/port2/m15/${TAG}_${SLURM_JOB_ID}
+mkdir -p "$OUT"
+[ -d "$MESH/dist_$SLURM_NTASKS" ] || { echo "ERROR: $MESH/dist_$SLURM_NTASKS missing"; exit 2; }
+bash "$ROOT/scripts/m15_precond_sweep.sh" "$MESH" "$DUMP" "$TAG" "$OUT"

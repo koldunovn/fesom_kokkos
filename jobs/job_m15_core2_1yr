@@ -1,0 +1,40 @@
+#!/bin/bash
+#SBATCH --job-name=m15_1yr
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=4
+#SBATCH --ntasks=512
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=04:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m15/core2_1yr.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m15/core2_1yr.%j.err
+#
+# M15 — CORE2 1-year twin: preconditioner variant 0 (as-coded) vs 1 (#984).
+# Accuracy/drift, NOT performance: both arms in one allocation, monthly means out.
+# 512 ranks = 248 nodes/rank, CORE2s efficient CPU point (M10 ladder). This is an ACCURACY
+# twin, not a scaling measurement, so the "CORE2 <=128r" rule (which scopes scaling claims)
+# does not apply.
+set -u
+ROOT=${M15_ROOT:-$HOME/port_kokkos_pre}
+source /sw/etc/profile.levante
+source "$ROOT/env.sh"
+export OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export FESOM_DIAG_MICE=1 FESOM_PRINT_EVERY=1000
+export FESOM_IC_EXTRAP=det          # correctness fix, identical in both arms
+MESH=/work/ab0995/a270088/port2/mesh/core2      # private copy (L73)
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BIN=${BIN:-$ROOT/build-serial/fesom_port}
+md5sum "$BIN"
+# 1 year at dt=1800 = 17520 steps; snap_every huge => only IC snapshot + monthly streams
+for V in 0 1; do
+    OUT=/work/ab0995/a270088/port2/m15/core2_1yr_v${V}_${SLURM_JOB_ID}
+    rm -rf "$OUT"; mkdir -p "$OUT"
+    if [ "$V" = 0 ]; then unset FESOM_SSH_PRECOND; else export FESOM_SSH_PRECOND=1; fi
+    echo "=== arm v$V -> $OUT ==="
+    srun -l --ntasks=512 "$BIN" "$MESH" "$OUT" 1800 17520 100000 "$PHC" 1958 \
+        > "$OUT/run.log" 2> "$OUT/run.err"
+    echo "  rc=$?  $(grep -a 'ssh-precond' "$OUT/run.err" | head -1)"
+    grep -a 'ssh-wire. AGGREGATE' "$OUT/run.err" | tail -1
+    ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l | sed 's/^/  monthly files: /'
+done
+echo "=== done; compare with scripts/m32_climate_compare.py or kpp_climate_compare.py ==="

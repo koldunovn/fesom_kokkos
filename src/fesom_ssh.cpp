@@ -239,6 +239,70 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
 }
 
 /*===========================================================================
+ * M15: SSH preconditioner variant (opt-in; 0 = as-built, byte-identical to HEAD)
+ *
+ * The coded off-diagonal  pr[i,j] = -0.5*a_ij/(d_i*(d_i+d_j))  carries TWO
+ * INDEPENDENT defects against the formula in solver.F90's own header comment
+ * (-2*a_ij/(d_i*(d_i+d_j))):
+ *   (a) SYMMETRY  — the leading 1/d_i is not symmetric: pr[i,j]/pr[j,i] = d_j/d_i.
+ *       Measured defect ratio 0.638 (CORE2) / 0.616 (dars) — M10 finding F1,
+ *       docs/report/m10_precond_note.tex (6 Aug 2026).
+ *   (b) MAGNITUDE — the coded expression is the header formula divided by 4,
+ *       EXACTLY, for all d_i,d_j (ratio verified symbolically, independent of d).
+ *
+ * FESOM/fesom2#984 (18 Aug 2026) repairs both at once; the M10 note repaired only
+ * (a). The variants below CROSS the two axes so the effect can be attributed rather
+ * than merely observed. All share the diagonal pr[i,i] = 1/d_i, on which every form
+ * agrees.
+ *
+ *   0  as built           -0.5*a/(d_i*(d_i+d_j))            asym, 1/4x   [DEFAULT]
+ *   1  fesom2#984 var 1   -a/(d_i*d_j)                      SYM,  ~1x
+ *   2  M10 note, 6 Aug    -0.5*a/(sqrt(d_i*d_j)*(d_i+d_j))  SYM,  1/4x
+ *   3  symmetrised hdr    -2*a/(sqrt(d_i*d_j)*(d_i+d_j))    SYM,  1x
+ *   4  header as written  -2*a/(d_i*(d_i+d_j))              asym, 1x
+ *
+ * 2 is the minimal spectrum-PRESERVING repair of 0 — a similarity transform of M^-1,
+ * D^{1/2}(D^-1 C)D^{-1/2} = D^{-1/2} C D^{-1/2} — so it fixes self-adjointness while
+ * leaving the eigenvalues of M^-1 untouched. 3 is that same repair applied to the
+ * header formula. 1 and 3 coincide EXACTLY where d_i == d_j and otherwise differ by
+ * the arithmetic/geometric-mean ratio (d_i+d_j)/(2*sqrt(d_i*d_j)) >= 1. 4 exists to
+ * reproduce #984's report that the header formula diverges, i.e. that magnitude
+ * without symmetry is not a fix.
+ *===========================================================================*/
+static int ssh_precond_variant(void)
+{
+    static int c = -1;
+    if (c < 0) {
+        const char *e = getenv("FESOM_SSH_PRECOND");
+        c = 0;
+        if (e && e[0]) {
+            char *endp = NULL;
+            long v = strtol(e, &endp, 10);
+            if (!endp || *endp != '\0' || v < 0 || v > 4) {
+                fprintf(stderr, "[fesom_ssh] unrecognised FESOM_SSH_PRECOND='%s' "
+                                "(valid values: 0,1,2,3,4)\n", e);
+                fflush(stderr);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            c = (int)v;
+        }
+    }
+    return c;
+}
+
+static const char *ssh_precond_name(int v)
+{
+    switch (v) {
+        case 0: return "0 as-built (asym, 1/4x)";
+        case 1: return "1 fesom2#984 -a/(di*dj) (sym, 1x)";
+        case 2: return "2 M10 note -0.5a/(sqrt(di*dj)*(di+dj)) (sym, 1/4x)";
+        case 3: return "3 symmetrised header -2a/(sqrt(di*dj)*(di+dj)) (sym, 1x)";
+        case 4: return "4 header as written -2a/(di*(di+dj)) (asym, 1x)";
+    }
+    return "?";
+}
+
+/*===========================================================================
  * Preconditioner: ssh_solve_preconditioner (solver.F90:31-95)
  *===========================================================================*/
 
@@ -265,6 +329,11 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
      *   pr[diag]                 = 1 / diag(row)
      *   pr[row, col=node, n>0]   = -0.5 * (off / diag(row)) / (diag(row) + diag(node))
      */
+    const int pvar = ssh_precond_variant();
+    if (pvar != 0 && (partit == NULL || partit->mype == 0)) {   /* L80: announce, never a dead knob */
+        fprintf(stderr, "[ssh-precond] FESOM_SSH_PRECOND = %s\n", ssh_precond_name(pvar));
+        fflush(stderr);
+    }
     for (int row = 0; row < N; ++row) {
         int  start = S->rowptr[row];
         int  nend  = S->rowptr[row + 1] - start;
@@ -272,8 +341,26 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
         S->pr_values[start] = 1.0 / diag_row;
         for (int n = 1; n < nend; ++n) {
             int node = S->colind[start + n];
-            S->pr_values[start + n] = -0.5 * (S->values[start + n] / diag_row)
-                                          / (diag_row + diag_values[node]);
+            const real_t a  = S->values[start + n];
+            const real_t dj = diag_values[node];
+            switch (pvar) {
+            case 0:   /* as built — expression kept VERBATIM so variant 0 is byte-identical */
+                S->pr_values[start + n] = -0.5 * (S->values[start + n] / diag_row)
+                                              / (diag_row + diag_values[node]);
+                break;
+            case 1:   /* fesom2#984 variant 1: textbook 2D^-1 - D^-1 A D^-1 */
+                S->pr_values[start + n] = -a / (diag_row * dj);
+                break;
+            case 2:   /* M10 note: minimal spectrum-preserving symmetrisation of 0 */
+                S->pr_values[start + n] = -0.5 * a / (sqrt(diag_row * dj) * (diag_row + dj));
+                break;
+            case 3:   /* the same repair applied to the header formula */
+                S->pr_values[start + n] = -2.0 * a / (sqrt(diag_row * dj) * (diag_row + dj));
+                break;
+            case 4:   /* header comment as literally written (asymmetric) */
+                S->pr_values[start + n] = -2.0 * a / (diag_row * (diag_row + dj));
+                break;
+            }
         }
     }
     free(diag_values);

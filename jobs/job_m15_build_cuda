@@ -1,0 +1,21 @@
+#!/bin/bash
+#SBATCH --job-name=m15_bld
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m15/build.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m15/build.%j.err
+# M15 — CUDA build on a compute node (the login node reaps heavy nvcc fan-out).
+set -eu
+ROOT=${M15_ROOT:-$HOME/port_kokkos_pre}
+source "$ROOT/env_cuda.sh"
+export NVCC_WRAPPER_DEFAULT_COMPILER=g++
+cd "$ROOT"
+cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release \
+      -DKokkos_ENABLE_CUDA=ON -DKokkos_ARCH_AMPERE80=ON \
+      -DCMAKE_CXX_COMPILER="$ROOT/externals/kokkos/bin/nvcc_wrapper"
+cmake --build build-cuda -j 64
+echo "=== built ==="; ls -la build-cuda/fesom_port; md5sum build-cuda/fesom_port

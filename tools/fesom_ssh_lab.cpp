@@ -185,6 +185,23 @@ int main(int argc, char **argv)
     stiff.values_fld.modify_host();    stiff.values_fld.sync_device();
     stiff.pr_values_fld.modify_host(); stiff.pr_values_fld.sync_device();
 
+    /* M15: the dumped pr_values were built by the RUN that made the dump, i.e. always
+     * variant 0. To replay the SAME system A under a DIFFERENT preconditioner, rebuild
+     * pr_values from the just-installed dumped `values` — so A is bit-for-bit the dump's
+     * and only M^-1 changes. Skipped when FESOM_SSH_PRECOND is unset/0, which keeps the
+     * dumped bytes and hence the bitwise CERT path exactly as before. */
+    {
+        const char *pv = getenv("FESOM_SSH_PRECOND");
+        if (pv && pv[0] && strcmp(pv, "0") != 0) {
+            fesom_ssh_preconditioner(&stiff, &mesh, &mpi);
+            if (mpi.mype == 0) {
+                printf("[lab] pr_values REBUILT from the dumped matrix under "
+                       "FESOM_SSH_PRECOND=%s (A unchanged; CERT is REPORT-only)\n", pv);
+                fflush(stdout);
+            }
+        }
+    }
+
     if (mpi.mype == 0)
         printf("[lab] dump step %d: np%d nnz=%d ref iters=%d res=%.6e rtol=%.6e "
                "(dump soltol=%g maxiter=%d)\n",
@@ -382,15 +399,27 @@ int main(int argc, char **argv)
     }
     if (mpi.mype == 0) {
         const char *sv = getenv("FESOM_SSH_SOLVER");
+        const char *pv = getenv("FESOM_SSH_PRECOND");
+        const bool alt_pre = pv && pv[0] && strcmp(pv, "0") != 0;
         const bool is_baseline = !sv || !sv[0] || strcmp(sv, "cg") == 0;
-        if (is_baseline)
+        if (alt_pre)
+            /* M15: a different M^-1 is a different Krylov space by construction, so an
+             * iterate/iteration-count difference is the measurement, not a failure. */
+            printf("[lab] REPORT only — FESOM_SSH_PRECOND=%s rebuilt the preconditioner; "
+                   "iteration-count and iterate differences above are the result, "
+                   "not failures\n", pv);
+        else if (is_baseline)
             printf("[lab] CERT %s (criteria: %s)\n", worst_rc == 0 ? "PASS" : "FAIL",
                    mpi.npes == 1 ? "bitwise x_final + iters" : "iters (np>1)");
         else
             printf("[lab] REPORT only — solver '%s' != the dump's baseline cg; iterate and "
                    "iteration-count differences above are expected, not failures\n", sv);
     }
-    if (worst_rc) { MPI_Abort(MPI_COMM_WORLD, 1); }
+    {   /* M15: never abort on a deliberate preconditioner swap (see above). */
+        const char *pv_ = getenv("FESOM_SSH_PRECOND");
+        const bool alt_pre_ = pv_ && pv_[0] && strcmp(pv_, "0") != 0;
+        if (worst_rc && !alt_pre_) { MPI_Abort(MPI_COMM_WORLD, 1); }
+    }
     }
 
     /* ---- teardown (fesom_main order: Views die before Kokkos::finalize) ---- */
