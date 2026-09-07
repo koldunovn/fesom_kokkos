@@ -686,7 +686,7 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 
 ---
 
-# Phase E — the measured ladder **[BLOCKED on /work]**
+# Phase E — the measured ladder (/work writable again 2026-09-07)
 
 ### Task E1: One harness with a precision axis (D11)
 
@@ -695,17 +695,17 @@ Slices touching device code additionally get the CUDA envelope leg (`scripts/mp_
 `jobs/job_m14_ladder_cpu:171` and `:143`), `jobs/m16_bins.sh`; copy `scripts/mp_{cuda_gate,
 divergence_curve,envelope_verdict,conserv_drift,gate4_verdict}.py`
 
-- [ ] extract the collector and the zombie check into scripts the jobs call (one implementation, both
+- [x] (2026-09-07: `scripts/m14_collect.py` + `scripts/m14_zombie_check.sh`, both ladders call them; round-trip on `ladder_farc_1024_26985036/legs.txt` identical to the inline python; the zombie check rejects that M14 log when SINGLE is demanded) extract the collector and the zombie check into scripts the jobs call (one implementation, both
       ladders); byte-for-byte same CSV rows on an existing M14 log
-- [ ] `PREC=dp|sp` axis: the arm pairs become `(BIN_DP, BIN_SP)` at identical knobs, ABBA in one
+- [x] (`PREC=dp|sp` for base/best; `ARMS="dp sp"` = the precision pair itself; `M16_BINS=<pair dir>`; `preflight_bin` refuses a mismatched or provenance-less sp binary; `DRYRUN=1`; `SSH_VERIFY_BAR`) `PREC=dp|sp` axis: the arm pairs become `(BIN_DP, BIN_SP)` at identical knobs, ABBA in one
       allocation, warm-up discarded, **equal leg counts**, min over legs; `cfg=` stamps `prec=`; the
       collector refuses a log without the banner **and** the per-step timer; the banner precision must
       match the requested arm (L80/SP10)
-- [ ] `m16_bins.sh`: sha-named frozen pairs under `port2/m16/bin/<tag>/{fesom_port_serial,fesom_port_cuda}`,
+- [x] (`jobs/m16_bins.sh <tag>` → `bin/<tag>/{dp,sp}/{fesom_port_serial,fesom_port_cuda}` + PROVENANCE; **`e0` = commit `f95eaef`: dp serial f2eb28b1 / cuda 40374895, sp serial 722e3002 / cuda c21fd52b**) `m16_bins.sh`: sha-named frozen pairs under `port2/m16/bin/<tag>/{fesom_port_serial,fesom_port_cuda}`,
       `PROVENANCE.txt` with commit, flags, Kokkos version
-- [ ] zombie check extended: non-finite step diag, `it=0`, CGPIPE-INACTIVE, **and** a `SINGLE` banner
+- [x] zombie check extended: non-finite step diag, `it=0`, CGPIPE-INACTIVE, **and** a `SINGLE` banner
       where `sp` was requested, **and** an `[ssh-verify]` gap above the pre-registered bar
-- [ ] gate: the extracted scripts round-trip one existing M14 log unchanged; a dry run with `PREC=sp`
+- [x] gate PASS (login dry runs: `PREC=sp` with a DP-provenance pair → REFUSE; `PREC=sp` with no sp binary → REFUSE; legacy M14 `i1` accepted as dp; `ARMS="dp sp"` with a proper pair → OK): the extracted scripts round-trip one existing M14 log unchanged; a dry run with `PREC=sp`
       refuses a DP binary
 
 ### Task E2: Gate 2 — prize sizing (D9)
