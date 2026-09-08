@@ -417,6 +417,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   (`FESOM_HALO_STAGE=1`, M7.5) removes it completely. Next discriminator: intra-node CUDA IPC on Kokkos' cudaMallocAsync
   pool memory (pool allocations are not IPC-exportable) — `UCX_TLS=^cuda_ipc` jobs 27310178 27310179 27310180; and a build with
   `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF`.
+  **Side finding, unexpected:** the host-staged legs ran at **0.0412 s/step vs 0.0622 on the device-pointer path** (same
+  1000-step 4-node CORE2 legs, same scanner overhead) — the CUDA-aware-MPI path is not only corrupting, it is ~34 %
+  SLOWER than one D2H of the packed buffer + host MPI + H2D. Every GPU number on the M14/M16 boards was measured on the
+  device path. Honest ABBA pair without the scanner (`base` device / `best` staged, PREC=dp): 4N job 27310269, 16N job 27310270.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
