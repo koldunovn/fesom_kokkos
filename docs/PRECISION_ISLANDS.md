@@ -401,6 +401,15 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   sea-ice → coupling → flux path on the GPU (levers `ICERAILS`/`ICEFLUXDEV`/`BULKTAIL`/`LAZYSNAP`, never bisected), not
   in the halo transport. Ice-lever bisect (1000-step legs ×5, scanner armed): control 27303628 27303630 27303631 · `ICERAILS=0`(+BULKTAIL,
   LAZYSNAP off) 27303634 27303637 27303638 · `ICEFLUXDEV=0`(+…) 27303642 27303643 27303644.
+  **1000-step legs change the picture (CORE2 4 nodes, scanner armed): control 12/15 legs die** (steps 60–956;
+  `entry(hf)`/`entry(wf)`/`pre-cg(ssh_rhs)` with values 1e30–1e190 or NaN at owned nodes anywhere on the globe);
+  `ICERAILS=0` 7/15, `ICEFLUXDEV=0` 7/15 ⇒ the ice device levers are NOT the cause (jobs 27303628-44). The NG5
+  self-check legs (27299293/94, 5/5 died) print **`[devhalo-selfcheck] kind=ELEM3D nl=70 nc=1 … halo mismatches=107
+  max|dev-host|=9.99`** right before the CG NaN: the DEVICE halo exchange delivered wrong halo values where the host
+  exchange of the same data did not. Garbage magnitudes (not physics NaNs) + intermittency growing with run length +
+  the NG5 30-step A/B (memtype-cache-off 0/15) fit **UCX's memory-type cache misclassifying a device buffer as host
+  memory after address reuse (Kokkos' cudaMallocAsync pool)** — the known failure `UCX_MEMTYPE_CACHE=n` exists for.
+  Decisive test at 1000 steps: `UCX_MEMTYPE_CACHE=n` jobs 27306555 27306558 27306560; `FESOM_HALO_STAGE=1` jobs 27306562 27306564 27306567.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
