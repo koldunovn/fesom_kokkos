@@ -383,6 +383,11 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   boundary", rate ~1/15 legs at 4 nodes, higher at 16 nodes (2/3 warm-ups) and NG5 64 GPUs (2/2). Handed to the
   campaign infrastructure track: next tool is `FESOM_HALO_SELFCHECK` (device-vs-host halo verification) on a
   multi-node leg, and a CUDA-aware-MPI/UCX transport A/B (`UCX_TLS` without cuda_ipc). Not a precision island.
+  **Lead (2026-09-08, G4 screens):** two more deaths — CORE2 16N SP leg at step 2001 (job 27294510) and NG5 16N SP
+  legs at step 2 (27294512), both `CG_kk: pp·App = nan` at iteration 1 — i.e. right after the step-diagnostic print at
+  steps 2000 and 1 (`FESOM_PRINT_EVERY=1000` in the ladders; step 1 always prints). The print pulls device fields to the
+  host (`sync_host` on device-authoritative Fields). Discriminator submitted: 4-node ×5 legs with `FESOM_PRINT_EVERY=1`
+  (jobs 27294800, 27294801) vs `=100000` (27294802). On NG5 at 64 GPUs the "flake" is 4/4 legs (2 FP64 + 2 SP) — deterministic there.
 - **2026-09-08 — OBSERVATION (superseded by the entry above): the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
   next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
   (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
