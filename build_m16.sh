@@ -12,7 +12,7 @@
 #
 # 🔴 Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF is MANDATORY (2026-09-08): Kokkos' cudaMallocAsync pool memory handed to
 #    CUDA-aware MPI corrupts halo slots intermittently (8/15 thousand-step legs on 4 nodes) and is 17 % slower;
-#    plain cudaMalloc: 0/15 and faster. Registry PRECISION_ISLANDS.md 2026-09-08, lessons L123.
+#    plain cudaMalloc: 0/15 and faster. Registry PRECISION_ISLANDS.md 2026-09-08, lessons L132.
 # 🔴 CUDA builds MUST use env_cuda.sh (openmpi 4.1.5-nvhpc, CUDA-aware, RPATH-pinned at link
 # time) — see the note in build_m14.sh; ldd every new CUDA binary.
 set -e
