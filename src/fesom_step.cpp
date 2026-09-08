@@ -3,6 +3,7 @@
  * For Phase 4 (MPI) every kernel that writes a field other ranks read is
  * followed by a halo exchange. Cheat sheet documented inline.
  */
+#include <climits>   // M16 flake hunt: LONG_MAX (device NaN scan)
 #include <cmath>   /* sqrt used in the FESOM_DIAG_SPREAD block */
 #include "fesom_step.h"
 #include "fesom_speed.hpp"   // M7 Task 1.0: FESOM_SPEED_ICEFLUXDEV
@@ -118,6 +119,52 @@ void fesom_mp_nanscan_node(const char *phase, const real_t *a, size_t n, int ste
                       "at %.2f/%.2f)", phase, step_n, nd, nz, lon, lat);
         }
     }
+}
+
+/* M16 flake hunt (2026-09-08, FESOM_MP_NANSCAN=2): the DEVICE twin. The host scanner reads host
+ * aliases, which on CUDA are stale mirrors of device-resident fields — it saw nothing while the
+ * multi-node GPU legs died at step 2 / step 6. This one reduces over the device view in place (no
+ * sync, no extra D2H — the race must not be perturbed) and names the FIRST non-finite slot. */
+int fesom_mp_nanscan_dev_enabled(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("FESOM_MP_NANSCAN");
+        on = (e && e[0] == '2') ? 1 : 0;
+        if (on) {
+            int rank = 0, inited = 0; MPI_Initialized(&inited);
+            if (inited) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+            if (rank == 0) { printf("[fesom_port] MP-NANSCAN-DEV ARMED (per-phase NaN tripwire, DEVICE views)\n"); fflush(stdout); }
+        }
+    }
+    return on;
+}
+static void mp_nanscan_dev(const char *phase, const fesom::Field &f, size_t n, int step_n,
+                           const struct fesom_mesh *mesh, int per /* slots per node (nl) or per elem (nl*2); 1 = 2D */,
+                           int is_elem)
+{
+    if (!fesom_mp_nanscan_dev_enabled() || !f.allocated()) return;
+    auto v = f.d();
+    long first = LONG_MAX;
+    Kokkos::parallel_reduce("mp_nanscan_dev", Kokkos::RangePolicy<>(0, (long)n),
+        KOKKOS_LAMBDA(const long i, long &m) {
+            const real_t x = v(i);
+            if (!(x == x) || x > (real_t)1e30 || x < (real_t)-1e30) { if (i < m) m = i; }
+        }, Kokkos::Min<long>(first));
+    if (first == LONG_MAX) return;
+    real_t val = 0; { auto sv = Kokkos::subview(v, first); Kokkos::View<real_t, Kokkos::HostSpace> h("mp_nanscan_val"); Kokkos::deep_copy(h, sv); val = h(); }
+    int rank = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    const long ent = first / per;
+    if (is_elem) {
+        fprintf(stderr, "[mp-nanscan-dev] rank %d step %d phase %-18s FIRST non-finite %g at elem=%ld slot=%ld owned=%s (flat=%ld of %zu)\n",
+                rank, step_n, phase, (double)val, ent, first % per, ent < mesh->myDim_elem2D ? "yes" : "HALO/EXT", first, n);
+    } else {
+        const double lon = mesh->geo_coord_nod2D[ent * 2] * 180.0 / M_PI, lat = mesh->geo_coord_nod2D[ent * 2 + 1] * 180.0 / M_PI;
+        fprintf(stderr, "[mp-nanscan-dev] rank %d step %d phase %-18s FIRST non-finite %g at node=%ld nz=%ld geo=(%.2f, %.2f) owned=%s (flat=%ld of %zu)\n",
+                rank, step_n, phase, (double)val, ent, first % per, lon, lat, ent < mesh->myDim_nod2D ? "yes" : "HALO", first, n);
+    }
+    fflush(stderr);
+    FESOM_DIE("mp-nanscan-dev: non-finite on the device at phase %s (step %d)", phase, step_n);
 }
 
 /* M8/M16 Gate-3 diagnostic (FESOM_MP_CONSERV=N): global ∫dV, ∫T·dV, ∫S·dV over owned wet
@@ -332,6 +379,17 @@ int fesom_timestep(int                          step_n,
         fesom_mp_nanscan_node("step-entry(eta)", dyn->eta_n, mp_n2, step_n, mesh, 1);
         fesom_mp_nanscan_node("step-entry(hf)", forcing->heat_flux, mp_n2, step_n, mesh, 1);
         fesom_mp_nanscan_node("step-entry(wf)", forcing->water_flux, mp_n2, step_n, mesh, 1);
+    }
+    if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: device views, no sync */
+        const int nl = mesh->nl;
+        mp_nanscan_dev("entry(T)",     tracers->data[FESOM_TRACER_T].values_fld, mp_n3, step_n, mesh, nl, 0);
+        mp_nanscan_dev("entry(S)",     tracers->data[FESOM_TRACER_S].values_fld, mp_n3, step_n, mesh, nl, 0);
+        mp_nanscan_dev("entry(uv)",    dyn->uv_fld,       mp_e3v, step_n, mesh, nl * 2, 1);
+        mp_nanscan_dev("entry(uvAB)",  dyn->uv_rhsAB_fld, mp_e3v, step_n, mesh, nl * 2, 1);
+        mp_nanscan_dev("entry(eta)",   dyn->eta_n_fld,    mp_n2,  step_n, mesh, 1, 0);
+        mp_nanscan_dev("entry(hnode)", mesh->hnode_fld,   mp_n3,  step_n, mesh, nl, 0);
+        mp_nanscan_dev("entry(hf)",    forcing->heat_flux_fld,  mp_n2, step_n, mesh, 1, 0);
+        mp_nanscan_dev("entry(wf)",    forcing->water_flux_fld, mp_n2, step_n, mesh, 1, 0);
     }
 
     /* Phase G8 — env-gated master switch for GM/Redi.
@@ -963,11 +1021,17 @@ int fesom_timestep(int                          step_n,
     /*  8. CG SSH solve — device (host loop control + device vector kernels + CG-owned
      *     pp/rr/X halo brackets). The exit EXCH(X) is the driver's exchange below. */
     fesom_phasestats_mark(FESOM_PH_CG);      /* M7 E.IMB.0: the solve is its own phase */
+    if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: the solve's inputs, on the device */
+        mp_nanscan_dev("pre-cg(ssh_rhs)", dyn->ssh_rhs_fld, mp_n2, step_n, mesh, 1, 0);
+        mp_nanscan_dev("pre-cg(eta)",     dyn->eta_n_fld,   mp_n2, step_n, mesh, 1, 0);
+        mp_nanscan_dev("pre-cg(stiff)",   ctx->stiff->values_fld, (size_t)ctx->stiff->nnz, step_n, mesh, 1, 1);
+    }
     cg_iters = fesom_ssh_solve_cg_kk(ctx->stiff, ctx->solver, mesh, dyn);   /* M12: decl hoisted above the SI/SE split */
     if (fesom_mp_nanscan_enabled()) {
         dyn->d_eta_fld.sync_host();
         fesom_mp_nanscan_node("ssh-solve(eta)", dyn->d_eta, mp_n2, step_n, mesh, 1);
     }
+    if (fesom_mp_nanscan_dev_enabled()) mp_nanscan_dev("post-cg(d_eta)", dyn->d_eta_fld, mp_n2, step_n, mesh, 1, 0);
     fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
@@ -1576,6 +1640,13 @@ int fesom_timestep(int                          step_n,
         fesom_mp_nanscan_node("step-end(T)", mp_T, mp_n3, step_n, mesh, mesh->nl);
         fesom_mp_nanscan_node("step-end(S)", mp_S, mp_n3, step_n, mesh, mesh->nl);
         fesom_mp_nanscan_node("step-end(Kv)", aux->Kv, mp_n3, step_n, mesh, mesh->nl);
+    }
+    if (fesom_mp_nanscan_dev_enabled()) {
+        mp_nanscan_dev("end(T)",   tracers->data[FESOM_TRACER_T].values_fld, mp_n3, step_n, mesh, mesh->nl, 0);
+        mp_nanscan_dev("end(S)",   tracers->data[FESOM_TRACER_S].values_fld, mp_n3, step_n, mesh, mesh->nl, 0);
+        mp_nanscan_dev("end(uv)",  dyn->uv_fld,   mp_e3v, step_n, mesh, mesh->nl * 2, 1);
+        mp_nanscan_dev("end(eta)", dyn->eta_n_fld, mp_n2, step_n, mesh, 1, 0);
+        mp_nanscan_dev("end(Kv)",  aux->Kv_fld,   mp_n3, step_n, mesh, mesh->nl, 0);
     }
     /* M8/M16 storm forensics: per-step single-node trace (FESOM_MP_TRACE_NODE=<global id>,
      * FESOM_MP_TRACE_FROM=<step>). Owner rank prints one end-of-step line. Env-unset => one
