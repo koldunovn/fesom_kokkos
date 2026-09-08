@@ -130,7 +130,7 @@ fi
 
 clean_env () {
     unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
-    for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE FESOM_WSPLIT; do
+    for pre in FESOM_SPEED FESOM_SSH FESOM_SE_ FESOM_PCSI FESOM_IC_EXTRAP FESOM_EVPWIDE FESOM_WSPLIT FESOM_HALO FESOM_SALT FESOM_MP_ FESOM_DIAG; do   # M16 2026-09-08: HALO, SALT, MP, DIAG knobs were leaking from the best arm into the next base leg
         while read -r v; do unset "$v"; done < <(env | sed -n "s/^\(${pre}[A-Za-z0-9_]*\)=.*/\1/p")
     done
     export FESOM_SPEED=1 FESOM_IC_EXTRAP=det      # both arms
