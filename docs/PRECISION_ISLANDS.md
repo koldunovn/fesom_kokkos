@@ -392,6 +392,15 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   significant). Day tally at 4 nodes: 4 failures in 55 legs, lever- and print-independent. On NG5 at 64 GPUs it is
   4/4 legs (2 FP64 + 2 SP) — deterministic there. **Handed off with this evidence; next tools unchanged (HALO_SELFCHECK on
   a multi-node leg, UCX transport A/B, then a fence sweep: `Kokkos::fence()` before every host read in the diag/io path).**
+  **CAUGHT by the device scanner (`FESOM_MP_NANSCAN=2`, commit 20bda2b; CORE2 4 nodes, 300-step legs, jobs
+  27301773/27301774/27301775, 2 failures in 15 legs):** (1) job 27301773 warm-up, **step 38, `pre-cg(ssh_rhs)` NaN at
+  OWNED node 4064 (72.5°E, 65.5°S) on rank 14** with every entry field finite that step; (2) job 27301774 leg 4, **step
+  101, `entry(hf)` = −3.4e52 / +1.0e42 at owned nodes on ranks 5 and 14 (67.9°E 53.8°S; 77.9°E 69.1°S)** — the heat flux
+  handed over by the ice–ocean coupling at the END of step 100 is garbage. Both are ice-covered Southern-Ocean nodes;
+  the earlier `[bulk-nan] T_oc=-277.8` was the same chain from the SST side. ⇒ the fault is produced inside the
+  sea-ice → coupling → flux path on the GPU (levers `ICERAILS`/`ICEFLUXDEV`/`BULKTAIL`/`LAZYSNAP`, never bisected), not
+  in the halo transport. Ice-lever bisect (1000-step legs ×5, scanner armed): control 27303628 27303630 27303631 · `ICERAILS=0`(+BULKTAIL,
+  LAZYSNAP off) 27303634 27303637 27303638 · `ICEFLUXDEV=0`(+…) 27303642 27303643 27303644.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
