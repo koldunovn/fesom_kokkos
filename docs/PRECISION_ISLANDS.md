@@ -421,6 +421,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   1000-step 4-node CORE2 legs, same scanner overhead) — the CUDA-aware-MPI path is not only corrupting, it is ~34 %
   SLOWER than one D2H of the packed buffer + host MPI + H2D. Every GPU number on the M14/M16 boards was measured on the
   device path. Honest ABBA pair without the scanner (`base` device / `best` staged, PREC=dp): 4N job 27310269, 16N job 27310270.
+  `UCX_TLS=^cuda_ipc` (jobs 27310178/79/80): **7/15 still fail** — intra-node CUDA IPC is not the mechanism. Remaining
+  candidate that fits a stream-ordered pool allocator: UCX's registration cache (rcache, `UCX_MEMTYPE_REG_WHOLE_ALLOC_TYPES=cuda`)
+  keyed on virtual addresses that cudaMallocAsync re-backs with different physical memory ⇒ stale registrations ⇒ transfers
+  to/from the wrong memory. Tests: `UCX_RCACHE_ENABLE=n` jobs 27312685 27312686 27312687; `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF` build `e2noasync`.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
