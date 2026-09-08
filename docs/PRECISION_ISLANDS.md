@@ -377,7 +377,12 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   NANSCAN cannot see device state. **Not a precision island — a campaign-wide CUDA flake, M14 saw it on NG5/dars.**
   Bisect round 1 (4 nodes, 5 FP64 legs each): control 1/5 failed (job 27294392; +0 % cost), `FESOM_SPEED_NOFENCE2=0` 0/5
   (27294393; +6 % step time), `FESOM_SPEED_FORCEDEV=0` 0/5 (27294394; +2 %); 16-node ×3 control clean (27294340).
-  Not yet conclusive at a ~20 % per-leg rate; round 2 doubles the legs: control 27294445/27294446, NOFENCE2=0 27294447/27294448.
+  Round 2 (jobs 27294445/27294446 control, 27294447/27294448 NOFENCE2=0): control 0/10, NOFENCE2=0 1/10 (a step-2
+  `pp·App is -nan`). **Totals at 4 nodes: control 1/15, NOFENCE2=0 1/15, FORCEDEV=0 0/5 — lever-independent.** Two
+  signatures (step-2 CG garbage/NaN; step-6 `[bulk-nan]` at the forcing refresh), both "device data wrong at a phase
+  boundary", rate ~1/15 legs at 4 nodes, higher at 16 nodes (2/3 warm-ups) and NG5 64 GPUs (2/2). Handed to the
+  campaign infrastructure track: next tool is `FESOM_HALO_SELFCHECK` (device-vs-host halo verification) on a
+  multi-node leg, and a CUDA-aware-MPI/UCX transport A/B (`UCX_TLS` without cuda_ipc). Not a precision island.
 - **2026-09-08 — OBSERVATION (superseded by the entry above): the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
   next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
   (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
