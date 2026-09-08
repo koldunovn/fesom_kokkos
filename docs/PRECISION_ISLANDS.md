@@ -375,7 +375,9 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   pair never failed; NG5 64 GPUs failed 2/2 FP64 legs), i.e. a device-side race or stale/unsynced device data in the
   `getcoeffld`→bulk path under the M7 speed levers (`FORCEDEV`, `NOFENCE2` are ON in the base arm). The host-alias
   NANSCAN cannot see device state. **Not a precision island — a campaign-wide CUDA flake, M14 saw it on NG5/dars.**
-  Bisect (next): same leg ×5 at 4 nodes with `FESOM_SPEED_NOFENCE2=0`, then `FESOM_SPEED_FORCEDEV=0`.
+  Bisect round 1 (4 nodes, 5 FP64 legs each): control 1/5 failed (job 27294392; +0 % cost), `FESOM_SPEED_NOFENCE2=0` 0/5
+  (27294393; +6 % step time), `FESOM_SPEED_FORCEDEV=0` 0/5 (27294394; +2 %); 16-node ×3 control clean (27294340).
+  Not yet conclusive at a ~20 % per-leg rate; round 2 doubles the legs: control 27294445/27294446, NOFENCE2=0 27294447/27294448.
 - **2026-09-08 — OBSERVATION (superseded by the entry above): the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
   next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
   (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
