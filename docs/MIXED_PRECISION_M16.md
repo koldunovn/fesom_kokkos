@@ -73,7 +73,18 @@ Jobs 27289583 (FP64) / 27289584 (SP), both rc 0, no non-finite; `scripts/mp_cons
 **Verdict for the campaign: `FESOM_SALT_ANOMALY=1` is part of the SP recipe** — it turns the one SP conservation defect found in 30 days (salt) into rounding, at zero cost (the same knob is a no-op in FP64 by construction, gate 0).
 
 
-## 3. Gate 4 — screens and the 1-year twin (pending)
+## 3. Gate 4 — screens and the 1-year twin
+3000-step SP screens at the recipe points (`e2`, `ARMS=sp NSTEPS=3000`, warm-up + 2 legs, `WSPLIT` per mesh rule):
+
+| cell | recipe | legs | job | verdict |
+|---|---|---|---|---|
+| fArc CPU 4096 | zstar + SE M=90 + salt anomaly | 2/2 × 3000 steps finite, 0.0387 s/step, CG-free (SE) | 27294513 | **PASS** |
+| dars CPU 8192 | zstar + SE M=20 + salt anomaly | 2/2 × 3000, 0.0726 s/step | 27294514 | **PASS** |
+| CORE2 GPU 16N | EVPWIDE lean + salt anomaly | leg 1 3000 finite (0.0549 s/step, it 62); leg 2 died at step 2000, warm-up died | 27294510 | partial — see the CUDA flake entry (registry 2026-09-08); the leg that ran is a pass, the one that died is the infrastructure failure |
+| NG5 GPU 16N | EVPWIDE lean + salt anomaly | both SP legs died at step 1–2 (knobs-off SP ran 300 steps at 0.1904 on 27289174) | 27294512 | FAIL — under investigation (recipe vs flake) |
+
+1-year twin: not started (needs the CUDA flake resolved or a Serial 2N×4-GPU-equivalent CPU posture).
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
