@@ -434,6 +434,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   fallback (0/15) and was faster still (0.0412) on the pool build; honest device-vs-staged pairs on the fixed binary:
   jobs 27313649 (4N) / 27313650 (16N). Every GPU number on the M14 and M16 boards was measured with the pool allocator; the
   timings survive only for legs that did not die, and are pessimistic by ~17 %.
+  `UCX_RCACHE_ENABLE=n` (jobs 27312685/86/87): **11/15 still fail** — the UCX registration cache is not the mechanism
+  either, and neither the memtype cache nor CUDA IPC was. What is established: pool-allocated (cudaMallocAsync) device
+  memory handed to UCX transfers wrongly on this stack (OpenMPI 4.1.5 / UCX 1.14 / CUDA 12.5 / A100), plain cudaMalloc
+  memory does not; the UCX-side mechanism is left unidentified (a DKRZ/UCX ticket item, with this table as evidence).
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
