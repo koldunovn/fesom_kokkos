@@ -367,7 +367,16 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
-- **2026-09-08 — OBSERVATION, untested: the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
+- **2026-09-08 — the multi-node CUDA intermittent NaN is NOT first-leg: it is the FIRST IN-LOOP FORCING REFRESH.**
+  Test job 27294339 (CORE2, 4 GPU nodes, FP64 `e2`, same leg ×3 with `FESOM_MP_NANSCAN=1`): warm-up and leg 1 clean
+  (0.0769 / 0.0751 s/step), leg 2 dies at **step 6 = 3 h = the first JRA record boundary** with `[bulk-nan] …
+  T_oc=-277.8 … cd=-nan` — the bulk formulae read an unphysical SST at the forcing refresh. Same phase as the SP JRA
+  macro bug of 2026-09-07 (deterministic there); here FP64, intermittent (~1 leg in 3 today on 4–16 nodes; the 1-node
+  pair never failed; NG5 64 GPUs failed 2/2 FP64 legs), i.e. a device-side race or stale/unsynced device data in the
+  `getcoeffld`→bulk path under the M7 speed levers (`FORCEDEV`, `NOFENCE2` are ON in the base arm). The host-alias
+  NANSCAN cannot see device state. **Not a precision island — a campaign-wide CUDA flake, M14 saw it on NG5/dars.**
+  Bisect (next): same leg ×5 at 4 nodes with `FESOM_SPEED_NOFENCE2=0`, then `FESOM_SPEED_FORCEDEV=0`.
+- **2026-09-08 — OBSERVATION (superseded by the entry above): the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
   next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
   (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
   (27289174) hit legs 1 and 4 too, so it is not only the first leg — but a first-leg-only NaN would point at
