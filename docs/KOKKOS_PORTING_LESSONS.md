@@ -2066,3 +2066,19 @@ Three transferable rules:
    phenomenon lives on a 1-node CORE2 partition that the load-balance study had already flagged
    as unusable — before/after in three minutes instead of an hour of 64-node time. When a
    failure is a property of the *initial condition*, mesh size is not part of the mechanism.
+
+## L132 — Kokkos' cudaMallocAsync pool + CUDA-aware MPI = intermittent halo corruption (2026-09-08)
+
+Kokkos ≥4.x allocates CUDA Views from a stream-ordered pool (`Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=ON` by default).
+Passing such device pointers to CUDA-aware MPI (OpenMPI 4.1.5 / UCX 1.14 on Levante) delivered wrong halo slots
+intermittently: 8 of 15 thousand-step CORE2 legs on 4 GPU nodes died with garbage (1e30–1e190) in fields that had just
+been halo-exchanged, first visible after the ice step; the device-vs-host halo self-check caught 107 wrong slots in one
+ELEM3D exchange. Neither `UCX_MEMTYPE_CACHE=n`, nor `UCX_TLS=^cuda_ipc`, nor any FESOM speed lever changed it. Building
+with `-DKokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF` (plain cudaMalloc): 0 of 15, and 17 % faster. Staging the packed
+halo through pinned host memory (`FESOM_HALO_STAGE=1`) also removes it (0/15) and was faster still on the pool build.
+Rules: (1) never hand pool-allocated device memory to MPI; the flag is mandatory in every CUDA build script;
+(2) the M14 NG5/dars "CG NaN" legs and every `pp·App is -nan` at 32–64 GPUs were this, not physics — rule 0.41's
+"roundoff-seeded onset" was the wrong story for the GPU deaths; (3) a NaN scanner must read DEVICE views — the host-alias
+scanner (`FESOM_MP_NANSCAN=1`) is blind on CUDA; `=2` is the device twin; (4) 300-step legs hide a ~10 %/leg failure —
+the ABBA warm-up absorbed it for a whole campaign; bisect with 1000-step legs ×15 per arm.
+

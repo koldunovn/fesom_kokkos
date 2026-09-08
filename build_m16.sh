@@ -10,6 +10,9 @@
 #   bash build_m16.sh cuda          CUDA   FP64                             -> build-m16cuda
 #   bash build_m16.sh cuda-sp       CUDA   FP32                             -> build-m16cuda-sp
 #
+# 🔴 Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF is MANDATORY (2026-09-08): Kokkos' cudaMallocAsync pool memory handed to
+#    CUDA-aware MPI corrupts halo slots intermittently (8/15 thousand-step legs on 4 nodes) and is 17 % slower;
+#    plain cudaMalloc: 0/15 and faster. Registry PRECISION_ISLANDS.md 2026-09-08, lessons L123.
 # 🔴 CUDA builds MUST use env_cuda.sh (openmpi 4.1.5-nvhpc, CUDA-aware, RPATH-pinned at link
 # time) — see the note in build_m14.sh; ldd every new CUDA binary.
 set -e
@@ -48,6 +51,7 @@ case "$which" in
           -DKokkos_ENABLE_CUDA=ON -DKokkos_ENABLE_CUDA_LAMBDA=ON -DKokkos_ARCH_AMPERE80=ON \
           -DBUILD_TESTING=ON -DFESOM_KK_SYNCCHECK=OFF -DFESOM_SYNC_LOG=OFF \
           -DUSE_SINGLE_PRECISION=$sp \
+          -DKokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF \
           -DCMAKE_CXX_COMPILER=/home/a/a270088/port_kokkos_sp/externals/kokkos/bin/nvcc_wrapper
     rm -f "$dir/fesom_port"
     cmake --build "$dir" -j 16

@@ -425,6 +425,15 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   candidate that fits a stream-ordered pool allocator: UCX's registration cache (rcache, `UCX_MEMTYPE_REG_WHOLE_ALLOC_TYPES=cuda`)
   keyed on virtual addresses that cudaMallocAsync re-backs with different physical memory ⇒ stale registrations ⇒ transfers
   to/from the wrong memory. Tests: `UCX_RCACHE_ENABLE=n` jobs 27312685 27312686 27312687; `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF` build `e2noasync`.
+  **ROOT CAUSE CONFIRMED (jobs 27310514/15/16, binary `e2noasync` cc1a5662 = same source built with
+  `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF`): device-pointer MPI path 0/15 thousand-step legs failed (8/15 with the
+  pool) AND 0.0518 s/step vs 0.0622 (−17 %).** Kokkos 4.4's default CUDA allocator is the stream-ordered pool
+  (cudaMallocAsync); its memory handed to CUDA-aware MPI (UCX) is intermittently transferred wrong — the pool re-backs
+  virtual addresses and the RDMA/registration side keeps stale mappings. Fix: plain cudaMalloc via the CMake flag, now
+  hard-wired in `build_m16.sh` (every CUDA build; pair `e3` = `5d7cd66`+flag). `FESOM_HALO_STAGE=1` remains a valid
+  fallback (0/15) and was faster still (0.0412) on the pool build; honest device-vs-staged pairs on the fixed binary:
+  jobs 27313649 (4N) / 27313650 (16N). Every GPU number on the M14 and M16 boards was measured with the pool allocator; the
+  timings survive only for legs that did not die, and are pessimistic by ~17 %.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
