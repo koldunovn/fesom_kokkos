@@ -367,6 +367,10 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-08 — NG5 16N GPU pair (job 27289174): FP64 dies, SP lives.** Both FP64 CUDA legs hit the M14-known
+  `CG_kk: pp·App is -nan` at step 2 (NG5 A100 at 64 GPUs, wsplit ON, det ON); both SP legs run 300 steps at 0.1904
+  s/step, 49 CG iterations. Not a precision finding — the onset is roundoff-seeded (rule 0.41) and SP perturbs the
+  seed. Consequence: no FP64 twin ⇒ no SP/DP ratio at NG5 16N; the point is reported SP-only.
 - **2026-09-07 — 30-day CORE2 conservation twin (np8, jobs 27289583 FP64 / 27289584 SP):** heat drift gap 0.2 % of the
   FP64 drift (July's number); **salt: SP drift −2.98e-6 vs FP64 −1.75e-6 at day 30, growing linearly** — the salt
   integral at SP carries a genuine drift (float `S` ≈ 35 ± 1.9e-6 psu ulp, the #986 motivation); the salt-anomaly twin
