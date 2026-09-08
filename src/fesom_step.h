@@ -106,4 +106,8 @@ int  fesom_mp_conserv_every(void);
 void fesom_mp_conserv(int step_n, struct fesom_mesh *mesh,
                       struct fesom_tracers *tracers, struct fesom_partit *partit);
 
+/* M16 flake hunt: device-side per-phase NaN scan (FESOM_MP_NANSCAN=2), callable from the main loop too. */
+int  fesom_mp_nanscan_dev_enabled(void);
+void mp_nanscan_dev(const char *phase, const fesom::Field &f, size_t n, int step_n,
+                    const struct fesom_mesh *mesh, int per, int is_elem);
 #endif /* FESOM_STEP_H */

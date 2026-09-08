@@ -1363,11 +1363,28 @@ skip_rest_state:
              * The ocean step that follows then sees the updated forcing. */
             fesom_phasestats_mark(FESOM_PH_ICE);
             TP_BEG();
+            if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: the ice step's INPUTS (device views) */
+                const size_t n2 = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
+                mp_nanscan_dev("pre-ice(srf_T)", ice.srfoce_temp_fld, n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("pre-ice(srf_S)", ice.srfoce_salt_fld, n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("pre-ice(aice)",  ice.data[FESOM_ICE_AICE].values_fld, n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("pre-ice(mice)",  ice.data[FESOM_ICE_MICE].values_fld, n2, n, &mesh, 1, 0);
+            }
             fesom_ice_step(n, &ice, &mpi, &mesh,
                            &dyn, &tracers, &forcing,
                            use_jra ? &jra : NULL,
                            use_sr  ? &sr  : NULL,
                            &stiff);
+            if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: the ice step's OUTPUTS */
+                const size_t n2 = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
+                mp_nanscan_dev("post-ice(aice)",   ice.data[FESOM_ICE_AICE].values_fld,  n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(mice)",   ice.data[FESOM_ICE_MICE].values_fld,  n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(msnow)",  ice.data[FESOM_ICE_MSNOW].values_fld, n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(uice)",   ice.uice_fld,   n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(vice)",   ice.vice_fld,   n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(flx_h)",  ice.flx_h_fld,  n2, n, &mesh, 1, 0);
+                mp_nanscan_dev("post-ice(flx_fw)", ice.flx_fw_fld, n2, n, &mesh, 1, 0);
+            }
             TP_END(tp_ice);
             fesom_phasestats_mark(FESOM_PH_COUPL);
             TP_BEG();   /* ice-ocean coupling (oce_fluxes_mom + shortwave) */
@@ -1383,6 +1400,13 @@ skip_rest_state:
              * re-populate from ice-ocean drag. */
             if (!no_wind) {
                 fesom_ice_oce_fluxes_mom(&ice, &mpi, &mesh, &forcing);
+            }
+            if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: what the coupling hands the ocean */
+                const size_t n2 = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
+                mp_nanscan_dev("post-coupl(hf)",     forcing.heat_flux_fld,        n2,     n, &mesh, 1, 0);
+                mp_nanscan_dev("post-coupl(wf)",     forcing.water_flux_fld,       n2,     n, &mesh, 1, 0);
+                mp_nanscan_dev("post-coupl(rsf)",    forcing.real_salt_flux_fld,   n2,     n, &mesh, 1, 0);
+                mp_nanscan_dev("post-coupl(stress)", forcing.stress_node_surf_fld, n2 * 2, n, &mesh, 2, 0);
             }
 
             /* Shortwave penetration (oce_shortwave_pene.F90 cal_shortwave_rad,

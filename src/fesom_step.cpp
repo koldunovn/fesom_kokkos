@@ -139,7 +139,7 @@ int fesom_mp_nanscan_dev_enabled(void)
     }
     return on;
 }
-static void mp_nanscan_dev(const char *phase, const fesom::Field &f, size_t n, int step_n,
+void mp_nanscan_dev(const char *phase, const fesom::Field &f, size_t n, int step_n,
                            const struct fesom_mesh *mesh, int per /* slots per node (nl) or per elem (nl*2); 1 = 2D */,
                            int is_elem)
 {
