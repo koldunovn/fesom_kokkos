@@ -367,6 +367,12 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   absorption of sub-ulp CSR increments over 118k steps until an eigenmode crossed |λ|=1. Upstream #997
   has the same island (`values_full`) — class 1 now, with divergence (b): our SP restart writes the
   shadow into `stiff_values`.
+- **2026-09-08 — OBSERVATION, untested: the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
+  next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
+  (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
+  (27289174) hit legs 1 and 4 too, so it is not only the first leg — but a first-leg-only NaN would point at
+  uninitialised DEVICE state on a cold node (a Field read before its first sync) rather than at physics. Test: one
+  allocation, the same leg twice, `FESOM_MP_NANSCAN=1` on the first. Until then the discarded warm-up is doing its job.
 - **2026-09-08 — NG5 16N GPU pair (job 27289174): FP64 dies, SP lives.** Both FP64 CUDA legs hit the M14-known
   `CG_kk: pp·App is -nan` at step 2 (NG5 A100 at 64 GPUs, wsplit ON, det ON); both SP legs run 300 steps at 0.1904
   s/step, 49 CG iterations. Not a precision finding — the onset is roundoff-seeded (rule 0.41) and SP perturbs the
