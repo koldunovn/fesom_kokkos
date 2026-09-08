@@ -392,6 +392,12 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   significant). Day tally at 4 nodes: 4 failures in 55 legs, lever- and print-independent. On NG5 at 64 GPUs it is
   4/4 legs (2 FP64 + 2 SP) — deterministic there. **Handed off with this evidence; next tools unchanged (HALO_SELFCHECK on
   a multi-node leg, UCX transport A/B, then a fence sweep: `Kokkos::fence()` before every host read in the diag/io path).**
+  **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
+  `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
+  0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
+  fences are identical) — consistent with a device-memory transport fault; not yet decisive (round 2: control 27299276 27299277,
+  stage 27299278 27299279, memtype 27299280 27299281). The exchange code's ordering is sound on reading: unconditional `Kokkos::fence()` before MPI
+  on device buffers, unpack launched after `MPI_Waitall`. The bundled UCX 1.14 is what the binary loads (no version mix).
 - **2026-09-08 — OBSERVATION (superseded by the entry above): the FIRST leg of a fresh GPU allocation can NaN where the identical leg run
   next succeeds.** Job 27294187 (CORE2 16N, recipe): warm-up FP64 leg `CG_kk: pp·App is -nan` at iteration 1; leg 1
   (same binary, same knobs, same nodes) 300 clean steps. Job 27289163 warm-up also failed (rc 1). The NG5 FP64 deaths
