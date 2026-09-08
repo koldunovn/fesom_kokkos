@@ -410,6 +410,13 @@ sites: 215  (generated 2026-09-07 by scripts/m16_accum_ledger.py)
   the NG5 30-step A/B (memtype-cache-off 0/15) fit **UCX's memory-type cache misclassifying a device buffer as host
   memory after address reuse (Kokkos' cudaMallocAsync pool)** — the known failure `UCX_MEMTYPE_CACHE=n` exists for.
   Decisive test at 1000 steps: `UCX_MEMTYPE_CACHE=n` jobs 27306555 27306558 27306560; `FESOM_HALO_STAGE=1` jobs 27306562 27306564 27306567.
+  **DECISIVE (1000-step legs ×15 per arm, CORE2 4 nodes, probe binary `e2scan2`): `FESOM_HALO_STAGE=1` 0/15 · control
+  8/15 · `UCX_MEMTYPE_CACHE=n` 7/15 (hypothesis refuted).** The probe binary names the phase every time: **`post-ice(mice)`**
+  — the ice mass right after the ice step, values 1e32–1e162, frequently at HALO slots ⇒ the ice halo exchanges on the
+  CUDA-aware-MPI device-pointer path deliver corrupted slots; staging the same packed buffers through pinned host memory
+  (`FESOM_HALO_STAGE=1`, M7.5) removes it completely. Next discriminator: intra-node CUDA IPC on Kokkos' cudaMallocAsync
+  pool memory (pool allocations are not IPC-exportable) — `UCX_TLS=^cuda_ipc` jobs 27310178 27310179 27310180; and a build with
+  `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF`.
   **A/B round 1 on NG5 16N (30-step legs ×5, jobs 27298178 control / 27298179 `FESOM_HALO_STAGE=1` / 27298180
   `UCX_MEMTYPE_CACHE=n`): control 1/5 failed (step 2, `CG_kk residual diverged`), host-staged halos 0/5, memtype cache off
   0/5.** Both interventions alter only the CUDA-aware-MPI path for the packed halos (the pack/unpack kernels and the
