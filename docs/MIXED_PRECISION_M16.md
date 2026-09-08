@@ -32,6 +32,22 @@ Recipe rows (BASE_KNOBS = the per-point M14 recipe) follow once the knobs-off ro
 
 Reading so far: SP and the recipe levers are close to multiplicative (CORE2 16N: recipe −23.6 %, SP −6.4 % knobs-off / −7.6 % under the recipe; fArc 4096: recipe −21.6 %, SP −14.5 % / −17.0 %) — July's "they overlap in the communication bytes" is at most a few percent here. The SP gain grows with the BYTE share of the step and shrinks where latency rules (CORE2 1N GPU −14 %, CORE2 16N GPU −6.4 % at 0.08 s/step, fArc 4096 CPU −14.5 %, dars 8192 CPU −27 %) — July's headline ("SP and the speed stack overlap in the communication bytes") reproduced on the m14 tree with knobs off.
 
+### 1b. Re-measure on the fixed allocator (`e3` = `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF`, 2026-09-08)
+Every row above was measured on Kokkos' cudaMallocAsync pool, which corrupts CUDA-aware-MPI halos (registry 2026-09-08) and
+costs ~17 % on the device path. Re-measured rows:
+
+| mesh | backend | nodes × ranks | knobs | DP s/step | SP s/step | SP/DP | job |
+|---|---|---|---|---|---|---|---|
+| CORE2 | GPU | 1 × 4 | knobs-off | 0.0601 (pool 0.0618) | 0.0523 (pool 0.0531) | **0.870** | 27313842 |
+| CORE2 | GPU | 16 × 64 | knobs-off / recipe | pending 27313843 / 27313844 | | | |
+| NG5 | GPU | 16 × 64 | knobs-off / recipe | pending 27313845 / 27313846 | | | |
+
+Device-pointer halo path vs host-staged (`FESOM_HALO_STAGE=1`), same allocation, CORE2 4 nodes, 300 steps, FP64
+(leg 1 of the device arm only — the ladder's env reset did not clear `FESOM_HALO_STAGE` between arms until 2026-09-08,
+so the 4th leg ran staged; fixed in both ladder jobs): pool build device 0.0629 → staged 0.0414 (−34 %, job 27310269);
+fixed build device 0.0534 → staged 0.0408 (−24 %, job 27313649). **The staged path is the faster halo on Levante A100
+by a wide margin** (dolpung already runs it); the 16N pairs (27310270 / 27313650) decide whether that holds at scale.
+
 Incidents: job 27289077 (same pair, node **l50154**) hung after the speed-knob lines; the M14 `i1`
 warm-up segfaulted there with UCX `VM_UNMAP` warnings. Excluding the node fixed it — the gpu partition
 is heterogeneous (memory rule); submit GPU ladders with `--exclude=l50154` until DKRZ confirms the node.
