@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M16 Gate 4 — build one Fortran run directory for the FAITHFULNESS matrix.
 #
-#   scripts/m16_faith_setup.sh <rundir> [run_length] [run_length_unit] [perturb_seed]
+#   scripts/m16_faith_setup.sh <rundir> [run_length] [run_length_unit] [perturb_seed] [step_per_day] [amp]
 #
 # The matrix compares four arms — Fortran-DP, Fortran-SP, port-DP, port-SP — on the ONE setup both
 # codes can share, plus FP64 noise twins that set the significance bar (Suvarchal's design: an SP-DP
@@ -28,7 +28,7 @@
 #     sanity cross-check on it.
 #
 # Everything else is upstream's default: which_ALE='zstar', mix_scheme='KPP', whichEVP=0 (standard
-# EVP, 120 subcycles), step_per_day=32 (dt=2700 s), start 1958, JRA55-do-v1.4.0, PHC3.0 winter.
+# EVP, 120 subcycles), start 1958, JRA55-do-v1.4.0, PHC3.0 winter. step_per_day is an argument.
 # 64 ranks on 1 node is upstream's own PR-940 benchmark posture (oracle PROVENANCE.txt).
 set -eu
 
@@ -36,6 +36,22 @@ RUNDIR=${1:?usage: m16_faith_setup.sh <rundir> [run_length] [run_length_unit] [p
 RLEN=${2:-1}
 RUNIT=${3:-m}
 SEED=${4:-}
+# step_per_day 32 (dt 2700) is upstream's test_core2 CI value; 48 (dt 1800) is this project's CORE2
+# protocol dt. 2700 is measurably marginal on a cold start -- the 1-month pilot logged CFLz_max up
+# to 2.46 against the 1.75 warning threshold -- and a configuration that sits near its stability
+# limit is the wrong place to ask a precision question: an SP arm that fails there would be
+# reporting the dt, not the precision. Production runs use 48.
+SPD=${5:-32}
+# Perturbation amplitude, K (gaussian sigma on temperature at the first step). TWO amplitudes are
+# meaningful and they answer different questions:
+#   2e-4  Suvarchal's value, used for his 60-yr dpnoise ensembles. Over decades a nudge this size
+#         saturates and the spread measures the model's internal variability -- the right bar for a
+#         CLIMATE comparison. Over a month or a year it has not saturated, and it is ~200x larger
+#         than single-precision rounding on a ~10 K field, so it is a GENEROUS bar for SP.
+#   1e-6  rounding-scale: comparable to what float32 itself does to a ~10 K temperature. The sharp
+#         test is whether the SP-DP departure matches the spread this produces -- that is the claim
+#         "SP behaves like a rounding-level perturbation, nothing more".
+AMP=${6:-2.D-4}
 
 CFG=/home/a/a270088/fesom2_sp/config
 MESH=/work/ab0995/a270088/port2/mesh/core2
@@ -54,7 +70,7 @@ cat > "$RUNDIR/namelist.config" <<EOF
 runid = 'fesom'
 /
 &timestep
-step_per_day      = 32
+step_per_day      = $SPD
 run_length        = $RLEN
 run_length_unit   = '$RUNIT'
 /
@@ -177,8 +193,9 @@ cp "$CFG/namelist.cvmix"     "$RUNDIR/namelist.cvmix"
 cp "$CFG/namelist.icepack"   "$RUNDIR/namelist.icepack" 2>/dev/null || true
 
 # IC perturbation (the FP64 noise twins). Upstream ships &oce_perturb in gen_ic3d.F90; a seed
-# argument appends the block. Gaussian, sigma = 2e-4 K on temperature at the first step — the
-# amplitude and mode Suvarchal used for his dpnoise ensembles.
+# argument appends the block. Gaussian on temperature at the first step; see AMP above for why two
+# amplitudes are run. Read sequentially from namelist.oce AFTER &oce_dyn (gen_model_setup.F90:140),
+# so appending at the end of the file is where it belongs.
 if [ -n "$SEED" ]; then
 cat >> "$RUNDIR/namelist.oce" <<EOF
 
@@ -187,7 +204,7 @@ lperturb       = .true.
 perturb_mode   = 'first_step'
 perturb_method = 'gaussian'
 perturb_seed   = $SEED
-temp_perturb   = 0.0, 2.D-4
+temp_perturb   = 0.0, $AMP
 salt_perturb   = 0.0, 0.0
 /
 EOF
@@ -204,4 +221,4 @@ grep -q "use_ocean_only_forcing = .false." "$RUNDIR/namelist.forcing" \
 # Two identical lines == initial run (gen_modules_clock.F90 clock_init).
 printf ' 0.0 1 1958\n 0.0 1 1958\n' > "$OUT/fesom.clock"
 
-echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, seed=${SEED:-none})"
+echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, seed=${SEED:-none}${SEED:+, amp=$AMP K})"

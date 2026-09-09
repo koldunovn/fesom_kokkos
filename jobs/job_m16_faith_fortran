@@ -65,6 +65,16 @@ for arm in $ARMS; do
     else
         echo "banner  : none (double precision)"
     fi
+    # L80: verify a knob FIRED before believing a null. A noise arm whose &oce_perturb block was
+    # silently not read would be a bit-identical copy of the unperturbed arm, and the envelope it
+    # produced would be exactly zero — which reads as "SP is above the envelope" for every variable.
+    if grep -q "lperturb *= *\.true\." "$dir/namelist.oce" 2>/dev/null; then
+        if grep -q "PERTURBATION TRIGGER" "$dir/run.log" 2>/dev/null; then
+            echo "perturb : FIRED  ($(grep -m1 'Mode:' "$dir/run.log" | sed 's/^ *//'))"
+        else
+            echo "perturb : !! REQUESTED BUT DID NOT FIRE — this arm is not a noise twin"
+        fi
+    fi
     grep -ciE "nan|infinity" "$dir/run.log" 2>/dev/null | sed 's/^/nan-ish log lines: /'
     ls "$dir/output"/*.nc 2>/dev/null | sed 's|.*/|  out: |'
     tail -3 "$dir/run.err" 2>/dev/null | sed 's/^/  err: /'

@@ -101,7 +101,12 @@ def main():
     names = sorted(d for d in os.listdir(runroot)
                    if os.path.isdir(os.path.join(runroot, d)))
     arms = {n: os.path.join(runroot, n) for n in names}
-    noise = [n for n in names if n.startswith("fdp_s")]
+    # Two noise families, two questions (see m16_faith_setup.sh AMP):
+    #   fdp_s<seed>  sigma 2e-4 K  -- Suvarchal's amplitude, the climate-variability bar
+    #   fdp_r<seed>  sigma 1e-6 K  -- rounding-scale, the bar that SP should actually match
+    noise_s = [n for n in names if n.startswith("fdp_s")]
+    noise_r = [n for n in names if n.startswith("fdp_r")]
+    noise = noise_s + noise_r
 
     print(f"runroot : {runroot}")
     print(f"arms    : {' '.join(names)}")
@@ -134,12 +139,13 @@ def main():
         for k, v in pairs.items():
             print(f"   relL2 SP vs DP  [{k:<7}] {v:.6e}")
 
-        env = []
+        env = {"s": [], "r": []}
         for n in noise:
             if n in got and "fdp" in got:
                 e = relL2(got[n], got["fdp"], mask)
-                env.append(e)
-                print(f"   relL2 noise vs DP [{n}] {e:.6e}")
+                env["s" if n in noise_s else "r"].append(e)
+                amp = "2e-4 K" if n in noise_s else "1e-6 K"
+                print(f"   relL2 noise vs DP [{n}, sigma {amp}] {e:.6e}")
 
         # the two code paths compared against each other, at equal precision:
         for p, label in (("dp", "port-DP vs fortran-DP"), ("sp", "port-SP vs fortran-SP")):
@@ -159,24 +165,29 @@ def main():
         print("=" * 72)
         print("SUMMARY")
         for var, (pairs, env, r) in verdict.items():
-            emax = max(env) if env else None
             line = f"  {var:<6}"
             for k in ("fortran", "port"):
                 if k in pairs:
                     line += f"  {k}-SP/DP {pairs[k]:.3e}"
-            if emax is not None:
-                line += f"  |  FP64 noise envelope {emax:.3e}"
-                for k in ("fortran", "port"):
-                    if k in pairs:
-                        tag = "ABOVE" if pairs[k] > emax else "below"
-                        line += f"  [{k} {tag} envelope]"
             if r is not None:
                 line += f"  |  ratio {r:.3f}"
             print(line)
+            for fam, amp in (("r", "1e-6 K"), ("s", "2e-4 K")):
+                if env[fam]:
+                    e = max(env[fam])
+                    tags = "  ".join(
+                        f"{k} {'ABOVE' if pairs[k] > e else 'below'}"
+                        for k in ("fortran", "port") if k in pairs)
+                    print(f"         FP64 envelope sigma {amp}: {e:.3e}   [{tags}]")
         print()
-        print("  Read: a departure BELOW the envelope is indistinguishable from the model's own")
-        print("  sensitivity to a 2e-4 K nudge, so it is not evidence that SP hurts. A ratio near")
-        print("  1 means the port loses exactly as much to single precision as upstream does.")
+        print("  Read. RATIO near 1 = the port loses as much to single precision as upstream does;")
+        print("  that is the G4 statement, and it does not depend on either departure being small.")
+        print("  The ENVELOPES say whether the departures matter at all. The 1e-6 K family is the")
+        print("  honest comparator: it is a nudge the size of float32 rounding itself, so an SP-DP")
+        print("  departure that sits at or below it is behaving exactly like rounding. The 2e-4 K")
+        print("  family is Suvarchal's climate amplitude -- ~200x larger than SP rounding on a 10 K")
+        print("  field, so 'below the 2e-4 envelope' is a generous statement, not a strong one, on")
+        print("  a run this short. Over decades the two families converge as both saturate.")
 
 
 if __name__ == "__main__":
