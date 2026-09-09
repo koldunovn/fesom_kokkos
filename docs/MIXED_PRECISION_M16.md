@@ -155,7 +155,77 @@ Jobs 27289583 (FP64) / 27289584 (SP), both rc 0, no non-finite; `scripts/mp_cons
 | CORE2 GPU 16N | EVPWIDE lean + salt anomaly | leg 1 3000 finite (0.0549 s/step, it 62); leg 2 died at step 2000, warm-up died | 27294510 | partial — see the CUDA flake entry (registry 2026-09-08); the leg that ran is a pass, the one that died is the infrastructure failure |
 | NG5 GPU 16N | EVPWIDE lean + salt anomaly | both SP legs died at step 1–2 (knobs-off SP ran 300 steps at 0.1904 on 27289174) | 27294512 | FAIL — under investigation (recipe vs flake) |
 
-1-year twin: not started (needs the CUDA flake resolved or a Serial 2N×4-GPU-equivalent CPU posture).
+### 3b. The faithfulness matrix — G4's actual bar, first numbers (2026-09-09)
+
+Plan **D14**. Until today G4's bar ("SP-vs-Fortran ≡ DP-vs-Fortran") had nothing on the Fortran side
+to stand on. It now runs as **four arms on the one setup both codes can share** — upstream's
+`setups/test_core2` (CORE2 mesh + JRA55 + PHC) — plus **FP64 noise twins** from upstream's own
+`&oce_perturb`. Driver `scripts/m16_faith_setup.sh` (which argues the four deliberate deviations from
+upstream's `setup.yml`), `jobs/job_m16_faith_{fortran,port}`, analysis `scripts/m16_faith_compare.py`.
+
+**Pilot: January 1958, 64 ranks / 1 node, dt 2700 (upstream's CI value), Serial port vs Intel oracle
+`a62f180`.** All arms rc 0, no non-finite. Both codes wrote the *same window* — one record, shape
+(1, 47, 126858), time stamp 1339200 s — so the comparison is like-for-like. The Fortran SP arm
+printed `SINGLE PRECISION MODE`, which is the one hard precision fact the harness gives: **219 s vs
+DP's 389 s = 1.78×**, against the 1.69× upstream reports for this posture (jobs 27355327, 27355390,
+27355632; det pair 27355922/27355923).
+
+| quantity (relL2, monthly mean, valid points) | sst | a_ice | temp | salt |
+|---|---|---|---|---|
+| **Fortran SP vs its own DP** | 9.09e-05 | 6.51e-04 | 1.20e-04 | 9.24e-06 |
+| **port SP vs its own DP** | 1.25e-04 | 6.12e-04 | 1.55e-04 | 1.42e-05 |
+| **RATIO port / Fortran** | **1.38** | **0.94** | **1.29** | **1.54** |
+| FP64 envelope, σ = 1e-6 K | 3.23e-05 | 4.16e-04 | 4.79e-05 | 3.24e-06 |
+| FP64 envelope, σ = 2e-4 K | 4.02e-05 | 5.82e-04 | 5.89e-05 | 4.75e-06 |
+| **port vs Fortran at EQUAL precision (DP)** | 3.49e-03 | 3.18e-03 | 2.29e-03 | 1.96e-04 |
+
+**Four readings, in order of how much they matter.**
+
+**1. The G4 statement, first quantified: the ratio is 0.94–1.54.** The port loses to single precision
+what upstream loses, to within a factor of 1.5 on the worst variable and 6 % on the best. This is the
+number G4 asks for, and it does not depend on either departure being small.
+
+**2. 🔴 The envelope has SATURATED by one month, and SP sits above it.** The two amplitudes differ by
+**200×** and their envelopes differ by **under 20 %** — so by 31 days both perturbations have already
+grown to the same level, and that level is the model's own noise floor rather than a property of the
+nudge. That makes it a real bar, and every SP−DP departure is **1.1–2.8× above it**. So the
+comfortable sentence "SP is buried in the noise" is **not true at one month** — it will only become
+true at climate length, where the comparison has to be re-made. *(Predicted before the runs: the
+opposite. The reason is that a perturbed IC is one kick that then grows at the flow's own rate, while
+single precision injects rounding at every operation of every one of 992 steps; a continuous source
+beats a single kick of 200× the amplitude.)*
+
+**3. SP carries a small systematic component, not only decorrelation — and BOTH codes carry it.** The
+mean shift of sst against each code's own DP arm is **−1.53e-05 (Fortran-SP)** and **−2.84e-05
+(port-SP)**, while the FP64 noise twins shift only −3.3e-07 and −9.8e-07 — twenty times less. A pure
+re-seeding of chaos would shift the mean like the noise twins do; this does not. The port reproduces
+upstream's SP behaviour *including its bias*, which is a stronger faithfulness result than the ratio
+alone.
+
+**4. The two codes differ from EACH OTHER, at equal precision, 20–30× more than either differs from
+its own DP arm.** That is the backdrop every ratio above rides on, and it needed an explanation.
+
+- **It is not the ice edge.** For sst the gap is concentrated — **44.7 % of the sum of squares in the
+  top 1 % of nodes** — in the energetic mid-latitude Southern Ocean (top-400 nodes: median latitude
+  −36, only 5 % poleward of 60), and the ice edge is *under*-represented (0.04 of the top nodes
+  against a 0.14 baseline). So this is **not** the F↔C ice-edge comparator class from M9.
+- **It is not the partition-dependent IC hole fill**, which was the obvious suspect (M13). Repeating
+  the 1-month pair with `ic_extrap_det` on in **both** codes (upstream `namelist.tra`, our own PR
+  #979; the port's `FESOM_IC_EXTRAP=det`) moves the code-to-code gap by **0.4 %, 2.9 %, 0.8 %** for
+  sst/a_ice/temp and 31 % for salt — i.e. essentially not at all. **The knob demonstrably fired:**
+  det-vs-legacy *within* each code is 3.6e-03…3.6e-02, and the Fortran side prints no banner, so this
+  empirical check is the only proof available (L80).
+- **The scale anchor that makes it readable:** flipping `ic_extrap_det`, a supported upstream option,
+  moves each code's own solution **more** (sst 4.86e-03 Fortran, 4.94e-03 port) than the two codes
+  differ from each other (3.49e-03). The port-vs-Fortran gap is **smaller than the spread of
+  legitimate configuration choices** — which is the honest way to report it.
+
+**Consequence for the campaign:** run the matrix with det **off** (the shared default) — it changes
+nothing and costs a knob. The 1-year matrix at the protocol dt 1800 is in flight: jobs 27355667–72
+(Fortran fdp/fsp + four noise twins) and 27355673/27355675 (port pdp/psp), 8 × 1 node, ~2–2.5 h.
+
+1-year GPU twin: not started (needs the CUDA flake resolved or a Serial 2N×4-GPU-equivalent CPU
+posture).
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
