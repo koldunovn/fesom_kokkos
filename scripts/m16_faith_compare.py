@@ -147,24 +147,29 @@ def main():
                 amp = "2e-4 K" if n in noise_s else "1e-6 K"
                 print(f"   relL2 noise vs DP [{n}, sigma {amp}] {e:.6e}")
 
-        # the two code paths compared against each other, at equal precision:
+        # the two code paths compared against each other, at equal precision. This is the number
+        # that decides whether "the port and upstream are the same model" in the only sense a
+        # chaotic system allows: not bit equality, but a difference no larger than the model's own
+        # response to a nudge it cannot help making.
+        cross = {}
         for p, label in (("dp", "port-DP vs fortran-DP"), ("sp", "port-SP vs fortran-SP")):
             fa, pa = f"f{p}", f"p{p}"
             if fa in got and pa in got:
-                print(f"   relL2 {label} {relL2(got[pa], got[fa], mask):.6e}")
+                cross[p] = relL2(got[pa], got[fa], mask)
+                print(f"   relL2 {label} {cross[p]:.6e}")
 
         if "fortran" in pairs and "port" in pairs:
             r = pairs["port"] / pairs["fortran"] if pairs["fortran"] > 0 else float("nan")
             print(f"   RATIO port/fortran SP-DP departure : {r:.4f}")
-            verdict[var] = (pairs, env, r)
+            verdict[var] = (pairs, env, r, cross)
         elif pairs:
-            verdict[var] = (pairs, env, None)
+            verdict[var] = (pairs, env, None, cross)
         print()
 
     if verdict:
         print("=" * 72)
         print("SUMMARY")
-        for var, (pairs, env, r) in verdict.items():
+        for var, (pairs, env, r, cross) in verdict.items():
             line = f"  {var:<6}"
             for k in ("fortran", "port"):
                 if k in pairs:
@@ -172,12 +177,16 @@ def main():
             if r is not None:
                 line += f"  |  ratio {r:.3f}"
             print(line)
+            if "dp" in cross:
+                print(f"         port-vs-fortran at equal precision (DP): {cross['dp']:.3e}")
             for fam, amp in (("r", "1e-6 K"), ("s", "2e-4 K")):
                 if env[fam]:
                     e = max(env[fam])
+                    items = [(k, pairs[k]) for k in ("fortran", "port") if k in pairs]
+                    if "dp" in cross:
+                        items.append(("code-vs-code", cross["dp"]))
                     tags = "  ".join(
-                        f"{k} {'ABOVE' if pairs[k] > e else 'below'}"
-                        for k in ("fortran", "port") if k in pairs)
+                        f"{k} {'ABOVE' if v > e else 'below'}" for k, v in items)
                     print(f"         FP64 envelope sigma {amp}: {e:.3e}   [{tags}]")
         print()
         print("  Read. RATIO near 1 = the port loses as much to single precision as upstream does;")
@@ -188,6 +197,12 @@ def main():
         print("  family is Suvarchal's climate amplitude -- ~200x larger than SP rounding on a 10 K")
         print("  field, so 'below the 2e-4 envelope' is a generous statement, not a strong one, on")
         print("  a run this short. Over decades the two families converge as both saturate.")
+        print()
+        print("  The code-vs-code line is the strongest claim available: if the port and upstream")
+        print("  differ, at the SAME precision, by no more than the model's response to a nudge it")
+        print("  cannot avoid making, then they are the same model in the only sense a chaotic")
+        print("  system permits. If it sits ABOVE the envelope, the gap is a real port difference")
+        print("  and belongs in the registry, not in the precision story.")
 
 
 if __name__ == "__main__":

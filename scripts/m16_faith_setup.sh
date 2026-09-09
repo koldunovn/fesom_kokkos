@@ -52,6 +52,13 @@ SPD=${5:-32}
 #         test is whether the SP-DP departure matches the spread this produces -- that is the claim
 #         "SP behaves like a rounding-level perturbation, nothing more".
 AMP=${6:-2.D-4}
+# DET=1 turns on upstream's deterministic IC hole fill (namelist.tra ic_extrap_det, our own M13
+# contribution, upstream PR #979, present in the oracle's a62f180). The port's counterpart is
+# FESOM_IC_EXTRAP=det. Both codes default to the LEGACY fill, which is partition-dependent by
+# construction -- so with DET off the two codes start from initial conditions that need not agree,
+# and every later difference inherits that seed. Turning det on in BOTH is the only way to ask
+# whether the code-to-code gap is dynamics or hole-filling.
+DET=${7:-0}
 
 CFG=/home/a/a270088/fesom2_sp/config
 MESH=/work/ab0995/a270088/port2/mesh/core2
@@ -188,6 +195,11 @@ EOF
 cp "$CFG/namelist.oce.core2" "$RUNDIR/namelist.oce"
 cp "$CFG/namelist.ice"       "$RUNDIR/namelist.ice"
 cp "$CFG/namelist.tra"       "$RUNDIR/namelist.tra"
+if [ "$DET" = 1 ]; then
+    sed -i "s/^ *ic_extrap_det *= *\.false\./ic_extrap_det = .true./" "$RUNDIR/namelist.tra"
+    grep -q "ic_extrap_det = .true." "$RUNDIR/namelist.tra" \
+      || { echo "FATAL: DET=1 requested but the ic_extrap_det edit did not apply"; exit 3; }
+fi
 cp "$CFG/namelist.dyn"       "$RUNDIR/namelist.dyn"
 cp "$CFG/namelist.cvmix"     "$RUNDIR/namelist.cvmix"
 cp "$CFG/namelist.icepack"   "$RUNDIR/namelist.icepack" 2>/dev/null || true
@@ -221,4 +233,4 @@ grep -q "use_ocean_only_forcing = .false." "$RUNDIR/namelist.forcing" \
 # Two identical lines == initial run (gen_modules_clock.F90 clock_init).
 printf ' 0.0 1 1958\n 0.0 1 1958\n' > "$OUT/fesom.clock"
 
-echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, seed=${SEED:-none}${SEED:+, amp=$AMP K})"
+echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, seed=${SEED:-none}${SEED:+, amp=$AMP K}, det=$DET)"

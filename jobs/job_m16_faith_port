@@ -40,13 +40,16 @@ ulimit -s 204800
 
 export FESOM_ALE=zstar
 export FESOM_PRINT_EVERY=320
+# DET=1 must be set on BOTH codes or neither -- see scripts/m16_faith_setup.sh. The legacy fill is
+# partition-dependent, so with det off the two codes need not even start from the same field.
+[ "${DET:-0}" = 1 ] && export FESOM_IC_EXTRAP=det
 
 echo "=== M16 faithfulness — port arms (Kokkos Serial) ==="
 echo "runroot : $RUNROOT"
 echo "arms    : $ARMS"
 echo "steps   : $NSTEPS at dt=$DT   (= $((NSTEPS/32)) days at step_per_day 32)"
 echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
-echo "knobs   : FESOM_ALE=zstar; everything else unset (KPP + standard EVP are the port defaults)"
+echo "knobs   : FESOM_ALE=zstar${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}; everything else unset (KPP + standard EVP are the port defaults)"
 echo
 
 for arm in $ARMS; do
