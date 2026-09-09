@@ -1,0 +1,73 @@
+#!/bin/bash
+#SBATCH --job-name=m16_faith_f
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=64
+#SBATCH -t 00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/faith/faith_f.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/faith/faith_f.%j.err
+#
+# M16 Gate 4 — the FORTRAN arms of the faithfulness matrix (oracle @ a62f180, both precisions).
+#
+#   sbatch --export=ALL,ARMS="fdp fsp",RUNROOT=/work/.../faith/pilot_1m jobs/job_m16_faith_fortran
+#
+# One arm = one directory built by scripts/m16_faith_setup.sh (which documents the four deliberate
+# deviations from upstream's setups/test_core2). Arm name prefix picks the binary: f*p reads its
+# precision from the 2nd character — fdp -> oracle/dp, fsp -> oracle/sp; anything else defaults to
+# dp (the noise twins fdp_s<seed> are FP64 by construction: the noise envelope is an FP64 property).
+#
+# 64 ranks on 1 node is upstream's own PR-940 benchmark posture (oracle/dp/PROVENANCE.txt).
+# 🔴 Never on the login node (standing rule).
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+ORACLE=/work/ab0995/a270088/port2/m16/oracle
+RUNROOT=${RUNROOT:?set RUNROOT}
+ARMS=${ARMS:?set ARMS}
+
+source /sw/etc/profile.levante >/dev/null 2>&1 || true
+# The oracle was built with `source env.sh levante.dkrz.de+intel` in ~/fesom2_sp; reuse exactly that
+# environment. env.sh dies under `set -u` on an unbound LD_LIBRARY_PATH (day-4 rule), so relax first.
+set +u
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+cd /home/a/a270088/fesom2_sp && source env.sh levante.dkrz.de+intel >/dev/null 2>&1
+set -u
+export HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+
+echo "=== M16 faithfulness — Fortran arms ==="
+echo "runroot : $RUNROOT"
+echo "arms    : $ARMS"
+echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
+echo
+
+for arm in $ARMS; do
+    dir="$RUNROOT/$arm"
+    [ -d "$dir" ] || { echo "!! $arm: no run dir $dir — skipped"; continue; }
+    case "$arm" in
+        ?sp*) prec=sp ;;
+        *)    prec=dp ;;
+    esac
+    BIN="$ORACLE/$prec/bin/fesom.x"
+    [ -x "$BIN" ] || { echo "!! $arm: no binary $BIN"; continue; }
+
+    echo "--- $arm (oracle/$prec, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
+    t0=$SECONDS
+    ( cd "$dir" && srun -l --ntasks="${SLURM_NTASKS}" "$BIN" ) \
+        > "$dir/run.log" 2> "$dir/run.err"
+    rc=$?
+    dt=$((SECONDS - t0))
+    echo "rc=$rc  wall=${dt}s"
+    # The one hard precision fact the harness gives us: an SP build announces itself (upstream makes
+    # this banner a mandatory ctest marker), so it proves the arm really ran the precision claimed.
+    if grep -qi "SINGLE PRECISION MODE" "$dir/run.log" 2>/dev/null; then
+        echo "banner  : SINGLE PRECISION MODE  (arm is genuinely SP)"
+    else
+        echo "banner  : none (double precision)"
+    fi
+    grep -ciE "nan|infinity" "$dir/run.log" 2>/dev/null | sed 's/^/nan-ish log lines: /'
+    ls "$dir/output"/*.nc 2>/dev/null | sed 's|.*/|  out: |'
+    tail -3 "$dir/run.err" 2>/dev/null | sed 's/^/  err: /'
+    echo
+done
+echo "=== done ==="

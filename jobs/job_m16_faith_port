@@ -1,0 +1,74 @@
+#!/bin/bash
+#SBATCH --job-name=m16_faith_p
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=64
+#SBATCH -t 00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/faith/faith_p.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/faith/faith_p.%j.err
+#
+# M16 Gate 4 — the PORT arms of the faithfulness matrix (Kokkos-Serial, e3 bins, both precisions).
+#
+#   sbatch --export=ALL,ARMS="pdp psp",RUNROOT=...,NSTEPS=992 jobs/job_m16_faith_port
+#
+# Serial, not CUDA: the Fortran oracle is a CPU code and CUDA is not run-to-run reproducible, so a
+# CUDA arm would fold device noise into a number meant to isolate precision. The GPU screens are a
+# separate gate.
+#
+# The port takes its configuration from the command line and FESOM_* env, not from namelists, so the
+# match to the Fortran arms is made HERE and must be read against scripts/m16_faith_setup.sh:
+#   dt 2700 (= step_per_day 32)   zstar   KPP (port default)   standard EVP (port default,
+#   FESOM_WHICH_EVP unset)   JRA55-do-v1.4.0 starting 1958   PHC3.0 winter   the private CORE2 mesh.
+# 🔴 Every FESOM_* knob is otherwise UNSET: the M16 default posture adds the #984 preconditioner
+# (variant 1) and it is upstream's shipped default too, so it is common to both codes.
+set -u
+BINROOT=${BINROOT:-/work/ab0995/a270088/port2/m16/bin/e3}
+RUNROOT=${RUNROOT:?set RUNROOT}
+ARMS=${ARMS:?set ARMS}
+NSTEPS=${NSTEPS:?set NSTEPS}
+DT=${DT:-2700}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+YEAR=1958
+
+source /sw/etc/profile.levante >/dev/null 2>&1 || true
+source /home/a/a270088/port_kokkos_sp/env.sh >/dev/null 2>&1
+export OMPI_MCA_btl_vader_single_copy_mechanism=none   # L18 deterministic gather
+export HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+
+export FESOM_ALE=zstar
+export FESOM_PRINT_EVERY=320
+
+echo "=== M16 faithfulness — port arms (Kokkos Serial) ==="
+echo "runroot : $RUNROOT"
+echo "arms    : $ARMS"
+echo "steps   : $NSTEPS at dt=$DT   (= $((NSTEPS/32)) days at step_per_day 32)"
+echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
+echo "knobs   : FESOM_ALE=zstar; everything else unset (KPP + standard EVP are the port defaults)"
+echo
+
+for arm in $ARMS; do
+    case "$arm" in
+        ?sp*) prec=sp ;;
+        *)    prec=dp ;;
+    esac
+    BIN="$BINROOT/$prec/fesom_port_serial"
+    [ -x "$BIN" ] || { echo "!! $arm: no binary $BIN"; continue; }
+    dir="$RUNROOT/$arm"; out="$dir/output"
+    rm -rf "$dir"; mkdir -p "$out"
+
+    echo "--- $arm ($prec, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
+    t0=$SECONDS
+    srun -l --ntasks="${SLURM_NTASKS}" "$BIN" \
+         "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" "$YEAR" \
+         > "$dir/run.log" 2> "$dir/run.err"
+    rc=$?
+    echo "rc=$rc  wall=$((SECONDS - t0))s"
+    grep -ciE "nan|inf" "$dir/run.log" 2>/dev/null | sed 's/^/nan-ish log lines: /'
+    ls "$out"/*.nc 2>/dev/null | sed 's|.*/|  out: |'
+    tail -3 "$dir/run.err" 2>/dev/null | sed 's/^/  err: /'
+    echo
+done
+echo "=== done ==="

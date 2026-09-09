@@ -41,7 +41,10 @@ costs ~17 % on the device path. Re-measured rows:
 | CORE2 | GPU | 1 × 4 | knobs-off | 0.0601 (pool 0.0618) | 0.0523 (pool 0.0531) | **0.870** | 27313842 |
 | CORE2 | GPU | **2 × 8** | knobs-off | 0.0488 | 0.0436 | **0.893** | 27339007 |
 | CORE2 | GPU | **2 × 8** | recipe (EVPWIDE lean + anomaly) | 0.0415 | 0.0369 | **0.889** | 27339008 |
-| NG5 | GPU | 4 × 16 | knobs-off | queued 27339009 | | | |
+| NG5 | GPU | **4 × 16** | knobs-off, `WSPLIT=1` | 0.6111 | 0.5276 | **0.863** | 27339009 |
+| CORE2 | GPU | 16 × 64 | knobs-off | 0.0627 | 0.0590 | **0.941** | 27313843 |
+| CORE2 | GPU | 16 × 64 | recipe | 0.0486 | 0.0474 | **0.975 — inside leg noise, see below** | 27313844 |
+| NG5 | GPU | **16 × 64** | knobs-off, `WSPLIT=1` | 0.1924 | 0.1661 | **0.863** | 27313845 |
 
 **Device memory** (new: the ladder now polls `nvidia-smi` around every leg and prints `gpumem_max=`;
 until 2026-09-09 the "0.51× memory" claim rested on one July hand-sample on dars). CORE2 8 ranks on
@@ -54,15 +57,52 @@ the old allocator) — the prize shrinks monotonically as the per-GPU work falls
 so the number quoted for the hindcast must be the 1–2 node one. Leg spreads 0.00–0.46 %. Both pairs
 cost 3 minutes on 2 nodes; the 16-node versions they replaced had queued 20 h (plan D13).
 
-**Superseded plan (2026-09-09):** the 16 × 64 rows were dropped. CORE2 does not scale past ~2 GPU
-nodes on Levante (board §1: 0.0618 s/step at 1 N vs 0.0794 at 16 N), so a 16-node row sizes the prize
-in a configuration nobody runs. Jobs 27313843/44 (CORE2 16 N) and 27313845/46 (NG5 16 N) cancelled.
+**Superseded plan (2026-09-09):** the 16 × 64 rows were dropped from the critical path (D13). CORE2
+does not scale past ~2 GPU nodes on Levante (board §1: 0.0618 s/step at 1 N vs 0.0794 at 16 N), so a
+16-node CORE2 row sizes the prize in a configuration nobody runs. **They were dropped, not cancelled:
+27313843/44/45 reached the front of the queue and ran on 2026-09-09 before the cancellation, so their
+rows above are free data on the fixed allocator.** Only 27313846 (NG5 16 N recipe) is still PENDING
+(start 2026-09-10T01:40) and should be cancelled — the recipe *is* the three M14 levers, which D13
+puts outside the SP paper.
+
+**🔴 The two mesh families say opposite things, and that is the result.** On CORE2 the SP prize decays
+monotonically with node count — **0.870 (1 N) → 0.893 (2 N) → 0.941 (16 N)** — because CORE2 is past its
+knee and the step is latency-bound, where halving the payload buys nothing. On **NG5 the ratio does not
+move: 0.863 at 4 nodes and 0.863 at 16 nodes** (0.6111 → 0.1924 s/step is 3.18× over 4× the nodes, so
+NG5 at 16 N is still on the scaling curve). The SP gain therefore tracks the **byte share of the step**,
+not the node count: it survives wherever there is still work per GPU. This is the honest way to quote
+the prize — a single headline number is a statement about the mesh and the node count, not about SP.
+
+⚠️ **The CORE2 16 N recipe row (27313844) is not a measurement of anything.** Its SP legs are
+[0.0474, 0.0488] = **2.95 % spread**, wider than the 1.2 % SP−DP gap it reports; taking the other SP leg
+flips the ratio to 1.004. Read it as "at 16 nodes under the recipe, SP's advantage on CORE2 has fallen
+into the leg noise", which is what the 0.870 → 0.941 trend predicts. Not a row to quote.
+
+**Device memory, first large-mesh number** (NG5 4 N, 27339009): **36765 → 20129 MiB = 0.547×** per GPU,
+below CORE2's 0.583× (27339007) exactly as expected — the FP64 islands and the fixed CUDA context are
+a constant, so their share shrinks as the mesh grows. Host high-water falls with it (sacct MaxRSS
+50.5 → 35.2 GB = 0.70×). **0.547× is the number to quote for a big mesh; 0.583× for CORE2.** Neither
+is the naive 0.5×, and July's hand-sampled 0.51× was optimistic.
 
 Device-pointer halo path vs host-staged (`FESOM_HALO_STAGE=1`), same allocation, CORE2 4 nodes, 300 steps, FP64
 (leg 1 of the device arm only — the ladder's env reset did not clear `FESOM_HALO_STAGE` between arms until 2026-09-08,
 so the 4th leg ran staged; fixed in both ladder jobs): pool build device 0.0629 → staged 0.0414 (−34 %, job 27310269);
 fixed build device 0.0534 → staged 0.0408 (−24 %, job 27313649). **The staged path is the faster halo on Levante A100
-by a wide margin** (dolpung already runs it); the 16N pairs (27310270 / 27313650) decide whether that holds at scale.
+by a wide margin** (dolpung already runs it).
+
+**The 16 N pairs ran (27310270 pool / 27313650 fixed) and the staged path holds at scale — but their
+printed `GAIN` lines are wrong and must not be quoted.** Both were submitted (2026-09-08 14:04 and
+15:41) *before* the env-reset fix was committed (`f91aa86`, 17:17 the same day), and SLURM snapshots the
+batch script at submit time — so both ran the leaking version, leg 4 ("base") inherited
+`FESOM_HALO_STAGE=1` from the best arm, and min-over-legs then selected that leaked leg as the baseline.
+The printed −0.24 % / −0.48 % are therefore staged-vs-staged. Discarding the leaked legs and reading the
+clean device-path legs only: **pool build 0.0798 → 0.0420 (−47 %)**, **fixed build 0.0634 (leg 1),
+0.0663 (warm-up) → 0.0412 (−35 %)**. The fixed-build number rests on two independent device-path
+observations; the pool number on one (its warm-up was rejected, rc 1). So the staged path's advantage
+*grows* from −24 % at 4 nodes to ~−35 % at 16 — consistent with it being a latency effect. ⚠️ This is
+the third time the min-over-legs rule has quietly rewarded a contaminated leg: **a leg that inherits the
+other arm's knob is always the fast one, so it always wins the min.** The zombie check rejects dead legs;
+it does not reject *mislabelled* ones.
 
 Incidents: job 27289077 (same pair, node **l50154**) hung after the speed-knob lines; the M14 `i1`
 warm-up segfaulted there with UCX `VM_UNMAP` warnings. Excluding the node fixed it — the gpu partition
