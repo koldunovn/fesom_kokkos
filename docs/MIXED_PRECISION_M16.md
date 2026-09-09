@@ -227,6 +227,73 @@ nothing and costs a knob. The 1-year matrix at the protocol dt 1800 is in flight
 1-year GPU twin: not started (needs the CUDA flake resolved or a Serial 2N×4-GPU-equivalent CPU
 posture).
 
+## 3c. Atmospheric forcing datasets — CORE2 and ERA5 (2026-09-09)
+
+The port read **JRA55-do only**, which blocked the like-for-like comparison against Suvarchal's
+60-year runs (CORE2 forcing). It now reads three sets, selected by **`FESOM_FORCING_SET=jra55 |
+core2 | era5`** (default `jra55`). A dataset is one descriptor (`fesom_forcing_dataset`,
+`src/fesom_jra55.h`); the three entries come from upstream's own namelists, checked against /pool.
+
+**Most of what was needed already existed.** The only genuinely hardcoded thing was one table of 8
+names used as *both* the file prefix and the variable name — true only of JRA55. The time-axis
+transform was already parametrised (`nm_nc_iyear/imm/idd/freq/tmid`), `fesom_jra_julday` already had
+both the gregorian and the 365-day branch, the dimension lookup already tried `LAT/LON/TIME`,
+`flip_lat` and the cyclic halo were already derived from the file, `Ntime` was already per field, the
+bulk formula already took `z_wind/z_tair/z_shum` as arguments, and `FESOM_CAL_NOLEAP_365` already
+existed as a model calendar.
+
+| | CORE2 | ERA5 |
+|---|---|---|
+| prefix ≠ variable | `ncar_rad.`→`SWDN_MOD`+`LWDN_MOD`, `ncar_precip.`→`RAIN`+`SNOW` | 1:1 (`t2m.`→`t2m`) |
+| two fields, one file | yes — **no special case**: the reader keeps one ncid *per field*, so the file is opened twice | no |
+| cadence | mixed *within* the set: `t_10` 6-hourly, `ncar_rad` daily, `ncar_precip` **monthly** — already fine, `Ntime` is per field | hourly, 8760/yr |
+| time axis | origin 1948, **`tmid=1`** (stamps at interval mid-points) | origin 1900, `tmid=0` — **identical to JRA55** |
+| calendar | files `NOLEAP` ⇒ model must be `FESOM_CAL_NOLEAP_365` | `proleptic_gregorian` — no calendar work |
+| bulk heights | 10 / 10 / 10 | 🔴 **`z_tair`=`z_shum`=2.0 m** (ERA5 ships 2-metre T and q; wind stays 10 m) |
+| runoff name | `runoff.nc` | `CORE2_runoff.nc` |
+| size | ~1 GB/var-yr | ⚠️ **28.7 GB/var-yr** — ~260 GB of forcing per simulated year |
+
+**The leap-day jump-over branch in `getcoeffld` stays unimplemented, and now the comment says why.**
+Upstream guards it on the *forcing file's* calendar being gregorian-family
+(`gen_surface_forcing.F90:878, 1719`); CORE2's files are NOLEAP with **365 records even in a leap
+year** (verified on `t_10.1960.nc`), so there is no 29 February in them to step over. It is needed
+only for the re-linked-forcing case — a no-leap model against gregorian files.
+
+SSS restoring and runoff differ only in **name**: the files are byte-identical across all three /pool
+copies (verified), so that forcing is provably the same in every set.
+
+### Evidence
+| test | result |
+|---|---|
+| 🔴 **Gate 0, set unselected** (27356584, CORE2 preset np8) | **BYTE-IDENTICAL to `ref0`, 3 snapshots.** Making the `jra55` entry reproduce the old literals exactly was the point: a forcing-path change re-opens G0, and this way it *re-passes* instead of being re-derived. |
+| Smoke, 20 steps np8, 1958 **and** leap 1960 (27356604, 27356737) | all three sets rc 0, no non-finite, physical T/S. Each resolves its own dataset; in the leap year CORE2 correctly stays at 365 days while ERA5 (8784) and JRA55 (2928) pick up 366. |
+| dead-knob check | the three sets give **different** answers (T max 30.23 / 29.94 / 29.87, hf 3.30e3 / 3.90e3 / 3.15e3) — a set that silently fell back to JRA55 would match it exactly. |
+
+**Acceptance test — the one that matters.** The smoke only proves files open. The reader is *right*
+only if switching forcing does not enlarge the port-vs-Fortran gap. Port-DP vs Fortran-DP, January
+1958, identical mesh/init/dt (27356880/27356908 CORE2, 27357560/27357176 ERA5):
+
+| var | JRA55 | CORE2 | ERA5 | CORE2/JRA | ERA5/JRA |
+|---|---|---|---|---|---|
+| sst | 3.4906e-03 | 3.7624e-03 | 3.6860e-03 | 1.078 | 1.056 |
+| a_ice | 3.1796e-03 | 3.5289e-03 | 3.0411e-03 | 1.110 | 0.956 |
+| temp | 2.2938e-03 | 2.3881e-03 | 2.4060e-03 | 1.041 | 1.049 |
+| salt | 1.9560e-04 | 1.9615e-04 | 2.0576e-04 | 1.003 | 1.052 |
+
+**All ratios 0.96–1.11: the new readers add essentially nothing to the code-to-code gap**, so that gap
+is still the chaotic divergence of §3b, not a reader defect. What gives the test teeth is the
+sanity line — the *forcings* separate by **1.1e-02…1.6e-02** (Fortran vs Fortran), 4–5× the
+code-to-code gap. A wrong variable, a wrong time origin or a missed `tmid` would have moved the
+port's column by about that much; it moved by ≤11 %.
+
+🔴 **Upstream bug found on the way** (`a62f180`): `config/namelist.forcing.era5` is **missing the
+`&age_tracer` group** that the JRA and CORE2 templates both carry. `namelist.forcing` is read
+sequentially (`gen_model_setup.F90:181-190`), so the scan for `age_tracer` runs past `&nam_sbc`, hits
+EOF, and the model dies before step 1 with `forrtl: severe (24)`. That template is stale in a second
+way: its paths still point at mistral. `scripts/m16_faith_setup.sh` grafts the group in and repoints
+the paths — **worth an upstream PR**. The *port* read ERA5 fine through the same failure, because it
+takes its configuration from the descriptor rather than a namelist; only the Fortran arm fell over.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
