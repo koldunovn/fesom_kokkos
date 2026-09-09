@@ -249,7 +249,18 @@ case "$FORCING" in
         -e "s|$POOL/CORE2/PHC2_salx\.nc|$POOL/era5/forcing/inverted/PHC2_salx.nc|" \
         "$CFG/namelist.forcing.era5" > "$RUNDIR/namelist.forcing"
     grep -q "$POOL/era5/forcing/inverted/t2m\." "$RUNDIR/namelist.forcing" \
-      || { echo "FATAL: ERA5 path repoint did not apply"; exit 3; } ;;
+      || { echo "FATAL: ERA5 path repoint did not apply"; exit 3; }
+    # 🔴 UPSTREAM BUG (a62f180): namelist.forcing.era5 is missing the &age_tracer group that both
+    # namelist.forcing.JRA and namelist.forcing.CORE2 carry. gen_model_setup.F90:181-190 reads
+    # namelist.forcing SEQUENTIALLY -- exchange_coeff, bulk, land_ice, age_tracer -- so the scan for
+    # age_tracer runs past &nam_sbc, hits EOF, and the model dies before step 1 with
+    # "forrtl: severe (24): end-of-file during read". Append the group with its compiled-in
+    # defaults, taken verbatim from the JRA template. (Cost us job 27357175.)
+    if ! grep -q "^&age_tracer" "$RUNDIR/namelist.forcing"; then
+        sed -n '/^&age_tracer/,/^\//p' "$CFG/namelist.forcing.JRA" >> "$RUNDIR/namelist.forcing"
+        grep -q "^&age_tracer" "$RUNDIR/namelist.forcing" \
+          || { echo "FATAL: could not graft &age_tracer into the ERA5 namelist"; exit 3; }
+    fi ;;
   *) echo "FATAL: forcing must be jra55 | core2 | era5 (got '$FORCING')"; exit 2 ;;
 esac
 
