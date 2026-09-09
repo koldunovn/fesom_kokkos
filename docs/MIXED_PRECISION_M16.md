@@ -224,6 +224,54 @@ its own DP arm.** That is the backdrop every ratio above rides on, and it needed
 nothing and costs a knob. The 1-year matrix at the protocol dt 1800 is in flight: jobs 27355667–72
 (Fortran fdp/fsp + four noise twins) and 27355673/27355675 (port pdp/psp), 8 × 1 node, ~2–2.5 h.
 
+### 3b-year. The 1-year matrix (dt 1800, 64 ranks/1 node, 1958) — jobs 27355667–72, 27355673/75
+
+Eight arms, all rc 0, 12 monthly records each; `fsp` printed `SINGLE PRECISION MODE` and all four
+noise arms printed `PERTURBATION TRIGGER` (the automatic fired-check). Wall: Fortran SP/DP
+3683/6560 s = **1.78×**, port SP/DP 5075/7704 s = **1.52×**.
+
+relL2 against each code's **own** DP arm; envelope = max over the two σ=1e-6 K seeds.
+
+| month | sst F-SP | sst P-SP | ratio | sst env | temp F-SP | temp P-SP | ratio | a_ice ratio | code-vs-code (sst) |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 9.39e-05 | 9.45e-05 | **1.01** | 2.36e-05 | 1.14e-04 | 1.64e-04 | 1.43 | 0.98 | 3.51e-03 |
+| 3 | 1.93e-04 | 4.11e-04 | 2.13 | 7.39e-05 | 2.15e-04 | 6.23e-04 | 2.90 | 1.09 | 4.60e-03 |
+| 5 | 1.73e-04 | 7.68e-04 | **4.43** | 5.07e-05 | 3.57e-04 | 1.26e-03 | 3.54 | 2.72 | 9.68e-03 |
+| 8 | 4.18e-04 | 1.26e-03 | 3.02 | 1.46e-04 | 1.13e-03 | 2.77e-03 | 2.46 | 2.46 | 1.45e-02 |
+| 12 | 1.53e-03 | 2.57e-03 | **1.67** | 1.02e-03 | 2.74e-03 | 4.53e-03 | 1.65 | **2.61** | 9.78e-03 |
+
+**Four readings.**
+
+**1. The ratio is not stationary — it rises then falls, and a single number for it is wrong.** sst
+goes 1.01 → 4.43 (May) → 1.67 (Dec); temp 1.43 → 3.73 (Apr) → 1.65; a_ice 0.98 → 2.95 (Nov) → 2.61.
+The arc is what saturation looks like: the port's SP departure grows faster early, then both
+approach the same chaotic ceiling. **Quote the ratio with its month, or quote the year-end value.**
+The one-month pilot's 0.94–1.54 was not wrong, it was early.
+
+**2. 🔴 The port loses MORE to single precision than upstream does, and by year end the gap is a
+factor 1.65–1.7 on the ocean fields and 2.6 on sea ice.** That is a real result and should not be
+softened: mid-year it reaches 4.4×. It is still the same *order*, which is the substance of G4, but
+"the port loses what upstream loses" is only true to a factor of ~2 over a year, not to the printed
+digit.
+
+**3. 🔴 The envelope never overtakes SP−DP within the year — the answer to the headline question is
+"not in 12 months".** Fortran-SP stays **1.2–4.3×** the σ=1e-6 K envelope and port-SP **1.6–19×**.
+But the envelope is *closing*: it grows 43× over the year (sst 2.4e-05 → 1.0e-03) against Fortran-SP's
+16×, so the ratio SP/env falls 3.98 → 1.50. They converge somewhere past one year. **This is a
+multi-year question — which is exactly why Suvarchal ran 60.** The comfortable "SP is inside the
+noise" claim cannot be made at one year and must be made, if at all, at climate length.
+
+**4. The code-to-code gap grows to 1.0e-02 (sst) … 2.4e-02 (a_ice) and stays 4–6× the SP−DP
+departures.** Precision remains the smaller effect all year.
+
+⚠️ **The limitation this exposes, and the work it implies.** The two codes' DP trajectories have
+themselves diverged by ~1e-02, so "port SP−DP" and "Fortran SP−DP" are sensitivities measured about
+*different* trajectories. The clean fix is to normalise each code's SP departure by **its own** noise
+envelope — which needs an IC perturbation in the port, since only the Fortran has `&oce_perturb`
+today. Porting `do_perturb` (`gen_ic3d.F90`) is small and would make the comparison
+apples-to-apples; without it, part of the 1.65–2.6 ratio may be the port's DP trajectory sitting in a
+more sensitive region rather than its SP arithmetic being worse.
+
 1-year GPU twin: not started (needs the CUDA flake resolved or a Serial 2N×4-GPU-equivalent CPU
 posture).
 
