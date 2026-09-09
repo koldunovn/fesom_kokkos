@@ -177,14 +177,24 @@ leg () {                       # leg <arm> <index>
     # M16 E1: a dp/sp arm runs its own binary at the SAME knobs; base/best run $BIN (= PREC's binary)
     local bin="$BIN" want; want=$(want_of "$PREC")
     case "$arm" in dp|sp) bin=$(bin_of "$arm"); want=$(want_of "$arm");; esac
+    # M16 2026-09-09: device-memory high-water per GPU, the second G2 deliverable ("0.51x memory",
+    # July, sampled by hand on dars). Polled on the BATCH node's 4 GPUs only -- that node hosts ranks
+    # like any other, and nvidia-smi costs ~20 ms against a 10 s cadence, far under the ~2 % leg spread.
+    local memlog="$out/gpumem.csv" smpid= gmem=NA
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        ( while :; do nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits >> "$memlog" 2>/dev/null; sleep 10; done ) &
+        smpid=$!
+    fi
     srun "$bin" "$mesh" "$out" "$DT" "$NSTEPS" "$SNAP" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
     local rc=$?
+    [ -n "$smpid" ] && { kill "$smpid" 2>/dev/null; wait "$smpid" 2>/dev/null; }
+    [ -s "$memlog" ] && gmem=$(awk -F, '{gsub(/ /,"",$2); if ($2+0>m) m=$2+0} END{printf "%d", m}' "$memlog")
     # ZOMBIE CHECK (M10 L106) — ONE implementation for both ladders: scripts/m14_zombie_check.sh
     # (rc, final step line present+finite, it≠0, CGPIPE-INACTIVE, timer, banner == the arm's precision,
     # optional [ssh-verify] bar via SSH_VERIFY_BAR). Its one output line is `t=<s/step> live=yes|no [why]`.
     local zc; zc=$("$ROOT/scripts/m14_zombie_check.sh" "$out/run.log" "$rc" "$want" "${SSH_VERIFY_BAR:-}")
     local t; t=$(echo "$zc" | sed -n 's/^t=\([0-9.]*\).*/\1/p')
-    echo "leg $idx $arm ($(basename "$(dirname "$bin")")/$(basename "$bin")): rc=$rc s/step=${t:-NA} ${zc#t=* }"
+    echo "leg $idx $arm ($(basename "$(dirname "$bin")")/$(basename "$bin")): rc=$rc s/step=${t:-NA} gpumem_max=${gmem}MiB ${zc#t=* }"
     if echo "$zc" | grep -q 'live=yes'; then echo "$arm $t" >> "$OUT/legs.txt"
     else echo "  !! leg REJECTED ($zc) — its timing is not admitted"; fi
 }
