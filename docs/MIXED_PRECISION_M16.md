@@ -39,8 +39,24 @@ costs ~17 % on the device path. Re-measured rows:
 | mesh | backend | nodes × ranks | knobs | DP s/step | SP s/step | SP/DP | job |
 |---|---|---|---|---|---|---|---|
 | CORE2 | GPU | 1 × 4 | knobs-off | 0.0601 (pool 0.0618) | 0.0523 (pool 0.0531) | **0.870** | 27313842 |
-| CORE2 | GPU | 16 × 64 | knobs-off / recipe | pending 27313843 / 27313844 | | | |
-| NG5 | GPU | 16 × 64 | knobs-off / recipe | pending 27313845 / 27313846 | | | |
+| CORE2 | GPU | **2 × 8** | knobs-off | 0.0488 | 0.0436 | **0.893** | 27339007 |
+| CORE2 | GPU | **2 × 8** | recipe (EVPWIDE lean + anomaly) | 0.0415 | 0.0369 | **0.889** | 27339008 |
+| NG5 | GPU | 4 × 16 | knobs-off | queued 27339009 | | | |
+
+**Device memory** (new: the ladder now polls `nvidia-smi` around every leg and prints `gpumem_max=`;
+until 2026-09-09 the "0.51× memory" claim rested on one July hand-sample on dars). CORE2 8 ranks on
+2 nodes, high-water per GPU including the CUDA context: knobs-off **2635 → 1537 MiB = 0.583×**
+(27339007); recipe **2639 → 1539 MiB = 0.583×** (27339008). Above the July 0.51× because the double
+islands and the fixed context do not halve.
+
+Reading at the production posture: SP/DP is **0.870 at 1 node, 0.893 at 2 nodes** (and 0.936 at 16 on
+the old allocator) — the prize shrinks monotonically as the per-GPU work falls and latency takes over,
+so the number quoted for the hindcast must be the 1–2 node one. Leg spreads 0.00–0.46 %. Both pairs
+cost 3 minutes on 2 nodes; the 16-node versions they replaced had queued 20 h (plan D13).
+
+**Superseded plan (2026-09-09):** the 16 × 64 rows were dropped. CORE2 does not scale past ~2 GPU
+nodes on Levante (board §1: 0.0618 s/step at 1 N vs 0.0794 at 16 N), so a 16-node row sizes the prize
+in a configuration nobody runs. Jobs 27313843/44 (CORE2 16 N) and 27313845/46 (NG5 16 N) cancelled.
 
 Device-pointer halo path vs host-staged (`FESOM_HALO_STAGE=1`), same allocation, CORE2 4 nodes, 300 steps, FP64
 (leg 1 of the device arm only — the ladder's env reset did not clear `FESOM_HALO_STAGE` between arms until 2026-09-08,
