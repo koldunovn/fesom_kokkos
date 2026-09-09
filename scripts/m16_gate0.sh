@@ -47,6 +47,14 @@ declare -A CONFIGS=(
   [pipecg]="FESOM_SSH_SOLVER=pipecg"
   [oati]="FESOM_SSH_SOLVER=oati"
   [pcsi]="FESOM_SSH_SOLVER=pcsi"
+  # M16 (2026-09-09): the SAME solver with the SP float-floor acceptance DISABLED. Board §2 credits
+  # pcsi's SP fix to two changes that landed together in e1 — the dbl_t scalar chains AND
+  # FESOM_SSH_FLOOR — without separating them. The unit test added to tests/test_ssh_solvers.cpp
+  # shows the floor is set by float VECTOR storage and is essentially unmoved by the scalar width,
+  # which predicts the floor rule is the load-bearing half. This config is the experiment that
+  # decides it on the real matrix: if pcsi falls back again with the floor off, the floor is what
+  # fixed it. (The gate unsets every FESOM_* per config, so the knob has to live in the config.)
+  [pcsi_nofloor]="FESOM_SSH_SOLVER=pcsi;FESOM_SSH_FLOOR=0"
   [det]="FESOM_IC_EXTRAP=det"
   [cgpipe]="FESOM_SPEED=1;FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_CGPIPE=1"
   [cgpoly]="FESOM_SPEED=1;FESOM_SPEED_FORCE_SERIAL=1;FESOM_SPEED_CGPOLY=2"

@@ -371,6 +371,103 @@ static void tridiag_extremes(const Lanczos &L, double *lo, double *hi)
     *hi = bisect(m);
 }
 
+
+/* ==================================================================================
+ * M16 — the SINGLE-PRECISION floor, as a unit test.
+ *
+ * WHY THIS EXISTS. The SP campaign found that at float storage the TRUE SSH residual
+ * has a floor which a fixed `soltol` can sit below, so the solver stalls short of the
+ * tolerance and — before `FESOM_SSH_FLOOR` — fell back (registry, G3 2026-09-07,
+ * jobs 27289198/27289199). Nothing tested that. The FP64 byte gate cannot: `dbl_t ==
+ * real_t` in a double build, so the whole mechanism is invisible there, and the port's
+ * own ctest passed 5/5 in the SP build while asserting nothing about precision at all.
+ *
+ * WHAT IT PINS. Two claims, both measured here rather than asserted from theory:
+ *   1. The floor is set by the VECTOR storage type. With double vectors the true
+ *      residual meets the tolerance on every fixture; with float vectors it can miss it
+ *      by 1-2 orders of magnitude.
+ *   2. It grows with the ITERATION COUNT, not simply with the condition number. A float
+ *      solve that converges in ~10 iterations shows no floor at all; the same matrix
+ *      solved in ~90 iterations misses the tolerance by ~16x. That is why the floor rule
+ *      is expressed as a multiple of rtol rather than a fixed number.
+ *   3. 🔴 The SCALAR CHAIN IS NOT THE CAUSE. Swapping the dot/alpha/beta accumulator
+ *      between float and double moves the floor by a few percent. This is deliberately
+ *      asserted so that a future reader who meets a floor problem does not try to fix it
+ *      by widening scalars — the M16 `dbl_t` chains protect the recurrence-based solvers,
+ *      not this.
+ *
+ * The types are EXPLICIT (not real_t), so this runs identically in a DP and an SP build
+ * and tests the mechanism rather than the build flag.
+ * ================================================================================== */
+
+/* PCG with the vector storage type V and the scalar/accumulator type S decoupled.
+ * Returns the iteration count, the recurred residual the solver would report, and the
+ * TRUE residual of the returned solution, recomputed in double from the exact matrix. */
+template <typename V, typename S>
+static void pcg_typed(const Fixture &F, int maxiter, double rtol,
+                      int &iters, double &recurred_rel, double &true_rel)
+{
+    const int N = F.N;
+    /* exact (double) copies of the operator, so only the SOLVER's types vary */
+    std::vector<double> Ad(F.values.size()), PRd(F.values.size(), 0.0);
+    for (size_t k = 0; k < F.values.size(); ++k) Ad[k] = (double)F.values[k];
+    for (int row = 0; row < N; ++row)            /* Jacobi: 1/diag, diagonal at offset 0 */
+        PRd[(size_t)F.rowptr[(size_t)row]] = 1.0 / Ad[(size_t)F.rowptr[(size_t)row]];
+
+    std::vector<V> A(Ad.begin(), Ad.end()), PR(PRd.begin(), PRd.end());
+    std::vector<V> b((size_t)N, (V)1), x((size_t)N, (V)0), r(N), u(N), p(N), ap(N);
+
+    auto spmv = [&](const std::vector<V> &m, const std::vector<V> &v, std::vector<V> &y) {
+        for (int row = 0; row < N; ++row) {
+            V acc = (V)0;                       /* the matvec is real_t in the model */
+            for (int k = F.rowptr[(size_t)row]; k < F.rowptr[(size_t)row + 1]; ++k)
+                acc += m[(size_t)k] * v[(size_t)F.colind[(size_t)k]];
+            y[(size_t)row] = acc;
+        }
+    };
+    auto dotS = [&](const std::vector<V> &a, const std::vector<V> &c) {
+        S acc = 0;                              /* THIS is the chain M16 promoted to dbl_t */
+        for (int i = 0; i < N; ++i) acc += (S)a[(size_t)i] * (S)c[(size_t)i];
+        return acc;
+    };
+
+    spmv(A, x, ap);
+    for (int i = 0; i < N; ++i) r[(size_t)i] = b[(size_t)i] - ap[(size_t)i];
+    spmv(PR, r, u);
+    p = u;
+    S gamma = dotS(r, u);
+    const S bn = (S)sqrt((double)dotS(b, b));
+    S rn = (S)0;
+    iters = maxiter;
+    for (int it = 1; it <= maxiter; ++it) {
+        spmv(A, p, ap);
+        const S alpha = gamma / dotS(p, ap);
+        for (int i = 0; i < N; ++i) {
+            x[(size_t)i] += (V)(alpha * (S)p[(size_t)i]);
+            r[(size_t)i] -= (V)(alpha * (S)ap[(size_t)i]);
+        }
+        rn = (S)sqrt((double)dotS(r, r));
+        spmv(PR, r, u);
+        const S gnew = dotS(r, u);
+        const S beta = gnew / gamma;
+        gamma = gnew;
+        for (int i = 0; i < N; ++i)
+            p[(size_t)i] = (V)((S)u[(size_t)i] + beta * (S)p[(size_t)i]);
+        if (rn <= (S)rtol * bn) { iters = it; break; }
+    }
+    recurred_rel = (double)rn / (double)bn;
+
+    double num = 0.0;                            /* ||b - Ax|| / ||b||, honestly, in double */
+    for (int row = 0; row < N; ++row) {
+        double acc = 0.0;
+        for (int k = F.rowptr[(size_t)row]; k < F.rowptr[(size_t)row + 1]; ++k)
+            acc += Ad[(size_t)k] * (double)x[(size_t)F.colind[(size_t)k]];
+        const double d = 1.0 - acc;
+        num += d * d;
+    }
+    true_rel = sqrt(num) / sqrt((double)N);
+}
+
 int main(void)
 {
     printf("=== M10 solver testbed (T4 scaffold) ===\n");
@@ -552,6 +649,53 @@ int main(void)
                       "T-5: the rooted start is closer to the converged answer at small m",
                       fabs(la - lo_ref) / lo_ref, fabs(lc - lo_ref) / lo_ref);
             }
+        }
+    }
+
+    /* ------------------------------------------------ M16: the single-precision floor */
+    {
+        printf("\n-- M16: the SP true-residual floor (explicit types; same in a DP and an SP build)\n");
+        const double rtol = 1e-5;               /* the model's soltol */
+        struct Case { int n; double contrast; const char *what; };
+        const Case cases[] = {
+            { 64, 0.0,  "long solve  (~90 iterations)"  },
+            { 64, 10.0, "short solve (~11 iterations)"  },
+        };
+        double ratio_fd[2] = {0, 0}, ratio_ff[2] = {0, 0};
+        for (int ci = 0; ci < 2; ++ci) {
+            Fixture G; G.build(cases[ci].n, cases[ci].contrast);
+            int i_dd, i_fd, i_ff; double r_dd, t_dd, r_fd, t_fd, r_ff, t_ff;
+            pcg_typed<double, double>(G, 50000, rtol, i_dd, r_dd, t_dd);
+            pcg_typed<float,  double>(G, 50000, rtol, i_fd, r_fd, t_fd);  /* the SHIPPED design */
+            pcg_typed<float,  float >(G, 50000, rtol, i_ff, r_ff, t_ff);  /* scalars NOT widened */
+            ratio_fd[ci] = t_fd / rtol; ratio_ff[ci] = t_ff / rtol;
+            printf("   %-28s  double/double %3dit true/rtol %7.2f | float/double %3dit %7.2f"
+                   " | float/float %3dit %7.2f\n",
+                   cases[ci].what, i_dd, t_dd / rtol, i_fd, ratio_fd[ci], i_ff, ratio_ff[ci]);
+
+            char nm[160];
+            snprintf(nm, sizeof nm, "M16: double vectors MEET the tolerance (%s)", cases[ci].what);
+            check(t_dd / rtol < 1.5, nm, t_dd / rtol, 1.5);
+        }
+        /* 1. the floor is real, and only on the long solve */
+        check(ratio_fd[0] > 5.0,
+              "M16: float vectors MISS soltol on a long solve -- the floor FESOM_SSH_FLOOR accepts",
+              ratio_fd[0], 5.0);
+        check(ratio_fd[1] < 1.5,
+              "M16: float vectors MEET soltol on a short solve -- the floor is not universal",
+              ratio_fd[1], 1.5);
+        /* 2. it grows with iteration count, so the rule must be a MULTIPLE of rtol */
+        check(ratio_fd[0] > 4.0 * ratio_fd[1],
+              "M16: the float floor GROWS with iteration count (long >> short)",
+              ratio_fd[0] / ratio_fd[1], 4.0);
+        /* 3. the scalar chain is NOT the cause -- do not 'fix' a floor by widening scalars */
+        for (int ci = 0; ci < 2; ++ci) {
+            const double rel = fabs(ratio_ff[ci] - ratio_fd[ci])
+                             / std::max(ratio_fd[ci], 1e-300);
+            char nm[160];
+            snprintf(nm, sizeof nm,
+                     "M16: widening the SCALAR chain does NOT move the floor (%s)", cases[ci].what);
+            check(rel < 0.3, nm, rel, 0.3);
         }
     }
 

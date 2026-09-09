@@ -117,6 +117,23 @@ per config (CORE2 np8, 20 steps, `FESOM_SSH_PRECOND=0` + the config's knobs, the
 | CUDA SP, 2 nodes (`e0/sp/fesom_port_cuda`) | 27289199 | 12 / 15 live; **pipecg, oati, pcsi DEAD** | every config rc 0 and finite; CG iterations at step 20 within 2 of the FP64 oracle for cg/cg2/cgpipe/cgpoly/se; **`[ssh-solver] !! FALLBACK … residual stalled or grew` on 20/20 solves (pipecg), 20/20 (oati), 19/20 (pcsi)** — the FP64 Serial oracle has 0 fallbacks in all three. The first liveness pass called them LIVE because the announce line prints before the fallback; `m16_knob_signals.sh` now has a `solver-fallback` row and `m14_zombie_check.sh` rejects a leg with a fallback. |
 | Serial SP, np8 (`e0/sp/fesom_port_serial`) | 27289198 | same 12 / 15; **pipecg 20/20, oati 20/20, pcsi 19/20 fallbacks** | SP-generic, not CUDA: the true-residual floor is the same on both backends (verify solve 1 true 4.823 Serial / 4.830 CUDA vs rtol 4.339; FP64 true = rec = 4.002). Mechanism + response in the registry log (2026-09-07 G3 entry): `soltol=1e-5` is below float `eta` resolution (upstream #940 says so and ships it); port: CA-solver scalar chains → `dbl_t` + `FESOM_SSH_FLOOR` acceptance (announced, counted). **Re-test on `e1` (= `084973c`, scalar chains `dbl_t` + `FESOM_SSH_FLOOR`): Serial job 27289394 / CUDA job 27289407 agree — `pcsi` LIVE, 0 fallbacks (iterations 155/240/290 at steps 1/10/20 vs FP64 155/145/140: it converges through the floor rule at ~2× the FP64 count); `pipecg`/`oati` still fall back on 13/20 solves, now by the DIVERGENCE branch (recurred residual grows to 1e1–1e4 at ~130 iters: the pipelined recurrences lose the residual in float — the textbook pipelined-CG instability that needs residual replacement, not a wider scalar). Verdict: `pipecg`/`oati` are NOT usable at SP as built (E5 item: residual replacement every k iterations); the SP recipe rows use `cg`/`cgpipe`/`cgpoly` (GPU) and `pcsi`/`cg` (CPU).** |
 
+### 🔴 2c. WHICH half of the e1 fix was load-bearing (2026-09-09) — the board was ambiguous, now it isn't
+`e1` changed two things at once (`dbl_t` scalar chains **and** `FESOM_SSH_FLOOR`) and the row above
+credits the pair. **Job 27359018 separates them on the real matrix**, same SP binary
+(`f1/sp`, `3459dd3a`), CORE2 np8, 20 steps, the only difference being the new `pcsi_nofloor` config:
+
+| config | verdict |
+|---|---|
+| `pcsi` (floor on, default factor 8) | **LIVE**, 7 signals, `it=230` at step 20 |
+| `pcsi_nofloor` (`FESOM_SSH_FLOOR=0`) | **NOT LIVE — `solver-fallback`**, i.e. exactly the pre-`e1` failure |
+
+**The float-floor acceptance rule is what made `pcsi` usable at SP; the `dbl_t` scalar chain is not.**
+This was predicted from first principles by the new unit test (`tests/test_ssh_solvers.cpp`, §M16):
+the true-residual floor is set by float **vector storage** and is essentially unmoved by the scalar
+accumulator width. The `dbl_t` chains remain the correct class-4 promotion and cheap insurance — and
+they may still matter for `pipecg`/`oati`, which fail by a different mechanism (divergence, not a
+floor) — but they should not be credited with this fix.
+
 **Reading:** the port-only communication-avoiding solvers carry their recurrence scalars in `real_t` (class 4,
 "real_t except global integrals") — the pipelined/Chebyshev recurrences lose the residual in float. Upstream
 has none of these solvers, so this is the class-4 promotion the plan reserved for E5: the scalar chains of
@@ -341,6 +358,42 @@ EOF, and the model dies before step 1 with `forrtl: severe (24)`. That template 
 way: its paths still point at mistral. `scripts/m16_faith_setup.sh` grafts the group in and repoints
 the paths — **worth an upstream PR**. The *port* read ERA5 fine through the same failure, because it
 takes its configuration from the descriptor rather than a namelist; only the Fortran arm fell over.
+
+## 3d. Single-precision UNIT tests (2026-09-09) — `ctest` now asserts something about SP
+
+**The finding that prompted this: the port's `ctest` passed 5/5 in the SP build while testing nothing
+about single precision.** `calendar`, `io_config`, `io_stream_unit` carry no floating-point type at
+all; `test_field`'s round-trip passes in any precision; and `test_ssh_solvers` promoted every
+accumulation to `double`, so its assertions were precision-insensitive. Green in an SP build was
+evidence of nothing. (Upstream's own SP ctest has the same shape — day-4 handoff: exit code +
+success markers, "a robustness check, not a numeric one".)
+
+`tests/test_ssh_solvers.cpp` now carries an **M16 section** that pins the SP floor mechanism, with
+`float`/`double` as **explicit** template parameters rather than `real_t` — so it tests the mechanism
+and runs identically in a DP and an SP build. Measured, not assumed (probes before assertions):
+
+| fixture | double/double | float/double (**shipped**) | float/float |
+|---|---|---|---|
+| long solve, 93 iterations | true/rtol **0.97** | **16.60** | 15.95 |
+| short solve, 11 iterations | 0.89 | **0.89** | 0.89 |
+
+Three things it asserts, each of which a mutation test confirmed can fail:
+1. **Double vectors always meet the tolerance; float vectors miss it by 16× on a long solve.** That
+   floor is what `FESOM_SSH_FLOOR` accepts.
+2. **The floor grows with ITERATION COUNT, not simply conditioning** — the same matrix solved in 11
+   iterations shows no floor at all. That is why the rule is a *multiple of rtol* rather than a fixed
+   number.
+3. 🔴 **The scalar chain is NOT the cause** (float vs double accumulator moves the floor by ~4 %).
+   Asserted deliberately, so that a future reader meeting a floor problem does not try to fix it by
+   widening scalars. This is the prediction §2c then confirmed on the real matrix.
+
+**Mutation-checked:** swapping the shipped `float/double` arm to `double/double` turns 3 of the
+assertions red. A test that cannot fail is not a test.
+
+⚠️ Still untested at SP: `pipecg`/`oati`'s divergence mechanism (different from the floor — the
+recurred residual *grows*), and everything outside the solver. The fixture is a Laplacian, not the
+SSH stiffness matrix, so its floor *magnitudes* are a stress case and do not predict the real one
+(the real matrix showed ~1.1× rtol); what transfers is the mechanism and its scaling.
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
