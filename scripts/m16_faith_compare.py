@@ -24,6 +24,10 @@ and then the two lines that carry the verdict:
 
 Arms are directories under <runroot>: fdp fsp pdp psp fdp_s<seed>...  Missing arms are
 skipped with a note rather than failing, so the script is useful before the matrix is complete.
+
+--where adds a spatial breakdown of the port-vs-Fortran difference: how concentrated it is, which
+latitudes carry it, and whether the ice edge is over-represented. Chaotic growth is diffuse and
+sits where the flow is energetic; a mechanism is concentrated and sits somewhere nameable.
 """
 import sys, os, glob, math
 import numpy as np
@@ -86,6 +90,54 @@ def relL2(a, b, mask):
     return float(np.linalg.norm(d) / n) if n > 0 else float("nan")
 
 
+def where(runroot, arms, var, rec):
+    """Say WHERE the two codes differ, so a gap can be told from a bug.
+
+    A difference spread thinly over the whole ocean is chaotic growth; one concentrated at a
+    handful of nodes, at the ice edge, or at a bathymetry feature is a mechanism worth naming.
+    Prints concentration, latitude band, and ice-edge over/under-representation."""
+    md_path = os.path.join(runroot, "fdp", "output", "fesom.mesh.diag.nc")
+    if not os.path.exists(md_path):
+        print(f"   (no mesh diag at {md_path} — skipping the spatial breakdown)")
+        return
+    md = Dataset(md_path)
+    lon = np.array(md.variables["lon"][:]); lat = np.array(md.variables["lat"][:])
+    md.close()
+    if np.abs(lat).max() < 3.2:            # radians, as some builds write them
+        lon, lat = np.degrees(lon), np.degrees(lat)
+
+    f_dp, _ = load(arms.get("fdp", ""), var, rec)
+    p_dp, _ = load(arms.get("pdp", ""), var, rec)
+    f_sp, _ = load(arms.get("fsp", ""), var, rec)
+    if f_dp is None or p_dp is None:
+        return
+    ok = np.isfinite(f_dp) & np.isfinite(p_dp) & (np.abs(f_dp) < 1e30)
+    d = np.where(ok, np.abs(p_dp - f_dp), 0.0)
+    ref = np.where(ok, np.abs(f_sp - f_dp), 0.0) if f_sp is not None else None
+    if d.ndim == 2:                        # (nz, nod2) -> worst level per node
+        d = d.max(axis=0); ok = ok.any(axis=0)
+        if ref is not None:
+            ref = ref.max(axis=0)
+    c = d[ok]
+    o = np.sort(c)[::-1]; n1 = max(1, len(o) // 100)
+    print(f"   |port-DP - fortran-DP| per node: max {c.max():.4g}  median {np.median(c):.4g}"
+          f"  p99 {np.percentile(c, 99):.4g}")
+    print(f"   concentration: {100 * (o[:n1] ** 2).sum() / (o ** 2).sum():.1f}%"
+          f" of the sum of squares lives in the top 1% of nodes")
+    if ref is not None:
+        print(f"   for scale, max |fortran-SP - fortran-DP| = {ref[ok].max():.4g}")
+    top = np.argsort(d)[::-1][:400]
+    print(f"   top-400 nodes: median lat {np.median(lat[top]):+.1f}"
+          f"   poleward of 60: {100 * np.mean(np.abs(lat[top]) > 60):.0f}%")
+    a, _ = load(arms.get("fdp", ""), "a_ice", rec)
+    if a is not None:
+        a = a if a.ndim == 1 else a[0]
+        edge = lambda m: float(np.mean((m > 0.05) & (m < 0.95)))
+        print(f"   ice edge (0.05<a_ice<0.95): {edge(a[top]):.2f} of the top nodes"
+              f" vs {edge(a):.2f} of all nodes"
+              f" -> {'OVER' if edge(a[top]) > edge(a) else 'under'}-represented")
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -97,6 +149,7 @@ def main():
         varlist = args[args.index("--vars") + 1].split(",")
     if "--rec" in args:
         rec = int(args[args.index("--rec") + 1])
+    do_where = "--where" in args
 
     names = sorted(d for d in os.listdir(runroot)
                    if os.path.isdir(os.path.join(runroot, d)))
@@ -157,6 +210,9 @@ def main():
             if fa in got and pa in got:
                 cross[p] = relL2(got[pa], got[fa], mask)
                 print(f"   relL2 {label} {cross[p]:.6e}")
+
+        if do_where and "pdp" in got and "fdp" in got:
+            where(runroot, arms, var, rec)
 
         if "fortran" in pairs and "port" in pairs:
             r = pairs["port"] / pairs["fortran"] if pairs["fortran"] > 0 else float("nan")
