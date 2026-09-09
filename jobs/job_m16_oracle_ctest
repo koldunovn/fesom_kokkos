@@ -1,0 +1,25 @@
+#!/bin/bash
+#SBATCH --job-name=m16_oracle_ctest
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/oracle/ctest.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/oracle/ctest.%j.err
+#
+# M16 -- upstream's own test suite on the Fortran mixed-precision ORACLE, both precisions.
+# #940 ships an SP ctest set (.github/workflows/fesom2_sp_ctest.yml) but upstream runs it only
+# with GNU on ubuntu; this is the first Intel/Levante run of it. Local tests only: the remote_*
+# ones download meshes. The tests launch MPI with `mpirun -np N`, so they need an allocation.
+set -e
+export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+SRC=/home/a/a270088/fesom2_sp
+ORC=/work/ab0995/a270088/port2/m16/oracle
+source /sw/etc/profile.levante
+cd "$SRC"; source env.sh levante.dkrz.de+intel
+for PREC in dp sp; do
+    echo; echo "================ ORACLE $PREC ================"
+    cd "$ORC/build_$PREC"
+    ctest -E '^(remote_|ecbundle_)' --output-on-failure --timeout 600 || echo "ctest rc=$? ($PREC)"
+done
