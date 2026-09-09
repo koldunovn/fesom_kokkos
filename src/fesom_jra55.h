@@ -61,6 +61,48 @@ enum {
 };
 
 /*
+ * One atmospheric forcing DATASET.
+ *
+ * Until 2026-09-09 the reader carried a single hardcoded table of 8 names used as BOTH the file
+ * prefix and the variable name inside the file, which is true only of JRA55-do. CORE2 breaks it
+ * three ways (`ncar_rad.` holds SWDN_MOD *and* LWDN_MOD, `ncar_precip.` holds RAIN *and* SNOW,
+ * `t_10.` holds T_10_MOD) and ERA5 breaks it mildly (`t2m.` holds `t2m`). Everything else the two
+ * datasets need was ALREADY generic: the time-axis transform is parametrised by
+ * nm_nc_iyear/imm/idd/freq/tmid, `fesom_jra_julday` has both the gregorian and the 365-day branch,
+ * the dimension lookup already tries LAT/LON/TIME as well as lat/lon/time, flip_lat and the cyclic
+ * longitude halo are derived from the file, Ntime is per field (so CORE2's mixed cadence — t_10
+ * 6-hourly, ncar_rad daily, ncar_precip MONTHLY — needs nothing), and the bulk formula already
+ * takes z_wind/z_tair/z_shum as arguments.
+ *
+ * So a dataset is exactly this descriptor. Selected by FESOM_FORCING_SET (default "jra55");
+ * FESOM_FORCING_DIR still overrides the directory, for the same reason it always did (JUPITER).
+ *
+ * 🔴 The jra55 entry reproduces the historical literals EXACTLY — same names, same directory, same
+ * five time scalars, same 10 m heights, same two auxiliary filenames. That is deliberate and load-
+ * bearing: it makes the default path bit-identical by construction, so gate G0 re-passes on this
+ * change rather than having to be re-derived.
+ */
+typedef struct fesom_forcing_dataset {
+    const char *name;                          /* FESOM_FORCING_SET value                     */
+    const char *dir;                           /* default directory, no trailing slash        */
+    const char *prefix[FESOM_JRA_NFLD];        /* filename stem; the reader appends "YYYY.nc" */
+    const char *var   [FESOM_JRA_NFLD];        /* variable name INSIDE that file              */
+    int   nm_nc_iyear, nm_nc_imm, nm_nc_idd;   /* time-axis origin                            */
+    int   nm_nc_freq;                          /* data points per day in the file's units     */
+    int   nm_nc_tmid;                          /* 1 = stamps already at interval mid-points   */
+    int   include_fleapyear;
+    real_t z_wind, z_tair, z_shum;             /* bulk reference heights, metres              */
+    const char *sss_file;                      /* basename in dir (SSS restoring climatology) */
+    const char *runoff_file;                   /* basename in dir                             */
+    fesom_calendar_kind_t model_cal;           /* the MODEL calendar this dataset implies     */
+} fesom_forcing_dataset;
+
+/* The selected dataset. Reads FESOM_FORCING_SET once; dies with the list of known names on an
+ * unrecognised value rather than silently falling back — a forcing set chosen by typo would run
+ * to completion and produce plausible, wrong output. */
+const fesom_forcing_dataset *fesom_forcing_dataset_get(void);
+
+/*
  * Per-field NetCDF state — one for each of the 8 fields. Mirrors the Fortran
  * type flfi_type (gen_surface_forcing.F90:189-220), but only the fields we use.
  *

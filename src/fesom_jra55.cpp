@@ -651,28 +651,121 @@ static void getcoeffld(fesom_jra55_field *flf,
  * Public API                                                                *
  * ------------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------------ *
+ * The forcing datasets.                                                     *
+ *                                                                           *
+ * Values taken from upstream's own namelists, which are the authority:       *
+ *   jra55 -> config/namelist.forcing.JRA   + setups/forcings.yml JRA55:      *
+ *   core2 -> config/namelist.forcing.CORE2 + setups/forcings.yml CORE2:      *
+ *   era5  -> config/namelist.forcing.era5  + setups/forcings.yml ERA5:       *
+ * (checked against the files on /pool, 2026-09-09 — see the notes per entry) *
+ * ------------------------------------------------------------------------- */
+static const fesom_forcing_dataset FESOM_FORCING_SETS[] = {
+{
+    /* JRA55-do v1.4.0 — the historical literals, reproduced exactly (see the header banner).
+     * 3-hourly, 2920 records/yr, 640x320, calendar 'gregorian', stamps at interval START. */
+    "jra55", "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0",
+    { "uas.", "vas.", "huss.", "rsds.", "rlds.", "tas.", "prra.", "prsn." },
+    { "uas",  "vas",  "huss",  "rsds",  "rlds",  "tas",  "prra",  "prsn"  },
+    1900, 1, 1, 1, 0, 1,
+    10.0, 10.0, 10.0,
+    "PHC2_salx.nc", "CORE2_runoff.nc", FESOM_CAL_GREGORIAN
+},
+{
+    /* CORE2 (normal-year + interannual NCAR forcing).
+     *   - prefix != variable, and TWO files carry two fields each: ncar_rad. -> SWDN_MOD+LWDN_MOD,
+     *     ncar_precip. -> RAIN+SNOW. That needs no special case here: the reader keeps one ncid
+     *     PER FIELD, so those files are simply opened twice with independent read handles.
+     *   - Mixed cadence within the one dataset (t_10 6-hourly 1460, ncar_rad daily 365,
+     *     ncar_precip MONTHLY 12). Ntime is per field, so this is already handled.
+     *   - Time stamps ARE at interval mid-points -> nm_nc_tmid = 1 (JRA55 and ERA5 use 0).
+     *   - Calendar in the files is 'NOLEAP', which `fesom_jra_julday` handles through its
+     *     365*yyyy branch — the same branch the Fortran takes. The MODEL must then also run a
+     *     365-day year (include_fleapyear = 0, model_cal = FESOM_CAL_NOLEAP_365) or the forcing
+     *     index would slip a day per leap year.
+     *   - 🔴 The Fortran's leap-day jump-over branch (gen_surface_forcing.F90:878, 1719) is NOT
+     *     needed here and is still unimplemented in getcoeffld: upstream guards it on the FORCING
+     *     file's calendar being gregorian-family, and CORE2's files are NOLEAP with 365 records —
+     *     there is no 29 February in them to step over. It would be needed only for the
+     *     re-linked-forcing case (no-leap model + gregorian forcing files). */
+    "core2", "/pool/data/AWICM/FESOM2/FORCING/CORE2",
+    { "u_10.", "v_10.", "q_10.", "ncar_rad.", "ncar_rad.", "t_10.", "ncar_precip.", "ncar_precip." },
+    { "U_10_MOD", "V_10_MOD", "Q_10_MOD", "SWDN_MOD", "LWDN_MOD", "T_10_MOD", "RAIN", "SNOW" },
+    1948, 1, 1, 1, 1, 0,
+    10.0, 10.0, 10.0,
+    "PHC2_salx.nc", "runoff.nc", FESOM_CAL_NOLEAP_365
+},
+{
+    /* ERA5 (the pre-inverted copy upstream's namelist points at).
+     *   - 🔴 z_tair and z_shum are 2 m, NOT 10 m — ERA5 ships 2-metre temperature and humidity
+     *     while the wind stays at 10 m. The bulk formula already takes all three as arguments and
+     *     does the full height correction, so this is three numbers rather than new physics; but
+     *     leaving them at 10 would run silently, with no error, and be wrong.
+     *   - Time axis is identical to JRA55 (days since 1900-01-01, freq 1, stamps at interval
+     *     start) and the calendar is proleptic_gregorian, so no calendar work at all.
+     *   - Its directory ALSO holds PHC2_salx.nc and CORE2_runoff.nc, byte-identical to JRA55's.
+     *   - ⚠️ The files carry NO units or long_name attributes. Ranges were checked by hand on
+     *     2026-09-09 and are already in model units (ssrd 0..1223 W/m2, strd 78..462 W/m2,
+     *     rf 0..0.0196 kg/m2/s) — i.e. the "inverted" copy has de-accumulated ERA5's native J/m2.
+     *     Nothing in the file asserts that, so re-check the ranges if the copy is ever replaced.
+     *   - ⚠️ 28.7 GB per variable-year (hourly, 1280x640) against JRA55's ~1.1 GB: about 260 GB
+     *     of forcing per simulated year across the 9 files. Fine for short runs, not for 60. */
+    "era5", "/pool/data/AWICM/FESOM2/FORCING/era5/forcing/inverted",
+    { "u.", "v.", "q.", "ssrd.", "strd.", "t2m.", "rf.", "sf." },
+    { "u",  "v",  "q",  "ssrd",  "strd",  "t2m",  "rf",  "sf"  },
+    1900, 1, 1, 1, 0, 1,
+    10.0, 2.0, 2.0,
+    "PHC2_salx.nc", "CORE2_runoff.nc", FESOM_CAL_GREGORIAN
+},
+};
+
+const fesom_forcing_dataset *fesom_forcing_dataset_get(void)
+{
+    static const fesom_forcing_dataset *sel = NULL;
+    if (sel) return sel;
+    const char *want = getenv("FESOM_FORCING_SET");
+    if (!want || !want[0]) want = "jra55";
+    const int n = (int)(sizeof FESOM_FORCING_SETS / sizeof FESOM_FORCING_SETS[0]);
+    for (int i = 0; i < n; ++i) {
+        if (strcmp(want, FESOM_FORCING_SETS[i].name) == 0) {
+            sel = &FESOM_FORCING_SETS[i];
+            return sel;
+        }
+    }
+    /* Never fall back silently: a set chosen by typo would run to completion on JRA55 and
+     * produce plausible output attributed to the wrong forcing. */
+    char known[256] = {0};
+    for (int i = 0; i < n; ++i) {
+        strncat(known, FESOM_FORCING_SETS[i].name, sizeof(known) - strlen(known) - 2);
+        if (i + 1 < n) strncat(known, " | ", sizeof(known) - strlen(known) - 2);
+    }
+    FESOM_DIE("FESOM_FORCING_SET=%s not recognised (want: %s)", want, known);
+    return NULL;   /* not reached */
+}
+
 void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
 {
     /* M4.3d-a: value-initialise (the struct now holds fesom::Field members → memset is UB, L13).
      * Default-constructs each Field (empty DualView) + zeros every POD. */
     *jra = fesom_jra55{};
 
-    /* Namelist defaults from work_core/namelist.forcing. The directory is
-     * overridable (FESOM_FORCING_DIR, no trailing slash) so the port runs off
-     * Levante — JUPITER etc. — without a source edit; the default reproduces
-     * the historical literal byte-for-byte. */
+    /* The dataset (FESOM_FORCING_SET, default jra55) supplies the names, the time-axis origin and
+     * the bulk heights. The directory stays separately overridable (FESOM_FORCING_DIR, no trailing
+     * slash) so the port runs off Levante — JUPITER etc. — without a source edit. With both unset
+     * this reproduces the historical literals byte-for-byte. */
+    const fesom_forcing_dataset *ds = fesom_forcing_dataset_get();
     const char *fdir = getenv("FESOM_FORCING_DIR");
-    if (!fdir || !fdir[0]) fdir = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0";
-    static const char *vars[FESOM_JRA_NFLD] = {
-        "uas", "vas", "huss", "rsds", "rlds", "tas", "prra", "prsn"
-    };
+    if (!fdir || !fdir[0]) fdir = ds->dir;
 
     int N_my = mesh->myDim_nod2D;
     int N    = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* physics arrays cover halo */
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
-        snprintf(flf->path_prefix, sizeof(flf->path_prefix), "%s/%s.", fdir, vars[f]);
-        strncpy(flf->var_name, vars[f], sizeof(flf->var_name) - 1);
+        /* ds->prefix already carries the trailing '.', exactly as upstream's namelist writes it
+         * (nm_xwind_file = 'uas.'), because CORE2 needs prefixes like "ncar_rad." that no longer
+         * match the variable name. */
+        snprintf(flf->path_prefix, sizeof(flf->path_prefix), "%s/%s", fdir, ds->prefix[f]);
+        strncpy(flf->var_name, ds->var[f], sizeof(flf->var_name) - 1);
         flf->var_name[sizeof(flf->var_name) - 1] = '\0';
         flf->year_loaded = -1;
         flf->ncid        = -1;
@@ -705,15 +798,15 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
     jra->prec_rain_fld.alloc("jra.prec_rain", (size_t)N); jra->prec_rain = jra->prec_rain_fld.h();
     jra->prec_snow_fld.alloc("jra.prec_snow", (size_t)N); jra->prec_snow = jra->prec_snow_fld.h();
 
-    jra->nm_nc_iyear   = 1900;
-    jra->nm_nc_imm     = 1;
-    jra->nm_nc_idd     = 1;
-    jra->nm_nc_freq    = 1;
-    jra->nm_nc_tmid    = 0;
-    jra->include_fleapyear = 1;
-    jra->z_wind = 10.0;
-    jra->z_tair = 10.0;
-    jra->z_shum = 10.0;
+    jra->nm_nc_iyear   = ds->nm_nc_iyear;
+    jra->nm_nc_imm     = ds->nm_nc_imm;
+    jra->nm_nc_idd     = ds->nm_nc_idd;
+    jra->nm_nc_freq    = ds->nm_nc_freq;
+    jra->nm_nc_tmid    = ds->nm_nc_tmid;
+    jra->include_fleapyear = ds->include_fleapyear;
+    jra->z_wind = ds->z_wind;
+    jra->z_tair = ds->z_tair;
+    jra->z_shum = ds->z_shum;
 }
 
 void fesom_jra55_free(fesom_jra55 *jra)

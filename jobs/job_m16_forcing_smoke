@@ -1,0 +1,68 @@
+#!/bin/bash
+#SBATCH --job-name=m16_fsmoke
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH -N 1
+#SBATCH --ntasks-per-node=8
+#SBATCH -t 00:40:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/faith/fsmoke.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/faith/fsmoke.%j.err
+#
+# M16 — smoke the atmospheric forcing datasets (FESOM_FORCING_SET: jra55 | core2 | era5).
+#
+#   sbatch --export=ALL,BIN=<abs>,SETS="jra55 core2 era5",NSTEPS=20 jobs/job_m16_forcing_smoke
+#
+# What a PASS means here: the set's 8 files open under the right names, the time axis decodes on the
+# file's own calendar, the bulk heights and the model calendar are the ones the dataset declares,
+# and the interpolated fields land in physical ranges. It is NOT a correctness proof against the
+# Fortran — that is the faithfulness matrix (jobs/job_m16_faith_*), which is the acceptance test a
+# new dataset actually has to pass.
+#
+# 🔴 ERA5 is ~28.7 GB per variable-year against JRA55's ~1.1 GB, so its first slice read is slow;
+# the timing here says nothing about model speed.
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+BIN=${BIN:?pin the binary (absolute path)}
+SETS=${SETS:-"jra55 core2 era5"}
+NSTEPS=${NSTEPS:-20}
+DT=${DT:-1800}
+YEAR=${YEAR:-1958}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=${OUT:-/work/ab0995/a270088/port2/m16/faith/forcing_smoke}
+
+source /sw/etc/profile.levante >/dev/null 2>&1 || true
+source "$SRC/env.sh" >/dev/null 2>&1
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+export HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+export FESOM_ALE=zstar FESOM_PRINT_EVERY=5
+
+echo "=== M16 forcing smoke — BIN=$BIN ($(md5sum "$BIN" | cut -c1-8)) ==="
+echo "sets='$SETS'  $NSTEPS steps at dt=$DT, year $YEAR, np=${SLURM_NTASKS:-?}"
+echo
+
+rc_all=0
+for set in $SETS; do
+    d="$OUT/$set"; rm -rf "$d"; mkdir -p "$d"
+    echo "################ $set ################"
+    t0=$SECONDS
+    env FESOM_FORCING_SET="$set" \
+        srun -l --ntasks="${SLURM_NTASKS}" "$BIN" \
+             "$MESH" "$d" "$DT" "$NSTEPS" -1 "$PHC" "$YEAR" \
+             > "$d/run.log" 2> "$d/run.err"
+    rc=$?; [ $rc -ne 0 ] && rc_all=1
+    echo "rc=$rc  wall=$((SECONDS-t0))s"
+    # the dataset must ANNOUNCE itself — a silently-wrong forcing set is the expensive failure
+    grep -E "^ *0: \[fesom_port\] (forcing set|.* init: 8 fields)" "$d/run.log" | sed 's/^ *0: /  /'
+    grep -E "^ *0: \[fesom_port\]   bulk heights" "$d/run.log" | sed 's/^ *0: /  /'
+    grep -E "SSS restoring|runoff:" "$d/run.log" | head -2 | sed 's/^ *[0-9]*: /  /'
+    # physical ranges at the last printed step: T and S must stay sane
+    echo "  last step: $(grep -E "^ *0: +[0-9]+ +it=" "$d/run.log" | tail -1 | cut -c1-118)"
+    n=$(grep -ciE "nan|infinity" "$d/run.log" 2>/dev/null)
+    echo "  nan-ish log lines: $n"; [ "$n" != 0 ] && rc_all=1
+    tail -2 "$d/run.err" 2>/dev/null | sed 's/^/  err: /'
+    echo
+done
+echo "=== smoke rc=$rc_all ==="
+exit $rc_all

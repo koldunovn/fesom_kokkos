@@ -1019,7 +1019,7 @@ skip_rest_state:
         char icpath[1024];
         snprintf(icpath, sizeof icpath, "%s/fesom.ic.restart.nc", rst.ic_dir);
         fesom_calendar_t ic_cal;
-        fesom_calendar_init(&ic_cal, FESOM_CAL_GREGORIAN,
+        fesom_calendar_init(&ic_cal, fesom_forcing_dataset_get()->model_cal,
                             (jra55_year > 0) ? jra55_year : 1958, 1, 1);
         fesom_restart_write(icpath, 0, (double)FESOM_PHASE1_DT, &ic_cal,
                             &mesh, &dyn, &tracers, &ice,
@@ -1042,15 +1042,19 @@ skip_rest_state:
         fesom_jra55_init(&jra, &mesh);
         fesom_jra55_open_year(&jra, &mesh, jra_year0);
         use_jra = 1;
-        /* Phase 3 step 25 paths from work_core/namelist.forcing. Directory
-         * overridable via FESOM_FORCING_DIR (same knob as the JRA55 reader —
-         * one dir holds the 8 JRA fields + these two); default = the
-         * historical /pool literal, byte-for-byte. */
+        /* Phase 3 step 25 paths. The dataset supplies the two basenames because CORE2 names its
+         * runoff `runoff.nc` where JRA55 and ERA5 call it `CORE2_runoff.nc`; the FILES themselves
+         * are byte-identical across all three /pool copies (verified 2026-09-09), so this is a
+         * naming difference only and the SSS/runoff forcing is provably the same in every set.
+         * Directory still overridable via FESOM_FORCING_DIR (same knob as the reader — one dir
+         * holds the 8 atmospheric fields plus these two); defaults reproduce the historical
+         * literals byte-for-byte. */
+        const fesom_forcing_dataset *fds = fesom_forcing_dataset_get();
         const char *fdir = getenv("FESOM_FORCING_DIR");
-        if (!fdir || !fdir[0]) fdir = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0";
+        if (!fdir || !fdir[0]) fdir = fds->dir;
         static char sss_path[1024], runoff_path[1024];
-        snprintf(sss_path,    sizeof sss_path,    "%s/PHC2_salx.nc",    fdir);
-        snprintf(runoff_path, sizeof runoff_path, "%s/CORE2_runoff.nc", fdir);
+        snprintf(sss_path,    sizeof sss_path,    "%s/%s", fdir, fds->sss_file);
+        snprintf(runoff_path, sizeof runoff_path, "%s/%s", fdir, fds->runoff_file);
         fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
         use_sr = 1;
         printf("[fesom_port] SSS restoring: %s\n", sss_path);
@@ -1064,11 +1068,24 @@ skip_rest_state:
                    runoff_path, (double)rmn, (double)rmx);
         }
         printf("[fesom_port] mesh.ocean_area = %.4e m²\n", (double)mesh.ocean_area);
-        printf("[fesom_port] JRA55 init: 8 fields opened for year %d, "
-               "Nlon=%d Nlat=%d Ntime=%d  cal=%s\n",
-               jra55_year,
+        /* Announce the dataset, its two dataset-dependent physics numbers and the model calendar
+         * it implies. A forcing set that is merely selected and never announced is the dead-knob
+         * trap in its most expensive form: every one of these choices runs silently to completion
+         * and produces plausible, wrong output. */
+        printf("[fesom_port] forcing set: %s  dir=%s\n"
+               "[fesom_port]   bulk heights z_wind=%.1f z_tair=%.1f z_shum=%.1f m; "
+               "time origin %04d-%02d-%02d freq=%d tmid=%d; model calendar %s\n",
+               fds->name, fdir,
+               (double)jra.z_wind, (double)jra.z_tair, (double)jra.z_shum,
+               fds->nm_nc_iyear, fds->nm_nc_imm, fds->nm_nc_idd,
+               fds->nm_nc_freq, fds->nm_nc_tmid,
+               fesom_calendar_cf_name(fds->model_cal));
+        printf("[fesom_port] %s init: 8 fields opened for year %d, "
+               "Nlon=%d Nlat=%d Ntime=%d  cal=%s  (%s%04d.nc -> '%s')\n",
+               fds->name, jra55_year,
                jra.fld[0].Nlon, jra.fld[0].Nlat, jra.fld[0].Ntime,
-               jra.fld[0].calendar);
+               jra.fld[0].calendar,
+               fds->prefix[0], jra55_year, jra.fld[0].var_name);
         /* Compute the very-first surface state for this set of bulk inputs
            so the first timestep sees forcing immediately. uvnode is zero at
            IC (UV=0); T_oc from initial T field. */
@@ -1212,7 +1229,10 @@ skip_rest_state:
             /* Optional override file: FESOM_IO_CONFIG=<path>. Empty / unset
              * → use compiled-in monthly-only default. */
             const char *cfg_path = getenv("FESOM_IO_CONFIG");
-            fesom_io_init(&io, io_out, FESOM_CAL_GREGORIAN,
+            /* The model calendar follows the forcing dataset: CORE2's files are NOLEAP with 365
+             * records per year, so a gregorian model year would slip a day against the forcing on
+             * every leap year. JRA55 and ERA5 are gregorian-family and keep the historical value. */
+            fesom_io_init(&io, io_out, fesom_forcing_dataset_get()->model_cal,
                           start_year, start_month, start_day,
                           cfg_path,
                           &mesh, &mpi);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M16 Gate 4 — build one Fortran run directory for the FAITHFULNESS matrix.
 #
-#   scripts/m16_faith_setup.sh <rundir> [run_length] [run_length_unit] [perturb_seed] [step_per_day] [amp]
+#   scripts/m16_faith_setup.sh <rundir> [run_length] [run_length_unit] [perturb_seed] [step_per_day] [amp] [det] [forcing]
 #
 # The matrix compares four arms — Fortran-DP, Fortran-SP, port-DP, port-SP — on the ONE setup both
 # codes can share, plus FP64 noise twins that set the significance bar (Suvarchal's design: an SP-DP
@@ -59,6 +59,13 @@ AMP=${6:-2.D-4}
 # and every later difference inherits that seed. Turning det on in BOTH is the only way to ask
 # whether the code-to-code gap is dynamics or hole-filling.
 DET=${7:-0}
+# Atmospheric forcing set: jra55 (default) | core2 | era5. Must match the port arm's
+# FESOM_FORCING_SET, which is the whole point of the pair. Upstream ships a namelist template per
+# dataset; the edits below are path fixes only (CORE2's template is relative, ERA5's still points at
+# mistral) plus, for CORE2, include_fleapyear=.false. — its files are NOLEAP with 365 records even
+# in a leap year (verified on t_10.1960.nc), so a gregorian model year would slip a day against the
+# forcing annually. The port makes the same choice from its dataset descriptor.
+FORCING=${8:-jra55}
 
 CFG=/home/a/a270088/fesom2_sp/config
 MESH=/work/ab0995/a270088/port2/mesh/core2
@@ -223,14 +230,45 @@ EOF
 fi
 
 # ---------------------------------------------------------------- namelist.forcing
-# Upstream's JRA template is already Levante-pathed; the one edit is deviation 2.
-sed -e "s|use_ocean_only_forcing *= *\.true\.|use_ocean_only_forcing = .false.|" \
-    "$CFG/namelist.forcing.JRA" > "$RUNDIR/namelist.forcing"
-grep -q "use_ocean_only_forcing = .false." "$RUNDIR/namelist.forcing" \
-  || { echo "FATAL: the ocean-mask edit did not apply — check namelist.forcing.JRA"; exit 3; }
+POOL=/pool/data/AWICM/FESOM2/FORCING
+case "$FORCING" in
+  jra55)
+    # Already Levante-pathed; the only edit is deviation 2 below.
+    cp "$CFG/namelist.forcing.JRA" "$RUNDIR/namelist.forcing" ;;
+  core2)
+    # Template uses paths relative to a run dir ('FORCING/CORE2/u_10.'); absolutise them.
+    sed -e "s|'FORCING/|'$POOL/|g" "$CFG/namelist.forcing.CORE2" > "$RUNDIR/namelist.forcing"
+    grep -q "'$POOL/CORE2/u_10\.'" "$RUNDIR/namelist.forcing" \
+      || { echo "FATAL: CORE2 path absolutisation did not apply"; exit 3; } ;;
+  era5)
+    # Template still points at mistral; repoint at /pool, and normalise runoff/SSS onto the ERA5
+    # directory's own copies so both codes name the same file. (They are byte-identical to CORE2's
+    # and JRA55's — verified 2026-09-09 — so this is exactness, not physics.)
+    sed -e "s|/mnt/lustre01/work/ba1138/a270099/era5/forcing/inverted/|$POOL/era5/forcing/inverted/|g" \
+        -e "s|$POOL/CORE2/runoff\.nc|$POOL/era5/forcing/inverted/CORE2_runoff.nc|" \
+        -e "s|$POOL/CORE2/PHC2_salx\.nc|$POOL/era5/forcing/inverted/PHC2_salx.nc|" \
+        "$CFG/namelist.forcing.era5" > "$RUNDIR/namelist.forcing"
+    grep -q "$POOL/era5/forcing/inverted/t2m\." "$RUNDIR/namelist.forcing" \
+      || { echo "FATAL: ERA5 path repoint did not apply"; exit 3; } ;;
+  *) echo "FATAL: forcing must be jra55 | core2 | era5 (got '$FORCING')"; exit 2 ;;
+esac
+
+# Deviation 2 — applies to whichever set ships the key (only JRA's template does today).
+sed -i "s|use_ocean_only_forcing *= *\.true\.|use_ocean_only_forcing = .false.|" "$RUNDIR/namelist.forcing"
+if grep -q "use_ocean_only_forcing" "$RUNDIR/namelist.forcing"; then
+    grep -q "use_ocean_only_forcing = .false." "$RUNDIR/namelist.forcing" \
+      || { echo "FATAL: the ocean-mask edit did not apply"; exit 3; }
+fi
+
+# CORE2's files are NOLEAP with 365 records per year; the model must match or drift a day a year.
+if [ "$FORCING" = core2 ]; then
+    sed -i "s|include_fleapyear *= *\.true\.|include_fleapyear = .false.|" "$RUNDIR/namelist.config"
+    grep -q "include_fleapyear = .false." "$RUNDIR/namelist.config" \
+      || { echo "FATAL: include_fleapyear edit did not apply"; exit 3; }
+fi
 
 # ---------------------------------------------------------------- clock (cold start)
 # Two identical lines == initial run (gen_modules_clock.F90 clock_init).
 printf ' 0.0 1 1958\n 0.0 1 1958\n' > "$OUT/fesom.clock"
 
-echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, seed=${SEED:-none}${SEED:+, amp=$AMP K}, det=$DET)"
+echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, forcing=$FORCING, seed=${SEED:-none}${SEED:+, amp=$AMP K}, det=$DET)"
