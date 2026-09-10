@@ -655,7 +655,30 @@ class-3 row *"PHC climatology / init path … detector: same-IC gate (det fill a
 the rounding class)"*, status **flip-B** — **the flip was made and its own designated detector was
 never run.** It has now been run, and it fails.
 
-⚠️ **What is NOT yet established: that upstream's IC is clean.** The Fortran's step-1 error of
+### 🔴 3h-b. Upstream is NOT clean either — the defect is SHARED, the port just has it worse
+The inference in the paragraph below was **wrong** and is corrected here. Comparing the two codes
+like for like at **step 1** (both fields are IC + exactly one step; salt, wet points only — note the
+Fortran writes `9.969e+36` at dry points where the port writes 0, so the fill mask is load-bearing):
+
+| | relL2 | median \|Δ\| | max \|Δ\| | pts > 1e-3 psu | pts > 1e-2 | top-100 share |
+|---|---|---|---|---|---|---|
+| **Fortran** | 2.221e-06 | 2.05e-06 (0.54× eps) | **3.62e-02 psu** | 1303 | **29** | 62.8 % |
+| **port** | 1.077e-05 | 3.17e-06 (0.83× eps) | **1.18e-01 psu** | 4345 | **180** | 89.6 % |
+
+**Upstream's float hole fill produces the same isolated broken points** — up to 0.036 psu, 29 of them
+past 1e-2. It is not a port-only defect. But **the port's instance is ~3× worse in magnitude and ~6×
+in count**, which is where its 4.85× step-1 excess comes from.
+
+So both conclusions hold at once:
+1. **This is an upstream SP bug worth reporting**, same family as our #979 (`ic_extrap_det`): at
+   single precision the IC extrapolation lands on visibly different values at isolated points, and
+   nothing in either code checks it. Promoting the fill to `dbl_t` costs nothing (once, at startup).
+2. **The port has an additional factor of ~3 to find** on top of the shared defect.
+
+Also worth noting: one timestep **spreads** the damage — the port's IC has 166 points past 1e-3, its
+step-1 field has 4345. The bad points are advected and diffused into their neighbourhoods immediately.
+
+⚠️ *(superseded by 3h-b above — kept for the record)* **What was NOT established: that upstream's IC is clean.** The Fortran's step-1 error of
 2.22e-06 sits near the bulk-rounding level, which *suggests* its fill does not produce the
 pathological points — but that is an inference, not a measurement. **Next check: dump the Fortran's
 IC the same way.** It decides the response:
