@@ -50,6 +50,8 @@ export FESOM_PRINT_EVERY=320
 export FESOM_FORCING_SET=${FORCING:-jra55}
 # Must match the Fortran arm's SALTANOM (scripts/m16_faith_setup.sh) — upstream #986.
 [ "${SALTANOM:-0}" = 1 ] && export FESOM_SALT_ANOMALY=1
+# upstream PR #1054 A/B: 1 = flux form (upstream's fix, the default), 0 = pre-#1054 subtraction.
+[ -n "${FLUXFORM:-}" ] && export FESOM_FCT_LO_FLUXFORM="$FLUXFORM"
 # IC perturbation (src/fesom_perturb.h) — the port's OWN noise ensemble, so its SP-DP departure can
 # be normalised by its own envelope instead of the Fortran's (board §3b-year). PSEED selects the
 # member; PAMP is the gaussian sigma on T in KELVIN and must be C syntax (1e-6), not Fortran (1.D-6).

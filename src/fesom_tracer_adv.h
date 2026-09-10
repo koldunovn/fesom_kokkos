@@ -44,6 +44,29 @@ typedef struct fesom_tracer_adv_scratch {
     real_t *fct_minus;           /* [nod2D  * nl]  negative limiter factor   */
     real_t *fct_aux;             /* [elem2D * nl * 2]  per-element max/min   */
 
+#if defined(FESOM_SINGLE_PRECISION)
+    /* Upstream PR #1054 (Jan Streffing, 2026-09-10; follow-up to #940) — SINGLE PRECISION ONLY.
+     *
+     * The FCT low-order tendency used to be RECOVERED by subtraction in flux2dtracer_fct:
+     *     dttf_v += -ttf*hnode + LO*hnode_new
+     * where LO was itself built as (ttf*hnode + tend)/hnode_new. In float, wherever `tend` is
+     * below half an ulp of ttf*hnode, LO rounds straight back to ttf and the difference is
+     * EXACTLY ZERO — that cell's low-order flux divergence is silently dropped, and because both
+     * the horizontal and vertical low-order parts are booked into dttf_v, the vertical advection
+     * stops telescoping. Upstream measured the resulting non-conservation in coupled AWI-ESM3 at
+     * -0.50 W/m2 (SP) against -0.01 (DP), holding at -0.52 W/m2 over 40 years.
+     *
+     * The loss scales with the TRACER'S ULP, which is why it hits salinity hardest:
+     * ulp(35 psu) ~ 2.4e-6 against ulp(4 degC) ~ 2.4e-7.
+     *
+     * Fix: keep the tendency in flux form and add it directly, never recovering it by
+     * cancellation. LO itself is unchanged and still sets the limiter bounds.
+     *
+     * FP64 keeps the unchanged code path, so gate G0 is untouched by construction. */
+    real_t *lo_tend;             /* [nod2D * nl]  the low-order tendency, kept not recovered */
+    int     lo_flux_form;        /* 1 = lo_tend is valid for this tracer's flux2dtracer call  */
+#endif
+
     /* MFCT 3rd-order horizontal flux (oce_adv_tra_hor.F90 adv_tra_hor_mfct).
        tr_xy: elemental tracer gradient [elem*nl*2] (FESOM_ELEMVEC layout, c=0 x,
        c=1 y), computed on myDim then wide-exchanged. edge_up_dn_grad: per-edge
@@ -66,6 +89,9 @@ typedef struct fesom_tracer_adv_scratch {
     fesom::Field fct_plus_fld;
     fesom::Field fct_minus_fld;
     fesom::Field fct_aux_fld;
+#if defined(FESOM_SINGLE_PRECISION)
+    fesom::Field lo_tend_fld;    /* owner for lo_tend (#1054) */
+#endif
     fesom::Field tr_xy_fld;
     fesom::Field edge_up_dn_grad_fld;
 

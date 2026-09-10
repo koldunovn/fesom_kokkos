@@ -564,6 +564,53 @@ port's residual 1.76× on salt is still unaccounted for. **Next probe: port the 
 re-measure** — it is a direct transliteration, and if the residual is the low-order tendency loss it
 should close further.
 
+### 3g. #1054 PORTED — and it does NOT explain the port/Fortran gap (2026-09-10)
+
+Ported into **both** the live Kokkos kernel (`fesom_tracer_advect_one_fct_kk`) and the host C twin,
+in the three places upstream touches: keep `lo_tend` at the LO finalisation, clear the flag where the
+implicit vertical split rewrites `fct_LO`, and add the kept tendency in `flux2dtracer` instead of
+recovering it. SP-gated exactly as upstream gates it. Knob `FESOM_FCT_LO_FLUXFORM` (default 1 =
+upstream behaviour) exists so the defect can be **measured**, not just asserted.
+
+🔴 **Process note — the fix first went into DEAD CODE.** `fesom_step.cpp` calls the Kokkos kernel;
+the host C functions with the same names are twins used by a probe and the host driver. The first
+build, first byte gate and first A/B all passed while changing nothing that runs. **What caught it
+was the announcement line failing to appear in the run log** — the instrument, not the gate. A gate
+that passes on a no-op looks exactly like a gate that passes.
+
+**Result (1 month, CORE2/JRA55, dt 1800; jobs 27377912/13/14 — the Fortran column is unchanged):**
+
+| var | fortran | port PRE-#1054 | ratio | port WITH #1054 | ratio | change |
+|---|---|---|---|---|---|---|
+| **salt** | 5.969e-06 | 1.652e-05 | **2.77** | 1.655e-05 | **2.77** | **1.00×** |
+| temp | 1.144e-04 | 1.637e-04 | 1.43 | 1.576e-04 | 1.38 | 0.96× |
+| sst | 9.393e-05 | 9.449e-05 | 1.01 | 1.205e-04 | 1.28 | 1.28× |
+| a_ice | 5.547e-04 | 5.443e-04 | 0.98 | 5.135e-04 | 0.93 | 0.94× |
+
+The fix is live and does change the solution (`psp_on` vs `psp_off`: relL2 5.0e-06 salt … 4.8e-04
+a_ice). **But it leaves the salt gap at exactly 2.77 — it explains none of it.** temp and a_ice move
+4–6 % in the right direction, sst 28 % the wrong way; at one month sst has already been seen to move
+the wrong way in the salt-anomaly test too, so it is not a reliable discriminator here.
+
+**Two conclusions, and they are separate.**
+1. **KEEP the fix.** #1054 addresses a real *conservation* defect that upstream measured at −0.50
+   W/m² against DP's −0.01, holding at −0.52 W/m² over 40 years. **This test measured the wrong
+   thing for that claim** — a 1-month relL2 state difference is not a 40-year conservation drift.
+   The correct validation is `FESOM_MP_CONSERV` with the knob on and off, which is the next task and
+   is also the check that says whether the port carried the defect at upstream's magnitude.
+2. 🔴 **The port/Fortran gap remains UNEXPLAINED.** The salinity localisation (§3f) still stands —
+   it is salt, and it is there at month 1 — and the #986 anomaly still halves it. But the FCT
+   low-order recovery is not the cause. This is consistent with the structural observation in §3f:
+   the port already forms the small difference first (`dttf_v + (−A + B)`) where the Fortran does
+   not, so the port was *less* exposed to that particular line, not more.
+
+**Next probe:** the defect is visible at month 1, so run both codes SP and DP for a handful of steps
+and diff the salinity field directly — at ~10 steps the difference is nearly pure arithmetic and can
+be bisected within the step. Candidates from the registry's own suspect list, in order: the
+EOS/pressure-gradient chain ("promote FIRST"), then the class-3 flips (things July kept in `dbl_t`
+that M16 flipped to `real_t` to match upstream — if any flip was wrong, the port is worse than
+upstream by construction).
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

@@ -78,6 +78,10 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
     sc->del_ttf_advhoriz_fld.alloc("tradv.del_ttf_advhoriz", n_full);     sc->del_ttf_advhoriz = sc->del_ttf_advhoriz_fld.h();
     sc->del_ttf_advvert_fld.alloc("tradv.del_ttf_advvert", n_full);       sc->del_ttf_advvert  = sc->del_ttf_advvert_fld.h();
     sc->fct_LO_fld.alloc("tradv.fct_LO", n_full);                         sc->fct_LO           = sc->fct_LO_fld.h();
+#if defined(FESOM_SINGLE_PRECISION)
+    sc->lo_tend_fld.alloc("tradv.lo_tend", n_full);                       sc->lo_tend          = sc->lo_tend_fld.h();
+    sc->lo_flux_form = 0;                                                 /* #1054 */
+#endif
     sc->fct_ttf_min_fld.alloc("tradv.fct_ttf_min", n_full);               sc->fct_ttf_min      = sc->fct_ttf_min_fld.h();
     sc->fct_ttf_max_fld.alloc("tradv.fct_ttf_max", n_full);               sc->fct_ttf_max      = sc->fct_ttf_max_fld.h();
     sc->fct_plus_fld.alloc("tradv.fct_plus", n_full);                     sc->fct_plus         = sc->fct_plus_fld.h();
@@ -100,6 +104,30 @@ void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
        (the raw ptrs are non-owning). */
     *sc = fesom_tracer_adv_scratch{};
 }
+
+#if defined(FESOM_SINGLE_PRECISION)
+/* FESOM_FCT_LO_FLUXFORM — upstream #1054's fix is unconditional in SP; this knob exists so the
+ * defect can be MEASURED rather than only asserted (default 1 = upstream behaviour; 0 restores the
+ * pre-#1054 recovery-by-subtraction). Announced once, like every other precision instrument. */
+static int fesom_fct_lo_fluxform_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_FCT_LO_FLUXFORM");
+        cached = (e && e[0]) ? atoi(e) : 1;
+        static int announced = 0;
+        if (!announced) {
+            announced = 1;
+            int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+            if (rk == 0)
+                printf("[fesom_port] FCT low-order tendency: %s (upstream PR #1054)\n",
+                       cached ? "FLUX FORM (kept, not recovered)"
+                              : "recovered by subtraction — PRE-#1054, non-conserving in SP");
+        }
+    }
+    return cached;
+}
+#endif
 
 /*--- compute_fct_LO --------------------------------------------------------
  * Mirror of oce_adv_tra_driver.F90:118-236 (FCT branch).
@@ -126,6 +154,11 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
 
     /* Step 1a: zero fct_LO */
     memset(sc->fct_LO, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+#if defined(FESOM_SINGLE_PRECISION)
+    /* #1054: zero the whole tendency array too — cells the step-2 loop skips (dry, zero area)
+     * must not present a stale tendency to flux2dtracer_fct. */
+    memset(sc->lo_tend, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+#endif
 
     /* Step 1b: accumulate horizontal flux divergence per node.
        Range matches oce_adv_tra_driver.F90:170 — nu12 to nl12. */
@@ -166,11 +199,26 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
             }
             real_t f_top = sc->adv_flux_ver[FESOM_NODE3D(n, nz,     nl)];
             real_t f_bot = sc->adv_flux_ver[FESOM_NODE3D(n, nz + 1, nl)];
+#if defined(FESOM_SINGLE_PRECISION)
+            /* #1054: form the tendency ONCE and keep it. Note this is bit-identical arithmetic to
+             * the FP64 line below — the same product and the same divide — so LO is unchanged; the
+             * only difference is that the tendency survives instead of having to be recovered by
+             * cancellation in flux2dtracer_fct. */
+            const real_t tend = (sc->fct_LO[k] + (f_top - f_bot)) * dt / a;
+            sc->lo_tend[k]    = tend;
+            sc->fct_LO[k]     = (T[k] * hnod_old + tend) / hnod_new;
+#else
             real_t numer = T[k] * hnod_old
                          + (sc->fct_LO[k] + (f_top - f_bot)) * dt / a;
             sc->fct_LO[k] = numer / hnod_new;
+#endif
         }
     }
+#if defined(FESOM_SINGLE_PRECISION)
+    /* Valid until something else rewrites fct_LO (the implicit vertical split does — see the
+     * wsplit branch in the FCT driver, which clears this exactly as upstream does). */
+    sc->lo_flux_form = fesom_fct_lo_fluxform_on();
+#endif
 }
 
 /*--- init_tracers_AB (oce_tracer_mod.F90:13-145, AB2 path) ----------------
@@ -1152,8 +1200,11 @@ static void flux2dtracer_fct(const struct fesom_mesh *mesh,
                              const real_t            *flux_h,
                              const real_t            *flux_v,
                              real_t                  *dttf_h,
-                             real_t                  *dttf_v)
+                             real_t                  *dttf_v,
+                             const real_t            *lo_tend,
+                             int                      lo_flux_form)
 {
+    (void)lo_tend; (void)lo_flux_form;   /* unused in FP64, which keeps the original path */
     const int N  = mesh->myDim_nod2D;
     const int E  = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl = mesh->nl;
@@ -1165,8 +1216,18 @@ static void flux2dtracer_fct(const struct fesom_mesh *mesh,
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nu1; nz < nl1; ++nz) {
             size_t k = FESOM_NODE3D(n, nz, nl);
-            dttf_v[k] += -ttf[k] * mesh->hnode    [k]
-                       +  lo[k] * mesh->hnode_new[k];
+#if defined(FESOM_SINGLE_PRECISION)
+            if (lo_flux_form) {
+                /* #1054: add the tendency that compute_fct_LO kept, instead of recovering it as
+                 * LO*hnode_new - ttf*hnode — a cancellation that returns exactly zero wherever the
+                 * step's change sits below half an ulp of ttf*hnode. */
+                dttf_v[k] += lo_tend[k];
+            } else
+#endif
+            {
+                dttf_v[k] += -ttf[k] * mesh->hnode    [k]
+                           +  lo[k] * mesh->hnode_new[k];
+            }
         }
         for (int nz = nu1; nz < nl1; ++nz) {
             real_t a = mesh->areasvol[FESOM_NODE3D(n, nz, nl)];
@@ -1326,6 +1387,11 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
        impl → recompute → exchange. */
     if (fesom_wsplit_on()) {
         adv_tra_vert_impl(mesh, dyn->w_i, sc->fct_LO);
+#if defined(FESOM_SINGLE_PRECISION)
+        /* #1054: the implicit split rewrites fct_LO itself, so the tendency kept above no longer
+         * describes it — fall back to the subtraction form, exactly as upstream does. */
+        sc->lo_flux_form = 0;
+#endif
         adv_tra_ver_upw1(mesh, dyn->w, vals, sc->adv_flux_ver);
     }
 
@@ -1360,7 +1426,12 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
     /* 6. flux2dtracer with LO (include the LO transition + limited HO). */
     flux2dtracer_fct(mesh, vals, sc->fct_LO,
                      sc->adv_flux_hor, sc->adv_flux_ver,
-                     sc->del_ttf_advhoriz, sc->del_ttf_advvert);
+                     sc->del_ttf_advhoriz, sc->del_ttf_advvert,
+#if defined(FESOM_SINGLE_PRECISION)
+                     sc->lo_tend, sc->lo_flux_form);
+#else
+                     NULL, 0);
+#endif
 
     /* 7. del_ttf := del_ttf_advhoriz + del_ttf_advvert */
     for (int n = 0; n < N; ++n) {
@@ -1515,6 +1586,9 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     auto dth      = sc->del_ttf_advhoriz_fld.d();
     auto dtv      = sc->del_ttf_advvert_fld.d();
     auto fctLO    = sc->fct_LO_fld.d();
+    #if defined(FESOM_SINGLE_PRECISION)
+    auto loTend   = sc->lo_tend_fld.d();   /* upstream PR #1054 */
+    #endif
     auto fmin     = sc->fct_ttf_min_fld.d();
     auto fmax     = sc->fct_ttf_max_fld.d();
     auto fplus    = sc->fct_plus_fld.d();
@@ -1661,10 +1735,23 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         if (nz < nu1 || nz >= nl1) return;
         size_t k = (size_t)n*nl+nz;
         real_t a = areasvol(k), hnod_old = hnode(k), hnod_new = hnode_new(k);
-        if (hnod_new <= 0.0 || a <= 0.0) { fctLO(k) = 0.0; return; }
+        if (hnod_new <= 0.0 || a <= 0.0) { fctLO(k) = 0.0;
+#if defined(FESOM_SINGLE_PRECISION)
+            loTend(k) = 0.0;    /* #1054: never present a stale tendency to flux2dtracer */
+#endif
+            return; }
         real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
+#if defined(FESOM_SINGLE_PRECISION)
+        /* upstream PR #1054: form the low-order tendency once and KEEP it, so flux2dtracer never
+         * has to recover it as LO*hnode_new - ttf*hnode — a cancellation that returns exactly zero
+         * wherever the step's change is below half an ulp of ttf*hnode. LO itself is unchanged. */
+        const real_t tend = (fctLO(k) + (f_top - f_bot)) * dt / a;
+        loTend(k) = tend;
+        fctLO(k)  = (vals(k)*hnod_old + tend) / hnod_new;
+#else
         real_t numer = vals(k)*hnod_old + (fctLO(k) + (f_top - f_bot)) * dt / a;
         fctLO(k) = numer / hnod_new;
+#endif
     });
     /* M7-wsplit (driver.F90:282-293): under use_wsplit, (a) apply the w_i share
      * of vertical transport IMPLICITLY to the LO solution — adv_tra_vert_impl,
@@ -1675,7 +1762,15 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
      * Both are exact no-ops when wsplit is off (w_i ≡ 0, w_e ≡ w) — the
      * knob-off path never reaches this branch. Fortran order: impl →
      * recompute → exchange (the D21 fct_LO exchange below covers the update). */
+#if defined(FESOM_SINGLE_PRECISION)
+    sc->lo_flux_form = fesom_fct_lo_fluxform_on();
+#endif
     if (fesom_wsplit_on()) {
+#if defined(FESOM_SINGLE_PRECISION)
+        /* #1054: the implicit vertical split rewrites fctLO itself, so the kept tendency no longer
+         * describes it — fall back to the subtraction form, exactly as upstream does. */
+        sc->lo_flux_form = 0;
+#endif
         Kokkos::parallel_for("fct_vimpl", RP(0, myDim), KOKKOS_LAMBDA(const int n) {
             int nzmin = ulev_n(n) - 1, nzmax = nlev_n(n) - 1;   /* layers [nzmin,nzmax) */
             if (nzmax - nzmin < 1) return;
@@ -2053,12 +2148,20 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
      * dtv[k] at the SAME level → fuse per (n,nz), preserving the two-step += order (LO
      * transition then antidiffusive divergence; f_bot=aflux_v[nz+1] is an INPUT). The a<=0
      * guard skips only the 2nd term (the 1st += is unconditional, as in the C twin). b-i. */
+#if defined(FESOM_SINGLE_PRECISION)
+    const int lo_flux_form = sc->lo_flux_form;   /* host flag, captured by value into the lambda */
+#endif
     Kokkos::parallel_for("fct_f2d_v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
         const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
         if (nz < nu1 || nz >= nl1) return;
         size_t k = (size_t)n*nl+nz;
+#if defined(FESOM_SINGLE_PRECISION)
+        if (lo_flux_form) dtv(k) += loTend(k);                    /* #1054: kept, not recovered */
+        else              dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);
+#else
         dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);      /* LO transition */
+#endif
         real_t a = areasvol(k);                                  /* antidiffusive vertical divergence */
         if (a <= 0.0) return;
         real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
