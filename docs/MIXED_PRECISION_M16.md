@@ -823,6 +823,43 @@ fuses several of these loops (the M5.21 "flat lever"), which reorders float accu
 the Fortran. **Next: bisect inside FCT the same way — dump at the limiter boundary and around the
 scatter.**
 
+### ✅ 3k. FIXED — IC bracket fix + the salt anomaly bring the port to parity (2.53 → 0.97)
+1 month, CORE2/JRA55, dt 1800, salt SP−DP against each code's own DP arm:
+
+| configuration | fortran | port | ratio |
+|---|---|---|---|
+| baseline (port already has the §3i IC fix) | 4.897e-06 … 5.969e-06 | 1.510e-05 | **2.53** |
+| **+ salt anomaly (#986) in BOTH codes** | 4.896e-06 | **4.739e-06** | **0.97** |
+
+**The port is now marginally BETTER than upstream on salt.** temp improves too (1.39 → **1.10**).
+
+**The tell is in how much each code gains from the anomaly: fortran 1.22×, port 3.19×.** Both codes
+store absolute salinity ≈35 in float, but the port had ~1e-05 of magnitude-driven error to give back
+where the Fortran had ~1e-06. That is the port-specific factor, and it is consistent with everything
+measured: it is salt-only (§3f), it is generated in FCT (§3j), and #986 — which exists precisely to
+stop float from spending its digits on the constant part of S — removes it.
+
+**The practical fix, then, is two things:**
+1. the §3i IC bracket fix (port-side, byte-neutral in FP64, and correct on its own terms);
+2. **run SP with `FESOM_SALT_ANOMALY=1`** — upstream's own measure for exactly this, and already the
+   M16 recipe (board §2's 30-day conservation twin reached the same conclusion from a different
+   direction: "`FESOM_SALT_ANOMALY=1` is part of the SP recipe").
+
+⚠️ **What is fixed and what is only masked.** The anomaly *removes the symptom* by making the working
+values O(1); it does not explain why the port is more sensitive to the absolute magnitude than
+upstream inside FCT. That mechanism is still unidentified, and it would resurface in any
+configuration that runs absolute salinity. The honest statement for the paper is: *at SP the port
+matches upstream once both use the salt anomaly, which upstream recommends for SP anyway; without it
+the port is ~2.5× worse on salt and the reason sits inside the FCT advection.*
+
+⚠️ Also unresolved: **sst gets worse with the anomaly** (1.12 → 1.47) while salt and temp improve.
+One month, one realisation, and sst has moved unpredictably at this horizon throughout the campaign —
+flagged, not explained.
+
+**Also settled here: PR #1054 is neutral on this metric even with a clean IC** — 1.5103e-05 (on) vs
+1.5076e-05 (off), a factor 0.998. It is a *conservation* fix and conservation is a different
+measurement; keep it, and validate it with `FESOM_MP_CONSERV` rather than with a state difference.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
