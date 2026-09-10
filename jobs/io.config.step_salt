@@ -1,0 +1,3 @@
+# M16 short-horizon bisection: per-step salt/temp so the SP-DP difference can be read at a horizon
+# where it is still nearly pure arithmetic rather than chaotic growth.
+salt,temp,sst	step

@@ -611,6 +611,62 @@ EOS/pressure-gradient chain ("promote FIRST"), then the class-3 flips (things Ju
 that M16 flipped to `real_t` to match upstream — if any flip was wrong, the port is worse than
 upstream by construction).
 
+### 🔴 3h. FOUND IT — the port's SP salt error is in the INITIAL CONDITION, not the timestepping
+
+**Short-horizon bisection** (20 steps, CORE2/JRA55, dt 1800; jobs 27378655 / 27378689), per-step
+output on both sides, SP−DP within each code:
+
+| step | fortran salt | port salt | ratio |
+|---|---|---|---|
+| 1 | 2.221e-06 | **1.077e-05** | **4.85** |
+| 5 | 2.322e-06 | 1.074e-05 | 4.62 |
+| 10 | 2.827e-06 | 1.087e-05 | 3.84 |
+| 20 | 2.801e-06 | 1.093e-05 | 3.90 |
+
+🔴 **The port's salt SP−DP is FLAT** — 1.077e-05 at step 1, 1.093e-05 at step 20, a 1.5 % change over
+20 steps. It does not accumulate. Whatever creates it happens **once, before the dynamics run**. The
+Fortran's starts 4.85× lower and *grows* (2.22e-06 → 2.80e-06, +26 %), which is what ordinary
+per-step rounding looks like.
+
+**Confirmed directly** by dumping the initial condition (`FESOM_RESTART_IC`, partition-independent by
+construction, job 27378753) before any timestep:
+
+| | port IC, SP vs DP |
+|---|---|
+| **salt** | relL2 **1.023e-05** — i.e. **95 % of the step-1 value of 1.077e-05** |
+| temp | relL2 4.858e-06 |
+
+**And it is not rounding — it is a hundred broken points.** Over 3 705 892 wet points: median
+|Δ| = 1.34e-06 psu = **0.4× float eps at S=35**, i.e. the bulk is clean. But **99.6 % of the sum of
+squares lives in the top 100 points**, 166 points exceed 1e-3 psu, 102 exceed 1e-2, and the worst is
+**0.118 psu**. A diffuse narrowing loss cannot do that; an *iterative* process converging to a
+different answer at isolated points can, and that is what the IC hole fill (`extrap_nod3D`) is.
+
+**The deterministic fill halves it but does not fix it** (job 27378806, `FESOM_IC_EXTRAP=det` in both
+precisions):
+
+| fill | relL2 | max Δ | points > 1e-2 psu |
+|---|---|---|---|
+| legacy | 1.023e-05 | 0.118 psu | 102 |
+| **det** (`ic_extrap_det`, our PR #979) | **4.193e-06** | 0.074 psu | 177 |
+
+So the locus is the fill itself, in either variant, run at `real_t`. This is precisely the registry's
+class-3 row *"PHC climatology / init path … detector: same-IC gate (det fill at SP equals DP fill to
+the rounding class)"*, status **flip-B** — **the flip was made and its own designated detector was
+never run.** It has now been run, and it fails.
+
+⚠️ **What is NOT yet established: that upstream's IC is clean.** The Fortran's step-1 error of
+2.22e-06 sits near the bulk-rounding level, which *suggests* its fill does not produce the
+pathological points — but that is an inference, not a measurement. **Next check: dump the Fortran's
+IC the same way.** It decides the response:
+- if upstream is clean → the port's fill has a specific defect to fix;
+- if upstream is equally corrupted → this is an **upstream SP bug worth reporting**, in the same
+  family as #979 (`ic_extrap_det`), and both codes need the IC path promoted to `dbl_t`.
+
+Either way the fix direction is the registry's own promotion order: **run the IC extrapolation in
+`dbl_t`**. It is computed once at startup, so there is no runtime cost — and note it would make the
+port's SP IC *better* than upstream's, which is a deliberate divergence to raise before taking.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
