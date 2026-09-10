@@ -304,6 +304,50 @@ at month 12 (sst 1.022e-03 vs 9.870e-04; temp 2.062e-03 vs 2.096e-03), so a rati
 outside the seed spread. Both codes' ratios are falling toward 1 as the year runs (Fortran sst
 3.98 → 1.50), consistent with a crossover past 12 months — which is the multi-year question.
 
+### 🔴 3b-year-b. The port's OWN envelope (2026-09-10) — the hypothesis was WRONG
+§3b-year proposed that part of the port's larger SP−DP ratio might be its DP trajectory sitting in a
+more sensitive region rather than its SP arithmetic being worse. The port now has `do_perturb`
+(§3e), so that was testable. **It is refuted.** Five arms (27369058–64), December 1958:
+
+| | fortran SP−DP | port SP−DP | fortran own env | port own env |
+|---|---|---|---|---|
+| sst | 1.534e-03 | 2.569e-03 | 8.7e-04 … 1.4e-03 | **2.9e-04 … 5.6e-04** |
+| temp | 2.738e-03 | 4.527e-03 | 1.7e-03 … 2.7e-03 | **4.0e-04 … 8.3e-04** |
+| a_ice | 2.614e-03 | 6.835e-03 | 1.0e-03 … 1.3e-03 | 1.4e-03 … 1.7e-03 |
+| salt | 1.732e-04 | 2.805e-04 | 1.1e-04 … 1.7e-04 | **3.0e-05 … 6.1e-05** |
+
+**The port's DP trajectory is markedly LESS sensitive to a rounding-sized IC nudge than the
+Fortran's** — for sst, temp and salt its envelope is 2–4× smaller, and the separation survives the
+worst-case seed pairing. So the port is *less* sensitive to perturbation and *more* affected by
+single precision. **Normalising each code by its own envelope therefore makes the port look worse,
+not better:**
+
+| | fortran, ×own env | port, ×own env |
+|---|---|---|
+| sst | 1.06 – 1.75 | **4.63 – 8.93** |
+| temp | 1.02 – 1.60 | **5.43 – 11.27** |
+| a_ice | 2.05 – 2.63 | **4.10 – 4.99** |
+| salt | 1.04 – 1.55 | **4.61 – 9.29** |
+
+Reading the tighter-seed family for each code: **upstream's SP sits at ~1–2× its own noise floor;
+the port's at ~4–6×.** A factor of about three, robust to which seed is chosen. And it says the
+port's SP penalty is *real arithmetic*, not a chaotic-sensitivity artefact — which also fits the
+1-month mean-shift result (§3b reading 3): SP carries a systematic component, and a pure re-seeding
+of chaos would scale with trajectory sensitivity, which here runs the other way.
+
+⚠️ **TWO SEEDS IS TOO FEW, and the numbers above show it.** Seed-to-seed spread within one family
+reaches **50 %** (port, σ=1e-6, sst/temp/salt), so "max over two seeds" is a noisy estimator and the
+ranges above are roughly a factor-2 wide. The families also disagree about which is tight — the
+Fortran's σ=1e-6 pair agrees to 0.1–10 % while its σ=2e-4 pair spreads 33–40 %; the port is the
+opposite. With two members that could easily be chance. **Before any of these ratios goes in a
+paper, run ~5 seeds per code.** The *direction* of every statement above is robust; the magnitudes
+are not.
+
+✅ **Byte-neutrality confirmed over a full year, not just a 20-step gate:** `pdp_f2` (the `f2` binary,
+carrying the forcing descriptor and the perturbation hook) is **BITWISE EQUAL** to `pdp` (the `e3`
+binary) across all 12 monthly records of every variable. Serial is bit-reproducible at fixed rank
+count, so this is the strongest available confirmation that both changes are byte-neutral in FP64.
+
 ⚠️ **The limitation this exposes, and the work it implies.** The two codes' DP trajectories have
 themselves diverged by ~1e-02, so "port SP−DP" and "Fortran SP−DP" are sensitivities measured about
 *different* trajectories. The clean fix is to normalise each code's SP departure by **its own** noise
