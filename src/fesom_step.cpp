@@ -351,6 +351,50 @@ bool fesom_sshrails_on(void)
     return true;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * M16 §3j — WITHIN-STEP salt bisection.
+ *
+ * §3i-c reduced the port's excess SP error to 1.59x generated in the FIRST TIMESTEP from an
+ * initial condition that is now clean to rounding. This dumps salt at each stage of that step so
+ * the SP-vs-DP difference can be attributed to a stage rather than guessed at. Owned nodes only,
+ * written as raw doubles; compare the SP and DP runs offline.
+ *
+ * FESOM_SALT_TRACE=<dir>  and only on the step given by FESOM_SALT_TRACE_STEP (default 1).
+ * Inert otherwise — one getenv per step.
+ * ------------------------------------------------------------------------------------------- */
+static void salt_stage_dump(const char *tag, int step_n,
+                            const struct fesom_mesh *mesh,
+                            struct fesom_tracers *tracers,
+                            struct fesom_partit *p)
+{
+    const char *dir = getenv("FESOM_SALT_TRACE");
+    if (!dir || !dir[0]) return;
+    const char *st = getenv("FESOM_SALT_TRACE_STEP");
+    if (step_n != (st && st[0] ? atoi(st) : 1)) return;
+
+    tracers->data[FESOM_TRACER_S].values_fld.sync_host();
+    const real_t *S = tracers->data[FESOM_TRACER_S].values;
+    const int nl = mesh->nl, N = mesh->myDim_nod2D;
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+
+    char path[1024];
+    snprintf(path, sizeof path, "%s/salt.%s.%04d.bin", dir, tag, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    /* global id + the whole column, so the two runs can be matched independent of decomposition */
+    for (int n = 0; n < N; ++n) {
+        int gid = (p && p->myList_nod2D) ? p->myList_nod2D[n] : n + 1;
+        int nlv = mesh->nlevels_nod2D[n] - 1;
+        fwrite(&gid, sizeof(int), 1, f);
+        fwrite(&nlv, sizeof(int), 1, f);
+        for (int nz = 0; nz < nlv; ++nz) {
+            double v = (double)S[FESOM_NODE3D(n, nz, nl)];
+            fwrite(&v, sizeof(double), 1, f);
+        }
+    }
+    fclose(f);
+}
+
 int fesom_timestep(int                          step_n,
                    const fesom_step_ctx        *ctx,
                    struct fesom_mesh           *mesh,
@@ -361,6 +405,7 @@ int fesom_timestep(int                          step_n,
 {
     fesom_partit *p = ctx->partit;
     int nl = mesh->nl;
+    salt_stage_dump("A_entry", step_n, mesh, tracers, p);
 
     /* M8/M16 nanscan probes (FESOM_MP_NANSCAN=1; Serial host-alias reads; env-gated, inert
      * otherwise). Walk the chain the 1964-storm hunt needed: state at entry, the SSH solve,
@@ -1453,7 +1498,9 @@ int fesom_timestep(int                          step_n,
                 fct_pre_vo.assign(tracers->data[FESOM_TRACER_S].valuesold,
                                   tracers->data[FESOM_TRACER_S].valuesold + (size_t)N_redi * nl);
             }
+            salt_stage_dump("B_pre_adv", step_n, mesh, tracers, p);
             fesom_tracer_advect_one_fct_kk(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers, p);
+            salt_stage_dump("C_post_adv", step_n, mesh, tracers, p);
             if (fesom_mp_nanscan_enabled()) {
                 tracers->data[FESOM_TRACER_T].values_fld.sync_host();
                 tracers->data[FESOM_TRACER_S].values_fld.sync_host();
@@ -1539,6 +1586,7 @@ int fesom_timestep(int                          step_n,
         /* M5.14 (S flip): S values device-resident too - no trdiff IN re-push (reads it on device). */
         /* M5.13c: slope_tapered/Ki device-resident with their halo (substep 1b) - no re-push (trdiff K33 reads them on device). */
         fesom_impl_vert_diff_tracers_kk(mesh, aux, forcing, tracers, gm);   /* device: values (T,S) */
+        salt_stage_dump("D_post_vdiff", step_n, mesh, tracers, p);
         /* M5.13g1-T: T values device-resident - no trdiff OUT sync_host (device-halo'd below). */
         /* M5.14 (S flip): S values device-resident too - no trdiff OUT sync_host (device-halo'd below). */
         if (s_verify_trdiff) fesom_impl_vert_diff_tracers_verify(mesh, aux, forcing, tracers, gm,

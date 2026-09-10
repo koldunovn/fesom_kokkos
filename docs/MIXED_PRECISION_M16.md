@@ -795,6 +795,34 @@ tracer, identical initial conditions, 1.59× more single-precision error. That i
 the step — the registry's suspect order applies (EOS/pressure-gradient chain first, then the class-3
 flips), and a per-routine dump over a single step separates them without any long integration.
 
+### 🔴 3j. WITHIN-STEP BISECTION — it is the FCT tracer advection
+With the IC clean to rounding (§3i), salt was dumped at four points of step 1 in both precisions
+(`FESOM_SALT_TRACE`, job 27383405). The port's SP−DP against its own DP arm:
+
+| stage | relL2 | change |
+|---|---|---|
+| A — step entry | 4.736e-08 | — (the clean IC) |
+| B — after forcing / ice-ocean coupling, before advection | 4.736e-08 | **1.00×** |
+| **C — after `fesom_tracer_advect_one_fct_kk(S)`** | **2.865e-06** | **60.5×** |
+| D — after implicit vertical diffusion | 3.541e-06 | 1.24× |
+
+**The FCT tracer advection generates essentially all of it — a 60× jump in one call.** The surface
+salinity flux and the whole ice-ocean coupling contribute *nothing* (1.00×, bit-for-bit at this
+resolution), which rules out the entire forcing path in one measurement. Vertical diffusion adds a
+further 24 %, and D matches the independently measured step-1 value of 3.541e-06 exactly, so the
+four stages account for the whole step.
+
+For scale: the Fortran's step-1 total is 2.221e-06, so its *entire* step generates less than the
+port's FCT call alone.
+
+**Note what this does NOT say.** #1054 lives in this same routine and is already ported (§3g), and it
+moved the ratio not at all — so the remaining excess is a *different* defect inside FCT. The
+registry lists "FCT tracer advection, ice FCT" as `suspect-fp32`. The live candidates now are the
+Zalesak limiter bounds, the MFCT high-order flux, and the edge→node scatter accumulations — the port
+fuses several of these loops (the M5.21 "flat lever"), which reorders float accumulation relative to
+the Fortran. **Next: bisect inside FCT the same way — dump at the limiter boundary and around the
+scatter.**
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

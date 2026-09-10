@@ -91,6 +91,9 @@ for arm in $ARMS; do
     rm -rf "$dir"; mkdir -p "$out"
 
     [ "${ICDUMP:-0}" = 1 ] && export FESOM_RESTART_IC="$out"
+    if [ "${SALTTRACE:-0}" = 1 ]; then
+        mkdir -p "$RUNROOT/$arm/strace"; export FESOM_SALT_TRACE="$RUNROOT/$arm/strace"
+    fi
     # per-arm, so $arm must be known: the hole-set dump lives beside the arm's output
     if [ -n "${HOLEDUMP:-}" ]; then
         mkdir -p "$RUNROOT/$arm/holes"
