@@ -281,6 +281,29 @@ noise" claim cannot be made at one year and must be made, if at all, at climate 
 **4. The code-to-code gap grows to 1.0e-02 (sst) … 2.4e-02 (a_ice) and stays 4–6× the SP−DP
 departures.** Precision remains the smaller effect all year.
 
+### 🔴 Does the FORTRAN sit inside its own noise? No — it has the same problem
+The obvious worry about §3b-year's third reading is that "SP is above the envelope" is a defect of
+*our port*. It is not. Fortran-SP against its **own** DP arm and its **own** FP64 envelope, every
+month of 1958 (envelope = max over the two σ=1e-6 K seeds):
+
+| month | sst | temp | a_ice | salt | | port, for contrast (sst) |
+|---|---|---|---|---|---|---|
+| 1 | 3.98 | 4.01 | 1.66 | 4.00 | | 4.00 |
+| 3 | 2.62 | 2.37 | 1.56 | 3.46 | | 5.57 |
+| 6 | 4.29 | 3.48 | 2.92 | 4.56 | | 18.98 |
+| 9 | 1.47 | 1.48 | 1.39 | 1.89 | | 3.74 |
+| 12 | **1.50** | **1.31** | **2.05** | **1.36** | | 2.51 |
+
+**Upstream's own single precision sits 1.3–4.6× above its own FP64 noise, in every variable, at every
+month. It never goes inside.** The port is consistently further out (2.2–5.4× at year end) but the
+two are on the **same side of the bar** — so "SP is not inside the noise at one year" is a property
+of single-precision FESOM, not of this port, and the paper should state it that way.
+
+The envelope is not the weak link in that statement: the two independent seeds agree to **1.6–3.5 %**
+at month 12 (sst 1.022e-03 vs 9.870e-04; temp 2.062e-03 vs 2.096e-03), so a ratio of 1.3–1.5 is well
+outside the seed spread. Both codes' ratios are falling toward 1 as the year runs (Fortran sst
+3.98 → 1.50), consistent with a crossover past 12 months — which is the multi-year question.
+
 ⚠️ **The limitation this exposes, and the work it implies.** The two codes' DP trajectories have
 themselves diverged by ~1e-02, so "port SP−DP" and "Fortran SP−DP" are sensitivities measured about
 *different* trajectories. The clean fix is to normalise each code's SP departure by **its own** noise
