@@ -66,6 +66,11 @@ DET=${7:-0}
 # in a leap year (verified on t_10.1960.nc), so a gregorian model year would slip a day against the
 # forcing annually. The port makes the same choice from its dataset descriptor.
 FORCING=${8:-jra55}
+# SALTANOM=1 turns on upstream #986 (namelist &oce_dyn use_salt_anomaly / S_ref_anomaly=35), whose
+# port counterpart is FESOM_SALT_ANOMALY=1. Both codes default OFF. It matters for a precision study
+# because float32 eps at S~35 is ~2.4e-6 psu, larger than the surface freshwater increments the
+# salinity BC adds each step; storing S-35 recovers those digits.
+SALTANOM=${9:-0}
 
 CFG=/home/a/a270088/fesom2_sp/config
 MESH=/work/ab0995/a270088/port2/mesh/core2
@@ -200,6 +205,17 @@ EOF
 # Straight from upstream, with mix_scheme='KPP' (namelist.oce.core2 == the CORE2 production choice)
 # and whichEVP=0 (namelist.ice default = standard EVP, 120 subcycles).
 cp "$CFG/namelist.oce.core2" "$RUNDIR/namelist.oce"
+if [ "$SALTANOM" = 1 ]; then
+    # &oce_dyn is the group that carries it (oce_modules.F90:31). Insert after the group header so
+    # it lands inside the group regardless of what else the template holds.
+    # ONLY use_salt_anomaly. S_ref_anomaly is NOT in the &oce_dyn variable list
+    # (oce_modules.F90:221-233) — upstream hardcodes it to 35.0 when the flag is on
+    # (oce_setup_step.F90:291). Adding it makes the namelist read fail and the model die
+    # at startup with a bare "Run finished unexpectedly!" (cost jobs 27376303/27376593).
+    sed -i "0,/^&oce_dyn/s//\&oce_dyn\nuse_salt_anomaly = .true./" "$RUNDIR/namelist.oce"
+    grep -q "use_salt_anomaly = .true." "$RUNDIR/namelist.oce" \
+      || { echo "FATAL: SALTANOM=1 requested but the edit did not apply"; exit 3; }
+fi
 cp "$CFG/namelist.ice"       "$RUNDIR/namelist.ice"
 cp "$CFG/namelist.tra"       "$RUNDIR/namelist.tra"
 if [ "$DET" = 1 ]; then
@@ -282,4 +298,4 @@ fi
 # Two identical lines == initial run (gen_modules_clock.F90 clock_init).
 printf ' 0.0 1 1958\n 0.0 1 1958\n' > "$OUT/fesom.clock"
 
-echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, forcing=$FORCING, seed=${SEED:-none}${SEED:+, amp=$AMP K}, det=$DET)"
+echo "run dir ready: $RUNDIR   ($RLEN$RUNIT, step_per_day=$SPD -> dt=$((86400/SPD))s, forcing=$FORCING, seed=${SEED:-none}${SEED:+, amp=$AMP K}, det=$DET, saltanom=$SALTANOM)"

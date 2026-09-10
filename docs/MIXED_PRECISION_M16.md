@@ -505,6 +505,65 @@ restart read, so that combination would perturb a state the restart then overwri
 supports it; the port refuses it loudly instead of silently perturbing nothing. That is the one
 capability gap against `&oce_perturb`.
 
+## 3f. WHY the port is worse than the Fortran at SP — the trail so far (2026-09-10)
+
+**Step 1: it is SALINITY, and it is there from month 1.** Month-by-month, SP−DP against each code's
+own DP arm:
+
+| | month 1 | port / fortran |
+|---|---|---|
+| **salt** | fortran 5.97e-06 · port **1.65e-05** | **2.77** |
+| temp | fortran 1.14e-04 · port 1.64e-04 | 1.43 |
+| sst | fortran 9.39e-05 · port 9.45e-05 | 1.01 |
+
+One month is 1488 steps — far too short for chaotic amplification to produce a factor 2.8, so this is
+a **static arithmetic difference**, not amplification. sst and temp start equal and diverge later,
+which is the signature of salinity error feeding density and density feeding everything else. The
+mean drifts confirm it is systematic and structural: the Fortran's salt mean drifts **positive** and
+monotonically (+1.8e-06 → +8.2e-05), the port's **negative** (−5.2e-06 → −2.9e-05). **Opposite signs.**
+
+**Step 2: the absolute-salinity path carries much of it.** Upstream's #986 salt anomaly stores S−35
+instead of absolute S — float32 eps at S≈35 is ~2.4e-6 psu, larger than the per-step surface
+freshwater increments. Both codes default it OFF, which is how the whole matrix ran. Turning it on in
+**both** (1 month, jobs 27377022 / 27376304):
+
+| var | fortran OFF | port OFF | ratio | fortran ON | port ON | ratio |
+|---|---|---|---|---|---|---|
+| **salt** | 5.97e-06 | 1.65e-05 | **2.77** | 4.90e-06 | 8.60e-06 | **1.76** |
+| temp | 1.14e-04 | 1.64e-04 | 1.43 | 9.94e-05 | 1.18e-04 | **1.19** |
+| sst | 9.39e-05 | 9.45e-05 | 1.01 | 7.05e-05 | 1.16e-04 | 1.64 |
+| a_ice | 5.55e-04 | 5.44e-04 | 0.98 | 5.29e-04 | 5.68e-04 | 1.07 |
+
+The anomaly **halves the port's salt SP−DP** (0.52×) while moving the Fortran's only 18 % (0.82×) —
+i.e. the port was losing far more to absolute salinity than upstream was. The salt gap closes from
+**2.77 → 1.76** and temp from 1.43 → 1.19. ⚠️ **sst moves the wrong way** (1.01 → 1.64); that is one
+month and one realisation of a surface field, so it is not yet a fact — do not build on it.
+
+**Step 3: 🔴 upstream PR #1054 (opened 2026-09-10, Jan Streffing) names the exact mechanism, and the
+port has the identical defect.** *"In single-precision builds the FCT path does not conserve tracer
+content. `oce_tra_adv_flux2dtracer` recovers the low-order tendency as `LO*hnode_new − ttf*hnode` …
+Where the per-step change is below half an ulp of the tracer, `LO` rounds back to `ttf` and that
+cell's low-order flux divergence is lost."* Measured upstream in coupled AWI-ESM3: SP −0.50 W/m²
+against DP −0.01, and +0.01 with the fix; the deficit held at −0.52 W/m² over 40 years. It is an
+explicit follow-up to #940, the PR M16 ports.
+
+**The port's line is the same one** (`src/fesom_tracer_adv.cpp`, `flux2dtracer_fct`):
+```c
+dttf_v[k] += -ttf[k] * mesh->hnode[k] + lo[k] * mesh->hnode_new[k];
+```
+and `fesom_tracer_compute_fct_LO` builds `LO` by the same `(ttf*hnode + tend)/hnode_new` formula. The
+mechanism explains the variable ordering exactly: the loss scales with the tracer's **ulp**, and
+ulp(35 psu) ≈ 2.4e-6 against ulp(4 °C) ≈ 2.4e-7 — ten times larger, which is why salt is hit hardest
+and why the S−35 anomaly halves it.
+
+⚠️ **What is NOT yet explained.** #1054 is a *shared* defect — the Fortran has it too — so on its own
+it does not explain why the port is worse. One structural difference is already visible and points
+the *other* way: the Fortran evaluates `(dttf_v − A) + B` left-to-right while the port computes
+`dttf_v + (−A + B)`, forming the small difference first, which is the better association. So the
+port's residual 1.76× on salt is still unaccounted for. **Next probe: port the #1054 fix and
+re-measure** — it is a direct transliteration, and if the residual is the low-order tendency loss it
+should close further.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

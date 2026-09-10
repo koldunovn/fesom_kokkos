@@ -48,6 +48,8 @@ export FESOM_PRINT_EVERY=320
 # also switches the model to a 365-day year, exactly as include_fleapyear=.false. does on the
 # Fortran side.
 export FESOM_FORCING_SET=${FORCING:-jra55}
+# Must match the Fortran arm's SALTANOM (scripts/m16_faith_setup.sh) — upstream #986.
+[ "${SALTANOM:-0}" = 1 ] && export FESOM_SALT_ANOMALY=1
 # IC perturbation (src/fesom_perturb.h) — the port's OWN noise ensemble, so its SP-DP departure can
 # be normalised by its own envelope instead of the Fortran's (board §3b-year). PSEED selects the
 # member; PAMP is the gaussian sigma on T in KELVIN and must be C syntax (1e-6), not Fortran (1.D-6).
@@ -62,7 +64,7 @@ echo "runroot : $RUNROOT"
 echo "arms    : $ARMS"
 echo "steps   : $NSTEPS at dt=$DT   (= $((NSTEPS/32)) days at step_per_day 32)"
 echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
-echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}${FESOM_PERTURB:+ FESOM_PERTURB=1 seed=$FESOM_PERTURB_SEED T=$FESOM_PERTURB_TEMP}; everything else unset (KPP + standard EVP are the port defaults)"
+echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}${FESOM_SALT_ANOMALY:+ FESOM_SALT_ANOMALY=1}${FESOM_PERTURB:+ FESOM_PERTURB=1 seed=$FESOM_PERTURB_SEED T=$FESOM_PERTURB_TEMP}; everything else unset (KPP + standard EVP are the port defaults)"
 echo
 
 for arm in $ARMS; do
