@@ -52,6 +52,8 @@ export FESOM_FORCING_SET=${FORCING:-jra55}
 [ "${SALTANOM:-0}" = 1 ] && export FESOM_SALT_ANOMALY=1
 # upstream PR #1054 A/B: 1 = flux form (upstream's fix, the default), 0 = pre-#1054 subtraction.
 [ -n "${FLUXFORM:-}" ] && export FESOM_FCT_LO_FLUXFORM="$FLUXFORM"
+[ -n "${ALEDBL:-}" ] && export FESOM_FCT_ALE_DBL="$ALEDBL"
+[ -n "${INCDBL:-}" ] && export FESOM_FCT_INC_DBL="$INCDBL"
 # IOCFG=<path> selects an output-stream override file (default: compiled-in monthly-only). Needed for
 # short-horizon runs, where a monthly stream never flushes and the run produces no comparable output.
 [ -n "${IOCFG:-}" ] && export FESOM_IO_CONFIG="$IOCFG"
@@ -91,6 +93,9 @@ for arm in $ARMS; do
     rm -rf "$dir"; mkdir -p "$out"
 
     [ "${ICDUMP:-0}" = 1 ] && export FESOM_RESTART_IC="$out"
+    if [ "${FCTTRACE:-0}" = 1 ]; then
+        mkdir -p "$RUNROOT/$arm/fct"; export FESOM_FCT_TRACE="$RUNROOT/$arm/fct"
+    fi
     if [ "${SALTTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/strace"; export FESOM_SALT_TRACE="$RUNROOT/$arm/strace"
     fi

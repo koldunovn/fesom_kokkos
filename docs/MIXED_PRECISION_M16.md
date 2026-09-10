@@ -860,6 +860,49 @@ flagged, not explained.
 1.5076e-05 (off), a factor 0.998. It is a *conservation* fix and conservation is a different
 measurement; keep it, and validate it with `FESOM_MP_CONSERV` rather than with a state difference.
 
+### 3l. INSIDE FCT: the loss is at flux FORMATION, not in any accumulation — and that is why #986 is a real fix
+The anomaly gain (port 3.19× vs upstream 1.22×) said the port has an operation whose rounding scales
+with |S|≈35. Dumping the FCT internals with the anomaly on and off localised it precisely — mean
+absolute SP−DP error, step 1, salt:
+
+| intermediate | anomaly OFF | anomaly ON | gain |
+|---|---|---|---|
+| `LO` (low-order solution, psu) | 2.088e-06 | 1.450e-06 | 1.4× |
+| **`del_ttf` BEFORE the ALE term (psu·m)** | **2.356e-03** | **2.691e-05** | **87.5×** |
+| `del_ttf` after the ALE term | 2.368e-03 | 2.701e-05 | 87.7× |
+| final salinity (psu) | 1.916e-05 | 1.604e-06 | 11.9× |
+
+The whole magnitude sensitivity is in the **increment**, and it is **already complete before the ALE
+reconstruction** — so it is made in the flux sums, not in the reconstruction.
+
+**Two fixes were then implemented and measured, and BOTH are no-ops.** Recorded because they are the
+obvious things to try and each cost a build and a job:
+
+| attempted fix | knob | 1-month salt SP−DP | effect |
+|---|---|---|---|
+| ALE reconstruction term in `dbl_t` | `FESOM_FCT_ALE_DBL` | 1.5103e-05 → 1.5093e-05 | **0.999×** |
+| whole increment (`dth`/`dtv`) accumulated in `dbl_t` | `FESOM_FCT_INC_DBL` | 1.5103e-05 → 1.5067e-05 | **0.998×** |
+
+Both default to **0** now: they allocate two extra `dbl_t` fields and buy nothing.
+
+🔴 **What that null result actually means, and it corrects the framing of §3k.** The error is not
+*created* by any summation — it is created when the **flux is formed** from a tracer already stored
+in float at ≈35 psu, whose absolute resolution is only ~2e-06 psu. Every flux inherits that, and the
+divergence then exposes it because the net convergence is far smaller than the fluxes it is made
+from. **No accumulator can recover information destroyed at storage.**
+
+So **#986 is not a mask — it is the correct fix for a representational problem.** Subtracting the
+reference salinity is the only way to give the stored value more usable digits. §3k's caveat ("the
+anomaly removes the symptom, not the cause") was wrong: the cause *is* the stored magnitude.
+
+⚠️ **Still open: why the port loses ~4× more than upstream to the same representational limit.** Both
+store S in float at ≈35 and both use flux-form advection. Ruled out so far: the IC (§3i, fixed
+separately), the #1054 low-order cancellation, the ALE reconstruction, and every increment
+accumulation. What remains is **flux formation itself** — the MFCT high-order horizontal flux, the
+QR4C vertical flux, and the upwind fluxes — where the port may simply perform more float operations
+on ≈35-sized values than upstream does. That is the next place to look, and it is now the only place
+left.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

@@ -81,6 +81,8 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
 #if defined(FESOM_SINGLE_PRECISION)
     sc->lo_tend_fld.alloc("tradv.lo_tend", n_full);                       sc->lo_tend          = sc->lo_tend_fld.h();
     sc->lo_flux_form = 0;                                                 /* #1054 */
+    sc->dth_d_fld.alloc("tradv.dth_d", n_full);                           /* §3l dbl_t shadows */
+    sc->dtv_d_fld.alloc("tradv.dtv_d", n_full);
 #endif
     sc->fct_ttf_min_fld.alloc("tradv.fct_ttf_min", n_full);               sc->fct_ttf_min      = sc->fct_ttf_min_fld.h();
     sc->fct_ttf_max_fld.alloc("tradv.fct_ttf_max", n_full);               sc->fct_ttf_max      = sc->fct_ttf_max_fld.h();
@@ -106,6 +108,37 @@ void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
 }
 
 #if defined(FESOM_SINGLE_PRECISION)
+/* M16 §3l: accumulate the FCT tracer increment (del_ttf) in dbl_t (default 1). See the header. */
+static int fesom_fct_inc_dbl(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_FCT_INC_DBL");
+        cached = (e && e[0]) ? atoi(e) : 0;   /* §3l: MEASURED NO-OP — off by default */
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_port] FCT increment accumulator: %s\n",
+                   cached ? "dbl_t (magnitude-independent)" : "real_t (legacy)");
+    }
+    return cached;
+}
+
+/* M16 §3l: accumulate the ALE reconstruction's S-proportional term in dbl_t (default 1).
+ * 0 restores the legacy real_t accumulation. See the comment at the use site. */
+static int fesom_fct_ale_dbl(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_FCT_ALE_DBL");
+        cached = (e && e[0]) ? atoi(e) : 0;   /* §3l: MEASURED NO-OP — off by default */
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_port] FCT ALE reconstruction accumulator: %s\n",
+                   cached ? "dbl_t" : "real_t (legacy)");
+    }
+    return cached;
+}
+
 /* FESOM_FCT_LO_FLUXFORM — upstream #1054's fix is unconditional in SP; this knob exists so the
  * defect can be MEASURED rather than only asserted (default 1 = upstream behaviour; 0 restores the
  * pre-#1054 recovery-by-subtraction). Announced once, like every other precision instrument. */
@@ -1554,6 +1587,45 @@ void mfct_edge_flux_kk(const DV &ttf, const DV &flux, const DV &eud,
     flux((size_t)e * nl + nz) = hi - flux((size_t)e * nl + nz);
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * M16 §3l — dump FCT internals for the magnitude-sensitivity hunt.
+ *
+ * §3k showed the salt anomaly buys the port 3.19x where it buys upstream only 1.22x, so the port has
+ * an operation whose rounding scales with |S| ~ 35 rather than with the increment. Comparing the
+ * ABSOLUTE (psu) SP-DP error of each FCT intermediate with the anomaly ON vs OFF names it: the stage
+ * whose absolute error collapses when S becomes O(1) is the magnitude-sensitive one.
+ *
+ * FESOM_FCT_TRACE=<dir>, first call for the given tracer only. Owned nodes, raw doubles.
+ * ------------------------------------------------------------------------------------------- */
+static void fct_internal_dump(const char *tag, int tr_idx, int *once,
+                              const struct fesom_mesh *mesh,
+                              struct fesom_partit *partit,
+                              const real_t *arr)
+{
+    const char *dir = getenv("FESOM_FCT_TRACE");
+    if (!dir || !dir[0]) return;
+    if (*once) return;          /* first call only — step 1, per call site */
+    *once = 1;
+
+    const int nl = mesh->nl, N = mesh->myDim_nod2D;
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/fct.%s.tr%d.%04d.bin", dir, tag, tr_idx, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    for (int n = 0; n < N; ++n) {
+        int gid = (partit && partit->myList_nod2D) ? partit->myList_nod2D[n] : n + 1;
+        int nlv = mesh->nlevels_nod2D[n] - 1;
+        fwrite(&gid, sizeof(int), 1, f);
+        fwrite(&nlv, sizeof(int), 1, f);
+        for (int nz = 0; nz < nlv; ++nz) {
+            double v = (double)arr[FESOM_NODE3D(n, nz, nl)];
+            fwrite(&v, sizeof(double), 1, f);
+        }
+    }
+    fclose(f);
+}
+
 void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
                                     int                       tr_idx,
                                     const struct fesom_mesh  *mesh,
@@ -1585,6 +1657,11 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     auto aflux_v  = sc->adv_flux_ver_fld.d();
     auto dth      = sc->del_ttf_advhoriz_fld.d();
     auto dtv      = sc->del_ttf_advvert_fld.d();
+#if defined(FESOM_SINGLE_PRECISION)
+    auto dth_d    = sc->dth_d_fld.d();                 /* §3l dbl_t increment accumulators */
+    auto dtv_d    = sc->dtv_d_fld.d();
+    const int inc_dbl = fesom_fct_inc_dbl();
+#endif
     auto fctLO    = sc->fct_LO_fld.d();
     #if defined(FESOM_SINGLE_PRECISION)
     auto loTend   = sc->lo_tend_fld.d();   /* upstream PR #1054 */
@@ -1636,7 +1713,11 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 
     /* ===== 1. init_tracers_AB (⚠️ AB2 eps=0.1) ===== */
     Kokkos::parallel_for("fct_init_zero", RP(0, (size_t)N_full * nl),
-        KOKKOS_LAMBDA(const size_t i) { delttf(i) = 0.0; dth(i) = 0.0; dtv(i) = 0.0; });
+        KOKKOS_LAMBDA(const size_t i) { delttf(i) = 0.0; dth(i) = 0.0; dtv(i) = 0.0;
+#if defined(FESOM_SINGLE_PRECISION)
+                                        dth_d(i) = 0.0; dtv_d(i) = 0.0;
+#endif
+                                      });
     Kokkos::parallel_for("fct_init_AB", RP(0, (size_t)N_full * nl),
         KOKKOS_LAMBDA(const size_t i) { valsAB(i) = c_old * valsold(i) + c_new * vals(i); });
     Kokkos::parallel_for("fct_init_save", RP(0, (size_t)N_full * nl),   /* valuesold = values (after AB) */
@@ -1765,6 +1846,9 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 #if defined(FESOM_SINGLE_PRECISION)
     sc->lo_flux_form = fesom_fct_lo_fluxform_on();
 #endif
+    sc->fct_LO_fld.sync_host();
+    { static int o_lo[2] = {0,0}; fct_internal_dump("LO", tr_idx, &o_lo[tr_idx & 1],
+                                                    mesh, partit, sc->fct_LO); }
     if (fesom_wsplit_on()) {
 #if defined(FESOM_SINGLE_PRECISION)
         /* #1054: the implicit vertical split rewrites fctLO itself, so the kept tendency no longer
@@ -2157,6 +2241,18 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         if (nz < nu1 || nz >= nl1) return;
         size_t k = (size_t)n*nl+nz;
 #if defined(FESOM_SINGLE_PRECISION)
+        if (inc_dbl) {
+            /* §3l: accumulate in dbl_t. Each flux is O(|S|.u.A) and the net is the increment, so the
+             * divergence cancels ~7 digits in float and the loss scales with the ABSOLUTE tracer. */
+            if (lo_flux_form) dtv_d(k) += (dbl_t)loTend(k);
+            else              dtv_d(k) += -(dbl_t)vals(k)*(dbl_t)hnode(k)
+                                        +  (dbl_t)fctLO(k)*(dbl_t)hnode_new(k);
+            real_t ad = areasvol(k);
+            if (ad <= 0.0) return;
+            dtv_d(k) += ((dbl_t)aflux_v((size_t)n*nl+nz) - (dbl_t)aflux_v((size_t)n*nl+(nz+1)))
+                        * (dbl_t)dt / (dbl_t)ad;
+            return;
+        }
         if (lo_flux_form) dtv(k) += loTend(k);                    /* #1054: kept, not recovered */
         else              dtv(k) += -vals(k)*hnode(k) + fctLO(k)*hnode_new(k);
 #else
@@ -2177,6 +2273,15 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         for (int nz = nu12; nz < nl12; ++nz) {
             real_t f = aflux_h((size_t)e*nl+nz);
             real_t a1 = areasvol((size_t)n1*nl+nz), a2 = areasvol((size_t)n2*nl+nz);
+#if defined(FESOM_SINGLE_PRECISION)
+            if (inc_dbl) {
+                if (a1 > 0.0) Kokkos::atomic_add(&dth_d((size_t)n1*nl+nz),
+                                                 (dbl_t)f*(dbl_t)dt/(dbl_t)a1);
+                if (a2 > 0.0) Kokkos::atomic_add(&dth_d((size_t)n2*nl+nz),
+                                                -((dbl_t)f*(dbl_t)dt/(dbl_t)a2));
+                continue;
+            }
+#endif
             if (a1 > 0.0) Kokkos::atomic_add(&dth((size_t)n1*nl+nz),   f*dt/a1);
             if (a2 > 0.0) Kokkos::atomic_add(&dth((size_t)n2*nl+nz), -(f*dt/a2));
         }
@@ -2184,8 +2289,20 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 
     /* ===== 9. del_ttf = del_ttf_advhoriz + del_ttf_advvert (per-node, full nl) ===== */
     Kokkos::parallel_for("fct_delttf_sum", RP(0, (size_t)myDim * nl),
-        KOKKOS_LAMBDA(const size_t i) { delttf(i) = dth(i) + dtv(i); });
+        KOKKOS_LAMBDA(const size_t i) {
+#if defined(FESOM_SINGLE_PRECISION)
+            if (inc_dbl) { delttf(i) = (real_t)(dth_d(i) + dtv_d(i)); return; }
+#endif
+            delttf(i) = dth(i) + dtv(i); });
 
+#if defined(FESOM_SINGLE_PRECISION)
+    const int ale_dbl = fesom_fct_ale_dbl();
+#endif
+    if (getenv("FESOM_FCT_TRACE")) {   /* §3l: del_ttf BEFORE the ALE term, to split flux vs ALE */
+        tracers->del_ttf_fld.sync_host();
+        static int o_d9[2] = {0,0};
+        fct_internal_dump("DELTTF9", tr_idx, &o_d9[tr_idx & 1], mesh, partit, tracers->del_ttf);
+    }
     /* ===== 10. ALE reconstruction (T_new = LO + limited antidiff) ===== */
     /* M5.21 flat lever: one thread per (node,LEVEL). All reads/writes at the SAME level
      * (delttf[k], vals[k]); the vals write uses the just-updated delttf[k] → each (n,nz)
@@ -2196,12 +2313,37 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         if (nz < nzmin || nz >= nzmax) return;
         size_t k = (size_t)n*nl+nz;
         real_t hnode_old = hnode(k), hn_new = hnode_new(k);
-        delttf(k) += vals(k) * (hnode_old - hn_new);
-        if (hn_new > 0.0) vals(k) += delttf(k) / hn_new;
+#if defined(FESOM_SINGLE_PRECISION)
+        if (ale_dbl) {
+            /* M16 §3l: `vals*(hnode_old-hn_new)` is proportional to the ABSOLUTE tracer (S ~ 35),
+             * while del_ttf is the increment. Adding the first to the second in float discards the
+             * increment's low bits — the loss scales with |S|, which is why the #986 anomaly buys
+             * the port 3.19x here and upstream only 1.22x. Keeping this one accumulation in dbl_t
+             * costs nothing on the state (it is still stored real_t) and removes the magnitude
+             * dependence. FP64 is unaffected: dbl_t == real_t there. */
+            const dbl_t acc = (dbl_t)delttf(k)
+                            + (dbl_t)vals(k) * ((dbl_t)hnode_old - (dbl_t)hn_new);
+            delttf(k) = (real_t)acc;
+            if (hn_new > 0.0) vals(k) = (real_t)((dbl_t)vals(k) + acc / (dbl_t)hn_new);
+        } else
+#endif
+        {
+            delttf(k) += vals(k) * (hnode_old - hn_new);
+            if (hn_new > 0.0) vals(k) += delttf(k) / hn_new;
+        }
     });
 
     tracers->data[tr_idx].values_fld.modify_device();
     tracers->data[tr_idx].valuesold_fld.modify_device();
+
+    if (getenv("FESOM_FCT_TRACE")) {
+        tracers->del_ttf_fld.sync_host();
+        tracers->data[tr_idx].values_fld.sync_host();
+        static int o_dt[2] = {0,0}, o_va[2] = {0,0};
+        fct_internal_dump("DELTTF", tr_idx, &o_dt[tr_idx & 1], mesh, partit, tracers->del_ttf);
+        fct_internal_dump("VALS",   tr_idx, &o_va[tr_idx & 1], mesh, partit,
+                          tracers->data[tr_idx].values);
+    }
 }
 
 /*--- FESOM_KK_VERIFY=tradv gate ---------------------------------------------

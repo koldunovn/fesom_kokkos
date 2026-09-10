@@ -91,6 +91,13 @@ typedef struct fesom_tracer_adv_scratch {
     fesom::Field fct_aux_fld;
 #if defined(FESOM_SINGLE_PRECISION)
     fesom::Field lo_tend_fld;    /* owner for lo_tend (#1054) */
+    /* M16 §3l: dbl_t shadows for the FCT increment accumulation. Every flux entering del_ttf is
+     * proportional to the ABSOLUTE tracer (S ~ 35 psu), while the net convergence is the tiny
+     * increment — so each divergence is a cancellation whose loss scales with |S|. Measured: the
+     * increment's SP-DP error falls 87.5x when #986 makes S O(1), and it is already fully present
+     * BEFORE the ALE reconstruction, i.e. it is made in the flux sums. Accumulating those sums in
+     * dbl_t removes the magnitude dependence at source instead of masking it with the anomaly. */
+    fesom::FieldT<dbl_t> dth_d_fld, dtv_d_fld;
 #endif
     fesom::Field tr_xy_fld;
     fesom::Field edge_up_dn_grad_fld;
