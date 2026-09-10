@@ -24,6 +24,70 @@
     }                                                                   \
 } while (0)
 
+/* M16: run the PHC bilinear weights in dbl_t (default 1). 0 restores the legacy real_t weights,
+ * which is what upstream does (gen_ic3d.F90:344 declares them real(wp)). Instrument for the
+ * IC-precision bisection — see docs/MIXED_PRECISION_M16.md §3h. */
+static int fesom_ic_interp_dbl(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_IC_INTERP_DBL");
+        cached = (e && e[0]) ? atoi(e) : 1;
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_phc] PHC bilinear weights: %s\n",
+                   cached ? "dbl_t" : "real_t (legacy, = upstream)");
+    }
+    return cached;
+}
+
+/* M16 §3h: keep the PHC depth-bracket search key in dbl_t (default 1). See the root-cause comment
+ * at its use site. 0 restores the legacy real_t narrowing, which is what upstream does. */
+static int fesom_ic_depth_dbl(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_IC_DEPTH_DBL");
+        cached = (e && e[0]) ? atoi(e) : 1;
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_phc] PHC depth-bracket key: %s\n",
+                   cached ? "dbl_t" : "real_t (legacy, = upstream)");
+    }
+    return cached;
+}
+
+/* §3h: bracket search with BOTH sides narrowed to real_t, which is what upstream does (its axis and
+ * its coordinate are both WP). Restores the exact-match shortcut for nodes lying on a grid line. */
+static int binarysearch_r_axis(int length, const double *arr, double value)
+{
+    const double d = 1e-9;
+    int left = 0, right = length - 1;
+    while (left <= right) {
+        int middle = (left + right + 1) / 2;
+        const double a = (double)(real_t)arr[middle];
+        if (fabs(a - value) <= d) return middle;
+        if (a > value) right = middle - 1;
+        else           left  = middle + 1;
+    }
+    return right;
+}
+
+static int fesom_ic_bracket_mixed(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_IC_BRACKET_MIXED");
+        cached = (e && e[0]) ? atoi(e) : 0;
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_phc] PHC bracket compare: %s\n",
+                   cached ? "MIXED double-axis vs real_t-coord (legacy, the §3h defect)"
+                          : "consistent real_t (= upstream)");
+    }
+    return cached;
+}
+
 /* g_config dummy value (gen_modules_config.F90:174). Land marker. */
 #define PHC_DUMMY  1.0e10
 
@@ -100,6 +164,7 @@ static void load_one_variable(int ncid, const char *varname,
                               int Nlon, int Nlat, int Ndepth,
                               const int *bilin_i, const int *bilin_j,
                               double fill_value, int has_fill,
+                              const int *node_gid,          /* §3h trace: myList_nod2D or NULL */
                               real_t *out)
 {
     /* Allocate full ncdata[Nlon][Nlat][Ndepth] (C row-major; first index Nlon). */
@@ -187,35 +252,71 @@ static void load_one_variable(int ncid, const char *varname,
 
         /* Skip if the surface (depth index 0) of any of the 4 corners is
            dummy — Fortran line 415 (any(ncdata(i:ip1, j:jp1, 1) > 0.99*dummy)). */
+        /* M16 IC-precision probe (FESOM_IC_INTERP_DBL, default 1): these locals were `real_t`,
+         * i.e. float in an SP build, exactly as upstream declares them (gen_ic3d.F90:344 real(wp)).
+         * The bilinear WEIGHTS (x2-x), (x-x1), ... are differences of nearly equal coordinates, so
+         * for a node close to a PHC grid line they cancel catastrophically in float; multiplied by
+         * the corner contrast (7+ psu across a coastal cell in a brackish sea) that is a visible
+         * salinity error at isolated points. ncdata and data1d are already double here, so lifting
+         * the weights costs nothing and the narrowing still happens at the store into `out`.
+         * In an FP64 build dbl_t == real_t, so the byte gate is untouched by construction. */
+        const int idbl = fesom_ic_interp_dbl();
+        /* §3h targeted probe: FESOM_IC_TRACE_GID=<gid[,gid...]> prints every branch input for the
+         * named node, so the test whose outcome flips between float and double can be NAMED rather
+         * than guessed at. */
+        int trace = 0;
+        {
+            const char *tg = getenv("FESOM_IC_TRACE_GID");
+            if (tg && tg[0]) {
+                int gid = node_gid ? node_gid[ii] : ii + 1;
+                char buf[256]; snprintf(buf, sizeof buf, ",%s,", tg);
+                char key[32];  snprintf(key, sizeof key, ",%d,", gid);
+                if (strstr(buf, key)) trace = gid;
+            }
+        }
         real_t s00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
         real_t s10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth];
         real_t s01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
         real_t s11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth];
+        if (trace)
+            printf("[ICTRACE] gid=%d var=%s i=%d j=%d s00=%.17g s10=%.17g s01=%.17g s11=%.17g "
+                   "surface_skip=%d\n", trace, varname, i, j,
+                   (double)s00, (double)s10, (double)s01, (double)s11,
+                   (s00 > 0.99*PHC_DUMMY || s10 > 0.99*PHC_DUMMY ||
+                    s01 > 0.99*PHC_DUMMY || s11 > 0.99*PHC_DUMMY) ? 1 : 0);
         if (s00 > 0.99*PHC_DUMMY || s10 > 0.99*PHC_DUMMY ||
             s01 > 0.99*PHC_DUMMY || s11 > 0.99*PHC_DUMMY) continue;
 
         /* Geographic node coords for interp weights. */
-        real_t x = (double)mesh->geo_coord_nod2D[2*ii + 0] / FESOM_RAD;
-        real_t y = (double)mesh->geo_coord_nod2D[2*ii + 1] / FESOM_RAD;
+        dbl_t x = (double)mesh->geo_coord_nod2D[2*ii + 0] / FESOM_RAD;
+        dbl_t y = (double)mesh->geo_coord_nod2D[2*ii + 1] / FESOM_RAD;
+        if (!idbl) { x = (real_t)x; y = (real_t)y; }      /* legacy: narrow before the weights */
         if (x < 0.0)   x += 360.0;
         if (x > 360.0) x -= 360.0;
 
-        real_t x1 = nc_lon[i];
-        real_t x2 = nc_lon[ip1];
-        real_t y1 = nc_lat[j];
-        real_t y2 = nc_lat[jp1];
-        real_t denom = (x2 - x1) * (y2 - y1);
+        dbl_t x1 = idbl ? (dbl_t)nc_lon[i]   : (dbl_t)(real_t)nc_lon[i];
+        dbl_t x2 = idbl ? (dbl_t)nc_lon[ip1] : (dbl_t)(real_t)nc_lon[ip1];
+        dbl_t y1 = idbl ? (dbl_t)nc_lat[j]   : (dbl_t)(real_t)nc_lat[j];
+        dbl_t y2 = idbl ? (dbl_t)nc_lat[jp1] : (dbl_t)(real_t)nc_lat[jp1];
+        dbl_t denom = idbl ? ((x2 - x1) * (y2 - y1))
+                           : (dbl_t)((real_t)(x2 - x1) * (real_t)(y2 - y1));
 
         /* Bilinear interp per depth — entire column (Fortran lines 423-428). */
         for (int k = 0; k < Ndepth; ++k) {
-            real_t v00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
-            real_t v10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
-            real_t v01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
-            real_t v11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
-            data1d[k] = (v00 * (x2 - x) * (y2 - y)
-                       + v10 * (x  - x1) * (y2 - y)
-                       + v01 * (x2 - x) * (y  - y1)
-                       + v11 * (x  - x1) * (y  - y1)) / denom;
+            dbl_t v00 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
+            dbl_t v10 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)j  )*(size_t)Ndepth + k];
+            dbl_t v01 = ncdata[((size_t)i  *(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
+            dbl_t v11 = ncdata[((size_t)ip1*(size_t)Nlat + (size_t)jp1)*(size_t)Ndepth + k];
+            if (!idbl) { v00=(real_t)v00; v10=(real_t)v10; v01=(real_t)v01; v11=(real_t)v11; }
+            data1d[k] = idbl
+                ? (v00 * (x2 - x) * (y2 - y)
+                 + v10 * (x  - x1) * (y2 - y)
+                 + v01 * (x2 - x) * (y  - y1)
+                 + v11 * (x  - x1) * (y  - y1)) / denom
+                : (dbl_t)(((real_t)v00 * (real_t)(x2 - x) * (real_t)(y2 - y)
+                         + (real_t)v10 * (real_t)(x  - x1) * (real_t)(y2 - y)
+                         + (real_t)v01 * (real_t)(x2 - x) * (real_t)(y  - y1)
+                         + (real_t)v11 * (real_t)(x  - x1) * (real_t)(y  - y1)) / (real_t)denom);
             if (v00 > 0.99*PHC_DUMMY || v10 > 0.99*PHC_DUMMY ||
                 v01 > 0.99*PHC_DUMMY || v11 > 0.99*PHC_DUMMY) {
                 data1d[k] = PHC_DUMMY;
@@ -229,8 +330,30 @@ static void load_one_variable(int ncid, const char *varname,
              * though its own comment cites the Fortran's Z_3d_n -- so we do too (golden rule:
              * faithful to the C, never "fix" its asymmetries). Inert either way: PHC runs once at
              * IC, where hbar==0 => Z_3d_n == Z BITWISE. */
-            real_t depth_pos = -(double)mesh->Z[k];
+            /* 🔴 M16 §3h ROOT CAUSE. This was `real_t depth_pos`, i.e. float in an SP build (and
+             * upstream's aux_z is real(wp), so upstream narrows here too). binarysearch_d takes a
+             * double and nc_depth is double, so the ONLY thing the narrowing does is move the
+             * search key — and when a FESOM level depth sits near a PHC level boundary the bracket
+             * lands one level away. That is a per-LEVEL flip, but its consequence appears only at
+             * nodes sitting on the PHC bathymetry edge, where one of the two candidate PHC depths
+             * is data and the other is the land dummy: those points flip between "interpolated from
+             * PHC" and "left as a hole for extrap_nod3D", which are completely different values.
+             * Measured on CORE2: 3 nodes flip (gid 49751 levels 0-3, 69121 level 29, 33626 levels
+             * 32-39), and extrap_nod3D then spreads the damage to ~100 points at up to 0.118 psu.
+             * dbl_t here costs nothing (the IC runs once) and is byte-neutral in FP64 by
+             * construction, since dbl_t == real_t there. FESOM_IC_DEPTH_DBL=0 restores the legacy
+             * narrowing for the A/B. */
+            dbl_t depth_pos = -(double)mesh->Z[k];
+            if (!fesom_ic_depth_dbl()) depth_pos = (dbl_t)(real_t)depth_pos;
             int d_indx = binarysearch_d(Ndepth, nc_depth, depth_pos);
+            if (trace)
+                printf("[ICTRACE] gid=%d var=%s k=%d depth=%.17g d_indx=%d d1=%.17g d2=%.17g "
+                       "filled=%d\n", trace, varname, k, (double)depth_pos, d_indx,
+                       (d_indx >= 0 && d_indx < Ndepth-1) ? (double)data1d[d_indx] : -1.0,
+                       (d_indx >= 0 && d_indx < Ndepth-1) ? (double)data1d[d_indx+1] : -1.0,
+                       (d_indx >= 0 && d_indx < Ndepth-1
+                        && data1d[d_indx] < 0.99*PHC_DUMMY
+                        && data1d[d_indx+1] < 0.99*PHC_DUMMY) ? 1 : 0);
             if (d_indx >= 0 && d_indx < Ndepth - 1) {
                 int d_indx_p1 = d_indx + 1;
                 real_t delta_d = nc_depth[d_indx + 1] - nc_depth[d_indx];
@@ -297,6 +420,56 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
         }
     }
 
+    /* M16 §3h probe: how many points does the interpolation leave for the fill, and does that COUNT
+     * differ between SP and DP? A structural difference (different holes) explains a large isolated
+     * error; a pure arithmetic one cannot. Counted over owned nodes and wet levels only. */
+    if (getenv("FESOM_IC_FILL_DIAG")) {
+        long holes = 0, wet = 0;
+        for (int n = 0; n < N; ++n)
+            for (int nz = 0; nz < mesh->nlevels_nod2D[n] - 1; ++nz) {
+                ++wet;
+                if (arr[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) ++holes;
+            }
+        long g[2] = {holes, wet};
+        if (partit && partit->npes > 1)
+            MPI_Allreduce(MPI_IN_PLACE, g, 2, MPI_LONG, MPI_SUM, partit->MPI_COMM_FESOM);
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_phc] FILL_DIAG pre-fill: %ld holes of %ld wet points (%.4f%%)\n",
+                   g[0], g[1], 100.0 * (double)g[0] / (double)g[1]);
+        /* per-level hole counts — a precision-dependent hole is a STRUCTURAL difference and the
+         * level it sits at names the mechanism (surface = corner/dummy test, bottom = depth-index
+         * bracket below the deepest PHC level). */
+        long *per = (long *)calloc((size_t)nl, sizeof(long));
+        for (int n = 0; n < N; ++n)
+            for (int nz = 0; nz < mesh->nlevels_nod2D[n] - 1; ++nz)
+                if (arr[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) ++per[nz];
+        if (partit && partit->npes > 1)
+            MPI_Allreduce(MPI_IN_PLACE, per, nl, MPI_LONG, MPI_SUM, partit->MPI_COMM_FESOM);
+        if (rk == 0) {
+            printf("[fesom_phc] FILL_DIAG per-level holes:");
+            for (int nz = 0; nz < nl; ++nz) if (per[nz]) printf(" %d:%ld", nz, per[nz]);
+            printf("\n");
+        }
+        free(per);
+        /* FESOM_IC_HOLE_DUMP=<dir>: one line "gid level" per pre-fill hole, per rank. Diffing the
+         * two precisions' sets names the exact points whose interpolation outcome flipped. */
+        const char *hd = getenv("FESOM_IC_HOLE_DUMP");
+        if (hd && hd[0]) {
+            char path[1024]; snprintf(path, sizeof path, "%s/holes.%04d.txt", hd, rk);
+            FILE *fp = fopen(path, "w");
+            if (fp) {
+                for (int n = 0; n < N; ++n) {
+                    int gid = (partit && partit->myList_nod2D) ? partit->myList_nod2D[n] : n + 1;
+                    for (int nz = 0; nz < mesh->nlevels_nod2D[n] - 1; ++nz)
+                        if (arr[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY)
+                            fprintf(fp, "%d %d\n", gid, nz);
+                }
+                fclose(fp);
+            }
+        }
+    }
+
     int iter_outer = 0;
     while (iter_outer < 200) {
         ++iter_outer;
@@ -360,6 +533,24 @@ static void extrap_nod3D(const struct fesom_mesh *mesh,
                 free(layer);
             }
         }
+    }
+
+    if (getenv("FESOM_IC_FILL_DIAG")) {
+        long holes = 0; double chk = 0.0;
+        for (int n = 0; n < N; ++n)
+            for (int nz = 0; nz < mesh->nlevels_nod2D[n] - 1; ++nz) {
+                double v = (double)arr[FESOM_NODE3D(n, nz, nl)];
+                if (v > 0.99 * PHC_DUMMY) ++holes; else chk += v;
+            }
+        long gh = holes; double gc = chk;
+        if (partit && partit->npes > 1) {
+            MPI_Allreduce(MPI_IN_PLACE, &gh, 1, MPI_LONG,   MPI_SUM, partit->MPI_COMM_FESOM);
+            MPI_Allreduce(MPI_IN_PLACE, &gc, 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
+        }
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_phc] FILL_DIAG post-horizontal: %ld holes left, outer_iters=%d, sum=%.10e\n",
+                   gh, iter_outer, gc);
     }
 
     /* Vertical fill — Fortran lines 491-498. */
@@ -678,10 +869,41 @@ void fesom_phc_load_ic(const char                  *path,
         double y = (double)mesh->geo_coord_nod2D[2*n + 1] / FESOM_RAD;
         if (x < 0.0)   x += 360.0;
         if (x > 360.0) x -= 360.0;
-        bilin_i[n] = (x <= nc_lon[Nlon - 1] && x >= nc_lon[0])
-                       ? binarysearch_d(Nlon, nc_lon, x) : -1;
-        bilin_j[n] = (y <= nc_lat[Nlat - 1] && y >= nc_lat[0])
-                       ? binarysearch_d(Nlat, nc_lat, y) : -1;
+        /* 🔴 M16 §3h ROOT CAUSE of the port's excess SP IC error.
+         *
+         * `mesh->geo_coord_nod2D` is real_t, so at SP the node's latitude is a FLOAT — and the
+         * CORE2 mesh puts many nodes exactly on 0.5-degree lines that coincide with PHC's grid
+         * latitudes. binarysearch_d takes the exact-match shortcut
+         *     if (fabs(arr[middle] - value) <= 1e-9) return middle;
+         * Upstream compares WP against WP (gen_ic3d.F90:955, d = 1e-9_WP), so at SP both sides are
+         * float and a node sitting ON a gridline still matches exactly. The port kept nc_lat/nc_lon
+         * in DOUBLE — nominally more accurate — and therefore compares a double gridline against a
+         * float-rounded coordinate: |70.5 - 70.50000381| = 3.8e-6, which blows past the 1e-9
+         * tolerance, the exact match is MISSED, and the bracket lands one cell away. Where that
+         * neighbouring cell is land, the node flips from "interpolated" to "left as a hole" and the
+         * extrapolation fills it with something else entirely.
+         *
+         * Measured: 3 nodes flip on CORE2 (gid 49751 and 69121 at lat 70.5000, gid 33626 at
+         * 51.5000 — all exactly on PHC gridlines), and extrap_nod3D spreads that to ~100 points at
+         * up to 0.118 psu, which is 95% of the port's step-1 salt SP-DP departure.
+         *
+         * Fix: make the comparison CONSISTENT, as upstream's is, by narrowing the grid axis to
+         * real_t for the bracket search. FESOM_IC_BRACKET_MIXED=1 restores the old mixed compare.
+         * FP64 is unaffected: real_t == double there. */
+        const int mixed = fesom_ic_bracket_mixed();
+        int bi, bj;
+        if (mixed) {
+            bi = (x <= nc_lon[Nlon-1] && x >= nc_lon[0]) ? binarysearch_d(Nlon, nc_lon, x) : -1;
+            bj = (y <= nc_lat[Nlat-1] && y >= nc_lat[0]) ? binarysearch_d(Nlat, nc_lat, y) : -1;
+        } else {
+            const double xr = (double)(real_t)x, yr = (double)(real_t)y;
+            bi = (xr <= (double)(real_t)nc_lon[Nlon-1] && xr >= (double)(real_t)nc_lon[0])
+                   ? binarysearch_r_axis(Nlon, nc_lon, xr) : -1;
+            bj = (yr <= (double)(real_t)nc_lat[Nlat-1] && yr >= (double)(real_t)nc_lat[0])
+                   ? binarysearch_r_axis(Nlat, nc_lat, yr) : -1;
+        }
+        bilin_i[n] = bi;
+        bilin_j[n] = bj;
         /* Reject the rightmost / topmost bracket (would index past array). */
         if (bilin_i[n] >= Nlon - 1) bilin_i[n] = -1;
         if (bilin_j[n] >= Nlat - 1) bilin_j[n] = -1;
@@ -706,10 +928,12 @@ void fesom_phc_load_ic(const char                  *path,
 
     load_one_variable(ncid, "temp", mesh, nc_lon, nc_lat, nc_depth,
                       Nlon, Nlat, Ndepth, bilin_i, bilin_j,
-                      fill_T, has_fill_T, T);
+                      fill_T, has_fill_T,
+                      partit ? partit->myList_nod2D : NULL, T);
     load_one_variable(ncid, "salt", mesh, nc_lon, nc_lat, nc_depth,
                       Nlon, Nlat, Ndepth, bilin_i, bilin_j,
-                      fill_S, has_fill_S, S);
+                      fill_S, has_fill_S,
+                      partit ? partit->myList_nod2D : NULL, S);
 
     NC_CHECK(nc_close(ncid));
 

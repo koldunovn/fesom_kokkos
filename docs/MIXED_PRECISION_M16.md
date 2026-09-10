@@ -690,6 +690,54 @@ Either way the fix direction is the registry's own promotion order: **run the IC
 `dbl_t`**. It is computed once at startup, so there is no runtime cost — and note it would make the
 port's SP IC *better* than upstream's, which is a deliberate divergence to raise before taking.
 
+### 🔴🔴 3i. ROOT CAUSE FOUND AND FIXED — a mixed-precision comparison in the PHC bracket search
+
+**The port's excess SP initial-condition error was caused by keeping the PHC grid axes in `double`
+while the node coordinate is `real_t`.** That is, by being *more* accurate than upstream in one
+place and not the other.
+
+`binarysearch_d` takes an exact-match shortcut, `if (fabs(arr[middle] - value) <= 1e-9) return
+middle;`. Upstream compares WP against WP (`gen_ic3d.F90:955`, `d = 1e-9_WP`), so at SP **both sides
+are float** and a node lying exactly on a grid line still matches. The port kept `nc_lat`/`nc_lon` in
+double and therefore compared a **double** gridline against a **float-rounded** coordinate:
+|70.5 − 70.50000381| = 3.8e-06, far past the 1e-9 tolerance. The exact match is missed, the bracket
+lands **one cell away**, and where that neighbouring cell is land the node flips from "interpolated
+from PHC" to "left as a hole for `extrap_nod3D`" — a completely different value.
+
+Caught by tracing the three flipping nodes (`FESOM_IC_TRACE_GID`), which showed it outright:
+
+| | i | j | corners | outcome |
+|---|---|---|---|---|
+| **DP** | 169 | **160** | 28.41, 28.76, 29.13, 29.42 | interpolated |
+| **SP** | 169 | **159** | **1e10, 1e10**, 28.41, 28.76 | `surface_skip=1` → hole |
+
+And the confirmation is in the mesh: **all three flipping nodes sit exactly on PHC grid lines** —
+gid 49751 and 69121 at latitude **70.5000**, gid 33626 at **51.5000**.
+
+**Fix** (`FESOM_IC_BRACKET_MIXED=1` restores the defect for A/B): narrow the axis to `real_t` for the
+bracket comparison, so both sides are consistent — which is what upstream does. FP64 unaffected
+(`real_t == double` there); **G0 byte gate re-passed BYTE-IDENTICAL at np2**.
+
+| PHC initial condition, SP vs DP | pre-fill holes DP / SP | differing | relL2 salt | max \|Δ\| | pts > 1e-3 |
+|---|---|---|---|---|---|
+| before | 587099 / 587096 | **13** | 1.023e-05 | 1.185e-01 psu | 166 |
+| **after** | **587099 / 587099** | **0** | **4.736e-08** | **2.43e-05 psu** | **0** |
+
+**216× on relL2, 4880× on the worst point, and the hole sets are now identical.** The residual
+4.7e-08 is pure rounding. The port's SP initial condition is now *better* than upstream's, whose
+step-1 field still carries 29 points past 1e-2 psu from a residual whose cause is not established
+here.
+
+**Dead ends, recorded because they cost jobs and would otherwise be retried:** the bilinear weights
+(`FESOM_IC_INTERP_DBL`) and the depth-bracket search key (`FESOM_IC_DEPTH_DBL`) were both promoted to
+`dbl_t` and both changed the result *not at all* — bit-identical hole counts and relL2. Neither was
+the cause. Both knobs are kept as instruments.
+
+**Worth reporting upstream**, with care about what is claimed: upstream's float-vs-float comparison
+protects it from *this* flip, so this exact defect is the port's. But the underlying fragility — an
+IC bracket search whose outcome depends on the working precision, at nodes that sit on grid lines —
+is structural, and upstream's own 29 bad points say it has a residual of its own.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
