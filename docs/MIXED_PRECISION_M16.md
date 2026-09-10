@@ -690,7 +690,8 @@ Either way the fix direction is the registry's own promotion order: **run the IC
 `dbl_t`**. It is computed once at startup, so there is no runtime cost — and note it would make the
 port's SP IC *better* than upstream's, which is a deliberate divergence to raise before taking.
 
-### 🔴🔴 3i. ROOT CAUSE FOUND AND FIXED — a mixed-precision comparison in the PHC bracket search
+### 🔴 3i. The IC defect: a mixed-precision comparison in the PHC bracket search — found and fixed
+*(⚠️ read §3i-b: this is a real defect worth 216× at t=0, but it is NOT the factor of 3.)*
 
 **The port's excess SP initial-condition error was caused by keeping the PHC grid axes in `double`
 while the node coordinate is `real_t`.** That is, by being *more* accurate than upstream in one
@@ -737,6 +738,37 @@ the cause. Both knobs are kept as instruments.
 protects it from *this* flip, so this exact defect is the port's. But the underlying fragility — an
 IC bracket search whose outcome depends on the working precision, at nodes that sit on grid lines —
 is structural, and upstream's own 29 bad points say it has a residual of its own.
+
+### ⚠️ 3i-b. …but it is NOT the factor of 3. The end-to-end gain is 9 %.
+The heading of §3i was written before the end-to-end measurement and **overclaimed**. Repeating the
+1-month comparison with the fixed binary (job 27383020):
+
+| var | fortran | port BEFORE | ratio | port AFTER fix | ratio |
+|---|---|---|---|---|---|
+| **salt** | 5.969e-06 | 1.652e-05 | **2.77** | 1.510e-05 | **2.53** |
+| temp | 1.144e-04 | 1.637e-04 | 1.43 | 1.593e-04 | 1.39 |
+| sst | 9.393e-05 | 9.449e-05 | 1.01 | 1.052e-04 | 1.12 |
+| a_ice | 5.547e-04 | 5.443e-04 | 0.98 | 6.225e-04 | 1.12 |
+
+**A 216× improvement at t=0 buys 9 % after one month.** So the initial-condition corruption, though
+real and now fixed, is **not** what makes the port worse at any horizon anyone cares about. It
+dominated the 1–20 step window — which is exactly why the bisection found it there, and why "the
+port's salt error is flat over 20 steps and equals the IC" was true and still misleading. By 1488
+steps the IC error has been mixed away and something else dominates.
+
+**The corrected picture, and the sharper question.** With the IC now clean (SP−DP 4.7e-08 at t=0),
+the two codes start together and the port's error grows **≈3× faster during integration**: the
+Fortran goes 2.22e-06 (step 1) → 5.97e-06 (month 1), a factor 2.7; the port now starts near rounding
+and reaches 1.51e-05, a far steeper climb. **So the remaining factor of 3 is in the TIMESTEPPING after
+all — it was simply invisible at 20 steps because the IC error masked it.** A post-fix 20-step
+bisection (job 27383261) is running to pin the growth curve now that the offset is gone.
+
+⚠️ sst and a_ice moved the *wrong* way (1.01 → 1.12, 0.98 → 1.12). One month, one realisation, and
+both variables have moved the wrong way before in this campaign — not a fact, but not dismissable
+either.
+
+**Keep the fix regardless**: it is byte-neutral in FP64, it costs nothing, and an initial condition
+that depends on working precision at 100 points is wrong on its own terms.
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
