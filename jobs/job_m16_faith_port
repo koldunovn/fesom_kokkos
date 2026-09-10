@@ -48,13 +48,21 @@ export FESOM_PRINT_EVERY=320
 # also switches the model to a 365-day year, exactly as include_fleapyear=.false. does on the
 # Fortran side.
 export FESOM_FORCING_SET=${FORCING:-jra55}
+# IC perturbation (src/fesom_perturb.h) — the port's OWN noise ensemble, so its SP-DP departure can
+# be normalised by its own envelope instead of the Fortran's (board §3b-year). PSEED selects the
+# member; PAMP is the gaussian sigma on T in KELVIN and must be C syntax (1e-6), not Fortran (1.D-6).
+# Unset PSEED = no perturbation = the baseline arm.
+if [ -n "${PSEED:-}" ]; then
+    export FESOM_PERTURB=1 FESOM_PERTURB_MODE=initial_only FESOM_PERTURB_METHOD=gaussian
+    export FESOM_PERTURB_SEED="$PSEED" FESOM_PERTURB_TEMP="0,${PAMP:-1e-6}"
+fi
 
 echo "=== M16 faithfulness — port arms (Kokkos Serial) ==="
 echo "runroot : $RUNROOT"
 echo "arms    : $ARMS"
 echo "steps   : $NSTEPS at dt=$DT   (= $((NSTEPS/32)) days at step_per_day 32)"
 echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
-echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}; everything else unset (KPP + standard EVP are the port defaults)"
+echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}${FESOM_PERTURB:+ FESOM_PERTURB=1 seed=$FESOM_PERTURB_SEED T=$FESOM_PERTURB_TEMP}; everything else unset (KPP + standard EVP are the port defaults)"
 echo
 
 for arm in $ARMS; do
@@ -74,6 +82,13 @@ for arm in $ARMS; do
          > "$dir/run.log" 2> "$dir/run.err"
     rc=$?
     echo "rc=$rc  wall=$((SECONDS - t0))s"
+    if [ -n "${PSEED:-}" ]; then
+        if grep -q "PERTURBATION APPLIED" "$dir/run.log" 2>/dev/null; then
+            echo "perturb : FIRED  ($(grep -m1 'applied to' "$dir/run.log" | sed 's/^ *[0-9]*: *//'))"
+        else
+            echo "perturb : !! REQUESTED BUT DID NOT FIRE — this arm is not an ensemble member"
+        fi
+    fi
     grep -ciE "nan|inf" "$dir/run.log" 2>/dev/null | sed 's/^/nan-ish log lines: /'
     ls "$out"/*.nc 2>/dev/null | sed 's|.*/|  out: |'
     tail -3 "$dir/run.err" 2>/dev/null | sed 's/^/  err: /'

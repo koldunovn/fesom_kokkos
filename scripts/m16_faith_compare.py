@@ -155,11 +155,19 @@ def main():
                    if os.path.isdir(os.path.join(runroot, d)))
     arms = {n: os.path.join(runroot, n) for n in names}
     # Two noise families, two questions (see m16_faith_setup.sh AMP):
-    #   fdp_s<seed>  sigma 2e-4 K  -- Suvarchal's amplitude, the climate-variability bar
-    #   fdp_r<seed>  sigma 1e-6 K  -- rounding-scale, the bar that SP should actually match
+    #   *_s<seed>  sigma 2e-4 K  -- Suvarchal's amplitude, the climate-variability bar
+    #   *_r<seed>  sigma 1e-6 K  -- rounding-scale, the bar that SP should actually match
+    # Each CODE has its own ensemble (the port's since 2026-09-10, src/fesom_perturb.*). Normalising
+    # a code's SP-DP departure by ITS OWN envelope is the apples-to-apples comparison: the two DP
+    # trajectories have themselves diverged, so a shared envelope would measure sensitivities about
+    # different trajectories (board §3b-year).
     noise_s = [n for n in names if n.startswith("fdp_s")]
     noise_r = [n for n in names if n.startswith("fdp_r")]
-    noise = noise_s + noise_r
+    pnoise_s = [n for n in names if n.startswith("pdp_s")]
+    pnoise_r = [n for n in names if n.startswith("pdp_r")]
+    # the port's noise arms must be judged against the baseline built from the SAME binary
+    pbase = "pdp_f2" if "pdp_f2" in names else "pdp"
+    noise = noise_s + noise_r + pnoise_s + pnoise_r
 
     print(f"runroot : {runroot}")
     print(f"arms    : {' '.join(names)}")
@@ -192,13 +200,20 @@ def main():
         for k, v in pairs.items():
             print(f"   relL2 SP vs DP  [{k:<7}] {v:.6e}")
 
-        env = {"s": [], "r": []}
+        env  = {"s": [], "r": []}          # fortran
+        penv = {"s": [], "r": []}          # port
         for n in noise:
-            if n in got and "fdp" in got:
-                e = relL2(got[n], got["fdp"], mask)
-                env["s" if n in noise_s else "r"].append(e)
-                amp = "2e-4 K" if n in noise_s else "1e-6 K"
-                print(f"   relL2 noise vs DP [{n}, sigma {amp}] {e:.6e}")
+            base = "fdp" if n.startswith("fdp") else pbase
+            if n in got and base in got:
+                e = relL2(got[n], got[base], mask)
+                is_s = n in noise_s or n in pnoise_s
+                (env if n.startswith("fdp") else penv)["s" if is_s else "r"].append(e)
+                amp = "2e-4 K" if is_s else "1e-6 K"
+                print(f"   relL2 noise vs own DP [{n}, sigma {amp}] {e:.6e}")
+        if pbase in got and "pdp" in got and pbase != "pdp":
+            d = relL2(got[pbase], got["pdp"], mask)
+            print(f"   [check] {pbase} vs pdp (different binaries, both DP): {d:.6e}"
+                  f"  {'BITWISE EQUAL' if d == 0.0 else '<-- NOT byte-neutral'}")
 
         # the two code paths compared against each other, at equal precision. This is the number
         # that decides whether "the port and upstream are the same model" in the only sense a
@@ -217,15 +232,15 @@ def main():
         if "fortran" in pairs and "port" in pairs:
             r = pairs["port"] / pairs["fortran"] if pairs["fortran"] > 0 else float("nan")
             print(f"   RATIO port/fortran SP-DP departure : {r:.4f}")
-            verdict[var] = (pairs, env, r, cross)
+            verdict[var] = (pairs, env, r, cross, penv)
         elif pairs:
-            verdict[var] = (pairs, env, None, cross)
+            verdict[var] = (pairs, env, None, cross, penv)
         print()
 
     if verdict:
         print("=" * 72)
         print("SUMMARY")
-        for var, (pairs, env, r, cross) in verdict.items():
+        for var, (pairs, env, r, cross, penv) in verdict.items():
             line = f"  {var:<6}"
             for k in ("fortran", "port"):
                 if k in pairs:
@@ -236,14 +251,22 @@ def main():
             if "dp" in cross:
                 print(f"         port-vs-fortran at equal precision (DP): {cross['dp']:.3e}")
             for fam, amp in (("r", "1e-6 K"), ("s", "2e-4 K")):
-                if env[fam]:
+                if not env[fam] and not penv[fam]:
+                    continue
+                bits = []
+                if env[fam] and "fortran" in pairs:
                     e = max(env[fam])
-                    items = [(k, pairs[k]) for k in ("fortran", "port") if k in pairs]
-                    if "dp" in cross:
-                        items.append(("code-vs-code", cross["dp"]))
-                    tags = "  ".join(
-                        f"{k} {'ABOVE' if v > e else 'below'}" for k, v in items)
-                    print(f"         FP64 envelope sigma {amp}: {e:.3e}   [{tags}]")
+                    bits.append(f"fortran {pairs['fortran'] / e:5.2f}x own env")
+                if penv[fam] and "port" in pairs:
+                    pe = max(penv[fam])
+                    bits.append(f"port {pairs['port'] / pe:5.2f}x own env")
+                elif env[fam] and "port" in pairs:
+                    e = max(env[fam])
+                    bits.append(f"port {pairs['port'] / e:5.2f}x FORTRAN's env (no port ensemble)")
+                if env[fam] and "dp" in cross:
+                    e = max(env[fam])
+                    bits.append(f"code-vs-code {cross['dp'] / e:5.2f}x")
+                print(f"         sigma {amp}:  " + " | ".join(bits))
         print()
         print("  Read. RATIO near 1 = the port loses as much to single precision as upstream does;")
         print("  that is the G4 statement, and it does not depend on either departure being small.")
@@ -253,6 +276,12 @@ def main():
         print("  family is Suvarchal's climate amplitude -- ~200x larger than SP rounding on a 10 K")
         print("  field, so 'below the 2e-4 envelope' is a generous statement, not a strong one, on")
         print("  a run this short. Over decades the two families converge as both saturate.")
+        print()
+        print("  Each code is now normalised by ITS OWN envelope where one exists. That is the")
+        print("  apples-to-apples form: the two DP trajectories have diverged, so a shared envelope")
+        print("  would compare sensitivities measured about different trajectories. A ratio near or")
+        print("  below 1 means that code's single precision is doing no more than a rounding-sized")
+        print("  nudge does to it.")
         print()
         print("  The code-vs-code line is the strongest claim available: if the port and upstream")
         print("  differ, at the SAME precision, by no more than the model's response to a nudge it")
