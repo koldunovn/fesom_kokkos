@@ -770,6 +770,31 @@ either.
 **Keep the fix regardless**: it is byte-neutral in FP64, it costs nothing, and an initial condition
 that depends on working precision at 100 points is wrong on its own terms.
 
+### 3i-c. The post-fix growth curve — the remaining factor splits cleanly in two
+Post-fix 20-step bisection (job 27383261), salt SP−DP against each code's own DP arm:
+
+| | step 1 | step 20 | month 1 | growth step1→month |
+|---|---|---|---|---|
+| fortran | 2.221e-06 | 2.801e-06 | 5.969e-06 | **2.7×** |
+| port BEFORE the IC fix | 1.077e-05 | 1.093e-05 | 1.652e-05 | 1.5× |
+| **port AFTER the IC fix** | **3.541e-06** | 4.150e-06 | 1.510e-05 | **4.3×** |
+| ratio port/fortran | **1.59** | 1.48 | **2.53** | |
+
+**The IC fix cut the step-1 ratio from 4.85 to 1.59** — that part was real and is now banked. What
+remains factorises almost exactly:
+
+* **≈1.59× is generated in the FIRST TIMESTEP.** With the IC at 4.7e-08 (rounding), the port's
+  3.54e-06 after one step is made *by the step*, against the Fortran's 2.22e-06. Single-step, single
+  precision, same IC — a pure arithmetic difference in the step itself.
+* **≈1.6× more is accumulated over the month** — the port grows 4.3× from step 1 to month 1 where
+  the Fortran grows 2.7×.
+* 1.59 × 1.6 ≈ 2.5, which is the observed month-1 ratio of 2.53.
+
+**This is the sharpest form of the question yet, and it is now cheap to attack:** one timestep, one
+tracer, identical initial conditions, 1.59× more single-precision error. That is bisectable *within*
+the step — the registry's suspect order applies (EOS/pressure-gradient chain first, then the class-3
+flips), and a per-routine dump over a single step separates them without any long integration.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
