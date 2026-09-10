@@ -395,6 +395,49 @@ recurred residual *grows*), and everything outside the solver. The fixture is a 
 SSH stiffness matrix, so its floor *magnitudes* are a stress case and do not predict the real one
 (the real matrix showed ~1.1× rtol); what transfers is the mechanism and its scaling.
 
+## 3e. The port has its own IC perturbation (2026-09-10) — `src/fesom_perturb.{h,cpp}`
+
+§3b-year's limitation was that only the Fortran had `&oce_perturb`, so the port's SP departure had to
+be judged against the *Fortran's* envelope — two sensitivities measured about trajectories that have
+themselves diverged by ~1e-02. The port now has the facility, so each code can be normalised by its
+own envelope.
+
+Knobs (all unset = OFF): `FESOM_PERTURB=1`, `FESOM_PERTURB_MODE=initial_only|first_step`,
+`FESOM_PERTURB_METHOD=gaussian|uniform`, `FESOM_PERTURB_SEED` (**required** when on),
+`FESOM_PERTURB_TEMP="mean,sigma"`, `FESOM_PERTURB_SALT`. Hook is where upstream's is — after the
+tracer IC, **before** the salt anomaly and the ice IC, so the ice cold start sees the perturbed SST
+exactly as upstream does.
+
+**🔴 One deliberate divergence: the port's perturbation is PARTITION-INDEPENDENT; upstream's is not.**
+Upstream seeds the Fortran intrinsic RNG with `perturb_seed + mype + 37*i` and draws one number per
+*local* node, so both seed and draw order depend on the decomposition — the same `perturb_seed` gives
+a different field at a different rank count. The port hashes (seed, **global** node id, tracer)
+through splitmix64, so the field is a property of the seed alone. This is the M13 lesson
+(`ic_extrap_det`, our PR #979): an ensemble whose members cannot be reproduced at another rank count
+is not much of an ensemble.
+
+**A second divergence is unavoidable and worth stating: the port cannot be bit-identical to the
+Fortran here, and neither can the Fortran to itself.** `random_number` is not specified by the
+standard — ifort and gfortran give different sequences from the same seed — so there is no sequence
+to match. What *is* matched is the transform and the statistics: one draw per node applied to every
+wet level of that column (a 2-D field constant in the vertical, as upstream), the same
+Box-Muller/uniform formulae, and upstream's `u1 < 1e-10` clamp.
+
+| check | result |
+|---|---|
+| **G0 byte gate, knob unset** | **BYTE-IDENTICAL to `ref0`, np1 and np2, 21 snapshots each** |
+| reproducible (same seed, rerun) | IC temperature field **identical** |
+| **partition-independent (np1 vs np2, same seed)** | IC temperature field **identical** — the divergence works |
+| it fires | perturbed vs unperturbed max \|Δ\| 4.02e-03 K |
+| amplitude is what was asked | realised σ **1.0223e-03 K** against 1.0e-03 requested (3140 nodes) |
+| ctest, both precisions | 5/5 |
+
+**Refused rather than guessed** (dead-knob discipline): `FESOM_PERTURB=1` without a seed, an
+unrecognised mode or method, and `first_step` **on a restart** — the port's hook sits before the
+restart read, so that combination would perturb a state the restart then overwrites. Upstream
+supports it; the port refuses it loudly instead of silently perturbing nothing. That is the one
+capability gap against `&oce_perturb`.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

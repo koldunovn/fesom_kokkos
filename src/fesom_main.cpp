@@ -30,6 +30,7 @@
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
 #include "fesom_phc.h"
+#include "fesom_perturb.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
 #include "fesom_ssh_se.h"   /* M12: FESOM_SSH_MODE=se knob + startup + free */
@@ -965,6 +966,16 @@ skip_rest_state:
                                /*sigma_deg=*/ 10.0,
                                /*sigma_z=*/  300.0,
                                /*amp_C=*/      5.0);
+    }
+
+    /* IC perturbation (upstream do_perturb, gen_ic3d.F90:743) — HERE, where upstream has it:
+     * after the tracer IC is read, before the salt anomaly and before the ice IC, so the ice
+     * cold start sees the perturbed SST exactly as it does upstream. No-op unless FESOM_PERTURB=1.
+     * The restart flag is read straight from the environment because fesom_restart_config runs
+     * further down and is a pure env parse; moving it would gain nothing. */
+    {
+        const char *rin = getenv("FESOM_RESTART_IN");
+        fesom_perturb_apply(&tracers, &mesh, &mpi, (rin && rin[0]) ? 1 : 0, mpi.mype);
     }
 
     /* M16 D1 (#986 oce_setup_step.F90:255-282): the salinity anomaly conversion — after the PHC

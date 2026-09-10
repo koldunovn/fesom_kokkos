@@ -81,6 +81,7 @@ set(FESOM_CORE_SRC
   src/fesom_tracer_adv.cpp  src/fesom_pp.cpp          src/fesom_step.cpp
   src/fesom_forcing_analytical.cpp                    src/fesom_io.cpp
   src/fesom_constants.cpp   src/fesom_phc.cpp         src/fesom_jra55.cpp
+  src/fesom_perturb.cpp
   src/fesom_bulk.cpp        src/fesom_tracer_diff.cpp src/fesom_sss_runoff.cpp
   src/fesom_partit.cpp      src/fesom_halo.cpp        src/fesom_ice.cpp
   src/fesom_halo_device.cpp src/fesom_profile.cpp   src/fesom_phasestats.cpp
