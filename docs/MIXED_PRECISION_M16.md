@@ -1070,7 +1070,13 @@ their provenance at `port2/m16/oracle_archive/pre-abfix/` (`gate0_ref0` 9.5 G, `
 | pi, np1, all 14 configs | oracle rewritten, **PASS** |
 | pi, np2, all 14 configs | oracle rewritten, **PASS** |
 | production binary vs the NEW baseline, np2, all 14 | **BYTE-IDENTICAL, PASS** |
-| CORE2 np8, all configs | re-basing, job 27392164 |
+| CORE2 np8, all 14 configs | oracle rewritten, **PASS** (27392164, 14 min) |
+| CORE2 production binary vs the NEW baseline, np8, all 14 | **BYTE-IDENTICAL, PASS** (27392407) |
+
+**The re-base is complete and closed.** Both presets, both rank counts, all fourteen configs, oracle
+and verification. `docs/plans/20260902-m16-mixed-precision.md` decision **D9/G0** now reads against
+the post-AB-fix baseline; the pre-fix oracles remain at `oracle_archive/pre-abfix/` with their
+`WHY_ARCHIVED.txt`, so the move is auditable in both directions.
 
 **Its effect on the SP faithfulness metric is small** (1 month, no anomaly): salt 2.53 → **2.43**×
 upstream, temp 1.39 → 1.37, a_ice 1.12 → **0.93**. So the oversized antidiffusive flux was **not**
