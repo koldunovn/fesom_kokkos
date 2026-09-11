@@ -1403,6 +1403,21 @@ failed the whole run at np1. **Verified pre-existing** — the pre-§3v `g2` bin
 identically — so it is a gate artefact, not a regression. `scripts/m16_gate0.sh` now skips it at
 np1 exactly as it skips `evpwlean`; np≥2 still checks it (and it is LIVE there).
 
+#### Bonus: FP64 faithfulness improved too — but from §3s, not §3v
+`port-DP` vs `Fortran-DP`, salt relL2 over month 1 (all four arms against the same Fortran DP run):
+
+| arm | day 1 | day 15 | day 31 |
+|---|---|---|---|
+| `g1`, opt_visc 7 (the historical matrix) | 1.208e-05 | 2.785e-04 | 3.759e-04 |
+| `g1`, opt_visc **5** | 9.354e-06 | 1.657e-04 | **2.005e-04** |
+| `g2` (+ CG `dbl_t`), opt_visc 7 | 1.208e-05 | 2.785e-04 | 3.759e-04 |
+| **`g3`** (+ CG + §3v), opt_visc 5 | 9.353e-06 | 1.657e-04 | **2.006e-04** |
+
+**The double-precision port and the Fortran now agree ~1.9× better — and every bit of that comes
+from §3s, the viscosity-scheme pin.** §3v and the CG promotion move FP64 only at rounding level, as
+designed. Worth stating plainly because it would be easy to credit the wrong change: **§3s bought the
+FP64 agreement, §3v bought the single-precision parity.**
+
 #### What is still divergent, and deliberately so
 - **Order within the diffusion block.** Upstream runs `diff_part_hor_redi` *then*
   `diff_ver_part_redi_expl`; the port runs vertical first. Both now `+=` into `del_ttf`, so the
