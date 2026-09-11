@@ -2071,6 +2071,16 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
      * -0.5(Tup+Tdn)W·area term) → they cancel to a net no-op; reproduced by leaving that
      * level untouched. Every other level is written exactly once → Serial bit-identical. */
     const int ho_dbl = fesom_fct_ho_dbl();
+    if (getenv("FESOM_FCT_TRACE")) {
+        /* §3p: what adv_flux_ver holds JUST BEFORE qr4c subtracts it — this must be the LOW-ORDER
+         * vertical flux. Plus the two mesh areas, to test the alternative explanation that the
+         * codes' area/areasvol are scaled consistently and cancel in the divergence. */
+        sc->adv_flux_ver_fld.sync_host();
+        static int o_lo[2] = {0,0}, o_ar[2] = {0,0}, o_av[2] = {0,0};
+        fct_internal_dump("AFLUXVLO", tr_idx, &o_lo[tr_idx & 1], mesh, partit, sc->adv_flux_ver);
+        fct_internal_dump("AREA",     tr_idx, &o_ar[tr_idx & 1], mesh, partit, mesh->area);
+        fct_internal_dump("AREASVOL", tr_idx, &o_av[tr_idx & 1], mesh, partit, mesh->areasvol);
+    }
     Kokkos::parallel_for("fct_qr4c_v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
         const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;

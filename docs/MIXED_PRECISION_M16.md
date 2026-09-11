@@ -1026,6 +1026,49 @@ flux. Both are single short jobs and one of them is the answer.
 routine takes no tracer index, so "first call" is not "tracer 1". The instrument now counts calls and
 tags `tr0`/`tr1`. The numbers above are the corrected, same-tracer comparison.
 
+### 🔴🔴🔴 3p. A REAL BUG: the port never seeds the Adams-Bashforth history
+Both §3o follow-ups ran and the second one answered it.
+
+**Test 1 — the areas are identical.** `area` and `areasvol` agree between the codes to **1.0000** at
+every level, so the 500–12000× flux-magnitude gap was never a units or scaling artefact.
+
+**Test 2 — the port's `adv_flux_ver` before `qr4c`, versus after.** `|HO − LO| / |LO| = 0.600` at
+**every level**, to three digits. That number is not physical: it is the Adams-Bashforth coefficient.
+
+**The bug.** Upstream seeds the AB history before the first step
+(`oce_setup_step.F90:310`: `tracers%data(n)%valuesold(i,:,:) = tracers%data(n)%values`), so at step 1
+`valuesAB = −(0.5+ε)·valuesold + (1.5+ε)·values = values`. **The port allocates `valuesold`
+zero-initialised and never assigns it**, so at step 1
+
+    valuesAB = 1.6 · values
+
+and every high-order flux built from `valuesAB` is **60 % too large**, making the antidiffusive flux
+`HO − LO = 0.6·LO` instead of the ~1e-04·LO correction it should be.
+
+**Fixed and verified** (`FESOM_AB_INIT_OLD=1`, job 27391185) — the port's antidiffusive flux now
+matches upstream's **exactly**:
+
+| level | port BEFORE | port AFTER | fortran | after/fort | \|HO−LO\|/\|LO\| after |
+|---|---|---|---|---|---|
+| 12 | 1.963e+05 | **2.614e+02** | 2.614e+02 | **1.00** | 8.0e-04 |
+| 24 | 7.464e+05 | **6.874e+02** | 6.874e+02 | **1.00** | 5.5e-04 |
+| 36 | 9.731e+05 | **1.765e+02** | 1.765e+02 | **1.00** | 1.1e-04 |
+| 42 | 7.479e+05 | **6.005e+01** | 6.005e+01 | **1.00** | 4.8e-05 |
+
+⚠️ **This is NOT byte-neutral in FP64** — the same bug is in the double build, so fixing it changes
+FP64 answers and **gate G0 must be re-based against a regenerated `ref0`**. It is therefore **off by
+default** pending that decision; the byte gate was re-run with the knob off and stays BYTE-IDENTICAL.
+
+**Its effect on the SP faithfulness metric is small** (1 month, no anomaly): salt 2.53 → **2.43**×
+upstream, temp 1.39 → 1.37, a_ice 1.12 → **0.93**. So the oversized antidiffusive flux was **not**
+the driver of the SP gap either — the limiter was evidently absorbing most of it, which is why the
+solutions agreed despite a 1000× wrong intermediate. **That is exactly why it went unnoticed: FCT is
+self-limiting, so a grossly wrong antidiffusive flux is clipped back to a plausible answer.**
+
+**But it is a genuine correctness defect and should be fixed on its own merits**, independently of
+precision: the port's first timestep applies a different high-order advection than upstream's, in
+both precisions.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

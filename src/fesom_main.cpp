@@ -982,6 +982,39 @@ skip_rest_state:
      * load + insitu2pot (absolute S), before the ice IC / restart read / AB copies. */
     fesom_salt_anomaly_setup(&tracers, &mesh, mpi.mype);
 
+    /* 🔴 M16 §3p BUG FIX (FESOM_AB_INIT_OLD, default 0 — see below).
+     *
+     * Upstream seeds the Adams-Bashforth history before the first step
+     * (`oce_setup_step.F90:310`:  tracers%data(n)%valuesold(i,:,:) = tracers%data(n)%values),
+     * so at step 1 valuesAB = -(0.5+eps)*valuesold + (1.5+eps)*values = values.
+     *
+     * The port allocates `valuesold` zero-initialised and NEVER assigns it, so at step 1
+     *     valuesAB = 1.6 * values
+     * and every high-order flux built from valuesAB is 60 % too large. Measured directly
+     * (§3o/§3p): the port's raw antidiffusive vertical flux is |HO - LO| = 0.600 * |LO| at EVERY
+     * level — the AB coefficient, exactly — against upstream's small correction, which is why the
+     * port's antidiffusive flux is 500-12000x larger in magnitude than upstream's.
+     *
+     * ⚠️ THIS IS NOT BYTE-NEUTRAL IN FP64. The same bug is present in the double build, so fixing
+     * it changes FP64 answers and gate G0 must be re-based against a regenerated ref0 oracle. It is
+     * therefore OFF by default until that decision is taken; set FESOM_AB_INIT_OLD=1 to enable.
+     * Placed here to match upstream's order: after the salt-anomaly conversion, before the ice IC. */
+    {
+        const char *e = getenv("FESOM_AB_INIT_OLD");
+        if (e && e[0] && strcmp(e, "0") != 0) {
+            const size_t nvals = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
+            for (int k = 0; k < tracers.num_tracers; ++k) {
+                memcpy(tracers.data[k].valuesold, tracers.data[k].values,
+                       nvals * sizeof(real_t));
+                tracers.data[k].valuesold_fld.modify_host();
+                tracers.data[k].valuesold_fld.sync_device();
+            }
+            if (mpi.mype == 0)
+                printf("[fesom_port] AB history seeded: valuesold = values "
+                       "(upstream oce_setup_step.F90:310) — NOT byte-neutral in FP64\n");
+        }
+    }
+
     /* Sea-ice cold-start IC: must run AFTER tracer IC so SST is set.
      * Mirrors Fortran ice_initial_state at ice_setup_step.F90:500-521. */
     fesom_ice_initial_state(&ice, &tracers, &mpi, &mesh);
