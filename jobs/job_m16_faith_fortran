@@ -48,10 +48,15 @@ for arm in $ARMS; do
         ?sp*) prec=sp ;;
         *)    prec=dp ;;
     esac
-    BIN="$ORACLE/$prec/bin/fesom.x"
+    # ORACLE_VARIANT=_instr selects the §3o instrumented build (dumps the raw antidiffusive
+    # vertical flux when FESOM_FCT_TRACE is set). The validated oracle is left untouched.
+    BIN="$ORACLE/$prec${ORACLE_VARIANT:-}/bin/fesom.x"
     [ -x "$BIN" ] || { echo "!! $arm: no binary $BIN"; continue; }
 
-    echo "--- $arm (oracle/$prec, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
+    if [ "${FCTTRACE:-0}" = 1 ]; then
+        mkdir -p "$dir/fct"; export FESOM_FCT_TRACE="$dir/fct"
+    fi
+    echo "--- $arm (oracle/$prec${ORACLE_VARIANT:-}, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
     t0=$SECONDS
     ( cd "$dir" && srun -l --ntasks="${SLURM_NTASKS}" "$BIN" ) \
         > "$dir/run.log" 2> "$dir/run.err"

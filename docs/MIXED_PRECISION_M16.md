@@ -984,6 +984,48 @@ inferring upstream's internals from its output. That is a rebuild of the oracle 
 straightforward — the oracle build recipe is in §0 — and it is the honest next step rather than
 another hypothesis.
 
+### 🔴🔴 3o. THE FORTRAN INSTRUMENTED: same relative error, but the port's antidiffusive flux is 500–12000× LARGER
+`src/oce_adv_tra_ver.F90` in `~/fesom2_sp` now dumps the raw antidiffusive vertical flux in the
+port's binary layout (`FESOM_FCT_TRACE`, first step, tagged `tr0`=T / `tr1`=S). Staged as
+`oracle/{dp,sp}_instr` so the **validated oracle is untouched**; `job_m16_faith_fortran` selects it
+with `ORACLE_VARIANT=_instr`. Salinity, step 1, both codes:
+
+| level | \|flux\| fortran | rel err F | \|flux\| port | rel err P | **mag P/F** | err P/F |
+|---|---|---|---|---|---|---|
+| 6 | 1.274e+02 | 7.89e-03 | 1.028e+05 | 1.04e-02 | **807** | 1.32 |
+| 18 | 7.961e+02 | 1.45e-02 | 4.355e+05 | 1.96e-02 | **547** | 1.35 |
+| 30 | 5.501e+02 | 2.79e-02 | 9.807e+05 | 3.81e-02 | **1783** | 1.37 |
+| 42 | 6.005e+01 | 1.90e-02 | 7.479e+05 | 2.57e-02 | **12455** | 1.35 |
+
+**Two facts, and the second is the lead.**
+
+1. **The relative error is the same in both codes** — 0.94–2.07×, typically ~1.35. So the precision
+   mechanism of §3m/§3n is genuinely *shared*: upstream's antidiffusive flux is just as damaged, in
+   relative terms, as the port's. That closes the question "does upstream avoid the cancellation" —
+   it does not.
+2. 🔴 **The port's antidiffusive flux is 500–12000× LARGER in magnitude, and the ratio grows with
+   depth.** That is far too large to be a precision effect. Since both codes' FP64 solutions agree to
+   ~2e-03, the physics cannot actually differ by that much — so either `area`/`areasvol` are scaled
+   consistently between the two (cancelling in the divergence), or **the port's `adv_flux_ver` does
+   not hold the low-order flux when `qr4c` subtracts it**, in which case the port's "antidiffusive"
+   flux is close to the *full* high-order flux rather than the small `HO − LO` correction.
+
+**Why that would explain the 16–18× final gap.** A hugely oversized raw antidiffusive flux is then
+*clipped by the Zalesak limiter* in most cells, so the port's result becomes governed by the **bounds**
+`tvert_max − LO` — which are exactly the ≈35-psu cancellation — while upstream's raw flux is small
+enough that the limiter rarely binds and its result stays governed by the (relatively cleaner) flux.
+That is consistent with §3l's observation that the port's limiter factors carry 3.4e-04…5.5e-03
+relative error while its bounds carry 3e-05…7e-04: a limiter that binds everywhere transmits them.
+
+**Next: settle the magnitude.** Compare `area`/`areasvol` between the codes at the same node/level,
+and dump the port's `adv_flux_ver` immediately *before* `qr4c` runs to confirm it holds the low-order
+flux. Both are single short jobs and one of them is the answer.
+
+⚠️ **Method correction worth recording:** the first version of this comparison dumped the Fortran's
+**first** `qr4c` call, which is *temperature*, and compared it against the port's *salinity* — the
+routine takes no tracer index, so "first call" is not "tracer 1". The instrument now counts calls and
+tags `tr0`/`tr1`. The numbers above are the corrected, same-tracer comparison.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
