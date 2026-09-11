@@ -1388,7 +1388,20 @@ upstream. §3f's oldest unexplained observation is now explained and gone.
 | pi, np2, 14 configs | oracle rewritten, **PASS** |
 | production binary vs the NEW baseline, np1 + np2 | **BYTE-IDENTICAL, PASS** |
 | CORE2, np8, 14 configs | oracle rewritten, **PASS** (27400103) |
-| CORE2 production binary vs the NEW baseline, np8 | (27400495) |
+| CORE2 production binary vs the NEW baseline, np8 | **BYTE-IDENTICAL, PASS** (27400495) |
+
+**The re-base is complete and closed** — both presets, both rank counts, all fourteen configs,
+oracle and production verification, with the reverted-source provenance proof on top.
+`docs/plans/20260902-m16-mixed-precision.md` decision **D9/G0** now reads against the post-§3v
+baseline.
+
+**Everything else re-checked on the new binaries:** `ctest` **5/5 PASS in both precisions**;
+Gate 3 (knob liveness at SP, `M16_MODE=live`) **PASS at np1 AND np2**, all 14 configs.
+⚠️ One harness fix was needed to get there: `cgpipe` cannot arm at `npes==1` by construction
+(`fesom_ssh.cpp`: *"requested but INACTIVE (npes==1 …)"*), so the live gate scored it DEAD and
+failed the whole run at np1. **Verified pre-existing** — the pre-§3v `g2` binary fails it
+identically — so it is a gate artefact, not a regression. `scripts/m16_gate0.sh` now skips it at
+np1 exactly as it skips `evpwlean`; np≥2 still checks it (and it is LIVE there).
 
 #### What is still divergent, and deliberately so
 - **Order within the diffusion block.** Upstream runs `diff_part_hor_redi` *then*

@@ -104,6 +104,11 @@ run_one() {
   [ -n "${CONFIGS[$c]+x}" ] || { echo "unknown config $c"; return 2; }
   if [ "$c" = det ] && [ "$PRESET" = pi ]; then echo "[$tag/$c np$np] skipped: the det IC fill only runs with a PHC init (core2 preset)"; return 0; fi
   if [ "$c" = evpwlean ] && [ "$np" -lt 2 ]; then echo "[$tag/$c np$np] skipped: the wide halo builds no extended zone at np1 (M9 FATAL by design)"; return 0; fi
+  # cgpipe refuses to arm at npes==1 by construction (fesom_ssh.cpp: "requested but INACTIVE
+  # (npes==1 or FESOM_HOST_HALO=1)"), so M16_MODE=live scored it DEAD and failed the whole gate
+  # at np1 — a harness artefact, not a knob regression (verified 2026-09-11: the pre-§3v binary
+  # fails it identically). Skip it at np1 exactly as evpwlean is skipped; np>=2 still checks it.
+  if [ "$c" = cgpipe ] && [ "$np" -lt 2 ]; then echo "[$tag/$c np$np] skipped: cgpipe cannot arm at npes==1 (needs the 2-ring exchange)"; return 0; fi
   rm -rf "$out"; mkdir -p "$out"
   ( # subshell: knob hygiene per config
     while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_[A-Za-z0-9_]*\)=.*/\1/p')
