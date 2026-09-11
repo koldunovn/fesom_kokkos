@@ -1596,6 +1596,43 @@ immune:** the r2g rotation is per-node and norm-preserving, so relL2(sp, dp) *wi
 exactly frame-invariant. Only the compare script's `port-vs-fortran at equal precision` line is
 frame-contaminated for these two variables and must be ignored.
 
+### 4d-result. The gap does NOT scale with the EVP subcycle count — another null
+Both codes at `evp_rheol_steps = 240` against both at 120 (`faith/evp240`, jobs 27406623–25;
+6 months, `ice_diff = 0` on both sides; both port knobs verified live in the run log):
+
+| | M4 | M5 | M6 |
+|---|---|---|---|
+| `a_ice` ratio, 120 subcycles | 1.32 | 1.48 | **1.80** |
+| `a_ice` ratio, 240 subcycles | 1.18 | 1.34 | **1.62** |
+
+Doubling the recurrence depth made the ratio **fall** ~10 %, not rise. Look at the absolute numbers
+and the reason is clear: at 240 the **Fortran's** SP−DP rose 12 % (1.327e-03 → 1.490e-03) while the
+**port's barely moved** (2.392e-03 → 2.416e-03). **The port's ice SP error is insensitive to the EVP
+configuration** — so whatever generates it is not the subcycle recurrence.
+
+### 4e. Following the forcing out of the EVP
+If the loss is not in the subcycle, it is in what the subcycle is *fed*. The SH signature is the
+constraint: Antarctic ice is in **free drift** (thin, low concentration, weak internal stress), so its
+velocity is set by **wind stress, ocean drag and the SSH gradient** — not by the rheology that
+dominates the landlocked Arctic pack. That is exactly the hemispheric split observed (NH 0.87–1.26,
+SH 2.19–2.20).
+
+**`ssh` checked first — it is elevated but not enough.** The SSH gradient forces the ice momentum
+(`rhs_a`/`rhs_m`, `ice_EVP.F90`:604-619, a faithful transcription in the port). `ssh` was never in the
+faithfulness matrix's variable list, and both codes already write it:
+
+| month | 1 | 6 | 9 | 12 |
+|---|---|---|---|---|
+| `ssh` ratio | 1.06 | **1.31** | **1.32** | 1.15 |
+
+Real but ~1.3, against the ice velocity's 1.6–2.0. It cannot be the whole story.
+
+⏳ **Next: ocean surface velocity** — the drag term `cd_oce_ice·|u_ice − u_w|·ρ₀·inv_mass` feeds on
+`u_w`, and the Southern Ocean is where the surface currents are strongest (the ACC), which is the
+one forcing whose geography matches the NH/SH split. **`u`/`v` have never been in the matrix either**
+— the Fortran's `io_list` does not carry them. `faith/year_uv/{fdp,fsp}` adds `u`, `v` (plus
+`uice`/`vice`) for a year (jobs 27408009/27408010); the port already writes them.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
