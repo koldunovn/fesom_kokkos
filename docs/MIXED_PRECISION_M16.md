@@ -1633,6 +1633,67 @@ one forcing whose geography matches the NH/SH split. **`u`/`v` have never been i
 — the Fortran's `io_list` does not carry them. `faith/year_uv/{fdp,fsp}` adds `u`, `v` (plus
 `uice`/`vice`) for a year (jobs 27408009/27408010); the port already writes them.
 
+### 4e-result. The ocean velocity is the OPPOSITE of the prediction — the port is 2× better
+`faith/year_uv/{fdp,fsp}` (jobs 27408009/27408010) added `u`,`v` to the Fortran's `io_list` for a
+year; the port already writes them. Within-code SP−DP relL2, elements × levels
+(`scratchpad/uvsplit.py`; frame-invariant within a code, see the note above):
+
+| var | month | slice | fortran | port | **ratio** |
+|---|---|---|---|---|---|
+| u | M6 | surface | 6.175e-03 | 4.372e-03 | **0.71** |
+| u | M9 | surface | 2.466e-02 | 9.306e-03 | **0.38** |
+| u | M12 | surface | 7.673e-02 | 4.205e-02 | **0.55** |
+| v | M6 | surface | 1.073e-02 | 8.183e-03 | **0.76** |
+| v | M9 | surface | 4.390e-02 | 1.750e-02 | **0.40** |
+| v | M12 | surface | 1.005e-01 | 6.420e-02 | **0.64** |
+
+**The port's ocean velocity loses HALF what upstream's does.** So the ice velocity gap is not
+inherited from the current the ice drags against — the drag input is *cleaner* in the port. Together
+with `ssh` at 1.3, the whole forcing side is eliminated: the ice momentum error is generated inside
+the ice. (Incidental but worth recording: ocean `u`/`v` were never in the faithfulness matrix, and
+the port is comfortably inside the bar on them.)
+
+### 4f. Where the ice dig stands — characterised, four hypotheses eliminated, NOT solved
+**What is established.**
+1. The gap is **Antarctic** (M12: NH 0.87, SH 2.20) and lives in the pack interior as much as the
+   edge, so it is not a marginal-ice-zone artefact. The comparator was verified first.
+2. It is a **systematic per-step precision loss, not amplification** — the two codes' `a_ice` FP64
+   noise envelopes agree to 0.85–1.1× while the port's SP−DP is 1.9×.
+3. It is carried by **`uice`/`vice` (1.6–2.0)** and **`a_ice` (1.8–2.0)**, much less by `m_ice`/
+   `m_snow` (1.2–1.4).
+4. Both codes' ice SP−DP exceeds their own noise envelope (2.6–4.8× at M6), so this is signal.
+
+**What is eliminated, each by its own measurement — do not retry:**
+
+| hypothesis | verdict |
+|---|---|
+| `ice_diff` mismatch (port 10.0 vs Fortran 0.0) — **a real defect, found and pinned** | **null** (M12 1.96 vs 1.92) |
+| per-subcycle accumulation in the 120-deep EVP recurrence | **null** — 240 subcycles *lowered* the ratio (M6 1.80 → 1.62); the port's absolute error barely moved |
+| SSH-gradient forcing of the ice momentum | ratio only **1.3** |
+| ocean surface velocity (the ACC drag hypothesis) | **refuted, inverted** — the port is **0.38–0.76×**, i.e. 2× better |
+| inherited from the ocean tracers | no — they are at parity (§3v) while `a_ice` is at 1.9 |
+
+**Source audit: faithful throughout.** `stress_tensor`, `stress2rhs`, the implicit drag/Coriolis
+velocity solve, `ice_strength`, `vale`/`dte`/`det1`/`Tevp_inv`, the subcycle order, the SSH-gradient
+`rhs_a`/`rhs_m` assembly, the atmospheric ice stress (and `Cd_atm_ice` = 1.2e-3 on both sides, with
+`AOMIP_drag_coeff=.false.`), the ice initial condition, the ice-FCT low-order solve, and the Hibler
+concentration equation `A += c_melt·min(rh,0)·A/max(h,hmin) + max(rA,0)(1−A)/lid_clo` are all
+one-to-one with the Fortran. Upstream's ice code has **no** explicit-double sites, so the §3r class
+cannot apply. Every `&ice_dyn`/`&ice_therm` parameter matches except the `ice_diff` above.
+**One rounding-level divergence recorded, not pursued:** the port's `zeta = p/max(δ,δ_min)` (one
+divide) against upstream's `delta_inv = 1/max(δ,δ_min)` then `p·delta_inv` — which makes the port
+*more* accurate, and one rounding cannot make a factor 2.
+
+🔴 **The decisive measurement not yet done** is the one that cracked the ocean: instrument **both**
+codes to dump the ice state at matched points of a single step — `a_ice`/`m_ice` at entry, after
+thermodynamics, after FCT advection, and `u_ice`/`v_ice` plus `sigma`/`eps` at chosen subcycles —
+and compare the SP−DP of each stage. §3q/§3u found the Redi defect that way after the same run of
+plausible-but-null hypotheses. The port already has half of it: `FESOM_EVP_DUMP_DIR` writes
+`a_ice`/`m_ice`/`m_snow`/`elevation` at entry, `u_ice`/`v_ice`, and `inv_mass`/`inv_areamass`/
+`rhs_a`/`rhs_m`/`ice_strength`, keyed by global id. The Fortran side needs the same instrument in
+`ice_EVP.F90` and `ice_thermo_oce.F90` — the pattern is the one already used in `oce_adv_tra_ver.F90`
+and `oce_adv_tra_fct.F90`.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
