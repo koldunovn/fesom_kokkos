@@ -1543,6 +1543,52 @@ The port already writes `uice`/`vice`/`m_snow` monthly by default; the Fortran's
 `faith/year_ice/{fdp,fsp}` adds them (jobs 27404993/27404994, 1 year). The port side is `year_g4`,
 already running with the matched `ice_diff`.
 
+**RESULT — the ice VELOCITY carries the gap** (`year_ice` Fortran arms, jobs 27404993/27404994;
+`year_g4` port arms; `scratchpad/icesplit.py`):
+
+| var | M6 | M9 | M12 |
+|---|---|---|---|
+| `a_ice` | 1.80 | 1.90 | **1.96** |
+| **`uice`** | **1.57** | **1.75** | **1.75** |
+| **`vice`** | **1.63** | **1.70** | **1.97** |
+| `m_ice` | 1.26 | 1.33 | 1.41 |
+| `m_snow` | 1.20 | 1.35 | 1.20 |
+
+So it is **not** downstream of the dynamics — `uice`/`vice` are already at 1.6–2.0. Concentration
+tracks the velocity (a_ice has the sharpest gradients and a hard [0,1] bound, so it is the most
+sensitive advected field); the masses lag at 1.2–1.4, partly reset each step by thermodynamics.
+
+🔴 **And it is NOT amplification.** `a_ice` SP−DP against each code's **own** FP64 noise envelope:
+
+| month | fortran envelope | port envelope | port/fortran envelope | SP−DP ratio |
+|---|---|---|---|---|
+| 6 | 4.48–5.18e-04 | 4.99–5.99e-04 | ~1.1 | **1.76** |
+| 9 | 1.11–1.71e-03 | 1.14–1.33e-03 | ~0.9 | **1.93** |
+| 12 | 1.00–1.28e-03 | 0.88–1.05e-03 | ~0.85 | **1.92** |
+
+**The two codes' sea ice is equally sensitive to a rounding-sized nudge** — the port marginally
+*less* so — while the port loses twice as much to single precision. That is the §3u signature
+exactly: a **systematic per-step precision loss**, not a faster-growing trajectory.
+
+**Source audit of the whole EVP: faithful.** `stress_tensor` (strain rates, `delta`, the Hunke
+`det1`/`det2` stress update), `stress2rhs` (the `elem_area·(σ·∇)` scatter and the `inv_areamass`
+normalisation), the per-subcycle implicit drag/Coriolis velocity solve
+(`det = 1/(r_a²+r_b²)`, then multiply), `ice_strength = 0.5·pstar·m̄·exp(-c_pressure(1-ā))`,
+`vale`/`dte`/`det1`, the subcycle order (stress → rhs → velocity → BC → halo), and the ice initial
+condition are all one-to-one with `ice_EVP.F90`. Upstream's ice code has **no** explicit-double
+sites, so the §3r class cannot apply. **One rounding-level divergence found:** the port computes
+`zeta = p/max(δ,δ_min)` (one divide) where upstream computes `delta_inv = 1/max(δ,δ_min)` then
+`zeta = p·delta_inv` (reciprocal then multiply). That makes the port *more* accurate, not less, and
+one rounding cannot produce a factor 2 — recorded, not pursued.
+
+### 4d. Does the gap scale with the EVP subcycle count?
+The subcycle is a **120-deep float recurrence per ice step** (~525 000 per year), so a per-subcycle
+loss is the natural shape for "systematic per-step, in the velocity". The test: run **both** codes
+with `evp_rheol_steps = 240` and see whether the ratio moves. New knob `FESOM_EVP_STEPS` in the port
+(default 120, announced on rank 0; **Gate 0 PASS byte-identical** with it unset), matched by
+`&ice_dyn/evp_rheol_steps` in the Fortran namelist. 6 months, 4 arms
+(`faith/evp240`, jobs 27406623–27406625) — month 6 is where the 120-subcycle ratio reads **1.80**.
+
 ⚠️ **Frame note.** `uice`/`vice` are VECTORS and the two codes write them in different frames — the
 Fortran rotates to geographic at output, the port writes the rotated-grid components
 ([[feedback-ice-mask-averaging]], the trap that twice masqueraded as physics). **This measurement is

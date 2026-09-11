@@ -92,6 +92,18 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->Clim_evp        = 615.0;
     ice->zeta_min        = 4.0e+8;
     ice->evp_rheol_steps = 120;
+    /* §4d: matched to the Fortran's &ice_dyn/evp_rheol_steps. Used to test whether the ice
+     * SP−DP gap scales with the number of EVP subcycles — i.e. whether it is a per-subcycle
+     * accumulation — since the subcycle is a 120-deep float recurrence per ice step. */
+    { const char *e = getenv("FESOM_EVP_STEPS");
+      if (e && e[0]) {
+          ice->evp_rheol_steps = atoi(e);
+          FESOM_CHECK(ice->evp_rheol_steps > 0, "FESOM_EVP_STEPS must be positive");
+          int rank = 0, ini = 0; MPI_Initialized(&ini);
+          if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+          if (rank == 0)
+              printf("[fesom_ice] FESOM_EVP_STEPS = %d (default 120)\n", ice->evp_rheol_steps);
+      } }
     ice->ice_gamma_fct   = 0.5;   /* CORE2 reference NAMELIST value (work_core /
                                    * work_kpp_dump namelist.ice:44); NOT the 0.25 module
                                    * default (MOD_ICE.F90:194). feedback_namelist_over_codedefault. */

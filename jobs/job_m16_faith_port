@@ -56,6 +56,8 @@ export FESOM_VISC_OPT=${VISCOPT:-5}
 # and REFERENCE_RUNS floors stay valid). Until 2026-09-11 nothing pinned it, so the matrix compared
 # two different ice advection operators. Pin it to the Fortran's value; ICEDIFF= overrides.
 export FESOM_ICE_DIFF=${ICEDIFF:-0}
+# §4d: EVPSTEPS must be matched by evp_rheol_steps in the Fortran arm's namelist.ice.
+[ -n "${EVPSTEPS:-}" ] && export FESOM_EVP_STEPS="$EVPSTEPS"
 # DET=1 must be set on BOTH codes or neither -- see scripts/m16_faith_setup.sh. The legacy fill is
 # partition-dependent, so with det off the two codes need not even start from the same field.
 [ "${DET:-0}" = 1 ] && export FESOM_IC_EXTRAP=det
