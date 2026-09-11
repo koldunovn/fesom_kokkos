@@ -1341,6 +1341,63 @@ when `real_t` is float, and only as a slow divergence, and only against the Fort
 production-binary verification) — the same procedure as §3p, and for the same stated reason: the port
 exists to be faithful to upstream.
 
+### ✅🔴 3v. FIXED — the Redi/GM restructuring closes the gap (1.95 → 1.02)
+The §3u mechanism, repaired the way upstream does it. Binary tag **`g3`**.
+
+**What changed** (4 files, no knob — same principle as §3p/§3r):
+1. `fesom_gm.cpp` — `fesom_diff_part_hor_redi_kk`, `fesom_diff_ver_part_redi_expl_kk` (both its
+   array and its `REDISWEEP` variant) and the two host twins now accumulate
+   `rhs*dt/areasvol` into **`tracers->del_ttf`** instead of `rhs*dt/(areasvol*hnode_new)` onto
+   `values`. The `modify_device()` markers follow.
+2. `fesom_tracer_adv.cpp` — the ALE reconstruction (step 10, `fct_ale_recon`) is **split out** of
+   `fesom_tracer_advect_one_fct_kk` into **`fesom_tracer_ale_recon_kk()`**, with a host twin
+   `fesom_tracer_ale_recon()`. The FCT now ends at `del_ttf`.
+3. `fesom_step.cpp` — the reconstruction is called per tracer **after** the `gm` block, so one
+   reconstruction folds advection **and** the explicit Redi terms, exactly as
+   `oce_ale_tracer.F90` does (`diff_tracers_ale` → :775-778).
+4. The two capture-before verify twins follow the data: `FESOM_KK_VERIFY=tradv` and `=gm` now
+   snapshot and diff **`del_ttf`**, not `values`.
+
+**Internal consistency first.** Both verify gates are **bit-identical on Serial** after the
+restructure — `max|Δ| = 0.000e+00` at every step for `fct(tr0)`, `fct(tr1)`, `redi(tr0)`, `redi(tr1)`
+— so the Kokkos kernels and the C twins still agree exactly.
+
+🔴 **The result.** 1 month, daily salt, SP−DP against each code's own DP arm, port/fortran ratio:
+
+| day | 1 | 5 | 9 | 13 | 17 | 21 | 25 | 31 |
+|---|---|---|---|---|---|---|---|---|
+| `g1` (before) | 1.05 | 1.35 | 1.65 | 1.69 | 1.79 | 1.70 | 1.61 | **1.95** |
+| **`g3` (after)** | 0.93 | 0.86 | 1.05 | 1.13 | 1.06 | 1.07 | 0.92 | **1.02** |
+
+**Flat about 1.0 for the whole month, with no trend** — the same shape the GM-off twin (§3u) and the
+#986 anomaly (§3t) produced, now at **absolute salinity with GM/Redi on**, i.e. in the configuration
+the model actually runs. Temperature follows: day-31 ratio 1.465 → **1.120**.
+
+**The mean drift changes sign with it.** Day 31, global mean SP−DP: fortran **+5.15e-06**, port
+**+2.55e-06** — same sign, same order. Before the fix the port drifted **−3.50e-06**, opposite to
+upstream. §3f's oldest unexplained observation is now explained and gone.
+
+20-step bisection (`bisect_20s_g3`): salt ratio 0.925 (step 1) · 0.973 (10) · 1.099 (20).
+
+#### Gate 0 re-based (second time; the first was §3p)
+| step | result |
+|---|---|
+| old oracles archived | `oracle_archive/pre-redifix/` — `gate0_ref0` 9.5 G + `gate0_core2_ref0` 93 G + `WHY_ARCHIVED.txt` |
+| 🔴 **provenance proof** | the same source with **§3v reverted** reproduces the **OLD** `ref0` **byte-identically**, all 14 configs, np1 — so the baseline move is caused by this change alone |
+| pi, np1, 14 configs | oracle rewritten, **PASS** |
+| pi, np2, 14 configs | oracle rewritten, **PASS** |
+| production binary vs the NEW baseline, np1 + np2 | **BYTE-IDENTICAL, PASS** |
+| CORE2, np8, 14 configs | oracle rewritten, **PASS** (27400103) |
+| CORE2 production binary vs the NEW baseline, np8 | (27400495) |
+
+#### What is still divergent, and deliberately so
+- **Order within the diffusion block.** Upstream runs `diff_part_hor_redi` *then*
+  `diff_ver_part_redi_expl`; the port runs vertical first. Both now `+=` into `del_ttf`, so the
+  difference is a rounding order on an *increment* (~1e-12 relative), not on absolute S. Left alone:
+  changing it would be a second, unmeasured move of the baseline.
+- **`FESOM_FCT_ALE_DBL`** stays as the instrument that named the magnitude dependence (§3l). It is a
+  no-op now that the Redi terms no longer touch `values`.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

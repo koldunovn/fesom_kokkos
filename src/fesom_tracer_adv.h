@@ -170,6 +170,24 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
                                     struct fesom_partit      *partit);
 
 /*
+ * 🔴 §3v: the ALE reconstruction, T* = (dt*R_T^n + h^(n-1/2)*T^(n-1/2)) / h^(n+1/2)
+ * (oce_ale_tracer.F90:775-778). It used to be step 10 INSIDE the FCT, which meant the Redi/GM
+ * terms — applied after the FCT — had to be added straight onto `values`, i.e. onto ABSOLUTE
+ * salinity, rounding at float ulp(35) = 2.4e-06 psu once per tracer per step. Upstream folds
+ * advection AND the explicit Redi terms into del_ttf and reconstructs ONCE. Call this per
+ * tracer after every explicit tendency has accumulated into del_ttf and before the implicit
+ * vertical diffusion.
+ */
+void fesom_tracer_ale_recon_kk(int                       tr_idx,
+                               const struct fesom_mesh  *mesh,
+                               struct fesom_tracers     *tracers,
+                               struct fesom_partit      *partit);
+
+/* Host twin of the above (FESOM_KK_VERIFY / the C reference path). */
+void fesom_tracer_ale_recon(int tr_idx, const struct fesom_mesh *mesh,
+                            struct fesom_tracers *tracers);
+
+/*
  * FESOM_KK_VERIFY=tradv gate: capture-before (L26) on `values` + `valuesold` (the
  * FCT read-modifies both). Runs the C twin on the restored inputs and asserts the
  * final `values` is bit-identical on Serial; non-intrusive (restores KK state).

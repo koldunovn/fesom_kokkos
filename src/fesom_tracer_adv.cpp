@@ -1497,9 +1497,16 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
         }
     }
 
-    /* 8. ALE reconstruction. With FCT use_lo=true the math reduces to
-       T_new = LO + limited_antidiff/areasvol/hnode_new — see fesom_tracer_adv.h */
-    ale_reconstruct(mesh, vals, tracers->del_ttf);
+    /* §3v: the ALE reconstruction is NO LONGER part of the FCT — it runs once, after the
+       explicit Redi/GM tendencies have also accumulated into del_ttf. See
+       fesom_tracer_ale_recon() / fesom_tracer_ale_recon_kk(). */
+}
+
+/*--- §3v: host twin of fesom_tracer_ale_recon_kk ----------------------------*/
+void fesom_tracer_ale_recon(int tr_idx, const struct fesom_mesh *mesh,
+                            struct fesom_tracers *tracers)
+{
+    ale_reconstruct(mesh, tracers->data[tr_idx].values, tracers->del_ttf);
 }
 
 /*--- Public entry: one full upwind step for one tracer --------------------*/
@@ -2349,9 +2356,6 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 #endif
             delttf(i) = dth(i) + dtv(i); });
 
-#if defined(FESOM_SINGLE_PRECISION)
-    const int ale_dbl = fesom_fct_ale_dbl();
-#endif
     if (getenv("FESOM_FCT_TRACE")) {   /* §3l: the limiter factors themselves */
         sc->fct_plus_fld.sync_host(); sc->fct_minus_fld.sync_host();
         sc->fct_ttf_max_fld.sync_host();
@@ -2364,15 +2368,47 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         static int o_fv[2] = {0,0};
         fct_internal_dump("AFLUXV", tr_idx, &o_fv[tr_idx & 1], mesh, partit, sc->adv_flux_ver);
     }
+    tracers->del_ttf_fld.modify_device();
+    tracers->data[tr_idx].valuesold_fld.modify_device();
+    /* 🔴 §3v: the ALE reconstruction USED to run here, folding only the advective tendency into
+     * `values`, after which the Redi terms were added straight onto `values` (absolute S).
+     * Upstream folds advection AND the explicit Redi terms into del_ttf and reconstructs ONCE
+     * (oce_ale_tracer.F90: diff_part_hor_redi / diff_ver_part_redi_expl accumulate del_ttf,
+     * then :775-778 reconstructs). The reconstruction now lives in
+     * fesom_tracer_ale_recon_kk(), which fesom_step calls AFTER the gm block. */
+}
+
+/*--- §3v: the ALE reconstruction, split out of the FCT ------------------------
+ * T* = (dt*R_T^n + h^(n-1/2)*T^(n-1/2)) / h^(n+1/2)  —  oce_ale_tracer.F90:775-778.
+ * Must be called once per tracer AFTER every explicit tendency (advection + Redi/GM) has
+ * accumulated into del_ttf, and BEFORE the implicit vertical diffusion.
+ * M5.21 flat lever: one thread per (node,LEVEL). All reads/writes at the SAME level
+ * (delttf[k], vals[k]); the vals write uses the just-updated delttf[k] → each (n,nz)
+ * independent, bit-identical. */
+void fesom_tracer_ale_recon_kk(int                       tr_idx,
+                               const struct fesom_mesh  *mesh,
+                               struct fesom_tracers     *tracers,
+                               struct fesom_partit      *partit)
+{
+    const int nl    = mesh->nl;
+    const int myDim = mesh->myDim_nod2D;
+    auto delttf     = tracers->del_ttf_fld.d();
+    auto vals       = tracers->data[tr_idx].values_fld.d();
+    auto hnode      = mesh->hnode_fld.d();
+    auto hnode_new  = mesh->hnode_new_fld.d();
+    auto ulev_n     = mesh->ulevels_nod2D_fld.d();
+    auto nlev_n     = mesh->nlevels_nod2D_fld.d();
+#if defined(FESOM_SINGLE_PRECISION)
+    const int ale_dbl = fesom_fct_ale_dbl();
+#endif
+    using RP = Kokkos::RangePolicy<Kokkos::IndexType<size_t>>;
+
     if (getenv("FESOM_FCT_TRACE")) {   /* §3l: del_ttf BEFORE the ALE term, to split flux vs ALE */
         tracers->del_ttf_fld.sync_host();
         static int o_d9[2] = {0,0};
         fct_internal_dump("DELTTF9", tr_idx, &o_d9[tr_idx & 1], mesh, partit, tracers->del_ttf);
     }
-    /* ===== 10. ALE reconstruction (T_new = LO + limited antidiff) ===== */
-    /* M5.21 flat lever: one thread per (node,LEVEL). All reads/writes at the SAME level
-     * (delttf[k], vals[k]); the vals write uses the just-updated delttf[k] → each (n,nz)
-     * independent, bit-identical. */
+
     Kokkos::parallel_for("fct_ale_recon", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
         const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
@@ -2382,11 +2418,9 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 #if defined(FESOM_SINGLE_PRECISION)
         if (ale_dbl) {
             /* M16 §3l: `vals*(hnode_old-hn_new)` is proportional to the ABSOLUTE tracer (S ~ 35),
-             * while del_ttf is the increment. Adding the first to the second in float discards the
-             * increment's low bits — the loss scales with |S|, which is why the #986 anomaly buys
-             * the port 3.19x here and upstream only 1.22x. Keeping this one accumulation in dbl_t
-             * costs nothing on the state (it is still stored real_t) and removes the magnitude
-             * dependence. FP64 is unaffected: dbl_t == real_t there. */
+             * while del_ttf is the increment. Measured a no-op once §3v moved the Redi terms out
+             * of `values`; kept as the instrument that named the magnitude dependence.
+             * FP64 is unaffected: dbl_t == real_t there. */
             const dbl_t acc = (dbl_t)delttf(k)
                             + (dbl_t)vals(k) * ((dbl_t)hnode_old - (dbl_t)hn_new);
             delttf(k) = (real_t)acc;
@@ -2399,8 +2433,8 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         }
     });
 
+    tracers->del_ttf_fld.modify_device();
     tracers->data[tr_idx].values_fld.modify_device();
-    tracers->data[tr_idx].valuesold_fld.modify_device();
 
     if (getenv("FESOM_FCT_TRACE")) {
         tracers->del_ttf_fld.sync_host();
@@ -2429,22 +2463,28 @@ void fesom_tracer_fct_verify(fesom_tracer_adv_scratch *sc, int tr_idx,
     (void)partit;
     const int nl = mesh->nl;
     const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
+    /* §3v: the FCT's output is now del_ttf (the ALE reconstruction moved out), so the diff
+     * is taken on del_ttf. `values` is still restored/captured because init_AB rewrites
+     * valuesold from it and the C twin must see the same inputs. */
     real_t *vals = tracers->data[tr_idx].values;
     real_t *vold = tracers->data[tr_idx].valuesold;
-    std::vector<real_t> kk_v(vals, vals + total);          /* KK final values */
+    real_t *dtf  = tracers->del_ttf;
+    std::vector<real_t> kk_v(vals, vals + total);          /* KK values (untouched by FCT now) */
     std::vector<real_t> kk_vo(vold, vold + total);         /* KK valuesold (= pre_values) */
+    std::vector<real_t> kk_d(dtf, dtf + total);            /* KK del_ttf — the FCT result */
     std::copy(pre_values.begin(),    pre_values.end(),    vals);   /* restore FCT inputs */
     std::copy(pre_valuesold.begin(), pre_valuesold.end(), vold);
     fesom_tracer_advect_one_fct(sc, tr_idx, mesh, dyn, tracers);    /* C twin (uses sc->partit) */
     double d = 0.0;
     for (size_t i = 0; i < total; ++i) {
-        double dd = std::fabs((double)kk_v[i] - (double)vals[i]);
+        double dd = std::fabs((double)kk_d[i] - (double)dtf[i]);
         if (dd > d) d = dd;
     }
     std::copy(kk_v.begin(),  kk_v.end(),  vals);           /* restore KK production state */
     std::copy(kk_vo.begin(), kk_vo.end(), vold);
+    std::copy(kk_d.begin(),  kk_d.end(),  dtf);
     const std::string backend = Kokkos::DefaultExecutionSpace::name();
-    std::printf("[FESOM_KK_VERIFY=tradv] step %d backend=%s  max|Δ|: fct(tr%d) values=%.3e\n",
+    std::printf("[FESOM_KK_VERIFY=tradv] step %d backend=%s  max|Δ|: fct(tr%d) del_ttf=%.3e\n",
                 step_n, backend.c_str(), tr_idx, d);
     std::fflush(stdout);
     if (backend == "Serial" && d != 0.0) {

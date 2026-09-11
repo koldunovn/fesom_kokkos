@@ -660,7 +660,7 @@ void fesom_diff_ver_part_redi_expl(int                          tr_idx,
      * (oce_ale_tracer.F90:394 → 468-471). The C port has reconstruct
      * already done — apply the Redi contribution directly to `values`
      * with the same `/hnode_new` factor that reconstruct would have. */
-    real_t *vals    = tracers->data[tr_idx].values;        /* [N * nl] */
+    real_t *delttf  = tracers->del_ttf;                    /* §3v: Redi accumulates HERE */
 
     /* ---- Step 1: tr_xy = ∇_h(valsAB) per element ------------ */
     /* Bounds: Fortran allocates and fills tr_xy for full element halo
@@ -765,15 +765,13 @@ void fesom_diff_ver_part_redi_expl(int                          tr_idx,
             vd_flux[nz] = (up + dn) / mid * a_int;
         }
 
-        /* 2d. T += (vd_flux[nz] - vd_flux[nz+1]) * dt / (areasvol*hnode_new)
-         * Fortran 1163-1165 writes to del_ttf; reconstruct (468-471) then
-         * does T += del_ttf/hnode_new. Composed: same as the line below. */
+        /* 2d. del_ttf += (vd_flux[nz] - vd_flux[nz+1]) * dt / areasvol  (§3v) */
         for (int nz = ule; nz < nle; ++nz) {
             real_t av = mesh->areasvol[(size_t)n * nl + nz];
             real_t hn = mesh->hnode_new[(size_t)n * nl + nz];
             if (av > 0.0 && hn > 0.0) {
-                vals[(size_t)n * nl + nz] +=
-                    (vd_flux[nz] - vd_flux[nz + 1]) * dt / (av * hn);
+                delttf[(size_t)n * nl + nz] +=
+                    (vd_flux[nz] - vd_flux[nz + 1]) * dt / av;
             }
         }
     }
@@ -829,7 +827,7 @@ void fesom_diff_part_hor_redi(int                          tr_idx,
     const real_t isredi = 1.0;
 
     real_t *valsold = tracers->data[tr_idx].valuesold;
-    real_t *vals    = tracers->data[tr_idx].values;
+    real_t *delttf  = tracers->del_ttf;                    /* §3v */
     real_t *txy     = gm->tr_xy;            /* [E_full * (nl-1) * 2] — built by G7a */
     real_t *trz     = gm->tr_z;             /* [N * nl] */
     const real_t *st = gm->slope_tapered;   /* [N * (nl-1) * 3] */
@@ -1000,12 +998,12 @@ void fesom_diff_part_hor_redi(int                          tr_idx,
             real_t hn1 = mesh->hnode_new[(size_t)e1 * nl + nz];
             real_t av1 = mesh->areasvol [(size_t)e1 * nl + nz];
             if (av1 > 0.0 && hn1 > 0.0) {
-                vals[(size_t)e1 * nl + nz] += rhs1[nz] * dt / (av1 * hn1);
+                delttf[(size_t)e1 * nl + nz] += rhs1[nz] * dt / av1;     /* §3v */
             }
             real_t hn2 = mesh->hnode_new[(size_t)e2 * nl + nz];
             real_t av2 = mesh->areasvol [(size_t)e2 * nl + nz];
             if (av2 > 0.0 && hn2 > 0.0) {
-                vals[(size_t)e2 * nl + nz] += rhs2[nz] * dt / (av2 * hn2);
+                delttf[(size_t)e2 * nl + nz] += rhs2[nz] * dt / av2;     /* §3v */
             }
         }
     }
@@ -1820,6 +1818,7 @@ static void fesom_gm_redi_ver_node_sweep(int                      tr_idx,
     const real_t dt    = (real_t)FESOM_PHASE1_DT;
 
     auto vals     = tracers->data[tr_idx].values_fld.d();
+    auto delttf   = tracers->del_ttf_fld.d();              /* §3v */
     auto txy      = gm->tr_xy_fld.d();
     auto st       = gm->slope_tapered_fld.d();
     auto Ki       = gm->Ki_fld.d();
@@ -1900,12 +1899,12 @@ static void fesom_gm_redi_ver_node_sweep(int                      tr_idx,
                 real_t a_int = area((size_t)n * nl + nz);
                 real_t flux_cur = (up + dn) / mid * a_int;
 
-                /* apply at nz (order-free across nz, see banner point 4) */
+                /* apply at nz (order-free across nz, see banner point 4) — §3v: into del_ttf */
                 real_t av = areasvol((size_t)n * nl + nz);
                 real_t hn = hnode_new((size_t)n * nl + nz);
                 if (av > 0.0 && hn > 0.0) {
-                    vals((size_t)n * nl + nz) +=
-                        (flux_cur - flux_below) * dt / (av * hn);
+                    delttf((size_t)n * nl + nz) +=
+                        (flux_cur - flux_below) * dt / av;
                 }
 
                 /* roll the carried state one level up */
@@ -1949,6 +1948,7 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
 
     auto valsold  = tracers->data[tr_idx].valuesold_fld.d();
     auto vals     = tracers->data[tr_idx].values_fld.d();
+    auto delttf   = tracers->del_ttf_fld.d();              /* §3v */
     auto txy      = gm->tr_xy_fld.d();
     auto st       = gm->slope_tapered_fld.d();
     auto Ki       = gm->Ki_fld.d();
@@ -2005,7 +2005,7 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
     static int s_redisweep = -1;
     if (fesom_speed_on_exp("REDISWEEP", &s_redisweep)) {
         fesom_gm_redi_ver_node_sweep(tr_idx, gm, mesh, tracers);
-        tracers->data[tr_idx].values_fld.modify_device();
+        tracers->del_ttf_fld.modify_device();         /* §3v: del_ttf, not values */
         return;
     }
     Kokkos::parallel_for("fesom_gm_redi_ver_node", Kokkos::RangePolicy<>(0, myDim),
@@ -2063,13 +2063,13 @@ void fesom_diff_ver_part_redi_expl_kk(int                      tr_idx,
                 real_t av = areasvol((size_t)n * nl + nz);
                 real_t hn = hnode_new((size_t)n * nl + nz);
                 if (av > 0.0 && hn > 0.0) {
-                    vals((size_t)n * nl + nz) +=
-                        (vd_flux[nz] - vd_flux[nz + 1]) * dt / (av * hn);
+                    delttf((size_t)n * nl + nz) +=
+                        (vd_flux[nz] - vd_flux[nz + 1]) * dt / av;
                 }
             }
         });
 
-    tracers->data[tr_idx].values_fld.modify_device();
+    tracers->del_ttf_fld.modify_device();            /* §3v: del_ttf, not values */
 }
 
 /*--- diff_part_hor_redi — DEVICE (substep 13) -------------------------------
@@ -2094,6 +2094,7 @@ void fesom_diff_part_hor_redi_kk(int                      tr_idx,
 
     auto valsold  = tracers->data[tr_idx].valuesold_fld.d();
     auto vals     = tracers->data[tr_idx].values_fld.d();
+    auto delttf   = tracers->del_ttf_fld.d();              /* §3v */
     auto txy      = gm->tr_xy_fld.d();
     auto trz      = gm->tr_z_fld.d();
     auto st       = gm->slope_tapered_fld.d();
@@ -2266,22 +2267,22 @@ void fesom_diff_part_hor_redi_kk(int                      tr_idx,
                 real_t hn1 = hnode_new((size_t)e1 * nl + nz);
                 real_t av1 = areasvol ((size_t)e1 * nl + nz);
                 if (av1 > 0.0 && hn1 > 0.0) {
-                    Kokkos::atomic_add(&vals((size_t)e1 * nl + nz), rhs1[nz] * dt / (av1 * hn1));
+                    Kokkos::atomic_add(&delttf((size_t)e1 * nl + nz), rhs1[nz] * dt / av1);  /* §3v */
                 }
                 real_t hn2 = hnode_new((size_t)e2 * nl + nz);
                 real_t av2 = areasvol ((size_t)e2 * nl + nz);
                 if (av2 > 0.0 && hn2 > 0.0) {
-                    Kokkos::atomic_add(&vals((size_t)e2 * nl + nz), rhs2[nz] * dt / (av2 * hn2));
+                    Kokkos::atomic_add(&delttf((size_t)e2 * nl + nz), rhs2[nz] * dt / av2);  /* §3v */
                 }
             }
         });
 
-    tracers->data[tr_idx].values_fld.modify_device();
+    tracers->del_ttf_fld.modify_device();             /* §3v: del_ttf, not values */
 }
 
 /*--- FESOM_KK_VERIFY=gm gate for the combined Redi (diff_ver + diff_hor) -----
- * `values` is read-modify-write (the Redi += onto the post-FCT field), so this is
- * the L26 capture-before: the DRIVER snapshots the post-FCT `values` (pre-Redi)
+ * §3v: the Redi terms are read-modify-write on **del_ttf** now, not on `values`, so this
+ * is the L26 capture-before of DEL_TTF: the DRIVER snapshots the post-FCT del_ttf (pre-Redi)
  * and passes it here. Restore it, run BOTH C twins in order (diff_ver rebuilds
  * tr_xy, diff_hor reads it), diff vs the KK result, restore KK. Non-intrusive. */
 void fesom_gm_redi_verify(int tr_idx, fesom_gm *gm, const struct fesom_aux *aux,
@@ -2291,14 +2292,14 @@ void fesom_gm_redi_verify(int tr_idx, fesom_gm *gm, const struct fesom_aux *aux,
 {
     const int nl = mesh->nl;
     const size_t total = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * (size_t)nl;
-    real_t *vals = tracers->data[tr_idx].values;
-    std::vector<real_t> kk(vals, vals + total);                 /* KK Redi result */
-    std::copy(pre_redi.begin(), pre_redi.end(), vals);          /* restore post-FCT (pre-Redi) */
+    real_t *dtf = tracers->del_ttf;                             /* §3v */
+    std::vector<real_t> kk(dtf, dtf + total);                   /* KK Redi result */
+    std::copy(pre_redi.begin(), pre_redi.end(), dtf);           /* restore post-FCT (pre-Redi) */
     fesom_diff_ver_part_redi_expl(tr_idx, gm, aux, mesh, tracers, partit);   /* C twin */
     fesom_diff_part_hor_redi    (tr_idx, gm, aux, mesh, tracers, partit);    /* C twin */
-    double d = fesom_gm_maxdiff_(kk, vals, total);
-    std::copy(kk.begin(), kk.end(), vals);                      /* restore KK */
-    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: redi(tr%d) values=%.3e\n",
+    double d = fesom_gm_maxdiff_(kk, dtf, total);
+    std::copy(kk.begin(), kk.end(), dtf);                       /* restore KK */
+    std::printf("[FESOM_KK_VERIFY=gm] step %d backend=%s  max|Δ|: redi(tr%d) del_ttf=%.3e\n",
                 step_n, std::string(Kokkos::DefaultExecutionSpace::name()).c_str(), tr_idx, d);
     fesom_gm_verify_report_(step_n, "redi", d);
 }

@@ -1477,13 +1477,16 @@ int fesom_timestep(int                          step_n,
         if (gm) {
             /* M5.13g1-T (FIX): T values + valuesold both device-resident from FCT - no Redi IN re-push. */
             std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi) */
-            if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_T].values,
-                                             tracers->data[FESOM_TRACER_T].values + (size_t)N_redi * nl);
+            if (s_verify_gm) redi_pre.assign(tracers->del_ttf,          /* §3v: del_ttf, not values */
+                                             tracers->del_ttf + (size_t)N_redi * nl);
             fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_T, gm, mesh, tracers, p);
             fesom_diff_part_hor_redi_kk     (FESOM_TRACER_T, gm, mesh, tracers, p);
             /* M5.13g1-T: T values device-resident - no Redi OUT sync_host (device-halo'd below). */
             if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_T, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
+        /* 🔴 §3v: ONE ALE reconstruction, after advection AND the explicit Redi/GM tendencies
+         * have accumulated into del_ttf — oce_ale_tracer.F90:775-778. */
+        fesom_tracer_ale_recon_kk(FESOM_TRACER_T, mesh, tracers, p);
         fesom_halo_field(tracers->data[FESOM_TRACER_T].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.13g1-T device-halo (T values) */
 
         /* ---- S ---- */
@@ -1514,13 +1517,15 @@ int fesom_timestep(int                          step_n,
         if (gm) {
             /* M5.14 (S flip): S values + valuesold both device-resident from FCT - no Redi IN re-push. */
             std::vector<real_t> redi_pre;     /* L26 capture-before (post-FCT, pre-Redi; Serial host==device) */
-            if (s_verify_gm) redi_pre.assign(tracers->data[FESOM_TRACER_S].values,
-                                             tracers->data[FESOM_TRACER_S].values + (size_t)N_redi * nl);
+            if (s_verify_gm) redi_pre.assign(tracers->del_ttf,          /* §3v: del_ttf, not values */
+                                             tracers->del_ttf + (size_t)N_redi * nl);
             fesom_diff_ver_part_redi_expl_kk(FESOM_TRACER_S, gm, mesh, tracers, p);
             fesom_diff_part_hor_redi_kk     (FESOM_TRACER_S, gm, mesh, tracers, p);
             /* M5.14 (S flip): S values device-resident - no Redi OUT sync_host (device-halo'd below). */
             if (s_verify_gm) fesom_gm_redi_verify(FESOM_TRACER_S, gm, aux, mesh, tracers, p, step_n, redi_pre);
         }
+        /* 🔴 §3v: see the T branch — one reconstruction, after every explicit tendency. */
+        fesom_tracer_ale_recon_kk(FESOM_TRACER_S, mesh, tracers, p);
         fesom_halo_field(tracers->data[FESOM_TRACER_S].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (S flip) device-halo (S values) */
     }
 
