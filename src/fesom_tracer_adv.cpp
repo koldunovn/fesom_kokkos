@@ -107,6 +107,28 @@ void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
     *sc = fesom_tracer_adv_scratch{};
 }
 
+/* M16 §3n: form the antidiffusive flux difference HO - LO in dbl_t (default 1). At SP the two
+ * fluxes are proportional to the ABSOLUTE tracer and nearly equal, so rounding HO to float before
+ * the subtraction destroys the small difference that survives. In an FP64 build dbl_t == real_t, so
+ * this is a no-op there and the byte gate is untouched. 0 restores the legacy float subtraction. */
+static int fesom_fct_ho_dbl(void)
+{
+#if defined(FESOM_SINGLE_PRECISION)
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("FESOM_FCT_HO_DBL");
+        cached = (e && e[0]) ? atoi(e) : 0;   /* §3n: MEASURED BIT-IDENTICAL — off by default */
+        int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+        if (rk == 0)
+            printf("[fesom_port] FCT antidiffusive flux HO-LO formed in: %s\n",
+                   cached ? "dbl_t" : "real_t (legacy)");
+    }
+    return cached;
+#else
+    return 0;      /* FP64: real_t IS double; the legacy path is already exact-as-possible */
+#endif
+}
+
 #if defined(FESOM_SINGLE_PRECISION)
 /* M16 §3l: accumulate the FCT tracer increment (del_ttf) in dbl_t (default 1). See the header. */
 static int fesom_fct_inc_dbl(void)
@@ -2048,6 +2070,7 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
      * writes BOTH hit level nzmin+1 (the 2nd reading the 1st's result with the SAME
      * -0.5(Tup+Tdn)W·area term) → they cancel to a net no-op; reproduced by leaving that
      * level untouched. Every other level is written exactly once → Serial bit-identical. */
+    const int ho_dbl = fesom_fct_ho_dbl();
     Kokkos::parallel_for("fct_qr4c_v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
         const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nzmin = ulev_n(n)-1, nzmax = nlev_n(n)-1;
@@ -2058,15 +2081,24 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         if (nzmax - nzmin == 2 && nz == nzmin+1) {
             return;                                             /* 2nd-layer ∘ bottom-1 cancel → net no-op */
         } else if (nz == nzmin) {                               /* surface */
-            aflux_v(k) = -valsAB(k) * Wfull(k) * area(k) - aflux_v(k);   /* M7-wsplit: HO = full w (F90:315) */
+            /* 🔴 M16 §3n: form HO and subtract the LO flux in dbl_t. The two are proportional to the
+             * ABSOLUTE tracer (~35 psu) and agree to ~1 part in 1e5-1e6 in the smooth interior, so
+             * rounding HO to float BEFORE the subtraction costs |HO|*eps — which, relative to the
+             * small difference that survives, is percent-level. Upstream writes the same line as a
+             * single Fortran expression, which ifort may contract into an FMA and thereby round
+             * once instead of twice. Doing the subtraction in dbl_t makes that explicit and
+             * compiler-independent. FP64 is unaffected: dbl_t == real_t there. */
+            aflux_v(k) = ho_dbl
+                ? (real_t)(-(dbl_t)valsAB(k)*(dbl_t)Wfull(k)*(dbl_t)area(k) - (dbl_t)aflux_v(k))
+                : (-valsAB(k) * Wfull(k) * area(k) - aflux_v(k));
         } else if (nz == nzmax) {                               /* bottom */
             aflux_v(k) = 0.0 - aflux_v(k);
-        } else if (nz == nzmin+1) {                             /* 2nd layer (nzmax-nzmin>=3) */
+        } else if (nz == nzmin+1 || nz == nzmax-1) {            /* 2nd layer / bottom-1 */
             real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-            aflux_v(k) = -0.5*(Tup+Tdn) * Wfull(k) * area(k) - aflux_v(k);
-        } else if (nz == nzmax-1) {                             /* bottom-1 (nzmax-nzmin>=3) */
-            real_t Tup = valsAB((size_t)n*nl+(nz-1)), Tdn = valsAB((size_t)n*nl+nz);
-            aflux_v(k) = -0.5*(Tup+Tdn) * Wfull(k) * area(k) - aflux_v(k);
+            aflux_v(k) = ho_dbl
+                ? (real_t)(-0.5*((dbl_t)Tup+(dbl_t)Tdn)*(dbl_t)Wfull(k)*(dbl_t)area(k)
+                           - (dbl_t)aflux_v(k))
+                : (-0.5*(Tup+Tdn) * Wfull(k) * area(k) - aflux_v(k));
         } else {                                                /* interior 4th-order quadratic */
             real_t Z_um1 = Z3d(FESOM_NODE3D(n, nz-1, nl)), Z_u   = Z3d(FESOM_NODE3D(n, nz,   nl));
             real_t Z_dn  = Z3d(FESOM_NODE3D(n, nz+1, nl)), Z_um2 = Z3d(FESOM_NODE3D(n, nz-2, nl));
@@ -2081,8 +2113,15 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             real_t w_iface = Wfull((size_t)n*nl+nz), aw = Kokkos::fabs(w_iface);   /* M7-wsplit: full w */
             real_t Tmean = (w_iface + aw)*Tmean1 + (w_iface - aw)*Tmean2;
             real_t a = area((size_t)n*nl+nz);
-            real_t hi = (-0.5*(1.0 - num_ord)*Tmean - num_ord*0.5*(Tmean1 + Tmean2)*w_iface) * a;
-            aflux_v((size_t)n*nl+nz) = hi - aflux_v((size_t)n*nl+nz);
+            if (ho_dbl) {
+                const dbl_t hi = (-0.5*(1.0 - (dbl_t)num_ord)*(dbl_t)Tmean
+                                  - (dbl_t)num_ord*0.5*((dbl_t)Tmean1 + (dbl_t)Tmean2)
+                                    *(dbl_t)w_iface) * (dbl_t)a;
+                aflux_v((size_t)n*nl+nz) = (real_t)(hi - (dbl_t)aflux_v((size_t)n*nl+nz));
+            } else {
+                real_t hi = (-0.5*(1.0 - num_ord)*Tmean - num_ord*0.5*(Tmean1 + Tmean2)*w_iface) * a;
+                aflux_v((size_t)n*nl+nz) = hi - aflux_v((size_t)n*nl+nz);
+            }
         }
     });
 

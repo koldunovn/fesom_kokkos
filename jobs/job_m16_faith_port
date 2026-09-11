@@ -54,6 +54,7 @@ export FESOM_FORCING_SET=${FORCING:-jra55}
 [ -n "${FLUXFORM:-}" ] && export FESOM_FCT_LO_FLUXFORM="$FLUXFORM"
 [ -n "${ALEDBL:-}" ] && export FESOM_FCT_ALE_DBL="$ALEDBL"
 [ -n "${INCDBL:-}" ] && export FESOM_FCT_INC_DBL="$INCDBL"
+[ -n "${HODBL:-}" ] && export FESOM_FCT_HO_DBL="$HODBL"
 # IOCFG=<path> selects an output-stream override file (default: compiled-in monthly-only). Needed for
 # short-horizon runs, where a monthly stream never flushes and the run produces no comparable output.
 [ -n "${IOCFG:-}" ] && export FESOM_IO_CONFIG="$IOCFG"

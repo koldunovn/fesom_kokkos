@@ -949,6 +949,41 @@ narrow to the flux expressions themselves — the port's `adv_tra_ver_qr4c`/`adv
 upstream's — and specifically to how many float operations each performs on ≈35-sized values before
 the subtraction. That is the next and, on this evidence, last place to look.
 
+### 3n. The subtraction is NOT the loss — the error is inherited from the flux computations
+§3m's candidate was that the port rounds `HO` to float into an explicit temporary immediately before
+subtracting `LO`, where upstream writes one Fortran expression that ifort can contract into an FMA.
+Implemented (`FESOM_FCT_HO_DBL`: form the whole `HO − LO` in `dbl_t`, all four branches of
+`fct_qr4c_v`) and measured — **bit-for-bit identical, at every level**:
+
+| level | legacy float | `HO−LO` in `dbl_t` | gain |
+|---|---|---|---|
+| 12 | 1.345e-02 | 1.345e-02 | **1.0×** |
+| 30 | 3.812e-02 | 3.812e-02 | **1.0×** |
+| final salinity, all levels | — | — | **1.0×** |
+
+Default flipped to **0**. That null is informative rather than disappointing: **the 1–4 % is already
+present in `HO` and in `LO` before they meet.** Each flux is computed from a **float tracer of
+magnitude ≈35**, so each carries an absolute error ≈ |flux|·6e-08; their difference is ~1e-06 of
+|flux|, so the inherited error is ~6e-08·1e+06 ≈ **6 % relative** — which is what is measured. No
+arithmetic performed *at* the subtraction can recover it, exactly as widening the accumulators could
+not (§3l).
+
+**So the chain is closed on the mechanism side:** the only lever is the tracer's magnitude when the
+flux is formed. `HO(T+c) − LO(T+c) = HO(T) − LO(T)` because both schemes are exact for constants, so
+computing the FCT fluxes from `T − T_ref` is mathematically identical and ~35× more accurate for
+salinity. **#986 is that shift, applied globally — which is why it delivers parity (§3k) and why it
+is the right setting for SP rather than a workaround.** Generalising it *inside* FCT would make it
+unconditional and extend it to temperature.
+
+⚠️ **What remains genuinely unexplained.** Upstream computes its fluxes from a float tracer of the
+same magnitude, so it should inherit the same ~6 % — yet its salinity error sits **at** the float
+floor (~2e-06 psu) at depth where the port is 16–18× above it. Every shared-mechanism explanation
+now fails to account for that asymmetry, and the remaining way to settle it is to **instrument the
+Fortran** (`oce_adv_tra_ver.F90`) and dump its antidiffusive flux for the same step, rather than
+inferring upstream's internals from its output. That is a rebuild of the oracle with a dump, which is
+straightforward — the oracle build recipe is in §0 — and it is the honest next step rather than
+another hypothesis.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
