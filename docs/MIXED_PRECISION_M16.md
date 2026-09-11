@@ -1055,9 +1055,22 @@ matches upstream's **exactly**:
 | 36 | 9.731e+05 | **1.765e+02** | 1.765e+02 | **1.00** | 1.1e-04 |
 | 42 | 7.479e+05 | **6.005e+01** | 6.005e+01 | **1.00** | 4.8e-05 |
 
-⚠️ **This is NOT byte-neutral in FP64** — the same bug is in the double build, so fixing it changes
-FP64 answers and **gate G0 must be re-based against a regenerated `ref0`**. It is therefore **off by
-default** pending that decision; the byte gate was re-run with the knob off and stays BYTE-IDENTICAL.
+**🔴 FIXED UNCONDITIONALLY and G0 RE-BASED (user decision, 2026-09-11: "our aim is to be faithful to
+Fortran, so this bug should be fixed and it should be in the port. if it means we rerun the gates so
+be it.").** No knob — a switch here would let someone run advection knowingly different from
+upstream's, which is what this track exists to prevent.
+
+The baseline move is **provably caused by this change alone**: the same source with the seeding
+removed reproduced the OLD `ref0` byte-identically (np2, all 14 configs). Old oracles archived with
+their provenance at `port2/m16/oracle_archive/pre-abfix/` (`gate0_ref0` 9.5 G, `gate0_core2_ref0`
+92 G, `WHY_ARCHIVED.txt`). New baseline regenerated and verified:
+
+| gate | status |
+|---|---|
+| pi, np1, all 14 configs | oracle rewritten, **PASS** |
+| pi, np2, all 14 configs | oracle rewritten, **PASS** |
+| production binary vs the NEW baseline, np2, all 14 | **BYTE-IDENTICAL, PASS** |
+| CORE2 np8, all configs | re-basing, job 27392164 |
 
 **Its effect on the SP faithfulness metric is small** (1 month, no anomaly): salt 2.53 → **2.43**×
 upstream, temp 1.39 → 1.37, a_ice 1.12 → **0.93**. So the oversized antidiffusive flux was **not**

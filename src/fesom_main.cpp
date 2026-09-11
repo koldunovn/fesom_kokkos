@@ -995,24 +995,25 @@ skip_rest_state:
      * level — the AB coefficient, exactly — against upstream's small correction, which is why the
      * port's antidiffusive flux is 500-12000x larger in magnitude than upstream's.
      *
-     * ⚠️ THIS IS NOT BYTE-NEUTRAL IN FP64. The same bug is present in the double build, so fixing
-     * it changes FP64 answers and gate G0 must be re-based against a regenerated ref0 oracle. It is
-     * therefore OFF by default until that decision is taken; set FESOM_AB_INIT_OLD=1 to enable.
-     * Placed here to match upstream's order: after the salt-anomaly conversion, before the ice IC. */
+     * ⚠️ THIS IS NOT BYTE-NEUTRAL IN FP64 — the same bug is present in the double build. The M16 G0
+     * baseline (`ref0`) was therefore RE-BASED on 2026-09-11, with the move proven to be caused by
+     * this change alone: the same binary with the seeding removed reproduces the OLD ref0
+     * byte-identically, so the AB fix is the only delta. Old oracle kept at `gate0.pre-abfix/`.
+     * User decision (2026-09-11): faithfulness to the Fortran outranks a frozen baseline.
+     *
+     * Unconditional by choice — no knob. A switch here would let someone run advection that is
+     * knowingly different from upstream's, which is exactly what this track exists to prevent.
+     * Placed to match upstream's order: after the salt-anomaly conversion, before the ice IC. */
     {
-        const char *e = getenv("FESOM_AB_INIT_OLD");
-        if (e && e[0] && strcmp(e, "0") != 0) {
-            const size_t nvals = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
-            for (int k = 0; k < tracers.num_tracers; ++k) {
-                memcpy(tracers.data[k].valuesold, tracers.data[k].values,
-                       nvals * sizeof(real_t));
-                tracers.data[k].valuesold_fld.modify_host();
-                tracers.data[k].valuesold_fld.sync_device();
-            }
-            if (mpi.mype == 0)
-                printf("[fesom_port] AB history seeded: valuesold = values "
-                       "(upstream oce_setup_step.F90:310) — NOT byte-neutral in FP64\n");
+        const size_t nvals = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
+        for (int k = 0; k < tracers.num_tracers; ++k) {
+            memcpy(tracers.data[k].valuesold, tracers.data[k].values, nvals * sizeof(real_t));
+            tracers.data[k].valuesold_fld.modify_host();
+            tracers.data[k].valuesold_fld.sync_device();
         }
+        if (mpi.mype == 0)
+            printf("[fesom_port] AB history seeded: valuesold = values "
+                   "(upstream oce_setup_step.F90:310)\n");
     }
 
     /* Sea-ice cold-start IC: must run AFTER tracer IC so SST is set.
