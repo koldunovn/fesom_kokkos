@@ -1,0 +1,4 @@
+# M16 §3q growth curve: DAILY salt/temp/sst so the port-vs-Fortran SP ratio can be read as a
+# function of time inside month 1. Step 1 and step 20 are already known (bisect_20s_g1); month 1
+# is known (faith matrix); what is missing is the shape in between.
+salt,temp,sst	daily

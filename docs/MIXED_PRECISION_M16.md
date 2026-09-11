@@ -1088,6 +1088,107 @@ self-limiting, so a grossly wrong antidiffusive flux is clipped back to a plausi
 precision: the port's first timestep applies a different high-order advection than upstream's, in
 both precisions.
 
+### 3b-year-g1. The 1-year matrix RE-RUN with both fixes (jobs 27393064–69) — the year is unchanged
+Six port arms re-run with `bin/g1` (IC-bracket fix + AB seeding fix) into `faith/year_g1`; the six
+Fortran arms are reused unchanged from `year_1958` (upstream always had both behaviours right).
+1958, dt 1800, 17520 steps, 64 ranks, JRA55, no salt anomaly. ⚠️ The AB fix moved the port's **DP**
+arm too, so the new port numbers are comparable to the **Fortran**, not to the old port numbers.
+
+RATIO = port SP−DP / fortran SP−DP, each against its own DP arm:
+
+| month | salt old → **new** | temp old → **new** | sst old → **new** | a_ice old → **new** |
+|---|---|---|---|---|
+| 1 | 2.77 → **2.43** | 1.43 → **1.37** | 1.01 → **1.11** | 0.98 → **0.93** |
+| 3 | 3.04 → **3.07** | 2.90 → **2.89** | 2.13 → **2.08** | 1.09 → **1.10** |
+| 6 | 3.03 → **3.01** | 2.94 → **2.87** | 4.42 → **4.32** | 2.85 → **2.99** |
+| 9 | 2.44 → **2.44** | 2.19 → **2.18** | 2.55 → **2.51** | 2.69 → **2.84** |
+| 12 | 1.62 → **1.56** | 1.65 → **1.62** | 1.68 → **1.66** | 2.61 → **2.80** |
+
+🔴 **Beyond month 1 the two fixes change nothing** — every ratio moves by less than 5 %. Month 1
+improves (salt 2.77 → 2.43) and that is the whole of the gain. The ratio's shape over the year is
+also unchanged: it rises to ~3 by month 3, holds through month 9, and falls to ~1.6 by month 12 as
+both codes' SP−DP saturate toward the same chaotic ceiling. **The ratio is not stationary and never
+was** (§3b-year); a single-month number is not a summary of it.
+
+🔴 **A new and sharper reading — normalise each code by ITS OWN noise envelope.** Salt, SP−DP
+divided by that code's own FP64 σ=2e-4 K twin spread:
+
+| month | fortran SP−DP / own envelope | **port SP−DP / own envelope** |
+|---|---|---|
+| 1 | 5.97e-06 / ≈2.0e-06 ≈ **3.0** | 1.45e-05 / ≈2.2e-06 ≈ **6.6** |
+| 6 | 3.83e-05 / ≈7.6e-06 ≈ **5.0** | 1.15e-04 / ≈5.6e-06 ≈ **20.6** |
+| 12 | 1.73e-04 / ≈1.4e-04 ≈ **1.2** | 2.71e-04 / ≈7.6e-05 ≈ **3.6** |
+
+**The port's FP64 noise envelope is consistently SMALLER than upstream's** (month 12: 6.9–8.2e-05
+against 1.12–1.66e-04) — the port's double-precision trajectory is *less* sensitive to a
+rounding-sized nudge — **while its SP−DP is larger.** Those two facts together are hard to reconcile
+with "the port amplifies perturbations more". They fit a **systematic drift** much better than
+chaotic amplification: a drift adds to SP−DP without touching the FP64 twin spread. §3f already saw
+the signature (the two codes' salt mean drifts have **opposite signs**, fortran +, port −); this is
+the same statement made quantitative.
+
+### 🔴🔴 3q. AFTER the AB fix: the per-step gap is GONE — what is left is GROWTH
+The §3o flux comparison was re-run against the post-AB-fix binary (`bin/g1`), and the whole FCT
+chain was instrumented on the Fortran side this time, not just the raw antidiffusive flux
+(`oce_adv_tra_fct.F90` now also dumps `LO`, `FTTFMAX`, `FPLUS`, `AFLUXV`; `oce_adv_tra_ver.F90`
+dumps `AFLUXVLO` = what `flux` holds on ENTRY to `qr4c`, i.e. the low-order vertical flux).
+Jobs 27395691 (port, `fluxg1`) and 27395935 (Fortran, `fort_flux3`). Salinity, step 1, SP-vs-DP
+relative error pooled over all nodes and levels:
+
+| stage | what it is | relerr port | relerr fortran | **P/F** | mag P/F |
+|---|---|---|---|---|---|
+| `LO` | low-order solution | 8.08e-08 | 9.69e-07 | **0.083** | 1.000 |
+| `AFLUXVLO` | LO vertical flux (`−w·T·area`) | 1.964e-02 | 1.716e-02 | **1.145** | 1.000 |
+| `AFLUXVRAW` | antidiffusive flux `HO − LO` | 1.158e-02 | 9.992e-03 | **1.159** | 1.000 |
+| `FTTFMAX` | Zalesak bounds | 2.38e-05 | 1.400e-04 | 0.170 | 1.000 |
+| `FPLUS` | limiter factors | 5.161e-02 | 5.131e-02 | **1.006** | 1.000 |
+| `AFLUXV` | flux AFTER limiting | 1.233e-02 | 1.088e-02 | **1.133** | 1.000 |
+
+**Four readings, in order of importance.**
+
+1. 🔴 **Every FP64 magnitude now matches 1.000 at every stage.** The 500–12000× of §3o is gone; the
+   two codes compute the same intermediates in double precision, stage by stage. This is the
+   strongest structural check the two codes have ever passed.
+2. 🔴 **FCT is NOT the amplifier.** The port/Fortran ratio is already **1.145 at `AFLUXVLO`** — the
+   low-order vertical flux, built *before* any FCT arithmetic — and it does not grow through
+   `HO − LO` (1.159), the limiter factors (1.006) or the limited flux (1.133). Whatever excess the
+   port carries into FCT, FCT passes through unchanged. **The §3o hypothesis that a binding limiter
+   transmits the ≈35-psu bounds is refuted:** `FPLUS` is 1.006, dead level.
+   `AFLUXVLO = −w·T·area` with `area` identical (§3p) and `T` at the float floor, so its relative
+   error is essentially `w`'s — the lead, if this mattered, would be the vertical velocity. It does
+   not appear to matter (see 4).
+3. **The port's `LO` and bounds are 6–12× BETTER than upstream's** — because the port carries #1054
+   and the oracle (`a62f180`) predates it. That is the first direct measurement of what #1054 buys:
+   **12× less single-precision error in the low-order solution.** It is also why `LO` must not be
+   read as a port defect here: the two codes are deliberately different at that line.
+4. 🔴🔴 **And none of it survives to the tracer.** The 20-step bisection re-run with `bin/g1`
+   (job 27395982, `bisect_20s_g1`, Fortran arms reused unchanged from `bisect_20s`):
+
+| salt SP−DP | step 1 | step 5 | step 10 | step 20 | month 1 |
+|---|---|---|---|---|---|
+| fortran | 2.221e-06 | 2.322e-06 | 2.827e-06 | 2.801e-06 | 5.969e-06 |
+| port, before the AB fix (§3i-c) | 3.541e-06 | — | — | 4.150e-06 | 1.510e-05 |
+| **port, after the AB fix** | **2.055e-06** | 2.158e-06 | 3.095e-06 | **3.167e-06** | (rerunning) |
+| **ratio port/fortran** | **0.925** | 0.929 | 1.095 | **1.131** | 2.43 |
+
+**The step-1 ratio went 1.59 → 0.925: the port is now marginally BETTER than upstream after one
+timestep.** §3i-c had factorised the month-1 2.53× as ≈1.59 (made in the first step) × ≈1.6
+(accumulated over the month). **The first factor is gone.** A 1.13–1.16× flux-level difference
+exists but does not reach the tracer, because the limiter absorbs it.
+
+🔴 **So the diagnosis has changed shape.** The port's single-precision penalty is no longer a
+per-step arithmetic difference — at 20 steps the two codes are within 13 % of each other. It is
+**growth**: something accumulates over ~1500 steps that does not accumulate upstream (or accumulates
+with the opposite sign — §3f's mean drifts are opposite in sign, fortran **+**, port **−**).
+That is a conservation/drift question, not a rounding question, and it needs a different instrument:
+the shape of the curve between step 20 and month 1. `growth_1m` (jobs 27396106 Fortran / 27396107
+port, daily salt/temp/sst, 1488 steps dt 1800, both precisions) measures exactly that.
+
+⚠️ **What this does NOT yet say.** The month-1 number in the table above is the pre-rerun 2.43; the
+post-fix 1-month and 1-year arms are in flight. And a ratio of 0.93 at step 1 is one realisation of
+one metric — it is a strong indication the arithmetic gap closed, not proof that nothing else is
+wrong per step.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
