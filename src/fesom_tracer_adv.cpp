@@ -2152,6 +2152,11 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     /* M5.22 flat lever: one thread per (node,LEVEL) — RP(0,myDim*nl), decode (n,nz). Per-(n,nz)
      * map: writes fplus/fminus[k] from aflux_v[nz] and the INPUT aflux_v[nz+1] (qr4c_v output,
      * not written here) → level contiguous → coalesced, bit-identical. */
+    if (getenv("FESOM_FCT_TRACE")) {   /* §3l: the RAW antidiffusive flux, BEFORE limiting */
+        sc->adv_flux_ver_fld.sync_host();
+        static int o_fr[2] = {0,0};
+        fct_internal_dump("AFLUXVRAW", tr_idx, &o_fr[tr_idx & 1], mesh, partit, sc->adv_flux_ver);
+    }
     Kokkos::parallel_for("fct_zal_b1v", RP(0, (size_t)myDim * nl), KOKKOS_LAMBDA(const size_t i) {
         const int n = (int)(i / nl), nz = (int)(i - (size_t)n*nl);
         int nu1 = ulev_n(n)-1, nl1 = nlev_n(n)-1;
@@ -2298,6 +2303,18 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
 #if defined(FESOM_SINGLE_PRECISION)
     const int ale_dbl = fesom_fct_ale_dbl();
 #endif
+    if (getenv("FESOM_FCT_TRACE")) {   /* §3l: the limiter factors themselves */
+        sc->fct_plus_fld.sync_host(); sc->fct_minus_fld.sync_host();
+        sc->fct_ttf_max_fld.sync_host();
+        static int o_fp[2] = {0,0}, o_fm[2] = {0,0};
+        fct_internal_dump("FPLUS", tr_idx, &o_fp[tr_idx & 1], mesh, partit, sc->fct_plus);
+        fct_internal_dump("FTTFMAX", tr_idx, &o_fm[tr_idx & 1], mesh, partit, sc->fct_ttf_max);
+    }
+    if (getenv("FESOM_FCT_TRACE")) {   /* §3l: the vertical antidiffusive flux itself */
+        sc->adv_flux_ver_fld.sync_host();
+        static int o_fv[2] = {0,0};
+        fct_internal_dump("AFLUXV", tr_idx, &o_fv[tr_idx & 1], mesh, partit, sc->adv_flux_ver);
+    }
     if (getenv("FESOM_FCT_TRACE")) {   /* §3l: del_ttf BEFORE the ALE term, to split flux vs ALE */
         tracers->del_ttf_fld.sync_host();
         static int o_d9[2] = {0,0};

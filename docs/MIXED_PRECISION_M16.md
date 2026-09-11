@@ -903,6 +903,52 @@ QR4C vertical flux, and the upwind fluxes — where the port may simply perform 
 on ≈35-sized values than upstream does. That is the next place to look, and it is now the only place
 left.
 
+### 🔴🔴 3m. THE MECHANISM: the antidiffusive flux `HO − LO` cancels, and the loss scales with |S|
+Dumping every FCT intermediate per level, SP vs DP, **relative** error (port, step 1, salt, no anomaly):
+
+| level | bounds `fct_ttf_max` | limiter `fct_plus` | **raw antidiff flux** | limited flux |
+|---|---|---|---|---|
+| 6 | 3.1e-05 | 5.8e-04 | **1.04e-02** | 1.17e-02 |
+| 18 | 3.5e-05 | 6.0e-04 | **1.96e-02** | 2.06e-02 |
+| 30 | 1.6e-04 | 3.7e-03 | **3.81e-02** | 4.33e-02 |
+| 42 | 7.3e-04 | 5.5e-03 | **2.57e-02** | 3.25e-02 |
+
+**The percent-level error is already in the RAW antidiffusive flux, before the limiter touches it.**
+The bounds (3e-05) and the limiter factors (5e-04) are 10–100× cleaner, so neither the Zalesak
+bounds' `tvert_max − LO` cancellation nor the limiter is the cause.
+
+**The mechanism.** The antidiffusive flux is formed as `HO − LO`
+(`o_init_zero=.false.` → `flux = HO_expression − flux_LO`, `oce_adv_tra_ver.F90:410`, and the port's
+identical `init_zero=0` path). Both fluxes are **proportional to the ABSOLUTE tracer**, ≈35 psu for
+salinity, and in the smooth deep interior they agree to roughly **1 part in 10⁵–10⁶**. In float that
+subtraction leaves one or two significant digits, so the antidiffusive flux carries **1–4 % relative
+error**. It then enters `del_ttf`, whose absolute error grows **130× with depth** (6.6e-05 →
+8.6e-03 psu·m, §3l) because the fluxes scale with layer thickness — and the final salinity error sits
+**16–18× above the float floor at levels 20–40**, while upstream sits *at* the floor (~2e-06 psu).
+
+**This explains every earlier observation at once:** why it is salt and not temperature (ulp(35) is
+10× ulp(4)); why it appears in FCT and nowhere else (§3j); why `LO` itself is clean at 2e-06 (§3l) —
+LO is a *value*, not a difference of large fluxes; why widening any accumulator was a no-op (the
+information is destroyed when the difference is formed, not when it is summed); and why #986 buys
+**87×** — shifting S by −35 shrinks both fluxes ~35× while leaving their difference unchanged,
+because **both schemes are consistent for a constant field**, so `HO(T+c) − LO(T+c) = HO(T) − LO(T)`.
+
+### The fix that is not a mask
+That last identity is the fix. The antidiffusive flux is **invariant under a constant shift of the
+tracer**, so it can be computed from `T − T_ref` *inside the flux routines* — mathematically
+identical, numerically free of the cancellation — **without** changing the model state, for **every**
+tracer, and **regardless of whether the user enables #986**. #986 achieves the same thing globally
+and is the reason it works; doing it locally in FCT makes it unconditional.
+
+Proof of concept already measured: with #986 on, the port's salt SP−DP is 4.739e-06 against
+upstream's 4.896e-06 — **parity** (§3k).
+
+⚠️ Still not explained: upstream forms `HO − LO` the same way yet sits at the float floor at depth
+where the port is 16–18× above it. The cancellation is shared; its *severity* is not. Candidates now
+narrow to the flux expressions themselves — the port's `adv_tra_ver_qr4c`/`adv_tra_hor_mfct` versus
+upstream's — and specifically to how many float operations each performs on ≈35-sized values before
+the subtraction. That is the next and, on this evidence, last place to look.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
