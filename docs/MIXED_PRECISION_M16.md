@@ -1403,6 +1403,36 @@ failed the whole run at np1. **Verified pre-existing** — the pre-§3v `g2` bin
 identically — so it is a gate artefact, not a regression. `scripts/m16_gate0.sh` now skips it at
 np1 exactly as it skips `evpwlean`; np≥2 still checks it (and it is LIVE there).
 
+#### The 1-year matrix, re-run on `g3` (jobs 27400326–332, `faith/year_g3`)
+Six port arms with `g3` and `FESOM_VISC_OPT=5`; the six Fortran arms reused unchanged from
+`year_1958`. RATIO = port SP−DP / fortran SP−DP, each against its own DP arm:
+
+| month | salt old → **new** | temp old → **new** | sst old → **new** | a_ice old → **new** |
+|---|---|---|---|---|
+| 1 | 2.43 → **0.98** | 1.37 → **1.03** | 1.11 → **0.88** | 0.93 → **1.03** |
+| 3 | 3.07 → **1.02** | 2.89 → **1.01** | 2.08 → **1.08** | 1.10 → **0.83** |
+| 6 | 3.01 → **1.08** | 2.87 → **0.81** | 4.32 → **1.28** | 2.99 → **1.76** |
+| 9 | 2.44 → **0.98** | 2.18 → **0.70** | 2.51 → **0.80** | 2.84 → **1.93** |
+| 12 | 1.56 → **0.85** | 1.62 → **0.70** | 1.66 → **0.74** | 2.80 → **1.92** |
+
+🔴 **Gate G4's bar is met for the ocean.** salt, temp and sst sit between **0.70 and 1.28 for the
+whole year** — the port loses no more to single precision than upstream does, and past mid-year it
+loses rather less. The ratio is also no longer a rising curve: the shape that ran 2.4 → 3.0 → 1.6
+across the year is gone. Every earlier statement in §3b/§3b-year/§3b-year-g1 was measured under the
+§3u defect **and** the §3s viscosity mismatch and should be read as history, not as results.
+
+⚠️🔴 **The remaining outlier is SEA ICE.** `a_ice` is at parity to month 3 and then settles at
+**1.76–1.93 from month 6 on**. That is a different code path (mEVP + ice thermodynamics), it was
+never touched by §3v, and it is now the only variable above the bar. It is the next question, and
+it is a *new* one — the ocean-tracer story that occupied §3f–§3v is closed.
+
+**Against each code's own FP64 noise envelope**, salt: month 6 fortran 3.83e-05 vs an envelope of
+6.6–9.0e-06 (≈4.9×), port 4.13e-05 vs 4.2–5.8e-06 (≈8.2×); month 12 fortran 1.73e-04 vs
+1.12–1.66e-04 (≈1.2×), port 1.47e-04 vs 3.8–7.8e-05 (≈2.5×). So SP−DP still exceeds the seed spread
+at one year in **both** codes — "SP is buried in the noise" remains a multi-year claim (§3b-year),
+unchanged by this fix. What changed is that the two codes now sit the same distance from double
+precision, which is what G4 actually asks.
+
 #### Bonus: FP64 faithfulness improved too — but from §3s, not §3v
 `port-DP` vs `Fortran-DP`, salt relL2 over month 1 (all four arms against the same Fortran DP run):
 
