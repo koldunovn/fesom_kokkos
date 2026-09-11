@@ -1290,9 +1290,56 @@ inside FCT on advection-only `del_ttf`, then Redi scatters straight onto `values
 Each extra write to `values` discards everything below ulp(35) = 2.4e-06 psu — invisible in FP64,
 once per tracer per step at SP. The setup runs `Fer_GM = .true.` and `Redi = .true.`, so it is live.
 
-**Test in flight** (jobs 27397494/95): the same 1-month pair with **GM/Redi off in both codes**. If
-the ratio collapses toward 1, the extra `values` store is the mechanism and the fix is to restructure
-the port to upstream's order. If it does not, this candidate is refuted like the others.
+### 🔴🔴🔴 3u. CONFIRMED — the port's Redi/GM diffusion writes onto ABSOLUTE salinity
+**The test: the same 1-month pair with GM/Redi OFF in both codes** (`Fer_GM=.false.`,
+`Redi=.false.` on the Fortran side; `FESOM_NO_GMREDI=1` on the port's — jobs 27397494/27397495).
+
+| day | 1 | 5 | 9 | 13 | 19 | 25 | 31 |
+|---|---|---|---|---|---|---|---|
+| ratio, **GM/Redi ON** | 1.05 | 1.35 | 1.65 | 1.69 | 1.82 | 1.62 | **1.95** |
+| ratio, **GM/Redi OFF** | 0.76 | 0.98 | 0.96 | 0.69 | 1.03 | 1.02 | **1.06** |
+
+🔴 **The gap is gone.** Flat about 1.0 for the whole month, no trend. The two codes' mean SP−DP
+drifts also stop disagreeing: with Redi on they are opposite in sign (fortran **+5.15e-06**, port
+**−3.50e-06**); with Redi off both are negative and track each other (−3.66e-05 / −2.32e-05).
+
+⚠️ **Knob liveness checked before believing it** (L80): the GM-off arms differ from the GM-on arms
+at FP64 by relL2 **1.11e-03** (port) and **9.72e-04** (Fortran), so both switches genuinely fired,
+and by comparable amounts. Note also that turning Redi off makes the SP−DP error *larger* in both
+codes (3.9e-05 vs 1.5e-05) — the finding is that the **asymmetry** vanishes, not the error.
+
+**The defect, at source level.** Upstream's `diff_part_hor_redi` (`oce_ale_tracer.F90`:1744-1748)
+accumulates its increment into `del_ttf`:
+```fortran
+del_ttf(ul12:nl12,enodes(1)) = del_ttf(ul12:nl12,enodes(1)) + rhs1(ul12:nl12)*dt/areasvol(...)
+```
+and the single ALE reconstruction later divides by `hnode_new` (:775-778). **The port scatters the
+same quantity straight onto `values`** (`fesom_gm.cpp`:2269/:2274):
+```c
+Kokkos::atomic_add(&vals((size_t)e1 * nl + nz), rhs1[nz] * dt / (av1 * hn1));
+```
+Algebraically identical — `del_ttf/hnode_new` is exactly `rhs*dt/(areasvol*hnode_new)`. **Numerically
+it is not.** Upstream rounds an *increment* of order 1e-05 psu (ulp ≈ 1e-12); the port rounds the
+*sum* `35 + 1e-05` (ulp = **2.4e-06**). Everything below 1.2e-06 psu of the Redi tendency is
+discarded, **once per tracer per step**, and it is invisible at FP64 where ulp(35) = 7e-15.
+
+**Why it survived every gate.** It is not a bug in FP64 — the port's byte gates compare the port
+against *itself*, and the port's FP64 trajectory is unaffected at the 1e-15 level. It only shows
+when `real_t` is float, and only as a slow divergence, and only against the Fortran.
+
+**The fix (specified, NOT yet applied).** Restore upstream's order:
+1. `fesom_diff_part_hor_redi_kk` and `fesom_diff_ver_part_redi_expl_kk` (`fesom_gm.cpp`) scatter into
+   **`tracers->del_ttf`** and drop the `/hn` — 2 lines each, plus their host twins.
+2. Split the ALE reconstruction (step 10, `fct_ale_recon`) out of
+   `fesom_tracer_advect_one_fct_kk` into its own entry point.
+3. Call it in `fesom_step.cpp` **after** the `gm` block for each tracer, so one reconstruction folds
+   advection **and** Redi, exactly as `oce_ale_tracer.F90` does.
+4. Update the `FESOM_KK_VERIFY=tradv` / `=gm` capture-before twins, which currently bracket a
+   different set of writes.
+
+🔴 **This changes FP64 results, so Gate 0 re-bases again** (both presets, both rank counts, the
+production-binary verification) — the same procedure as §3p, and for the same stated reason: the port
+exists to be faithful to upstream.
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
