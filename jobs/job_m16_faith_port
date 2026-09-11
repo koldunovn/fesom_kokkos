@@ -40,6 +40,16 @@ ulimit -s 204800
 
 export FESOM_ALE=zstar
 export FESOM_PRINT_EVERY=320
+# \U0001f534 M16 \u00a73s — HORIZONTAL VISCOSITY SCHEME. Upstream's config/namelist.dyn ships
+# `opt_visc = 5` (easy backscatter) and setups/test_core2 does not override it, so every FORTRAN
+# arm of this matrix runs scheme 5 (its `--check opt_visc-->` line in run.log proves it). The
+# PORT's default is 7 (biharmonic). Until 2026-09-11 this job left FESOM_VISC_OPT unset, so the
+# whole faithfulness matrix compared two DIFFERENT viscous operators — a physics mismatch, not a
+# precision one. Pin it to the Fortran's value; VISCOPT= overrides for an A/B against the history.
+export FESOM_VISC_OPT=${VISCOPT:-5}
+# NOGM=1 turns GM/Redi off — must be matched by Fer_GM=.false./Redi=.false. on the Fortran side
+# (scripts/m16_faith_setup.sh GMREDI argument). Used by the §3t test.
+[ "${NOGM:-0}" = 1 ] && export FESOM_NO_GMREDI=1
 # DET=1 must be set on BOTH codes or neither -- see scripts/m16_faith_setup.sh. The legacy fill is
 # partition-dependent, so with det off the two codes need not even start from the same field.
 [ "${DET:-0}" = 1 ] && export FESOM_IC_EXTRAP=det

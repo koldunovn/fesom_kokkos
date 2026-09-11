@@ -1189,6 +1189,111 @@ post-fix 1-month and 1-year arms are in flight. And a ratio of 0.93 at step 1 is
 one metric — it is a strong indication the arithmetic gap closed, not proof that nothing else is
 wrong per step.
 
+### 3r. A REAL conformance defect in the SSH solver — and it is NOT the gap
+🔴 **Upstream keeps the entire CG *arithmetic* in FP64 even in a single-precision build.**
+`solver.F90` @ a62f180 (the oracle) :150 declares `real(kind=WP_full) :: sprod(2), s_old, s_aux,
+al, be, rtol`, and :194-196 / :207-208 / :240-241 / :304-313 cast **every sparse-row term** of the
+residual, the preconditioner apply and the SpMV to `WP_full` before multiplying, rounding once into
+the WP vector. Its own comment says why:
+
+> *"they set the search direction and the stopping test — so rounding here steers the iteration
+> itself rather than just reporting on it. The vectors (rr/zz/pp/App) and the matrix stay WP: the
+> bandwidth is theirs, the accuracy is these."*
+
+**The port ran that whole chain in `real_t`.** `docs/PRECISION_ISLANDS.md` carried it as **class 3**
+("July stricter — upstream runs it in WP") and Phase B3 duly flipped it to float. That reading is
+**false for the oracle**: it is class **2**, upstream stricter. Fixed unconditionally (no knob —
+same principle as §3p): `cg_spmv`, `cg_dot`, the two fused reduce kernels, the axpy/`pp` recurrences
+and every CG scalar now accumulate in `dbl_t` and store `real_t`; the reduces pair with `MPI_DOUBLE`
+(registry rule 3, lesson SP1). Liveness is announced on rank 0 — `[fesom_ssh] CG arithmetic in
+dbl_t (8-byte accumulators, 4-byte vectors)` — because a silent no-op here would look exactly like
+a null result (the #1054 dead-code lesson).
+
+**Gate 0: PASS np1 AND np2, all 14 configs, BYTE-IDENTICAL.** No re-base. In FP64 `dbl_t == real_t`,
+so every cast is the identity — and the FMA-contraction worry was checked, not assumed.
+
+⚠️ **And it does NOT move the SP gap.** Binary `g2` (= `g1` + this fix), 1 month, daily salt:
+
+| day | 1 | 5 | 9 | 15 | 21 | 31 |
+|---|---|---|---|---|---|---|
+| ratio, g1 (no CG fix) | 1.053 | 1.349 | 1.646 | 1.788 | 1.699 | **1.948** |
+| ratio, g2 (CG in dbl_t) | 1.054 | 1.393 | 1.698 | 1.792 | 1.734 | **1.937** |
+
+**A null.** It is kept because it is what upstream does and the port exists to be faithful — not
+because it bought anything.
+
+### 🔴 3s. The faithfulness matrix was comparing two DIFFERENT viscosity schemes
+Upstream's `config/namelist.dyn` ships **`opt_visc = 5`** (easy backscatter) and `setups/test_core2`
+does not override it, so every **Fortran** arm of this matrix has run scheme 5 — its
+`--check opt_visc-->` line in `run.log` is the proof. **The port's default is 7** (biharmonic), and
+`jobs/job_m16_faith_port` never set `FESOM_VISC_OPT`. So from the first pilot to the 1-year matrix,
+**the two arms ran different viscous operators** — a physics mismatch, not a precision one.
+
+Fixed: the job now pins `FESOM_VISC_OPT=${VISCOPT:-5}`.
+
+⚠️ **This too is a null for the gap.** `g1` re-run at 1 month with the viscosity matched:
+
+| day | 1 | 5 | 9 | 15 | 21 | 31 |
+|---|---|---|---|---|---|---|
+| ratio, opt_visc 7 (mismatched) | 1.053 | 1.349 | 1.646 | 1.788 | 1.699 | **1.948** |
+| ratio, opt_visc 5 (matched) | 1.094 | 1.384 | 1.658 | 1.821 | 1.804 | **1.940** |
+
+The mismatch was real and had to be fixed — every number in §3b/§3b-year was measured under it — but
+it is not what makes the port worse at SP.
+
+### 🔴🔴 3t. The gap, finally characterised: it is ENTIRELY magnitude-dependent, and it is NOT chaos
+Two 1-month daily curves, both codes, salt SP−DP against each code's own DP arm (`growth_1m`,
+`growth_1m_anom`; jobs 27396106/07 and 27396546/47):
+
+| day | 1 | 3 | 5 | 9 | 15 | 21 | 27 | 31 |
+|---|---|---|---|---|---|---|---|---|
+| **ratio, absolute S** | 1.05 | 1.23 | 1.35 | 1.65 | 1.79 | 1.70 | 1.70 | **1.95** |
+| **ratio, #986 anomaly ON in BOTH** | 0.90 | 0.91 | 1.01 | 1.10 | 1.24 | 1.07 | 1.00 | **0.83** |
+
+🔴 **With `S − 35` the gap never appears at all** — the ratio is flat about 1.0 for the whole month,
+with no trend. Without it, it climbs from 1.05 to ~1.9 by day 9 and stays there. And the global mean
+SP−DP shifts, day 31: absolute S gives fortran **+5.15e-06** against port **−3.50e-06** (opposite
+signs, §3f); with the anomaly both become **+8.96e-07 / +8.41e-07** — same sign, same size.
+
+**Read what that rules out.** Not chaotic amplification: the port's own FP64 noise envelope is
+*smaller* than upstream's (§3b-year-g1), and a chaos story cannot be switched off by re-centring the
+tracer. Not the flux chain: §3q measured it at 1.13–1.16× and showed nothing downstream amplifies it.
+It is an operation whose rounding scales with **|S| ≈ 35** (float ulp 2.4e-06), present in the port
+and not in upstream.
+
+**Upstream gains nothing from the anomaly** (1.540e-05 → 1.648e-05, i.e. ×1.07 — very slightly
+worse); **the port gains a factor 2.2** (2.983e-05 → 1.374e-05, ×0.46). So the port carries a
+magnitude-sensitive term that upstream simply does not have.
+
+**Stage sweep, anomaly ON/OFF, both codes** (step 1, absolute psu, `fluxg2`/`fluxg2_anom` vs
+`fort_flux3`/`fort_flux4`) — the stage whose error collapses when S becomes O(1) is the culprit:
+
+| stage | port OFF | port ON | ON/OFF | fort OFF | fort ON | ON/OFF |
+|---|---|---|---|---|---|---|
+| `LO` | 2.79e-06 | 2.08e-06 | 0.747 | 3.35e-05 | 3.34e-05 | 0.998 |
+| `AFLUXVLO` | 4.41e+04 | 4.62e+02 | 0.010 | 3.85e+04 | 4.03e+02 | 0.010 |
+| `AFLUXVRAW` | 2.13e+01 | 2.13e+01 | **1.000** | 1.84e+01 | 1.84e+01 | **1.000** |
+| `FPLUS` | 5.15e-02 | 2.63e-02 | 0.511 | 5.12e-02 | 2.64e-02 | 0.515 |
+| `DELTTF9` (pre-ALE) | 6.26e-05 | 4.92e-05 | 0.786 | — | — | — |
+| **`DELTTF`** (post-ALE) | **9.74e-05** | **4.93e-05** | **0.506** | — | — | — |
+
+`AFLUXVRAW` is magnitude-**in**sensitive in both (1.000) — so the `HO − LO` cancellation of §3m is
+*not* the magnitude term. The port's jump is at **`DELTTF9 → DELTTF`**, the ALE reconstruction:
+without the anomaly it inflates the increment error by **1.56×**; with it, by **1.00×**.
+
+🔴 **The structural candidate (source-level, not yet measured).** Upstream accumulates advection
+**and** the explicit Redi/GM diffusion into `del_ttf` and performs **one** ALE reconstruction
+(`oce_ale_tracer.F90`: `diff_part_hor_redi` writes `temporary_ttf => tracers%work%del_ttf`, then
+:775 `del_ttf += values*(hnode−hnode_new)`, `values += del_ttf/hnode_new`). **The port reconstructs
+inside FCT on advection-only `del_ttf`, then Redi scatters straight onto `values`**
+(`fesom_gm.cpp` `fesom_diff_part_hor_redi_kk`: *"edge→node SCATTER into `values` (atomic_add)"*).
+Each extra write to `values` discards everything below ulp(35) = 2.4e-06 psu — invisible in FP64,
+once per tracer per step at SP. The setup runs `Fer_GM = .true.` and `Redi = .true.`, so it is live.
+
+**Test in flight** (jobs 27397494/95): the same 1-month pair with **GM/Redi off in both codes**. If
+the ratio collapses toward 1, the extra `values` store is the mechanism and the fix is to restructure
+the port to upstream's order. If it does not, this candidate is refuted like the others.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

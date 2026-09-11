@@ -535,13 +535,13 @@ static void csr_matvec(const fesom_ssh_stiff *S,
                        real_t                *y, int dim)
 {
     for (int row = 0; row < dim; ++row) {
-        real_t s = 0.0;
+        dbl_t s = 0.0;                               /* §3r: upstream accumulates in WP_full */
         int rstart = S->rowptr[row];
         int rend   = S->rowptr[row + 1];
         for (int n = rstart; n < rend; ++n) {
-            s += Avals[n] * v[S->colind[n]];
+            s += (dbl_t)Avals[n] * (dbl_t)v[S->colind[n]];
         }
-        y[row] = s;
+        y[row] = (real_t)s;
     }
 }
 
@@ -555,7 +555,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     /* Helper macro: exchange a nod2D field. */
     #define EXCH(field) fesom_halo_exchange((field), FESOM_HALO_NOD2D, 1, 1, si->partit)
     /* All-reduce sum of a single double in-place. */
-    #define ALLREDUCE_SUM(var) MPI_Allreduce(MPI_IN_PLACE, &(var), 1, FESOM_MPI_REAL, MPI_SUM, si->partit->MPI_COMM_FESOM)
+    #define ALLREDUCE_SUM(var) MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, si->partit->MPI_COMM_FESOM)
 
     const int    N      = mesh->myDim_nod2D;
     const real_t soltol = si->soltol;
@@ -566,14 +566,14 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     real_t       *pp    = si->pp;
     real_t       *App   = si->App;
 
-    /* Initial ‖rhs‖² and tolerance (Fortran solver.F90:142-154). */
-    real_t s_old = 0.0;
-    for (int row = 0; row < N; ++row) s_old += rhs[row] * rhs[row];
+    /* Initial ‖rhs‖² and tolerance (Fortran solver.F90:142-154). §3r: dbl_t chain. */
+    dbl_t s_old = 0.0;
+    for (int row = 0; row < N; ++row) s_old += (dbl_t)rhs[row] * (dbl_t)rhs[row];
     if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
     /* The global problem size for the rtol normalisation must be the GLOBAL
      * row count, not local (Fortran uses nod2D). */
     int N_global = (si->partit && si->partit->npes > 1) ? mesh->nod2D : N;
-    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
+    dbl_t rtol = (dbl_t)soltol * sqrt(s_old / (dbl_t)N_global);
 
     if (s_old == 0.0) {
         memset(X, 0, (size_t)N * sizeof(real_t));
@@ -584,7 +584,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     /* r0 = rhs - A * X. Need X halo exchanged before SpMV. */
     if (si->partit && si->partit->npes > 1) EXCH(X);
     csr_matvec(S, S->values, X, rr, N);
-    for (int row = 0; row < N; ++row) rr[row] = rhs[row] - rr[row];
+    for (int row = 0; row < N; ++row) rr[row] = (real_t)((dbl_t)rhs[row] - (dbl_t)rr[row]);
     if (si->partit && si->partit->npes > 1) EXCH(rr);
 
     /* z0 = M^{-1} r0; pp = z0 */
@@ -593,7 +593,7 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
 
     /* s_old = r0·z0 */
     s_old = 0.0;
-    for (int row = 0; row < N; ++row) s_old += rr[row] * zz[row];
+    for (int row = 0; row < N; ++row) s_old += (dbl_t)rr[row] * (dbl_t)zz[row];
     if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
 
     int iter = 0;
@@ -607,8 +607,8 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
         csr_matvec(S, S->values, pp, App, N);
 
         /* α = s_old / (pp·App) */
-        real_t s_aux = 0.0;
-        for (int row = 0; row < N; ++row) s_aux += pp[row] * App[row];
+        dbl_t s_aux = 0.0;
+        for (int row = 0; row < N; ++row) s_aux += (dbl_t)pp[row] * (dbl_t)App[row];
         if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_aux);
         if (s_aux == 0.0 || s_aux != s_aux) {       /* NaN/zero check */
             if (si->partit == NULL || si->partit->mype == 0) {
@@ -617,27 +617,27 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             }
             FESOM_DIE("CG: pp·App is %g — matrix singular or NaN propagated", s_aux);
         }
-        real_t al = s_old / s_aux;
+        dbl_t al = s_old / s_aux;
 
         for (int row = 0; row < N; ++row) {
-            X [row] += al * pp [row];
-            rr[row] -= al * App[row];
+            X [row] = (real_t)((dbl_t)X [row] + al * (dbl_t)pp [row]);
+            rr[row] = (real_t)((dbl_t)rr[row] - al * (dbl_t)App[row]);
         }
         if (si->partit && si->partit->npes > 1) EXCH(rr);
 
         csr_matvec(S, S->pr_values, rr, zz, N);
 
-        real_t sp0 = 0.0, sp1 = 0.0;
+        dbl_t sp0 = 0.0, sp1 = 0.0;
         for (int row = 0; row < N; ++row) {
-            sp0 += rr[row] * zz[row];
-            sp1 += rr[row] * rr[row];
+            sp0 += (dbl_t)rr[row] * (dbl_t)zz[row];
+            sp1 += (dbl_t)rr[row] * (dbl_t)rr[row];
         }
         if (si->partit && si->partit->npes > 1) {
             ALLREDUCE_SUM(sp0);
             ALLREDUCE_SUM(sp1);
         }
 
-        real_t residual = sqrt(sp1 / (real_t)N_global);
+        dbl_t residual = sqrt(sp1 / (dbl_t)N_global);
         if ((si->partit == NULL || si->partit->mype == 0)
             && (verbose ? (iter <= 5 || iter % 50 == 0)
                         : (iter % heartbeat_every == 0))) {
@@ -655,15 +655,16 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             FESOM_DIE("CG residual diverged");
         }
 
-        real_t be = sp0 / s_old;
+        dbl_t be = sp0 / s_old;
         s_old = sp0;
-        for (int row = 0; row < N; ++row) pp[row] = zz[row] + be * pp[row];
+        for (int row = 0; row < N; ++row)
+            pp[row] = (real_t)((dbl_t)zz[row] + be * (dbl_t)pp[row]);
     }
     if (iter > si->maxiter) {
         if (si->partit == NULL || si->partit->mype == 0) {
             fprintf(stderr, "[fesom_ssh] CG hit maxiter=%d without converging "
                     "(last residual ~%.4e, rtol=%.4e)\n",
-                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+                    si->maxiter, (double)sqrt(s_old/(dbl_t)N_global), (double)rtol);
             fflush(stderr);
         }
         FESOM_DIE("CG did not converge");
@@ -711,25 +712,38 @@ long   g_fesom_cg_iters = 0;
  * (which can reach into the halo → v must be halo-current before this call). The
  * inner sum is sequential per row, exactly the C csr_matvec inner loop, so this is
  * bit-identical on Serial AND OpenMP (race-free, no cross-thread reduction). */
+/* 🔴 M16 §3r — the CG arithmetic runs in dbl_t, the vectors and the matrix stay real_t.
+ * This is NOT a port choice: upstream main @ a62f180 (our oracle) declares every CG scalar
+ * WP_full (= real64) and casts each sparse-row term to WP_full before multiplying, rounding
+ * once on the store into the WP vector (`solver.F90` :150, :194-196, :207-208, :240-241,
+ * :304-313). Its own comment says why: *"they set the search direction and the stopping
+ * test -- so rounding here steers the iteration itself rather than just reporting on it.
+ * The vectors (rr/zz/pp/App) and the matrix stay WP: the bandwidth is theirs, the accuracy
+ * is these."*  The port had flipped this whole chain to real_t in Phase B3 as registry
+ * class 3 ("July stricter, upstream runs it in WP") — that reading is wrong for the oracle,
+ * which makes it class 2 (upstream stricter) instead.
+ * FP64 builds are untouched by construction: dbl_t == real_t there, so every cast below is
+ * the identity and Gate 0 cannot move. */
 static void cg_spmv(IDV rowptr, IDV colind, DV vals, DV v, DV y, int N)
 {
     Kokkos::parallel_for("fesom_cg_spmv", Kokkos::RangePolicy<>(0, N),
         KOKKOS_LAMBDA(const int row) {
-            real_t s = 0.0;
+            dbl_t s = 0.0;
             const int rstart = rowptr(row);
             const int rend   = rowptr(row + 1);
-            for (int n = rstart; n < rend; ++n) s += vals(n) * v(colind(n));
-            y(row) = s;
+            for (int n = rstart; n < rend; ++n) s += (dbl_t)vals(n) * (dbl_t)v(colind(n));
+            y(row) = (real_t)s;                      /* rounded once, as upstream stores into WP */
         });
 }
 
-/* Σ a(i)·b(i) over [0,N). The first parallel_reduce: Serial sums sequentially in
- * index order == the C `for` loop → bit-identical; OpenMP/CUDA climate-close. */
-static real_t cg_dot(DV a, DV b, int N)
+/* Σ a(i)·b(i) over [0,N), accumulated in dbl_t (upstream: WP_full). The first
+ * parallel_reduce: Serial sums sequentially in index order == the C `for` loop →
+ * bit-identical; OpenMP/CUDA climate-close. */
+static dbl_t cg_dot(DV a, DV b, int N)
 {
-    real_t s = 0.0;
+    dbl_t s = 0.0;
     Kokkos::parallel_reduce("fesom_cg_dot", Kokkos::RangePolicy<>(0, N),
-        KOKKOS_LAMBDA(const int i, real_t &l) { l += a(i) * b(i); }, s);
+        KOKKOS_LAMBDA(const int i, dbl_t &l) { l += (dbl_t)a(i) * (dbl_t)b(i); }, s);
     return s;
 }
 
@@ -4336,15 +4350,33 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         fesom_halo_exchange(f.h_checked(), FESOM_HALO_NOD2D, 1, 1, partit);
         f.modify_host();   f.sync_device();
     };
+    /* §3r: the CG scalars are dbl_t (upstream WP_full), so the reduce type is MPI_DOUBLE.
+     * Rule 3 of the registry: MPI_DOUBLE only ever pairs with dbl_t storage (lesson SP1). */
     #define ALLREDUCE_SUM(var) do { if (parallel) { \
-        MPI_Allreduce(MPI_IN_PLACE, &(var), 1, FESOM_MPI_REAL, MPI_SUM, partit->MPI_COMM_FESOM); \
+        MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM); \
         ++g_sshwire.s_arb; } } while (0)             /* M10 [ssh-wire] */
+
+    /* \u00a73r liveness (L80 / the #1054 dead-code lesson): say once, on rank 0, that the CG
+     * arithmetic really is running in dbl_t. A silent no-op here would look exactly like a
+     * null result. */
+    {
+        static int announced = 0;
+        if (!announced) {
+            announced = 1;
+            if (partit == NULL || partit->mype == 0) {
+                printf("[fesom_ssh] CG arithmetic in dbl_t (%zu-byte accumulators, %zu-byte "
+                       "vectors) = upstream WP_full (solver.F90:150)\n",
+                       sizeof(dbl_t), sizeof(real_t));
+                fflush(stdout);
+            }
+        }
+    }
 
     /* Initial ‖rhs‖² + tolerance (solver.F90:142-154). rhs is read at OWNED rows only. */
     SSH_WIRE_LAUNCH(1);
-    real_t s_old = cg_dot(rhs, rhs, N);
+    dbl_t s_old = cg_dot(rhs, rhs, N);
     ALLREDUCE_SUM(s_old);
-    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
+    dbl_t rtol = (dbl_t)soltol * sqrt(s_old / (dbl_t)N_global);
 
     if (s_old == 0.0) {
         SSH_WIRE_LAUNCH(1);
@@ -4426,15 +4458,18 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
          * parallel_reduce — App(row) is computed and pp(row)·App(row) accumulated
          * in row order, identical to the separate cg_spmv+cg_dot (Serial bit-id),
          * saving a kernel launch + a full device read of App per iteration. */
-        real_t s_aux = 0.0;
+        dbl_t s_aux = 0.0;
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_reduce("fesom_cg_spmv_dot", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int row, real_t &l) {
-                real_t s = 0.0;
+            KOKKOS_LAMBDA(const int row, dbl_t &l) {
+                dbl_t s = 0.0;
                 const int rstart = rowptr(row), rend = rowptr(row + 1);
-                for (int n = rstart; n < rend; ++n) s += vals(n) * pp(colind(n));
-                App(row) = s;
-                l += pp(row) * s;
+                for (int n = rstart; n < rend; ++n) s += (dbl_t)vals(n) * (dbl_t)pp(colind(n));
+                /* \u26a0 upstream forms App in WP first and only THEN dots it with pp
+                 * (solver.F90:240-241 then :252), so the dot must read the ROUNDED App,
+                 * not the unrounded accumulator. */
+                App(row) = (real_t)s;
+                l += (dbl_t)pp(row) * (dbl_t)App(row);
             }, s_aux);
         ALLREDUCE_SUM(s_aux);
         if (s_aux == 0.0 || s_aux != s_aux) {        /* NaN/zero check */
@@ -4444,13 +4479,15 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             }
             FESOM_DIE("CG_kk: pp·App is %g — matrix singular or NaN propagated", s_aux);
         }
-        const real_t al = s_old / s_aux;
+        const dbl_t al = s_old / s_aux;
 
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_for("fesom_cg_axpy", Kokkos::RangePolicy<>(0, N),
             KOKKOS_LAMBDA(const int row) {
-                X (row) += al * pp (row);
-                rr(row) -= al * App(row);
+                /* upstream: X/pp/rr/App are WP, al is WP_full → the expression evaluates in
+                 * WP_full and rounds once on the store (solver.F90:283-286). */
+                X (row) = (real_t)((dbl_t)X (row) + al * (dbl_t)pp (row));
+                rr(row) = (real_t)((dbl_t)rr(row) - al * (dbl_t)App(row));
             });
         if      (cgpoly) { if (parallel) ++g_sshwire.s_exch;
                            cgpoly_exchange(rr, partit); si->rr_fld.modify_device(); }  /* E.CG2 */
@@ -4464,32 +4501,32 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
          * blocking collectives → the per-iter sync count the GPU is latency-bound on).
          * E.CG2: the Chebyshev apply replaces the psolve; the dots run separately
          * (same row order, still ONE 2-element Allreduce). */
-        real_t sp0 = 0.0, sp1 = 0.0;
+        dbl_t sp0 = 0.0, sp1 = 0.0;
         if (cgpoly) {
             SSH_WIRE_LAUNCH(g_cgpoly.d + 2);         /* apply (f0 + d semis) + dot2 */
             cgpoly_apply(S, rr, zz);
             if (cgpoly_selfcheck_on()) cgpoly_selfcheck(S, rr, zz, partit, iter);
             Kokkos::parallel_reduce("fesom_cg_dot2", Kokkos::RangePolicy<>(0, N),
-                KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
-                    l0 += rr(row) * zz(row);
-                    l1 += rr(row) * rr(row);
+                KOKKOS_LAMBDA(const int row, dbl_t &l0, dbl_t &l1) {
+                    l0 += (dbl_t)rr(row) * (dbl_t)zz(row);
+                    l1 += (dbl_t)rr(row) * (dbl_t)rr(row);
                 }, sp0, sp1);
         } else {
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_reduce("fesom_cg_psolve_dot2", Kokkos::RangePolicy<>(0, N),
-            KOKKOS_LAMBDA(const int row, real_t &l0, real_t &l1) {
-                real_t s = 0.0;
+            KOKKOS_LAMBDA(const int row, dbl_t &l0, dbl_t &l1) {
+                dbl_t s = 0.0;
                 const int rstart = rowptr(row), rend = rowptr(row + 1);
-                for (int n = rstart; n < rend; ++n) s += prvals(n) * rr(colind(n));
-                zz(row) = s;
-                l0 += rr(row) * s;
-                l1 += rr(row) * rr(row);
+                for (int n = rstart; n < rend; ++n) s += (dbl_t)prvals(n) * (dbl_t)rr(colind(n));
+                zz(row) = (real_t)s;                 /* rounded before the dot, as upstream */
+                l0 += (dbl_t)rr(row) * (dbl_t)zz(row);
+                l1 += (dbl_t)rr(row) * (dbl_t)rr(row);
             }, sp0, sp1);
         if (cgpipe) { SSH_WIRE_LAUNCH(1); cgpipe_zz_ring1(rr, zz); }  /* E.CG1: ring1 rows (dots stay owned-only) */
         }
         if (parallel) {
-            real_t sbuf[2] = { (double)sp0, (double)sp1 };
-            MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, FESOM_MPI_REAL, MPI_SUM, partit->MPI_COMM_FESOM);
+            dbl_t sbuf[2] = { sp0, sp1 };
+            MPI_Allreduce(MPI_IN_PLACE, sbuf, 2, MPI_DOUBLE, MPI_SUM, partit->MPI_COMM_FESOM);
             sp0 = sbuf[0]; sp1 = sbuf[1];
             ++g_sshwire.s_arb;                       /* M10 [ssh-wire] */
         }
@@ -4502,8 +4539,8 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             FESOM_DIE("cgpoly: preconditioner indefinite (rr·M⁻¹rr = %g)", (double)sp0);
         }
 
-        real_t residual = sqrt(sp1 / (real_t)N_global);
-        last_res = residual;                         /* M10: exported to wire/verify */
+        dbl_t residual = sqrt(sp1 / (dbl_t)N_global);
+        last_res = (real_t)residual;                 /* M10: exported to wire/verify */
         if (ssh_trace_on() && (partit == NULL || partit->mype == 0)) {
             fprintf(stderr, "[ssh-trace] it=%d al=%.17g res=%.17g\n",
                     iter, (double)al, (double)residual);
@@ -4524,13 +4561,15 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
             FESOM_DIE("CG_kk residual diverged");
         }
 
-        const real_t be = sp0 / s_old;
+        const dbl_t be = sp0 / s_old;
         s_old = sp0;
         if (ssh_trace_on() && (partit == NULL || partit->mype == 0))
             fprintf(stderr, "[ssh-trace] it=%d be=%.17g\n", iter, (double)be);
         SSH_WIRE_LAUNCH(1);
         Kokkos::parallel_for("fesom_cg_pp", Kokkos::RangePolicy<>(0, Next),
-            KOKKOS_LAMBDA(const int row) { pp(row) = zz(row) + be * pp(row); });
+            KOKKOS_LAMBDA(const int row) {
+                pp(row) = (real_t)((dbl_t)zz(row) + be * (dbl_t)pp(row));   /* §3r: WP_full, WP store */
+            });
         if (cgpipe && cgpipe_selfcheck_on())         /* bring-up: recurred ring1 MUST equal exchanged */
             cgpipe_selfcheck_pp(si, partit, iter);
     }
@@ -4543,7 +4582,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
         if (partit == NULL || partit->mype == 0) {
             fprintf(stderr, "[fesom_ssh] CG_kk hit maxiter=%d without converging "
                     "(last residual ~%.4e, rtol=%.4e)\n",
-                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+                    si->maxiter, (double)sqrt(s_old/(dbl_t)N_global), (double)rtol);
             fflush(stderr);
         }
         FESOM_DIE("CG_kk did not converge");
