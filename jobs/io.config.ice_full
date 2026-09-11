@@ -1,0 +1,7 @@
+# M16 §4c: every ice field the Fortran can also write, monthly — so the SP-DP ratio can be split
+# between ice DYNAMICS (uice/vice) and the advected/thermodynamic scalars (a_ice/m_ice/m_snow).
+# ⚠️ uice/vice are VECTORS and the two codes write them in DIFFERENT frames (Fortran rotates to
+# geographic at output, the port writes rotated — see feedback-ice-mask-averaging). That does NOT
+# affect this measurement: the r2g rotation is per-node and norm-preserving, so relL2(sp,dp)
+# WITHIN one code is exactly frame-invariant. Only cross-code field comparisons need the rotation.
+sst,sss,a_ice,m_ice,m_snow,uice,vice,temp,salt	monthly

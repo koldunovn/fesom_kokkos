@@ -1517,9 +1517,38 @@ floor was measured with it. A new knob **`FESOM_ICE_DIFF`** pins it (announced o
 `jobs/job_m16_faith_port` now sets `FESOM_ICE_DIFF=${ICEDIFF:-0}` to match the Fortran.
 **Gate 0: PASS byte-identical at np1** — knob-off is byte-neutral, so nothing re-bases.
 
-⏳ **Under test** (jobs 27404226/27404228, `faith/year_g4`): the 1-year `pdp`/`psp` pair with
-`ice_diff = 0`. The Fortran arms are unchanged and reused. ⚠️ **Predicted, not concluded** — §3r and
-§3s both looked this convincing and both measured as nulls.
+⚠️ **MEASURED: another null** (jobs 27404226/27404228, `faith/year_g4`, 1-year `pdp`/`psp` pair with
+`ice_diff = 0`; Fortran arms unchanged and reused). `a_ice` RATIO:
+
+| month | 1 | 2 | 3 | 4 | 6 |
+|---|---|---|---|---|---|
+| `ice_diff` 10 (mismatched) | 1.03 | 1.21 | 0.83 | 1.39 | **1.76** |
+| `ice_diff` 0 (**matched**) | 1.15 | 1.27 | 0.81 | 1.32 | **1.80** |
+
+The mismatch was real and is now pinned — it has to be, the two codes must run the same advection
+operator — **but it is not the ice gap.** That is three configuration/precision findings in a row
+(§3r CG, §3s viscosity, §4b ice_diff) that were genuine defects and measured as nulls, against one
+(§3v) that was the mechanism. The pattern is worth naming: *finding a difference is easy; finding
+the one that carries the signal takes the measurement every time.*
+
+### 4c. Splitting the ice gap: dynamics or the advected scalars?
+The next discriminator, since the remaining candidates divide cleanly:
+
+* if the **ice velocity** `uice`/`vice` carries the same ~2× SP−DP ratio, the gap is in the **EVP
+  dynamics** (120 subcycles per step — a long float recurrence);
+* if `uice`/`vice` is at parity while `a_ice` is at 2×, the gap is downstream, in the **FCT advection
+  of the ice scalars or the thermodynamics**.
+
+The port already writes `uice`/`vice`/`m_snow` monthly by default; the Fortran's `io_list` did not, so
+`faith/year_ice/{fdp,fsp}` adds them (jobs 27404993/27404994, 1 year). The port side is `year_g4`,
+already running with the matched `ice_diff`.
+
+⚠️ **Frame note.** `uice`/`vice` are VECTORS and the two codes write them in different frames — the
+Fortran rotates to geographic at output, the port writes the rotated-grid components
+([[feedback-ice-mask-averaging]], the trap that twice masqueraded as physics). **This measurement is
+immune:** the r2g rotation is per-node and norm-preserving, so relL2(sp, dp) *within* one code is
+exactly frame-invariant. Only the compare script's `port-vs-fortran at equal precision` line is
+frame-contaminated for these two variables and must be ignored.
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
