@@ -95,7 +95,24 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->ice_gamma_fct   = 0.5;   /* CORE2 reference NAMELIST value (work_core /
                                    * work_kpp_dump namelist.ice:44); NOT the 0.25 module
                                    * default (MOD_ICE.F90:194). feedback_namelist_over_codedefault. */
+    /* 🔴 M16 §4b — ARTIFICIAL ICE DIFFUSION. This 10.0 is the value the project's own CORE2
+     * reference namelists carried (work_core/work_kpp_dump namelist.ice), and every port baseline
+     * and REFERENCE_RUNS floor was measured with it — so it stays the DEFAULT. But upstream's
+     * shipped `config/namelist.ice` sets `ice_diff = 0.0`, and `setups/test_core2` does not
+     * override it, so every FORTRAN arm of the faithfulness matrix runs with NO artificial ice
+     * diffusion. Until 2026-09-11 nothing pinned this, so the matrix compared two different ice
+     * advection operators — the §3s mistake again, one milestone later.
+     * FESOM_ICE_DIFF=<m^2/s> pins it; jobs/job_m16_faith_port sets 0 to match the Fortran. */
     ice->ice_diff        = 10.0;
+    { const char *e = getenv("FESOM_ICE_DIFF");
+      if (e && e[0]) {
+          ice->ice_diff = (real_t)atof(e);
+          int rank = 0, ini = 0; MPI_Initialized(&ini);
+          if (ini) MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+          if (rank == 0)
+              printf("[fesom_ice] FESOM_ICE_DIFF = %g m^2/s (default 10; upstream namelist ships 0)\n",
+                     (double)ice->ice_diff);
+      } }
     ice->theta_io        = 0.0;
     ice->cd_oce_ice      = 5.5e-3;
     ice->ice_free_slip   = 0;

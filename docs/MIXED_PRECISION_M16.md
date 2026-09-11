@@ -1456,6 +1456,71 @@ FP64 agreement, §3v bought the single-precision parity.**
 - **`FESOM_FCT_ALE_DBL`** stays as the instrument that named the magnitude dependence (§3l). It is a
   no-op now that the Redi terms no longer touch `values`.
 
+## 3w. SEA ICE — the remaining outlier (2026-09-11)
+
+### 4a. Characterisation: it is the SOUTHERN hemisphere, and it is not a comparator artefact
+With the ocean at parity (§3v), `a_ice` is the only variable left above the bar. The monthly curve,
+`year_g3`, RATIO = port SP−DP / fortran SP−DP:
+
+| month | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| `a_ice` | 1.03 | 1.21 | 0.83 | 1.39 | 1.46 | **1.76** | **1.88** | **1.98** | **1.93** | 1.32 | **1.80** | **1.92** |
+| `m_ice` | 0.97 | 1.08 | 0.96 | 1.09 | 1.02 | 1.13 | 1.21 | 1.32 | 1.27 | 1.28 | 1.39 | 1.38 |
+
+⚠️ **The comparator was checked first** — [[feedback-ice-mask-averaging]] records two separate
+sea-ice comparator bugs that each masqueraded as physics. `m16_faith_compare.py` builds **one shared
+validity mask across all four arms**, so the Fortran's NaN-over-open-water points are excluded from
+the port's sum too, and points that are exactly zero in every arm are dropped. `a_ice`/`m_ice` are
+scalars, so the rotated-vs-geographic vector-frame trap does not apply. The number stands.
+
+🔴 **Where it lives** (`scratchpad/icewhere.py`, same shared mask):
+
+| month 9 | npts | fortran | port | ratio |
+|---|---|---|---|---|
+| ALL | 29462 | 2.378e-03 | 4.595e-03 | **1.93** |
+| **NH** | 15736 | 2.107e-03 | 2.656e-03 | **1.26** |
+| **SH** | 13726 | 2.559e-03 | 5.602e-03 | **2.19** |
+| NH pack a>0.8 | 8322 | 4.286e-04 | 5.602e-04 | 1.31 |
+| SH pack a>0.8 | 12276 | 5.991e-04 | 1.278e-03 | 2.13 |
+
+and at month 12 the split is sharper still: **NH 0.87** (the port is *better*), **SH 2.20**. It is not
+an ice-edge effect — within the SH the pack interior, the 0.15–0.8 band and the marginal zone are all
+around 2×. **It is Antarctic sea ice**, which is where the ice is free-drifting and dynamics-dominated
+rather than landlocked.
+
+### 🔴 4b. A configuration mismatch in the ice advection — `ice_diff`, the §3s mistake one milestone later
+Auditing every `&ice_dyn`/`&ice_therm` parameter against the port's defaults found **one** difference,
+and it is in the advection operator:
+
+| | Fortran (upstream `config/namelist.ice`, not overridden by `setups/test_core2`) | port default |
+|---|---|---|
+| `ice_diff` | **0.0** | **10.0** |
+
+Every other parameter matches exactly — `whichEVP` 0, `Pstar` 30000, `ellipse` 2.0, `c_pressure` 20,
+`delta_min` 1e-11, `evp_rheol_steps` 120, `ice_gamma_fct` 0.5, `theta_io` 0, `Cd_oce_ice` 5.5e-3,
+`ice_ave_steps` 1, `Sice` 4.0, `iclasses` 7, `hmin`/`armin` 0.01, `h0`=`h0_s`=0.5, all six albedos,
+`con`/`consn`, `snowdist`, `c_melt`, `open_water_albedo` 0; `new_iclasses`/`use_meltponds` are
+`.false.` in both and `h_snowscale`=0 is inert (its only use is the coupled thermodynamics).
+The hemisphere branches were checked too: both codes select `h0` vs `h0_s` on
+`geo_coord_nod2D(2,·)` — **geographic** latitude on both sides, so the rotated-frame trap does not fire
+(and with `h0 == h0_s` it could not have mattered numerically anyway).
+
+`ice_diff` is live: it enters the ice-FCT low-order rhs as
+`diff = ice_diff*sqrt(elem_area/scale_area)` (`ice_fct.F90`:175, `fesom_ice_fct.cpp`:184/:610). So the
+port has been running ~10–70 m²/s of artificial diffusion on `a_ice`/`m_ice`/`m_snow` where upstream
+runs **none** — a different advection operator, in exactly the fields that show the gap, with exactly
+the free-drift/sharp-gradient signature that would make it hemispherically asymmetric.
+
+**Handled like §3s**, not like §3v: the port's **default stays 10.0**, because that is the value this
+project's own CORE2 reference namelists carried and every existing baseline and `REFERENCE_RUNS`
+floor was measured with it. A new knob **`FESOM_ICE_DIFF`** pins it (announced on rank 0), and
+`jobs/job_m16_faith_port` now sets `FESOM_ICE_DIFF=${ICEDIFF:-0}` to match the Fortran.
+**Gate 0: PASS byte-identical at np1** — knob-off is byte-neutral, so nothing re-bases.
+
+⏳ **Under test** (jobs 27404226/27404228, `faith/year_g4`): the 1-year `pdp`/`psp` pair with
+`ice_diff = 0`. The Fortran arms are unchanged and reused. ⚠️ **Predicted, not concluded** — §3r and
+§3s both looked this convincing and both measured as nulls.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

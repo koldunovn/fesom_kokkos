@@ -50,6 +50,12 @@ export FESOM_VISC_OPT=${VISCOPT:-5}
 # NOGM=1 turns GM/Redi off — must be matched by Fer_GM=.false./Redi=.false. on the Fortran side
 # (scripts/m16_faith_setup.sh GMREDI argument). Used by the §3t test.
 [ "${NOGM:-0}" = 1 ] && export FESOM_NO_GMREDI=1
+# 🔴 M16 §4b — ARTIFICIAL ICE DIFFUSION. Upstream's config/namelist.ice ships `ice_diff = 0.0` and
+# setups/test_core2 does not override it, so every FORTRAN arm runs with none. The PORT's default is
+# 10.0 (the value this project's own CORE2 reference namelists carried, kept so existing baselines
+# and REFERENCE_RUNS floors stay valid). Until 2026-09-11 nothing pinned it, so the matrix compared
+# two different ice advection operators. Pin it to the Fortran's value; ICEDIFF= overrides.
+export FESOM_ICE_DIFF=${ICEDIFF:-0}
 # DET=1 must be set on BOTH codes or neither -- see scripts/m16_faith_setup.sh. The legacy fill is
 # partition-dependent, so with det off the two codes need not even start from the same field.
 [ "${DET:-0}" = 1 ] && export FESOM_IC_EXTRAP=det
