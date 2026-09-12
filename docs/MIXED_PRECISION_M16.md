@@ -1761,6 +1761,52 @@ first month run (a `read` into the iostat variable; fixed) — it wrote every st
 the analysis read the port's strided subset, so the result stands. Its step field was `I3.3` and
 wrapped at step 1000 (now `I0.3`, matching the port's `%03d`); steps ≥ 1008 are absent from that run.
 
+### 🔴🔴 4h. REFRAMED: it is not a sea-ice problem — it is a 60–70°S OCEAN problem the ice inherits
+The §4g finding ("the excess accumulates *between* ice steps") sent the question back to the ocean,
+and the ocean's *global* parity turned out to be hiding a **latitudinal structure**.
+Month 12, port/fortran SP−DP ratio by latitude band, surface fields (`year_g4`/`year_ice`):
+
+| band | sst | sss | ssh | | band | sst | sss | ssh |
+|---|---|---|---|---|---|---|---|---|
+| 90–70°S | 1.04 | 1.48 | 1.38 | | 20°S–0 | **0.43** | **0.45** | 0.59 |
+| **70–60°S** | **2.63** | **2.62** | **2.15** | | 0–20°N | 0.54 | 0.65 | 0.51 |
+| 60–50°S | 1.45 | 1.81 | 1.39 | | 40–50°N | 1.16 | 1.10 | 1.33 |
+| 50–40°S | 1.11 | 1.16 | 1.02 | | 50–60°N | 1.10 | 1.04 | 1.23 |
+| 40–20°S | 1.19 | 1.40 | 1.11 | | 70–90°N | 1.14 | 1.90 | 1.55 |
+
+Month 6 has the same shape (70–60°S: 2.24 / 1.40 / 2.19). **The port is 2× better than upstream
+in the tropics and 2.6× worse in one band, 60–70°S** — the global ratios of §3v (0.70–1.28) are the
+*average* of those two. The Antarctic ice sits in exactly that band, and its SP−DP ratio there
+(a_ice 2.15, month 12) matches the surface ocean's. **The ice is following the ocean, not driving
+it.** The SH *open* ocean south of 40°S is as bad as the ice zone (sss 2.33 vs 2.25).
+
+**And the noise-envelope test localises it the same way** (`year_g3`, month 12, `sst`):
+
+| band | F spdp/env | P spdp/env | spdp P/F | **env P/F** |
+|---|---|---|---|---|
+| **70–60°S** | 4.9 | **13.2** | **2.61** | **0.98** |
+| 60–50°S | 8.0 | 7.6 | 1.43 | 1.51 |
+| 50–60°N | 17.8 | 18.0 | 1.10 | 1.09 |
+| 20°S–20°N | 1.2 | 1.5 | 0.56 | 0.43 |
+
+In 60–70°S the two codes' FP64 noise envelopes are **identical (0.98)** while the port's SP−DP is
+2.6× — the port sits **13× above its own envelope** there, upstream 5×. Everywhere else the two
+ratios track each other. **A per-step precision loss confined to one latitude band**, with the
+northern analogue (50–60°N) clean.
+
+**What is distinctive about 60–70°S in this setup.** It is the Antarctic coastal/shelf zone: the
+coldest, freshest, densest surface water in the model (near-freezing SST, brine rejection, the
+densest water masses forming), the strongest surface buoyancy fluxes from the ice, and — on the
+CORE2 mesh — no cavities, so the shelf is the model's southern boundary. The physics that is
+*specific* to that band and not to 50–60°N: (a) the freezing-point / near-freezing branch of the
+EOS and of the ice–ocean heat flux, (b) brine-rejection salt fluxes into a very dense water column,
+(c) the deepest convective mixing (KPP boundary-layer depth reaching the bottom on the shelf). Each
+of those is a *different* code path from the one the northern band exercises. **This is the next
+thing to instrument — per-band, per-stage, in the ocean, not the ice.**
+
+Month 1 (daily, `growth_1m_g3`): the 60–70°S sst band is already the most consistently elevated
+(1.0–1.4 while other bands swing 0.5–1.7), so the mechanism is present from the start and compounds.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
