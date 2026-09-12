@@ -369,30 +369,40 @@ static void salt_stage_dump(const char *tag, int step_n,
 {
     const char *dir = getenv("FESOM_SALT_TRACE");
     if (!dir || !dir[0]) return;
-    const char *st = getenv("FESOM_SALT_TRACE_STEP");
-    if (step_n != (st && st[0] ? atoi(st) : 1)) return;
+    /* §4i: FESOM_SALT_TRACE_STEP=<n> (default 1) is the LAST step traced; FESOM_SALT_TRACE_EVERY=<k>
+     * (default = STEP, i.e. that one step only) is the stride. Both tracers are written, the file
+     * name carries tracer and step: salt.<tag>.tr<k>.s<step>.<rank>.bin (matches the Fortran twin
+     * in oce_ale_tracer.F90 / fesom_module.F90). */
+    static int last = -1, every = -1;
+    if (last < 0) {
+        const char *st = getenv("FESOM_SALT_TRACE_STEP");  last  = (st && st[0]) ? atoi(st) : 1;
+        const char *ev = getenv("FESOM_SALT_TRACE_EVERY"); every = (ev && ev[0]) ? atoi(ev) : last;
+        if (every < 1) every = 1;
+    }
+    if (step_n > last || step_n % every != 0) return;
 
-    tracers->data[FESOM_TRACER_S].values_fld.sync_host();
-    const real_t *S = tracers->data[FESOM_TRACER_S].values;
     const int nl = mesh->nl, N = mesh->myDim_nod2D;
     int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
-
-    char path[1024];
-    snprintf(path, sizeof path, "%s/salt.%s.%04d.bin", dir, tag, rk);
-    FILE *f = fopen(path, "wb");
-    if (!f) return;
-    /* global id + the whole column, so the two runs can be matched independent of decomposition */
-    for (int n = 0; n < N; ++n) {
-        int gid = (p && p->myList_nod2D) ? p->myList_nod2D[n] : n + 1;
-        int nlv = mesh->nlevels_nod2D[n] - 1;
-        fwrite(&gid, sizeof(int), 1, f);
-        fwrite(&nlv, sizeof(int), 1, f);
-        for (int nz = 0; nz < nlv; ++nz) {
-            double v = (double)S[FESOM_NODE3D(n, nz, nl)];
-            fwrite(&v, sizeof(double), 1, f);
+    for (int k = 0; k < 2; ++k) {
+        tracers->data[k].values_fld.sync_host();
+        const real_t *V = tracers->data[k].values;
+        char path[1024];
+        snprintf(path, sizeof path, "%s/salt.%s.tr%d.s%03d.%04d.bin", dir, tag, k, step_n, rk);
+        FILE *f = fopen(path, "wb");
+        if (!f) return;
+        /* global id + the whole column, so the two runs can be matched independent of decomposition */
+        for (int n = 0; n < N; ++n) {
+            int gid = (p && p->myList_nod2D) ? p->myList_nod2D[n] : n + 1;
+            int nlv = mesh->nlevels_nod2D[n] - 1;
+            fwrite(&gid, sizeof(int), 1, f);
+            fwrite(&nlv, sizeof(int), 1, f);
+            for (int nz = 0; nz < nlv; ++nz) {
+                double v = (double)V[FESOM_NODE3D(n, nz, nl)];
+                fwrite(&v, sizeof(double), 1, f);
+            }
         }
+        fclose(f);
     }
-    fclose(f);
 }
 
 int fesom_timestep(int                          step_n,
@@ -1526,6 +1536,7 @@ int fesom_timestep(int                          step_n,
         }
         /* 🔴 §3v: see the T branch — one reconstruction, after every explicit tendency. */
         fesom_tracer_ale_recon_kk(FESOM_TRACER_S, mesh, tracers, p);
+        salt_stage_dump("C2_post_recon", step_n, mesh, tracers, p);   /* §4i: = Fortran after solve_tracers_ale */
         fesom_halo_field(tracers->data[FESOM_TRACER_S].values_fld, FESOM_HALO_NOD3D, nl, 1, p);   /* M5.14 (S flip) device-halo (S values) */
     }
 

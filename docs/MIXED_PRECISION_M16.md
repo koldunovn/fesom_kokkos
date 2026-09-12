@@ -1807,6 +1807,53 @@ thing to instrument — per-band, per-stage, in the ocean, not the ice.**
 Month 1 (daily, `growth_1m_g3`): the 60–70°S sst band is already the most consistently elevated
 (1.0–1.4 while other bands swing 0.5–1.7), so the mechanism is present from the start and compounds.
 
+### 4i. The ocean stage trace, per band — the excess is set OUTSIDE the tracer stages, at the surface
+The tracer-step instrument (§3j's `FESOM_SALT_TRACE`) was generalised to both tracers, any step
+and a stride, and given a Fortran twin (`oce_ale_tracer.F90`, `m16_salt_stage`, LOCAL): stages
+`A_entry` (top of the per-tracer loop), `C2_post_recon` (after the §3v single ALE reconstruction —
+advection + Redi folded), `D_post_vdiff` (after the implicit vertical diffusion). One month, one
+traced step every two days (`faith/oceantrace_1m`, jobs 27414753/27414754). Salinity, **surface
+level**, port/fortran SP−DP ratio:
+
+| step | 70–60°S A / C2 / D | 50–60°N A / C2 / D | 20°S–20°N A / C2 / D |
+|---|---|---|---|
+| 96 | 1.94 / 1.95 / 2.01 | 0.75 / 0.72 / 0.66 | 0.96 / 0.95 / 1.14 |
+| 192 | **3.26 / 3.28 / 3.19** | 1.12 / 1.15 / 1.06 | 1.69 / 1.67 / 1.06 |
+| 288 | 2.18 / 2.20 / 2.17 | 0.85 / 0.91 / 0.87 | 1.05 / 1.05 / 1.07 |
+| 864 | 1.14 / 1.13 / 1.12 | 2.20 / 2.22 / 2.20 | 1.27 / 1.27 / 1.39 |
+| 1440 | 1.40 / 1.38 / 1.39 | 1.10 / 1.10 / 1.11 | 1.24 / 1.25 / 0.93 |
+
+🔴 **In every band and every step, A → C2 → D move together.** The tracer advection, the Redi
+terms, the reconstruction and the implicit vertical diffusion all leave the ratio where they found
+it. (The one exception is the tropics' D column, which moves the ratio *down* — the vertical
+diffusion is where the port is *better*.) Same verdict as the ice trace (§4g): the excess is
+generated **between** the tracer stages — in the dynamics half of the step or in the surface
+forcing — and the tracers merely carry it.
+
+**And it is surface-intensified.** Month 12, port/fortran ratio by depth level in the 60–70°S band
+(`year_g4`/`year_ice`):
+
+| level | 0 | 2 | 4 | 6 | 9 | 12 | 15 | 18 | 22 | 30 | 40 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| temp | **2.63** | **2.70** | 2.47 | 2.42 | 2.11 | 1.76 | 1.54 | 1.34 | 1.33 | 1.67 | 1.62 |
+| salt | **2.62** | **2.87** | 1.90 | 1.93 | 1.72 | 1.69 | 1.64 | 1.69 | 1.07 | 1.47 | 1.35 |
+
+2.6–2.9 in the top ~50 m, decaying to ~1.5 below; 50–60°N is 0.9–1.3 at every level; the tropics
+0.5–0.8 at every level. **A surface-flux signature, confined to the Antarctic band.**
+
+**What that leaves.** Not the EOS/pressure-gradient chain (that would be interior-weighted, and the
+dynamics feed the tracers only through advection, which is at parity). Not the ice's own internals
+(§4g). What is specific to 60–70°S, at the surface, in the forcing: the **bulk formulae over ice
+and near-freezing water** (`gen_forcing_couple.F90` / `fesom_bulk.cpp`: latent/sensible heat with
+the ice-surface branch, the freezing-point limit), the **ice–ocean fluxes** into the ocean
+(`oce_fluxes`: the heat and virtual-salt/fresh-water fluxes from ice growth and melt, brine
+rejection), and the **surface stress under ice** (the ice–ocean drag applied to the ocean). Each
+is a port-side code path with its own float arithmetic on quantities that are large and cancelling
+(latent heat ≈ 2.5e6 J/kg × evaporation; freezing point vs SST differences of 1e-2 K on a 271 K
+base). **The next instrument is on those flux fields, per band, matched between the codes** —
+`heat_flux`, `water_flux`, `stress_surf`, the ice `flx_h`/`flx_fw` — and it is the first one that
+needs the *forcing* dumped rather than the state.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

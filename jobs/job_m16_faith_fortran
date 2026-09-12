@@ -56,6 +56,12 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/fct"; export FESOM_FCT_TRACE="$dir/fct"
     fi
+    # SALTTRACE=1 (§4i): ocean tracer stage trace, needs ORACLE_VARIANT=_instr
+    if [ "${SALTTRACE:-0}" = 1 ]; then
+        mkdir -p "$dir/strace"; export FESOM_SALT_TRACE="$dir/strace"
+        [ -n "${SALTTRACE_STEP:-}"  ] && export FESOM_SALT_TRACE_STEP="$SALTTRACE_STEP"
+        [ -n "${SALTTRACE_EVERY:-}" ] && export FESOM_SALT_TRACE_EVERY="$SALTTRACE_EVERY"
+    fi
     # ICETRACE=1 (§4g): needs ORACLE_VARIANT=_instr; same knobs as the port job
     if [ "${ICETRACE:-0}" = 1 ]; then
         mkdir -p "$dir/ice"; export FESOM_ICE_TRACE="$dir/ice"
