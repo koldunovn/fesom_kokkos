@@ -452,6 +452,64 @@ void fesom_ice_initial_state(fesom_ice                  *ice,
  * Env knobs are read once and cached (matches FESOM_NO_TRADV style elsewhere).
  */
 static int s_ice_env_loaded = 0;
+/* ------------------------------------------------------------------------------------------
+ * M16 §4g — ICE STAGE TRACE (FESOM_ICE_TRACE=<dir>): dump the ice state at MATCHED points of the
+ * ice step, in the same binary layout the tracer FCT trace uses (int32 gid, int32 nlv=1, one
+ * float64 per owned node), so each stage's SP−DP can be compared between the codes. The Fortran
+ * twin lives in ice_setup_step.F90 (LOCAL instrument, not for upstream). Stages:
+ *   A_entry     after ocean2ice, before dynamics      a_ice m_ice m_snow uice vice
+ *   B_postdyn   after EVP                              uice vice
+ *   C_postadv   after FCT + cut_off                    a_ice m_ice m_snow
+ *   D_postthermo after thermodynamics                  a_ice m_ice m_snow
+ * First N ice steps only (FESOM_ICE_TRACE_STEPS, default 1). This is the method that found the
+ * Redi/del_ttf defect (§3q–§3u); the ice was the remaining outlier after that fix (§4a–§4f).
+ * ------------------------------------------------------------------------------------------ */
+static void ice_trace_dump(const char *stage, const char *tag, int step,
+                           const struct fesom_mesh *mesh, struct fesom_partit *partit,
+                           const real_t *arr)
+{
+    const char *dir = getenv("FESOM_ICE_TRACE");
+    if (!dir || !dir[0]) return;
+    static int nsteps = -1;
+    if (nsteps < 0) { const char *e = getenv("FESOM_ICE_TRACE_STEPS"); nsteps = (e && e[0]) ? atoi(e) : 1; }
+    if (step > nsteps) return;
+    static int every = -1;
+    if (every < 0) { const char *e = getenv("FESOM_ICE_TRACE_EVERY"); every = (e && e[0]) ? atoi(e) : 1; if (every < 1) every = 1; }
+    if (every > 1 && step % every != 0) return;
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/ice.%s.%s.s%03d.%04d.bin", dir, stage, tag, step, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int one = 1;
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int gid = partit->myList_nod2D[n];
+        double v = (double)arr[n];
+        fwrite(&gid, sizeof(int), 1, f); fwrite(&one, sizeof(int), 1, f);
+        fwrite(&v, sizeof(double), 1, f);
+    }
+    fclose(f);
+}
+static void ice_trace_stage(const char *stage, int step, fesom_ice *ice,
+                            const struct fesom_mesh *mesh, struct fesom_partit *partit,
+                            int with_scalars, int with_vel)
+{
+    if (!getenv("FESOM_ICE_TRACE")) return;
+    if (with_scalars) {
+        ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MICE].values_fld.sync_host();
+        ice->data[FESOM_ICE_MSNOW].values_fld.sync_host();
+        ice_trace_dump(stage, "a_ice",  step, mesh, partit, ice->data[FESOM_ICE_AICE].values);
+        ice_trace_dump(stage, "m_ice",  step, mesh, partit, ice->data[FESOM_ICE_MICE].values);
+        ice_trace_dump(stage, "m_snow", step, mesh, partit, ice->data[FESOM_ICE_MSNOW].values);
+    }
+    if (with_vel) {
+        ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+        ice_trace_dump(stage, "uice", step, mesh, partit, ice->uice);
+        ice_trace_dump(stage, "vice", step, mesh, partit, ice->vice);
+    }
+}
+
 static int s_no_ice_dyn     = 0;
 static int s_no_ice_adv     = 0;
 static int s_no_ice_thermo  = 0;
@@ -714,6 +772,7 @@ void fesom_ice_step(int                            step,
             mesh->hbar_fld.modify_host(); mesh->hbar_fld.sync_device();   /* hbar IS host-authoritative (legacy) — keep */
         }
         fesom_ocean2ice_kk(ice, dyn, tracers, partit, mesh);
+        ice_trace_stage("A_entry", step, ice, mesh, partit, 1, 1);   /* §4g */
         if (icerails) {
             /* THE UNPIN. srfoce_* stay DEVICE-authoritative; the 2 host-staged halos (each a
              * full-field D2H + host MPI + full-field H2D) become ONE co-packed device exchange.
@@ -777,6 +836,7 @@ void fesom_ice_step(int                            step,
             ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
             ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
             }
+            ice_trace_stage("B_postdyn", step, ice, mesh, partit, 0, 1);   /* §4g */
             if (s_verify_evp) fesom_ice_evp_verify(ice, partit, mesh, step, eu, ev, e11, e12, e22);
         } else if (ice->whichEVP == 1) {
             /* mEVP (M6.2, FESOM_WHICH_EVP=1). Same IN/OUT rail as std EVP — it reads and writes
@@ -896,6 +956,7 @@ void fesom_ice_step(int                            step,
         ice->data[FESOM_ICE_MSNOW].values_fld.modify_host(); ice->data[FESOM_ICE_MSNOW].values_fld.sync_device();
         }
         fesom_ice_cut_off_kk(ice, partit, mesh);
+        ice_trace_stage("C_postadv", step, ice, mesh, partit, 1, 0);   /* §4g */
         if (!icerails) {
         ice->data[FESOM_ICE_AICE].values_fld.sync_host();
         ice->data[FESOM_ICE_MICE].values_fld.sync_host();
@@ -962,6 +1023,7 @@ void fesom_ice_step(int                            step,
         }
 
         fesom_ice_thermodynamics_kk(ice, partit, mesh, forcing, jra, sr);
+        ice_trace_stage("D_postthermo", step, ice, mesh, partit, 1, 0);   /* §4g */
 
         /* OUT rail — the 9 consumed outputs to the host (oce_fluxes reads flx_*, h_diag reads values).
          * M7 H.2 ICERAILS: NONE of those 9 has a production host reader any more. flx_h/flx_fw are

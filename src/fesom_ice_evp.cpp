@@ -511,6 +511,64 @@ static Kokkos::View<int*> evp_coastal_mask(struct fesom_partit *partit, struct f
  * after finalize, aborts — same rule as fesom_halo_device_free). No-op if never built. */
 void fesom_ice_evp_free(void) { g_evp_coastal_mask = Kokkos::View<int*>(); }
 
+/* M16 §4g — EVP SUBCYCLE TRACE (FESOM_ICE_TRACE=<dir>). Inside the FIRST ice step, at the
+ * subcycles listed in FESOM_ICE_TRACE_SUBS (default "1,2,10,60,120"), dump u_ice/v_ice (owned
+ * nodes) and sigma11/sigma12/sigma22 + eps11/eps22/eps12 (owned elements) in the ice-trace binary
+ * layout. Same 1-based subcycle numbering as the Fortran's `shortstep`. Its twin is in
+ * ice_EVP.F90 (LOCAL instrument). Costs a sync_host per traced subcycle, never on the hot path. */
+static void evp_trace_write(const char *tag, int sub, const int *gids, int N, const real_t *arr)
+{
+    const char *dir = getenv("FESOM_ICE_TRACE");
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/evp.%s.sub%03d.%04d.bin", dir, tag, sub, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int one = 1;
+    for (int n = 0; n < N; ++n) {
+        double v = (double)arr[n];
+        fwrite(&gids[n], sizeof(int), 1, f); fwrite(&one, sizeof(int), 1, f);
+        fwrite(&v, sizeof(double), 1, f);
+    }
+    fclose(f);
+}
+static void evp_subcycle_trace(int sub, fesom_ice *ice, struct fesom_partit *partit,
+                               const struct fesom_mesh *mesh)
+{
+    static int loaded = 0, want[64], nwant = 0, icestep = 0;
+    if (!loaded) {
+        loaded = 1;
+        if (getenv("FESOM_ICE_TRACE")) {
+            const char *e = getenv("FESOM_ICE_TRACE_SUBS");
+            const char *lst = (e && e[0]) ? e : "1,2,10,60,120";
+            for (const char *p = lst; *p && nwant < 64; ) {
+                char *end; long v = strtol(p, &end, 10);
+                if (end == p) break;
+                want[nwant++] = (int)v;
+                while (*end == ',' || *end == ' ') ++end;
+                p = end;
+            }
+        }
+    }
+    if (nwant == 0) return;
+    if (sub == 1) ++icestep;                       /* count ice steps by their first subcycle */
+    if (icestep > 1) return;                       /* first ice step only */
+    int hit = 0;
+    for (int i = 0; i < nwant; ++i) if (want[i] == sub) hit = 1;
+    if (!hit) return;
+    ice->uice_fld.sync_host(); ice->vice_fld.sync_host();
+    ice->work.sigma11_fld.sync_host(); ice->work.sigma12_fld.sync_host(); ice->work.sigma22_fld.sync_host();
+    ice->work.eps11_fld.sync_host();   ice->work.eps12_fld.sync_host();   ice->work.eps22_fld.sync_host();
+    evp_trace_write("uice",    sub, partit->myList_nod2D,  mesh->myDim_nod2D,  ice->uice);
+    evp_trace_write("vice",    sub, partit->myList_nod2D,  mesh->myDim_nod2D,  ice->vice);
+    evp_trace_write("sigma11", sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.sigma11);
+    evp_trace_write("sigma12", sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.sigma12);
+    evp_trace_write("sigma22", sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.sigma22);
+    evp_trace_write("eps11",   sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.eps11);
+    evp_trace_write("eps12",   sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.eps12);
+    evp_trace_write("eps22",   sub, partit->myList_elem2D, mesh->myDim_elem2D, ice->work.eps22);
+}
+
 void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
                                struct fesom_partit  *partit,
                                struct fesom_mesh    *mesh)
@@ -932,6 +990,7 @@ void fesom_ice_evp_dynamics_kk(fesom_ice            *ice,
         } else if ((sub + 1) % Kw == 0) {
             fesom_evpwide_subcycle_exchange(ice, partit);
         }
+        evp_subcycle_trace(sub + 1, ice, partit, mesh);   /* §4g, no-op unless FESOM_ICE_TRACE */
     }
 }
 

@@ -116,6 +116,13 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/fct"; export FESOM_FCT_TRACE="$RUNROOT/$arm/fct"
     fi
+    # ICETRACE=1 (§4g): matched ice-stage + EVP-subcycle dumps for the first ICETRACE_STEPS ice steps
+    if [ "${ICETRACE:-0}" = 1 ]; then
+        mkdir -p "$RUNROOT/$arm/ice"; export FESOM_ICE_TRACE="$RUNROOT/$arm/ice"
+        [ -n "${ICETRACE_STEPS:-}" ] && export FESOM_ICE_TRACE_STEPS="$ICETRACE_STEPS"
+        [ -n "${ICETRACE_SUBS:-}"  ] && export FESOM_ICE_TRACE_SUBS="$ICETRACE_SUBS"
+        [ -n "${ICETRACE_EVERY:-}" ] && export FESOM_ICE_TRACE_EVERY="$ICETRACE_EVERY"
+    fi
     if [ "${SALTTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/strace"; export FESOM_SALT_TRACE="$RUNROOT/$arm/strace"
     fi

@@ -1694,6 +1694,73 @@ plausible-but-null hypotheses. The port already has half of it: `FESOM_EVP_DUMP_
 `ice_EVP.F90` and `ice_thermo_oce.F90` — the pattern is the one already used in `oce_adv_tra_ver.F90`
 and `oce_adv_tra_fct.F90`.
 
+### 4g. THE INSTRUMENT: matched ice-stage and EVP-subcycle traces in both codes
+Built 2026-09-12. `FESOM_ICE_TRACE=<dir>` writes, in the tracer-FCT binary layout (int32 gid,
+int32 1, float64) so the existing readers apply:
+
+| stage | where | fields |
+|---|---|---|
+| `A_entry` | after `ocean2ice`, before dynamics | a_ice m_ice m_snow uice vice |
+| `B_postdyn` | after the EVP | uice vice |
+| `C_postadv` | after ice-FCT + `cut_off` | a_ice m_ice m_snow |
+| `D_postthermo` | after thermodynamics | a_ice m_ice m_snow |
+| `evp.*.subNNN` | inside the first ice step, at `FESOM_ICE_TRACE_SUBS` (default 1,2,10,60,120) | uice vice σ11 σ12 σ22 ε11 ε12 ε22 |
+
+Knobs `FESOM_ICE_TRACE_STEPS` (how many ice steps), `FESOM_ICE_TRACE_EVERY` (stride). Port:
+`fesom_ice.cpp` (`ice_trace_stage`) + `fesom_ice_evp.cpp` (`evp_subcycle_trace`, inside the live
+Kokkos subcycle loop, after the halo). Fortran twin (LOCAL, not for upstream): `ice_setup_step.F90`
+(`m16_ice_trace`, `contains`-ed) + `ice_EVP.F90` (`m16_evp_trace`). Job knobs `ICETRACE=1`,
+`ICETRACE_STEPS`, `ICETRACE_EVERY`, `ICETRACE_SUBS`; Fortran needs `ORACLE_VARIANT=_instr`.
+Both codes wrote identical file inventories on the first run (3392 files each, 64 ranks).
+Binary tag **`g6`**; byte-neutral when unset.
+
+**Result 1 — ice step 1, every stage (`faith/icetrace`, jobs 27414200/27414201):**
+
+| stage | relerr F | relerr P | **P/F** | \|DP\| P/F |
+|---|---|---|---|---|
+| `B_postdyn.uice` / `.vice` | 1.47e-04 / 1.96e-04 | 1.48e-04 / 1.96e-04 | **1.007 / 0.999** | 1.000 |
+| `C_postadv.a_ice` / `m_ice` / `m_snow` | 9.75e-07 / 8.45e-07 / 7.08e-07 | 9.98e-07 / 8.67e-07 / 7.26e-07 | **1.024 / 1.025 / 1.026** | 1.000 |
+| `D_postthermo.a_ice` / `m_ice` / `m_snow` | 9.72e-07 / 8.50e-07 / 7.13e-07 | 9.96e-07 / 8.72e-07 / 7.31e-07 | **1.024 / 1.025 / 1.026** | 1.000 |
+| EVP sub 120: σ11 / σ12 / σ22 | 5.88e-03 / 8.79e-03 / 6.00e-03 | 5.57e-03 / 8.85e-03 / 5.63e-03 | 0.95 / 1.01 / 0.94 | 1.000 |
+| EVP sub 120: ε11 / ε12 / ε22 | 1.36e-03 / 1.41e-03 / 1.55e-03 | 1.47e-03 / 1.42e-03 / 1.50e-03 | 1.08 / 1.00 / 0.97 | 1.000 |
+
+Every FP64 magnitude matches to 1.000 (the DP-vs-DP columns are 1e-14 at sub 1, growing to
+1e-6 by sub 120 — pure rounding-order drift). **Every stage of the ice step is at parity (0.92–1.08)
+on step 1**, subcycle by subcycle. (Early subcycles show the port *better*, 0.27–0.57 at sub 1–10
+on uice — the σ11/σ22 3.2× at sub 1 is the first-subcycle stress on a uniform IC, magnitudes 5e-07,
+and is gone by sub 2.)
+
+**Result 2 — the month-long daily trace (`faith/icetrace_1m`, jobs 27414257/27414258; 1488 ice
+steps, one traced per day):** a_ice's within-step ratio at the three stages of the same step:
+
+| step | 48 | 144 | 288 | 432 | 576 | 720 | 864 | 960 |
+|---|---|---|---|---|---|---|---|---|
+| `A_entry` | 1.33 | 1.00 | 1.14 | 0.96 | 0.87 | 1.40 | 1.27 | 0.89 |
+| `C_postadv` | 1.11 | 0.69 | 0.61 | 1.47 | 0.90 | 1.39 | 1.26 | 0.95 |
+| `D_postthermo` | 1.12 | 0.98 | 1.16 | 1.47 | 0.91 | 1.38 | 1.25 | 0.95 |
+
+🔴 **The three stages of any one step move together.** Where `D ≠ A` on a given day, `C` explains
+it (the FCT + `cut_off` stage, days 144/288/432), and the direction is *not* consistently upward —
+it is 0.61 at step 288 and 1.47 at step 432. **Neither the ice advection nor the thermodynamics
+systematically inflates the port's ratio within a step.** What the trace shows instead is that the
+`A_entry` ratio itself drifts 0.9 → 1.3 over the month — the excess is accumulating **between** ice
+steps, i.e. through the ocean the ice is coupled to.
+
+**Which eliminates the last in-ice candidates.** With the EVP (§4d, and now traced), the advection
+and the thermodynamics all at parity within the step, and the ocean→ice mapping (`ocean2ice`:
+area-weighted surface `UV` → `u_w`/`v_w`, `hbar` → `elevation`, `T`/`S` → `srfoce_*`) verified
+faithful line by line, the remaining directions are the **ice→ocean** half of the coupling
+(`oce_fluxes`: the stress the ice puts on the ocean, the fresh-water and heat fluxes) and the
+ocean's own SP behaviour *under* ice. Note that this is consistent with everything measured: the
+Southern Ocean is where the ice-driven surface stress and buoyancy fluxes matter most for the
+surface ocean, and the ocean `u`/`v` is at 0.4–0.8 *globally* — a hemispheric split of that field
+has not been taken.
+
+⚠️ **Instrument caveats recorded.** The Fortran `FESOM_ICE_TRACE_EVERY` stride did not fire on the
+first month run (a `read` into the iostat variable; fixed) — it wrote every step, 48× more files, and
+the analysis read the port's strided subset, so the result stands. Its step field was `I3.3` and
+wrapped at step 1000 (now `I0.3`, matching the port's `%03d`); steps ≥ 1008 are absent from that run.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

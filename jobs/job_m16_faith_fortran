@@ -56,6 +56,13 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/fct"; export FESOM_FCT_TRACE="$dir/fct"
     fi
+    # ICETRACE=1 (§4g): needs ORACLE_VARIANT=_instr; same knobs as the port job
+    if [ "${ICETRACE:-0}" = 1 ]; then
+        mkdir -p "$dir/ice"; export FESOM_ICE_TRACE="$dir/ice"
+        [ -n "${ICETRACE_STEPS:-}" ] && export FESOM_ICE_TRACE_STEPS="$ICETRACE_STEPS"
+        [ -n "${ICETRACE_SUBS:-}"  ] && export FESOM_ICE_TRACE_SUBS="$ICETRACE_SUBS"
+        [ -n "${ICETRACE_EVERY:-}" ] && export FESOM_ICE_TRACE_EVERY="$ICETRACE_EVERY"
+    fi
     echo "--- $arm (oracle/$prec${ORACLE_VARIANT:-}, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
     t0=$SECONDS
     ( cd "$dir" && srun -l --ntasks="${SLURM_NTASKS}" "$BIN" ) \
