@@ -362,6 +362,53 @@ bool fesom_sshrails_on(void)
  * FESOM_SALT_TRACE=<dir>  and only on the step given by FESOM_SALT_TRACE_STEP (default 1).
  * Inert otherwise — one getenv per step.
  * ------------------------------------------------------------------------------------------- */
+/* ------------------------------------------------------------------------------------------
+ * M16 §4m — DYNAMICS STAGE TRACE (FESOM_DYN_TRACE=<dir>): the last untraced part of the timestep.
+ * Dumps, at matched points of the dynamics, in the tracer-trace binary layout (int32 gid, int32
+ * nlv, nlv*float64 per owned node; 2D fields have nlv=1):
+ *   P1_post_pbv     density_m_rho0, hpressure   (per level; after pressure_bv)
+ *   P2_post_ssh     d_eta, ssh_rhs              (after the SSH solve)
+ *   P3_post_hbar    hbar                        (after compute_hbar)
+ *   P4_post_wvel    w                           (per interface level; after vert_vel)
+ * FESOM_DYN_TRACE_STEP = last step (default 1), FESOM_DYN_TRACE_EVERY = stride (default = STEP).
+ * Fortran twin: m16_dyn_trace in oce_ale.F90 (LOCAL). §4k/§4l localised the residual SP-DP
+ * excess to a BAROTROPIC velocity error in 60-70S, downstream of the density -> pressure -> SSH
+ * chain and upstream of everything already traced (ice §4g, tracers §4i, fluxes §4j).
+ * ------------------------------------------------------------------------------------------ */
+static void dyn_trace_write(const char *dir, const char *stage, const char *tag, int step,
+                            const struct fesom_mesh *mesh, const fesom_partit *p,
+                            const real_t *arr, int nlv_max, int per_level)
+{
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/dyn.%s.%s.s%03d.%04d.bin", dir, stage, tag, step, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int nl = mesh->nl;
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int gid = p->myList_nod2D[n];
+        int nlv = per_level ? (nlv_max ? nlv_max : mesh->nlevels_nod2D[n] - 1) : 1;
+        fwrite(&gid, sizeof(int), 1, f); fwrite(&nlv, sizeof(int), 1, f);
+        for (int nz = 0; nz < nlv; ++nz) {
+            double v = (double)(per_level ? arr[(size_t)n * nl + nz] : arr[n]);
+            fwrite(&v, sizeof(double), 1, f);
+        }
+    }
+    fclose(f);
+}
+static int dyn_trace_on(int step)
+{
+    const char *dir = getenv("FESOM_DYN_TRACE");
+    if (!dir || !dir[0]) return 0;
+    static int last = -1, every = -1;
+    if (last < 0) {
+        const char *st = getenv("FESOM_DYN_TRACE_STEP");  last  = (st && st[0]) ? atoi(st) : 1;
+        const char *ev = getenv("FESOM_DYN_TRACE_EVERY"); every = (ev && ev[0]) ? atoi(ev) : last;
+        if (every < 1) every = 1;
+    }
+    return step <= last && step % every == 0;
+}
+
 static void salt_stage_dump(const char *tag, int step_n,
                             const struct fesom_mesh *mesh,
                             struct fesom_tracers *tracers,
@@ -575,6 +622,12 @@ int fesom_timestep(int                          step_n,
         /* M5.13f: hnode device-resident from last step's commit (fesom_halo_field) - no re-push; EOS reads it on device. */
     }
     fesom_pressure_bv_kk(tracers, mesh, aux);   /* device: density_m_rho0/hpressure/bvfreq/dbsfc/MLD1 */
+    if (dyn_trace_on(step_n)) {   /* §4m P1 */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        aux->density_m_rho0_fld.sync_host(); aux->hpressure_fld.sync_host();
+        dyn_trace_write(dd, "P1_post_pbv", "density_m_rho0", step_n, mesh, p, aux->density_m_rho0, 0, 1);
+        dyn_trace_write(dd, "P1_post_pbv", "hpressure",      step_n, mesh, p, aux->hpressure,      0, 1);
+    }
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
      * Mirror of Fortran oce_ale.F90:3475 sw_alpha_beta. */
     fesom_compute_sw_alpha_beta_kk(tracers, mesh, aux);   /* device: sw_alpha/sw_beta */
@@ -1087,6 +1140,12 @@ int fesom_timestep(int                          step_n,
         fesom_mp_nanscan_node("ssh-solve(eta)", dyn->d_eta, mp_n2, step_n, mesh, 1);
     }
     if (fesom_mp_nanscan_dev_enabled()) mp_nanscan_dev("post-cg(d_eta)", dyn->d_eta_fld, mp_n2, step_n, mesh, 1, 0);
+    if (dyn_trace_on(step_n)) {   /* §4m P2 */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        dyn->d_eta_fld.sync_host(); dyn->ssh_rhs_fld.sync_host();
+        dyn_trace_write(dd, "P2_post_ssh", "d_eta",   step_n, mesh, p, dyn->d_eta,   0, 0);
+        dyn_trace_write(dd, "P2_post_ssh", "ssh_rhs", step_n, mesh, p, dyn->ssh_rhs, 0, 0);
+    }
     fesom_phasestats_mark(FESOM_PH_OCEAN);
     if (fesom_sshrails_on()) {
         /* M7 H.9: device halo leaves d_eta owned+halo current ON DEVICE — update_vel's halo-vertex
@@ -1114,6 +1173,11 @@ int fesom_timestep(int                          step_n,
      *     so re-push it (L30) to keep the device copy coherent with the host. */
     /* M5.13g1: uv device-resident (update_vel fesom_halo_field) - no re-push; compute_hbar reads it on device. */
     fesom_compute_hbar_kk(mesh, dyn, forcing);
+    if (dyn_trace_on(step_n)) {   /* §4m P3 */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        mesh->hbar_fld.sync_host();
+        dyn_trace_write(dd, "P3_post_hbar", "hbar", step_n, mesh, p, mesh->hbar, 0, 0);
+    }
     if (fesom_sshrails_on()) {
         /* M7 H.9: ONE co-packed device exchange for the two adjacent same-kind halos (the
          * ICERAILS srfoce pattern). hbar_old needs NO exchange — compute_hbar_kk writes it
@@ -1375,6 +1439,11 @@ int fesom_timestep(int                          step_n,
 
     if (gm) fesom_halo_field2(dyn->w_fld, dyn->fer_w_fld, FESOM_HALO_NOD3D, nl, 1, p);
     else    fesom_halo_field (dyn->w_fld,                 FESOM_HALO_NOD3D, nl, 1, p);
+    if (dyn_trace_on(step_n)) {   /* §4m P4: w on interfaces, nl per node (bottom rows are 0) */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        dyn->w_fld.sync_host();
+        dyn_trace_write(dd, "P4_post_wvel", "w", step_n, mesh, p, dyn->w, nl, 1);
+    }
 
     /* M6.3 (zstar) — ⚠️ THE hnode_new HALO RAIL, restored (Fortran oce_ale.F90:2871).
      * Under linfs hnode_new == hnode everywhere including the halo (the step-12a device copy),

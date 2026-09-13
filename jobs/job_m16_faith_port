@@ -116,6 +116,12 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/fct"; export FESOM_FCT_TRACE="$RUNROOT/$arm/fct"
     fi
+    # DYNTRACE=1 (§4m): density/hpressure, d_eta/ssh_rhs, hbar, w at matched points of the dynamics
+    if [ "${DYNTRACE:-0}" = 1 ]; then
+        mkdir -p "$RUNROOT/$arm"/dyn; export FESOM_DYN_TRACE="$RUNROOT/$arm"/dyn
+        [ -n "${DYNTRACE_STEP:-}"  ] && export FESOM_DYN_TRACE_STEP="$DYNTRACE_STEP"
+        [ -n "${DYNTRACE_EVERY:-}" ] && export FESOM_DYN_TRACE_EVERY="$DYNTRACE_EVERY"
+    fi
     # FLUXTRACE=1 (§4j): the surface forcing the ocean consumes, after oce_fluxes
     if [ "${FLUXTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm"/flux; export FESOM_FLUX_TRACE="$RUNROOT/$arm"/flux

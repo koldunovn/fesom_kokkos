@@ -56,6 +56,12 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/fct"; export FESOM_FCT_TRACE="$dir/fct"
     fi
+    # DYNTRACE=1 (§4m): density/hpressure, d_eta/ssh_rhs, hbar, w at matched points of the dynamics
+    if [ "${DYNTRACE:-0}" = 1 ]; then
+        mkdir -p "$dir"/dyn; export FESOM_DYN_TRACE="$dir"/dyn
+        [ -n "${DYNTRACE_STEP:-}"  ] && export FESOM_DYN_TRACE_STEP="$DYNTRACE_STEP"
+        [ -n "${DYNTRACE_EVERY:-}" ] && export FESOM_DYN_TRACE_EVERY="$DYNTRACE_EVERY"
+    fi
     # FLUXTRACE=1 (§4j): the surface forcing the ocean consumes, after oce_fluxes (needs ORACLE_VARIANT=_instr)
     if [ "${FLUXTRACE:-0}" = 1 ]; then
         mkdir -p "$dir"/flux; export FESOM_FLUX_TRACE="$dir"/flux
