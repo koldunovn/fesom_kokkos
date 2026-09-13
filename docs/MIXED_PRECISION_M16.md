@@ -2079,6 +2079,54 @@ and `S`, SP−DP, as a time series in both codes. A ratio of variances (what eve
 computed) cannot see a bias; a time series of the band mean can. It is cheap: all of it is
 already in the monthly output.
 
+### 4p. The mean-drift ledger — the bias hypothesis is REFUTED; the excess is in the VARIANCE
+Band-mean of (SP − DP), monthly, both codes (`scratchpad/drift_ledger.py`, `year_uv`/`year_g4`).
+70–60°S, month 12: `ssh` F +3.53e-04 / P +1.87e-04 · `temp` (column) F −2.16e-04 / P −1.12e-04 ·
+`salt` (column) F +1.67e-04 / P +1.28e-04 · `sst` F −5.79e-04 / P −2.97e-04. Same sign in every
+field, and the **port's mean drift is the smaller one**. There is no conserved-quantity bias
+that the port carries and upstream does not. §4o's mechanism is dead too.
+
+**So the excess is entirely in the variance** — the port's SP trajectory develops a *spatial
+pattern* of departure from its DP twin in 60–70°S that is ~2× larger than upstream's by month 6,
+with the same mean, the same per-step arithmetic at every traced stage, and an identical FP64
+noise envelope. That combination has one remaining reading: the two codes' DP trajectories in that
+band are **differently unstable to a rounding-sized perturbation in the specific direction that
+single precision perturbs them** — the envelope (a random T perturbation) does not probe that
+direction; SP (a structured, every-field, every-step perturbation) does. That is a property of
+the *flow* in the band (the ACC's eddy field on the CORE2 mesh, ~1° there), not of any line of
+code, and it is consistent with everything measured: no per-step defect, growth over months,
+one band, port DP itself differing from Fortran DP by 1–2% in `u` by month 12.
+
+### 4q. Where the SP faithfulness question now stands (2026-09-13)
+| | verdict |
+|---|---|
+| ocean tracers, global | **at parity** (§3v, 0.70–1.28 all year) |
+| ocean tracers, tropics | port **2× better** |
+| ocean tracers, 60–70°S | port 2.6× worse at the surface (§4h) — **variance, not bias; not any traced stage** |
+| sea ice | follows the 60–70°S ocean (§4g–§4h) |
+| every stage of every timestep, both codes, per step | **parity** (§4g ice · §4i tracers · §4j fluxes · §4m density/SSH/w · §4n momentum) |
+| conserved-quantity drift | **none** (§4p) |
+| FP64 noise envelope | **identical** in the band (§4h) |
+
+**What I would tell a reader.** Two real port defects were found by this ladder and fixed (§3p AB
+seeding, §3v Redi→`del_ttf`), plus three conformance defects (§3r CG, §3s viscosity, §4b
+`ice_diff`), and the port went from 2.5× worse than upstream at SP to global parity. The residual
+is a single latitude band where the port's SP trajectory diverges from its DP twin ~2× faster than
+upstream's over months, with no per-step arithmetic difference at any traced stage and no mean
+bias. **That is not a bug that a stage instrument can find**, because no stage makes it; it is a
+sensitivity of the band's flow. Whether it is *worth* chasing further depends on whether a
+band-local 2× in a 1-year SP−DP ratio matters for the paper's claim — and the honest statement is
+that after §3v the port and upstream are equally faithful to double precision everywhere except
+one band where the port is 2× less so and one band where it is 2× more so.
+
+**If it is chased further, the only remaining discriminator is a *structured* perturbation
+envelope**: perturb the DP runs not with random T noise but with the actual SP−DP field at step
+1 (or a scaled version), in both codes, and see whether the port's DP trajectory amplifies *that*
+direction 2× faster. If it does, the band's difference is in the DP dynamics (the port's DP
+already differs from upstream's DP by 1–2% in `u` there) and single precision is only the probe
+that reveals it. That is a two-run experiment on existing infrastructure (`FESOM_PERTURB` reads a
+field it can be given).
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
