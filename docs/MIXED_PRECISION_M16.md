@@ -1911,6 +1911,58 @@ forcing is cleared — so it must be read as **where the dynamics' error project
 (the mixed layer, where `w` and the surface-intensified currents act). That is consistent with the
 SSH ratio being 2.15 in the band while the fluxes are at 1.
 
+**Confirmed from data already in hand** (`year_uv`/`year_g4`, month 12, ocean velocity on
+elements, port/fortran SP−DP ratio by band and level):
+
+| band | `u` lev0 / lev5 / lev10 / lev20 / column | `v` lev0 / lev5 / lev10 / lev20 / column |
+|---|---|---|
+| **70–60°S** | **1.82 / 1.81 / 1.81 / 1.79 / 1.84** | **1.98 / 2.03 / 2.03 / 1.96 / 2.02** |
+| 60–50°S | 1.20 / 1.20 / 1.21 / 1.26 / 1.27 | 1.25 / 1.27 / 1.27 / 1.29 / 1.30 |
+| 20°S–20°N | 0.54 / 0.49 / 0.41 / 0.54 / 0.52 | 0.63 / 0.59 / 0.52 / 0.47 / 0.59 |
+| 50–60°N | 1.01 / 1.02 / 1.03 / 1.01 / 1.01 | 1.01 / 1.02 / 1.03 / 1.03 / 1.01 |
+
+🔴 **The ocean velocity in 60–70°S is at 1.8–2.0 at EVERY depth, uniform through the column** —
+a **barotropic** signature — while its northern analogue is 1.01 at every depth. The tracers'
+surface intensification (§4i) is the mixed layer responding to a depth-uniform velocity error.
+That narrows the dynamics chain to its barotropic part: the **SSH solve and the barotropic
+pressure gradient** (`ssh` itself is 2.15 in the band), not the baroclinic EOS/hpressure chain
+(which would be depth-structured). And the ice, which drags on that velocity and whose own ratio
+is 2.15 there, is simply following it.
+
+**Why 60–70°S and not 50–60°N for a barotropic error?** Two candidates, both testable:
+(a) the **ACC** — the only band with a strong, deep-reaching, zonally unbounded barotropic flow,
+so the SSH gradient balances a large transport and a small relative SSH error is a large velocity
+error; (b) the **CG solver** in that band — the port's CG arithmetic was promoted to `dbl_t` in
+§3r (measured as a null *globally*, but the global metric averages the tropics' gain against
+this band), and the two codes' preconditioners differ in form. The cheap discriminator is the
+§3r knob in reverse: run `g3` (CG in `dbl_t`) against `g1` (CG in `real_t`) **per band** — that
+data exists (`growth_1m_g2` vs `growth_1m`) and costs nothing to read.
+
+### 4l. The §3r-in-reverse test — and a clue about what the band's residual is
+`ssh` in the 70–60°S band, month-1 mean, port/fortran SP−DP ratio, across the binary ladder:
+
+| binary | CG arithmetic | Redi → del_ttf (§3v) | 70–60°S | 60–50°S | 20°S–20°N | 50–60°N |
+|---|---|---|---|---|---|---|
+| `g1` | real_t | no | **4.89** | 4.22 | 3.26 | 2.47 |
+| `g2` | **dbl_t** | no | **4.90** | 4.23 | 3.26 | 2.47 |
+| `g3` | dbl_t | **yes** | **1.54** | 1.12 | 0.93 | 0.84 |
+
+**The CG promotion is a null in the band too** (4.89 → 4.90) — hypothesis (b) of §4k is dead.
+**The §3v Redi fix cut the band's SSH excess from 4.9 to 1.5** — so most of the band's SSH error
+was a *density* consequence of the Redi defect, not a solver one. What remains, 1.54 at month 1
+growing to 2.15 by month 12, is the residual that the ice and the barotropic velocity follow.
+
+**The residual has the shape of a second, smaller instance of the same class.** It is barotropic,
+it is in the one band where density is set by the coldest, densest, most weakly stratified water
+in the model, and it grows over the year rather than appearing at step 1. The §3u mechanism was
+"an increment rounded on top of an absolute value"; the candidates for a second one, specific to
+the density → SSH path, are the places where the port forms the **baroclinic pressure / density
+anomaly** from absolute quantities in `real_t` where upstream forms it from an anomaly or in a
+different order — `fesom_pressure_bv` (`density_m_rho0`, `hpressure`) and the ALE `hbar`/`ssh`
+update. That is the next matched-stage instrument: **`density_m_rho0`, `hpressure` (per level),
+`hbar`/`ssh`, `w`, after the dynamics of the step, per band** — the last untraced part of the
+timestep.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
