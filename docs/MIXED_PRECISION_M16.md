@@ -1854,6 +1854,63 @@ base). **The next instrument is on those flux fields, per band, matched between 
 `heat_flux`, `water_flux`, `stress_surf`, the ice `flx_h`/`flx_fw` — and it is the first one that
 needs the *forcing* dumped rather than the state.
 
+### 4j. THE FLUX INSTRUMENT — the surface forcing is CLEARED
+Built in both codes (2026-09-13). `FESOM_FLUX_TRACE=<dir>` dumps, at the point where the coupling
+has finished and the ocean step is about to consume it (port `fesom_main.cpp` after
+`fesom_ice_oce_fluxes_mom`; Fortran `fesom_module.F90` after `oce_fluxes_mom` + `oce_fluxes`,
+twin `m16_flux_trace` in `ice_oce_coupling.F90`, LOCAL): `heat_flux`, `water_flux`,
+`real_salt_flux`, `relax_salt`, `stress_x/y` (the blended `stress_node_surf`), `stress_iceoce_x/y`,
+`stress_atmice_x/y`, `flx_h`, `flx_fw`, `thdgr`, `thdgrsn`, `a_ice`. One float64 per owned node,
+ice-trace layout. Knobs `_STEP`, `_EVERY`; job knob `FLUXTRACE=1`. `faith/fluxtrace_1m`, jobs
+27434784/27434785, one traced step per day for a month.
+
+**The instantaneous view is chaos-dominated and cannot be read.** `heat_flux` differs between the
+two codes' *double* runs by relL2 **0.63–0.93** at a daily instant — the forcing is a fast, noisy
+field — so a per-day SP−DP ratio of it is meaningless. What the ocean integrates is the sum, and a
+systematic per-step precision bias survives a sum where chaos averages down. **Time-accumulated
+over the 31 traced steps**, port/fortran ratio of the accumulated SP−DP by band:
+
+| flux | 70–60°S | 60–50°S | 20°S–20°N | 50–60°N | 70–90°N | **net bias 70–60°S, P/F** |
+|---|---|---|---|---|---|---|
+| `heat_flux` | **0.47** | 0.37 | 0.58 | 1.05 | 1.28 | **0.09** |
+| `water_flux` | 1.21 | 0.94 | 1.02 | 1.00 | 1.26 | **0.00** |
+| `real_salt_flux` | 1.20 | 0.93 | — | 1.00 | 1.28 | **0.05** |
+| `relax_salt` | 1.19 | 1.09 | 0.98 | 1.09 | 1.01 | 0.56 |
+| `stress_x` / `stress_y` | 0.78 / 0.81 | 1.08 / 0.97 | 0.89 / 0.96 | 1.06 / 0.92 | 1.05 / 1.13 | 0.89 / 0.41 |
+| `flx_h` / `flx_fw` | 1.26 / 1.21 | 0.99 / 0.94 | 0.95 / 0.92 | 1.00 / 1.00 | 1.28 / 1.26 | 0.24 / 0.15 |
+
+🔴 **In the 60–70°S band every flux the ocean receives is at 0.5–1.3, and the port's *net* SP−DP
+bias is far smaller than upstream's** (heat 0.09×, fresh water ~0, salt 0.05×). The forcing is not
+where the 2.6× is made. (`stress_iceoce` shows 24× / 81× at 60–50°S — the marginal ice zone, where
+the DP magnitude is near zero and the ratio is of two rounding-sized numbers; it is not in the
+60–70°S band and the blended `stress_x/y` that the ocean actually feels is 0.8–1.1 there.)
+
+### 4k. Where the 60–70°S excess now stands — cornered, not caught
+Everything measured, in order:
+
+| suspect | instrument | verdict in 60–70°S |
+|---|---|---|
+| sea-ice internals (EVP, advection, thermo) | §4g ice-stage trace | at parity within the step |
+| tracer advection + Redi + reconstruction | §4i ocean-stage trace | at parity within the step |
+| implicit vertical diffusion | §4i | at parity (port *better*) |
+| every surface flux the ocean receives | §4j flux trace, accumulated | at parity or better |
+| noise-envelope (chaos) | §4h | **identical** envelopes, 2.6× SP−DP |
+
+**What is left is the dynamics half of the ocean step**: the EOS / pressure gradient → momentum →
+SSH solve → vertical velocity chain, evaluated in that band. Three things make 60–70°S different
+for *that* chain and not for the tracers or the forcing: (a) the coldest, densest water in the model,
+so the EOS is evaluated where `T − T_freeze` and the density anomaly are smallest relative to the
+absolute values — the same magnitude-cancellation class as §3u, now in `ρ(T,S,p)`; (b) the steepest
+bathymetry (the Antarctic shelf break) so the pressure-gradient error has the largest σ-coordinate
+component; (c) the strongest barotropic signal (ACC) per unit surface area. The next stage
+instrument is on **`density`, `hpressure`, `w`, `ssh` at matched points of the dynamics**, per band —
+the port already writes `density`/`w`/`ssh` monthly and the Fortran can be asked to.
+
+⚠️ The signature "surface-intensified" (§4i) does *not* point at surface forcing after all — the
+forcing is cleared — so it must be read as **where the dynamics' error projects onto the tracers**
+(the mixed layer, where `w` and the surface-intensified currents act). That is consistent with the
+SSH ratio being 2.15 in the band while the fluxes are at 1.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.

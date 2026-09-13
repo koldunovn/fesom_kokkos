@@ -342,6 +342,77 @@ static void fesom_m14_knob_summary(const fesom_mpi *mpi)
     fflush(stderr);
 }
 
+/* ------------------------------------------------------------------------------------------
+ * M16 §4j — SURFACE FLUX TRACE (FESOM_FLUX_TRACE=<dir>): dump what the coupling hands the ocean
+ * at the point where it is FINAL — after oce_fluxes_mom + oce_fluxes (the Fortran's
+ * fesom_module.F90:1100-1101 pair), before the ocean step consumes it. Same binary layout as the
+ * ice/tracer traces (int32 gid, int32 1, float64 per owned node) so the readers apply. Fields:
+ *   heat_flux water_flux real_salt_flux relax_salt (ocean forcing, nodes)
+ *   stress_x stress_y (stress_node_surf, the ice/atm blend the ocean feels)
+ *   stress_iceoce_x/y  (ice->ocean drag stress, before the a_ice blend)
+ *   stress_atmice_x/y  (atmosphere->ice bulk stress)
+ *   flx_h flx_fw       (the ice thermodynamics' heat / fresh-water flux to the ocean)
+ *   thdgr thdgrsn      (ice / snow thermodynamic growth rates)
+ *   a_ice              (for masking by ice cover on the reader side)
+ * FESOM_FLUX_TRACE_STEP = last step traced (default 1), FESOM_FLUX_TRACE_EVERY = stride
+ * (default = STEP). Twin: m16_flux_trace in fesom_module.F90 (LOCAL). §4i put the 60-70S excess
+ * outside the tracer stages and at the surface; this is the instrument on the forcing itself.
+ * ------------------------------------------------------------------------------------------ */
+static void flux_trace_one(const char *dir, const char *tag, int step, int rk,
+                           const struct fesom_mesh *mesh, const fesom_partit *partit,
+                           const real_t *arr, int stride, int comp)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s/flux.%s.s%03d.%04d.bin", dir, tag, step, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int one = 1;
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int gid = partit->myList_nod2D[n];
+        double v = (double)arr[(size_t)n * stride + comp];
+        fwrite(&gid, sizeof(int), 1, f); fwrite(&one, sizeof(int), 1, f);
+        fwrite(&v, sizeof(double), 1, f);
+    }
+    fclose(f);
+}
+static void flux_trace(int step, const struct fesom_mesh *mesh, fesom_partit *partit,
+                       fesom_forcing *forcing, fesom_ice *ice)
+{
+    const char *dir = getenv("FESOM_FLUX_TRACE");
+    if (!dir || !dir[0]) return;
+    static int last = -1, every = -1;
+    if (last < 0) {
+        const char *st = getenv("FESOM_FLUX_TRACE_STEP");  last  = (st && st[0]) ? atoi(st) : 1;
+        const char *ev = getenv("FESOM_FLUX_TRACE_EVERY"); every = (ev && ev[0]) ? atoi(ev) : last;
+        if (every < 1) every = 1;
+    }
+    if (step > last || step % every != 0) return;
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    forcing->heat_flux_fld.sync_host();      forcing->water_flux_fld.sync_host();
+    forcing->real_salt_flux_fld.sync_host(); forcing->relax_salt_fld.sync_host();
+    forcing->stress_node_surf_fld.sync_host();
+    ice->stress_atmice_x_fld.sync_host();    ice->stress_atmice_y_fld.sync_host();
+    ice->flx_h_fld.sync_host();              ice->flx_fw_fld.sync_host();
+    ice->thermo.thdgr_fld.sync_host();       ice->thermo.thdgrsn_fld.sync_host();
+    ice->data[FESOM_ICE_AICE].values_fld.sync_host();
+    flux_trace_one(dir, "heat_flux",      step, rk, mesh, partit, forcing->heat_flux,        1, 0);
+    flux_trace_one(dir, "water_flux",     step, rk, mesh, partit, forcing->water_flux,       1, 0);
+    flux_trace_one(dir, "real_salt_flux", step, rk, mesh, partit, forcing->real_salt_flux,   1, 0);
+    flux_trace_one(dir, "relax_salt",     step, rk, mesh, partit, forcing->relax_salt,       1, 0);
+    flux_trace_one(dir, "stress_x",       step, rk, mesh, partit, forcing->stress_node_surf, 2, 0);
+    flux_trace_one(dir, "stress_y",       step, rk, mesh, partit, forcing->stress_node_surf, 2, 1);
+    ice->stress_iceoce_x_fld.sync_host();    ice->stress_iceoce_y_fld.sync_host();
+    flux_trace_one(dir, "stress_iceoce_x",step, rk, mesh, partit, ice->stress_iceoce_x,      1, 0);
+    flux_trace_one(dir, "stress_iceoce_y",step, rk, mesh, partit, ice->stress_iceoce_y,      1, 0);
+    flux_trace_one(dir, "stress_atmice_x",step, rk, mesh, partit, ice->stress_atmice_x,      1, 0);
+    flux_trace_one(dir, "stress_atmice_y",step, rk, mesh, partit, ice->stress_atmice_y,      1, 0);
+    flux_trace_one(dir, "flx_h",          step, rk, mesh, partit, ice->flx_h,                1, 0);
+    flux_trace_one(dir, "flx_fw",         step, rk, mesh, partit, ice->flx_fw,               1, 0);
+    flux_trace_one(dir, "thdgr",          step, rk, mesh, partit, ice->thermo.thdgr,         1, 0);
+    flux_trace_one(dir, "thdgrsn",        step, rk, mesh, partit, ice->thermo.thdgrsn,       1, 0);
+    flux_trace_one(dir, "a_ice",          step, rk, mesh, partit, ice->data[FESOM_ICE_AICE].values, 1, 0);
+}
+
 int main(int argc, char **argv)
 {
     /* Force line buffering so SLURM-redirected stdout/stderr show progress
@@ -1466,6 +1537,7 @@ skip_rest_state:
             if (!no_wind) {
                 fesom_ice_oce_fluxes_mom(&ice, &mpi, &mesh, &forcing);
             }
+            flux_trace(n, &mesh, &mpi, &forcing, &ice);   /* §4j: no-op unless FESOM_FLUX_TRACE */
             if (fesom_mp_nanscan_dev_enabled()) {   /* M16 flake hunt: what the coupling hands the ocean */
                 const size_t n2 = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D);
                 mp_nanscan_dev("post-coupl(hf)",     forcing.heat_flux_fld,        n2,     n, &mesh, 1, 0);

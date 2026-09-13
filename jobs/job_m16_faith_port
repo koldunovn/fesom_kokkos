@@ -116,6 +116,12 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/fct"; export FESOM_FCT_TRACE="$RUNROOT/$arm/fct"
     fi
+    # FLUXTRACE=1 (§4j): the surface forcing the ocean consumes, after oce_fluxes
+    if [ "${FLUXTRACE:-0}" = 1 ]; then
+        mkdir -p "$RUNROOT/$arm"/flux; export FESOM_FLUX_TRACE="$RUNROOT/$arm"/flux
+        [ -n "${FLUXTRACE_STEP:-}"  ] && export FESOM_FLUX_TRACE_STEP="$FLUXTRACE_STEP"
+        [ -n "${FLUXTRACE_EVERY:-}" ] && export FESOM_FLUX_TRACE_EVERY="$FLUXTRACE_EVERY"
+    fi
     # ICETRACE=1 (§4g): matched ice-stage + EVP-subcycle dumps for the first ICETRACE_STEPS ice steps
     if [ "${ICETRACE:-0}" = 1 ]; then
         mkdir -p "$RUNROOT/$arm/ice"; export FESOM_ICE_TRACE="$RUNROOT/$arm/ice"

@@ -56,6 +56,12 @@ for arm in $ARMS; do
     if [ "${FCTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/fct"; export FESOM_FCT_TRACE="$dir/fct"
     fi
+    # FLUXTRACE=1 (§4j): the surface forcing the ocean consumes, after oce_fluxes (needs ORACLE_VARIANT=_instr)
+    if [ "${FLUXTRACE:-0}" = 1 ]; then
+        mkdir -p "$dir"/flux; export FESOM_FLUX_TRACE="$dir"/flux
+        [ -n "${FLUXTRACE_STEP:-}"  ] && export FESOM_FLUX_TRACE_STEP="$FLUXTRACE_STEP"
+        [ -n "${FLUXTRACE_EVERY:-}" ] && export FESOM_FLUX_TRACE_EVERY="$FLUXTRACE_EVERY"
+    fi
     # SALTTRACE=1 (§4i): ocean tracer stage trace, needs ORACLE_VARIANT=_instr
     if [ "${SALTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/strace"; export FESOM_SALT_TRACE="$dir/strace"
