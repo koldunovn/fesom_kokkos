@@ -396,6 +396,29 @@ static void dyn_trace_write(const char *dir, const char *stage, const char *tag,
     }
     fclose(f);
 }
+/* element-indexed variant: arr is [elem][nl][ncomp] (FESOM_ELEMVEC) or [elem][nl] (ncomp=1);
+ * writes component `comp`, levels 0..nlevels(el)-2, keyed by the GLOBAL element id. */
+static void dyn_trace_write_elem(const char *dir, const char *stage, const char *tag, int step,
+                                 const struct fesom_mesh *mesh, const fesom_partit *p,
+                                 const real_t *arr, int ncomp, int comp)
+{
+    int rk = 0; MPI_Comm_rank(MPI_COMM_WORLD, &rk);
+    char path[1024];
+    snprintf(path, sizeof path, "%s/dyn.%s.%s.s%03d.%04d.bin", dir, stage, tag, step, rk);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int nl = mesh->nl;
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        int gid = p->myList_elem2D[e];
+        int nlv = mesh->nlevels[e] - 1;
+        fwrite(&gid, sizeof(int), 1, f); fwrite(&nlv, sizeof(int), 1, f);
+        for (int nz = 0; nz < nlv; ++nz) {
+            double v = (double)arr[((size_t)e * nl + nz) * ncomp + comp];
+            fwrite(&v, sizeof(double), 1, f);
+        }
+    }
+    fclose(f);
+}
 static int dyn_trace_on(int step)
 {
     const char *dir = getenv("FESOM_DYN_TRACE");
@@ -774,6 +797,12 @@ int fesom_timestep(int                          step_n,
     else
         fesom_pressure_force_linfs_fullcell_kk(mesh, aux);      /* device: pgf_x, pgf_y (elem) */
     if (s_verify_pgf) fesom_pressure_force_verify(mesh, aux, step_n);
+    if (dyn_trace_on(step_n)) {   /* §4n M1: the pressure-gradient force, elements */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        aux->pgf_x_fld.sync_host(); aux->pgf_y_fld.sync_host();
+        dyn_trace_write_elem(dd, "M1_post_pgf", "pgf_x", step_n, mesh, p, aux->pgf_x, 1, 0);
+        dyn_trace_write_elem(dd, "M1_post_pgf", "pgf_y", step_n, mesh, p, aux->pgf_y, 1, 0);
+    }
     /* M5.4: pgf device-halo (GPU-aware MPI on CUDA, host-staged on Serial). The OUT-rail
      * sync_host + the vel_rhs IN re-push (substep 4) are gone — pgf stays device-resident
      * with its halo (vel_rhs reads it on-device). */
@@ -960,6 +989,12 @@ int fesom_timestep(int                          step_n,
     /* M5.13f: hnode device-resident from last step's commit - no re-push; compute_vel_rhs reads it on device. */
     fesom_compute_vel_rhs_kk(mesh, aux, dyn,
                              /*is_first_step=*/(step_n == 1 && !ctx->restarted), p);
+    if (dyn_trace_on(step_n)) {   /* §4n M2: the explicit momentum tendency, elements */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        dyn->uv_rhs_fld.sync_host();
+        dyn_trace_write_elem(dd, "M2_post_velrhs", "uv_rhs_x", step_n, mesh, p, dyn->uv_rhs, 2, 0);
+        dyn_trace_write_elem(dd, "M2_post_velrhs", "uv_rhs_y", step_n, mesh, p, dyn->uv_rhs, 2, 1);
+    }
     /* M5.13d: uv_rhsAB OUT sync_host removed - AB2 history read on device, no host reader. */
     if (s_verify_vrhs) fesom_compute_vel_rhs_verify(mesh, aux, dyn,
                                                    (step_n == 1 && !ctx->restarted), p, step_n,
@@ -1163,6 +1198,12 @@ int fesom_timestep(int                          step_n,
         dyn->d_eta_fld.modify_host(); dyn->d_eta_fld.sync_device();
     }
     fesom_update_vel_kk(mesh, dyn);
+    if (dyn_trace_on(step_n)) {   /* §4n M3: the velocity after the barotropic correction */
+        const char *dd = getenv("FESOM_DYN_TRACE");
+        dyn->uv_fld.sync_host();
+        dyn_trace_write_elem(dd, "M3_post_updvel", "u", step_n, mesh, p, dyn->uv, 2, 0);
+        dyn_trace_write_elem(dd, "M3_post_updvel", "v", step_n, mesh, p, dyn->uv, 2, 1);
+    }
     /* M5.13g1: uv device-halo (GPU-aware MPI). uv stays device-resident across the whole step +
      * the next step's substeps 3-7 + the ice-step ocean2ice (ALL uv re-pushes removed). snap-out
      * (u/v element output) → pre-I/O sync in fesom_main.cpp; one-time init push bootstraps step 1. */

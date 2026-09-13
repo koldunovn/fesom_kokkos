@@ -2016,6 +2016,69 @@ tendency is a small residual of two large `real_t` terms — **the §3u cancella
 momentum equation**. The northern analogue (50–60°N) has no such flow. The next instrument is on
 **`uv_rhs` after each term of `compute_vel_rhs`, and `uv` after `update_vel`**, per band.
 
+### 4n. THE MOMENTUM INSTRUMENT — the momentum step is at parity too; the excess is a SLOW SECULAR divergence
+Extended the dynamics trace to elements: `M1_post_pgf` (`pgf_x/y`), `M2_post_velrhs`
+(`uv_rhs_x/y`, the whole explicit tendency — Coriolis + PGF + SSH gradient + viscosity),
+`M3_post_updvel` (`u`/`v` after the barotropic correction), keyed by global element id. Port
+`fesom_step.cpp` (`dyn_trace_write_elem`); Fortran `m16_dyn_trace3e` in `oce_ale.F90` (LOCAL).
+`faith/dyntrace2_1m`, jobs 27435506/27435507, every 96th step. **Internal arrays, rotated frame in
+both codes** — so both the within-code ratio and the cross-code magnitude are meaningful here.
+
+**60–70°S, port/fortran SP−DP ratio (column), instantaneous, steps 96 / 768 / 1440:**
+
+| field | 96 | 768 | 1440 |
+|---|---|---|---|
+| `pgf_x` / `pgf_y` | 1.05 / 1.04 | 1.16 / 1.11 | 1.25 / 1.20 |
+| `uv_rhs_x` / `uv_rhs_y` | 1.13 / 1.05 | 0.85 / 1.04 | **0.91 / 0.73** |
+| **`u` / `v` after `update_vel`** | 1.09 / 1.15 | 1.07 / 1.06 | **1.23 / 0.96** |
+
+**Time-accumulated over the 15 traced steps** (the statistic that survives chaos), surface / column:
+`pgf_x` 1.00 / 1.46 · `uv_rhs_x` 0.87 / 0.90 · `uv_rhs_y` 0.91 / 0.93 · `u` 1.11 / 1.12 · `v` 1.01 / 1.05.
+
+🔴 **The momentum step is at parity in the band.** Neither the pressure-gradient force nor the
+assembled tendency nor the corrected velocity shows the 2× at any instant of month 1, nor in the
+accumulation. The §4m/§4k hypothesis — a §3u-class cancellation in the momentum equation — is
+**dead**: the residual of Coriolis against the PGF is formed equally well in both codes.
+
+**And that is consistent with the monthly output, once it is read month by month.** Monthly-mean
+`u`, column relL2 ratio (`year_uv`/`year_g4`):
+
+| month | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| **70–60°S** | **1.15** | 1.19 | 1.31 | 1.46 | 1.63 | 1.78 | 1.79 | 1.84 | 1.84 | 1.89 | 1.89 | **1.84** |
+| 60–50°S | 1.13 | 1.17 | 1.25 | 1.27 | 1.27 | 1.32 | 1.32 | 1.34 | 1.36 | 1.31 | 1.26 | 1.27 |
+| 50–60°N | 1.02 | 0.94 | 0.96 | 1.00 | 1.02 | 1.08 | 1.09 | 1.10 | 1.11 | 1.08 | 1.00 | 1.01 |
+
+**Month 1 is 1.15 — matching the instrument — and it climbs monotonically to 1.9 by month 10,
+while the northern band stays at 1.0 all year.** The excess is not made in any step's arithmetic.
+It is a **slow, secular divergence of the SP trajectory from the DP trajectory that is ~2× faster in
+the port than in upstream, in one band, over months.** That is a different class of thing from
+everything found so far.
+
+### 4o. What the whole ladder now says, and the one candidate it leaves
+Every stage of every timestep has been traced in both codes — ice (§4g), tracers (§4i), surface
+fluxes (§4j), density/SSH/w (§4m), momentum (§4n) — and **every one is at parity in 60–70°S at the
+per-step level, in month 1**. Yet the band's SP−DP grows 1.15 → 1.9 over the year in the port and
+does not in upstream, with **identical FP64 noise envelopes** (§4h: 0.98) — so it is not chaos.
+
+A slow secular SP divergence with identical envelopes and clean per-step arithmetic has one
+mechanism: a **conserved-quantity drift** — a small systematic bias per step that the dynamics
+cannot damp because it is in a conserved or nearly-conserved quantity, so it integrates. In this
+band the candidates are the **barotropic transport of the ACC** (set by the vertically integrated
+momentum balance, and free to drift if the SSH/`hbar` accumulation biases) and the **layer
+thicknesses** (`hnode`, under zstar the whole column stretches with `hbar`). Both would show as a
+*mean* drift, not a variance — and `hbar` was the one dynamics field that grew (§4m, 1.19 → 1.55)
+while its input `ssh_rhs` stayed at 0.7–0.85. `hbar = hbar_old + ssh_rhs_old·dt/areasvol` is
+identical in both codes — but in the port, under zstar, `hbar` is **also** what the §3v ALE
+reconstruction and `hnode_new` are built from each step, and the port's zstar thickness update
+(`fesom_ale_update_thickness_zstar_kk`) is a port-only device kernel.
+
+**The discriminating measurement is a mean-drift ledger, not another stage ratio**: the
+band-mean of `hbar`, of the vertically-integrated transport, and of the column-integrated `T`
+and `S`, SP−DP, as a time series in both codes. A ratio of variances (what every instrument so far
+computed) cannot see a bias; a time series of the band mean can. It is cheap: all of it is
+already in the monthly output.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
