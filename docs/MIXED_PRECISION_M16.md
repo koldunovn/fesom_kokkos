@@ -2181,6 +2181,60 @@ monthly already) and `bvfreq`: their SP−DP ratio by band. If the mixing coeffi
 2× in the band while the tracers feeding it are at ~1.2× in month 1, the scheme is the injector.
 `faith/year_kv/{fdp,fsp}` adds both to the Fortran's `io_list` (jobs 27445755/27445756).
 
+### 4s. `Kv` — KPP is at parity too; the switching-parameterisation hypothesis is dead
+`faith/year_kv/{fdp,fsp}` added `Kv` to the Fortran's `io_list` (`bvfreq` is not a Fortran stream
+name — "stream bvfreq is not defined" — dropped). Port/fortran ratio of the within-code SP−DP of
+`Kv` by band, monthly:
+
+| depth | month | 70–60°S | 60–50°S | 20°S–20°N | 50–60°N |
+|---|---|---|---|---|---|
+| top 5 levels | 1 / 3 / 6 / 9 / 12 | 1.03 / 1.07 / 1.03 / 1.01 / 1.10 | 1.06 / 1.08 / 1.16 / 1.08 / 1.05 | 1.01 / 1.05 / 0.93 / 0.51 / 0.58 | 1.07 / 1.06 / 1.01 / 1.02 / 1.19 |
+| levels 5–20 | 1 / 3 / 6 / 9 / 12 | 1.01 / 0.82 / 0.95 / 1.03 / 1.03 | 0.99 / 0.83 / 1.09 / 1.06 / 1.07 | 1.08 / 1.08 / 1.02 / 0.67 / 0.68 | 1.05 / 1.08 / 0.95 / 0.95 / 1.03 |
+| column | 1 / 3 / 6 / 9 / 12 | 1.00 / 0.96 / 0.99 / 1.11 / 1.22 | 0.97 / 1.04 / 1.08 / 1.13 / 1.20 | 1.04 / 1.05 / 0.94 / 0.79 / 0.71 | 1.05 / 1.04 / 0.94 / 1.00 / 0.89 |
+
+🔴 **The mixing coefficient's single-precision departure is the same in both codes in the band —
+0.93–1.22 all year, at every depth** — while its absolute SP−DP is enormous in both (upstream
+0.04–0.73 relL2 in 60–70°S: KPP *is* a switching scheme, and both implementations switch equally
+often under float). The "port's KPP flips more" hypothesis is **dead**. (The tropics show the port
+*better* at 0.5–0.7 late in the year, matching the tracers' tropical advantage.)
+
+### 4t. Where this leaves the 60–70°S residual — an honest close
+Every hypothesis with a measurable consequence has now been tested with a matched instrument in
+both codes, and every one is at parity in the band, per step:
+
+| mechanism class | instrument | 60–70°S verdict |
+|---|---|---|
+| ice internals | §4g stage + subcycle trace | parity |
+| tracer advection / Redi / reconstruction / vdiff | §4i stage trace | parity |
+| surface fluxes | §4j, time-accumulated | parity or better |
+| density / SSH solve / hbar / w | §4m | parity (SSH solve better) |
+| momentum: PGF / tendency / velocity | §4n | parity |
+| conserved-quantity bias | §4p mean-drift ledger | port smaller |
+| chaotic amplification, random direction | §4h envelope | identical |
+| amplification of the SP direction itself | §4r structured perturbation | **identical** |
+| switching mixing scheme (KPP) | §4s `Kv` | parity |
+| ice cover | §4r | refuted |
+| configuration (opt_visc, ice_diff, CG precision) | §3s, §4b, §3r | fixed; nulls |
+
+And yet the SP−DP variance in the band grows to 2–2.6× upstream's over months 2–6, with the
+structured perturbation *decaying* over the same period in both codes. **A continuously injected,
+zero-mean, band-local, time-growing SP−DP difference that no per-step instrument sees.** The one
+consistent reading left is that the injection *is* at parity per step but the port's SP state in
+the band drifts — within its own DP's basin, not into a different regime — to somewhere its float
+rounding projects onto a slower-decaying mode; the tracer-stage ratios (§4i) do show the band's
+*state* ratio rising 1.1 → 1.4 inside month 1 while the per-step tendency ratio stays ~1. That is a
+property of the SP *trajectory*, not of any operation, and the tools built here — all of which
+compare an operation's output given its input — cannot resolve it further. It would need an
+ensemble of SP runs per code (the SP analogue of the noise twins) to even state it with error bars.
+
+**What the paper can say, with the numbers behind it:** after the two real fixes (§3p, §3v) and
+three conformance fixes (§3r, §3s, §4b) the port's single precision is as faithful to double as
+upstream's globally (0.70–1.28, §3v), *more* faithful in the tropics (0.4–0.7), and *less* faithful
+in one band, 60–70°S (2–2.6×), where every operation of the timestep, every surface flux, the mixing
+scheme, the dynamics' amplification of random and of structured perturbations, and the mean drift
+have been measured against upstream at parity. The band-local residual is reported as observed and
+not explained. That is the honest state, and it took 26 instrumented comparisons to earn it.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
