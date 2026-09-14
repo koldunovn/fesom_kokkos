@@ -2127,6 +2127,60 @@ already differs from upstream's DP by 1–2% in `u` there) and single precision 
 that reveals it. That is a two-run experiment on existing infrastructure (`FESOM_PERTURB` reads a
 field it can be given).
 
+### 4r. The STRUCTURED-perturbation test — the sensitivity hypothesis is REFUTED, and the residual is re-diagnosed
+Built in both codes: `FESOM_PERTURB_METHOD=file` (port `fesom_perturb.cpp`) / `FESOM_PERTURB_FILE`
+(Fortran `m16_perturb_file` in `gen_ic3d.F90`, LOCAL, entered from `do_perturb`). The field is the
+port's own step-1 (SP − DP) of T and S (`bisect_20s_g3`; rms 3.5e-04 K / 5.6e-05 psu, |max| 0.18 K
+— the same order as the 2e-4 K random envelope), one file, applied identically to **both** codes'
+DP initial state (both logs: rank 0, 1982 nodes, |max ΔT| 1.127e-02). One year, `faith/year_spert`,
+jobs 27443872/27443911.
+
+**60–70°S, port/fortran ratio of the departure (DP-perturbed vs DP) against the SP−DP ratio:**
+
+| month | 1 | 3 | 5 | 6 | 8 | 10 | 12 |
+|---|---|---|---|---|---|---|---|
+| sst: **structured P/F** | **1.02** | 0.98 | 0.90 | 0.79 | 0.93 | 0.89 | 1.30 |
+| sst: SP−DP P/F | 1.33 | 2.00 | 2.49 | 2.24 | 2.20 | 2.31 | 2.63 |
+| salt: **structured P/F** | **1.02** | 0.99 | 1.50 | 1.66 | 0.83 | 0.96 | 1.25 |
+| salt: SP−DP P/F | 1.21 | 1.86 | 1.75 | 1.40 | 1.64 | 2.01 | 2.62 |
+| ssh: **structured P/F** | **1.01** | 0.96 | 1.01 | 0.80 | 0.81 | 0.73 | 0.85 |
+| ssh: SP−DP P/F | 1.52 | 1.98 | 2.16 | 2.19 | 2.24 | 2.33 | 2.15 |
+
+🔴 **The two codes' DP dynamics amplify the SP direction IDENTICALLY** (0.7–1.1 all year, in the
+very band where SP−DP is at 2–2.6). §4q's "band-local sensitivity of the flow" is **dead**.
+
+**And the test says something sharper about what the SP−DP is.** In the band, the structured
+perturbation's departure **decays** (fortran sst 3.1e-03 at month 1 → 3.0e-04 at month 6 → 1.0e-03
+at month 12; the port the same) — the band's dynamics *damp* that direction — while the SP−DP
+departure **grows** (2.5e-04 → 5.9e-03 upstream, 3.4e-04 → 1.5e-02 port). A one-shot perturbation
+decays; SP−DP keeps growing. **So the SP−DP is continuous-injection dominated:** departure ≈
+(per-step injection) × (damping time), the damping time is the same in both codes, and the 2× must
+be in the injection.
+
+**But the injection at step 1 is ~1× in the band** (`bisect_20s_g3`, step 1, 70–60°S: sst 1.09,
+salt 1.33; step 20: 1.09 / 0.87), and the per-step tendency ledger over month 1 is noisy about 1
+(0.6–2.2, no trend). And **it is not ice cover**: the band is already 71 % ice-covered in month 1
+(cold start from winter climatology), its ice fraction *falls* to 57 % by month 3 while the ratio
+*rises* 1.33 → 2.00, and the ice-free nodes of the band carry the same ratio as the whole band
+(2.41 vs 2.36 at month 4).
+
+**What that leaves is precise.** An injection that is ~1× at the start and ~2× later, with zero
+band-mean bias (§4p), no amplification difference (§4r), no per-step arithmetic difference at any
+traced stage (§4g–§4n) — a **patterned, systematic, threshold-driven difference that emerges as the
+SP state evolves**: the signature of a **switching parameterisation** whose branch decisions flip
+under single precision more often in the port than upstream, in the band where the decision is
+marginal. In the Southern Ocean that is **KPP**: the boundary-layer depth is set by a bulk-Richardson
+threshold, and 60–70°S winter is where stratification is weakest so the criterion is crossed over the
+widest depth range by the smallest margins. A flipped column deepens or shoals its mixing for a step —
+zero mean over the band, a persistent spatial pattern, invisible to a stage ratio of the *tracers*,
+invisible to a random or structured perturbation of the DP run, and growing as the SP state drifts
+into more marginal columns. The port's KPP (`fesom_kpp.cpp`) is its own implementation of the scheme.
+
+**The discriminator is `Kv`** (the vertical diffusivity the scheme produces — the port writes it
+monthly already) and `bvfreq`: their SP−DP ratio by band. If the mixing coefficient's SP−DP is at
+2× in the band while the tracers feeding it are at ~1.2× in month 1, the scheme is the injector.
+`faith/year_kv/{fdp,fsp}` adds both to the Fortran's `io_list` (jobs 27445755/27445756).
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
