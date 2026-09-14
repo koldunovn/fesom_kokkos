@@ -68,6 +68,12 @@ for arm in $ARMS; do
         [ -n "${FLUXTRACE_STEP:-}"  ] && export FESOM_FLUX_TRACE_STEP="$FLUXTRACE_STEP"
         [ -n "${FLUXTRACE_EVERY:-}" ] && export FESOM_FLUX_TRACE_EVERY="$FLUXTRACE_EVERY"
     fi
+    # PFILE=<base> (§4r): structured perturbation of the IC, needs ORACLE_VARIANT=_instr AND an
+    # arm built with a perturb seed (so lperturb=.true. and do_perturb is entered); the file
+    # branch then replaces the random draw.
+    if [ -n "${PFILE:-}" ]; then
+        export FESOM_PERTURB_FILE="$PFILE" FESOM_PERTURB_SCALE="${PSCALE:-1}"
+    fi
     # SALTTRACE=1 (§4i): ocean tracer stage trace, needs ORACLE_VARIANT=_instr
     if [ "${SALTTRACE:-0}" = 1 ]; then
         mkdir -p "$dir/strace"; export FESOM_SALT_TRACE="$dir/strace"

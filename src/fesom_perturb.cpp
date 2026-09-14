@@ -73,6 +73,71 @@ static int parse_pair(const char *s, double *a, double *b, const char *what)
     return 1;
 }
 
+#include <map>
+#include <vector>
+static void fesom_perturb_apply_file(struct fesom_tracers *tracers,
+                                     const struct fesom_mesh *mesh,
+                                     const struct fesom_partit *partit,
+                                     int is_restart, int first_step, int mype)
+{
+    if (first_step && is_restart) {
+        fprintf(stderr, "[fesom_perturb] FESOM_PERTURB_MODE=first_step on a RESTART is not "
+                        "a perturbation of the initial condition — refusing\n");
+        exit(1);
+    }
+    const char *base = getenv("FESOM_PERTURB_FILE");
+    if (!base || !base[0]) {
+        fprintf(stderr, "[fesom_perturb] FESOM_PERTURB_METHOD=file needs FESOM_PERTURB_FILE=<base>\n");
+        exit(1);
+    }
+    const char *sc = getenv("FESOM_PERTURB_SCALE");
+    const double scale = (sc && sc[0]) ? atof(sc) : 1.0;
+    const int nl = mesh->nl, nnodes = mesh->myDim_nod2D;
+    double sum[2] = {0.0, 0.0}, amax[2] = {0.0, 0.0}; long hit[2] = {0, 0}, miss[2] = {0, 0};
+
+    for (int tr = 0; tr < 2; ++tr) {
+        /* read every rank-file of this tracer into a gid -> column map */
+        std::map<int, std::vector<double>> fld;
+        for (int rk = 0; rk < 100000; ++rk) {
+            char path[1024];
+            snprintf(path, sizeof path, "%s.tr%d.%04d.bin", base, tr, rk);
+            FILE *f = fopen(path, "rb");
+            if (!f) { if (rk == 0) { fprintf(stderr, "[fesom_perturb] cannot open %s\n", path); exit(1); } break; }
+            int gid, nlv;
+            while (fread(&gid, sizeof(int), 1, f) == 1 && fread(&nlv, sizeof(int), 1, f) == 1) {
+                std::vector<double> col((size_t)nlv);
+                if (fread(col.data(), sizeof(double), (size_t)nlv, f) != (size_t)nlv) break;
+                fld[gid] = col;
+            }
+            fclose(f);
+        }
+        const int idx = (tr == 0) ? FESOM_TRACER_T : FESOM_TRACER_S;
+        real_t *v = tracers->data[idx].values;
+        for (int n = 0; n < nnodes; ++n) {
+            const int gid = partit->myList_nod2D ? partit->myList_nod2D[n] : n + 1;
+            auto it = fld.find(gid);
+            if (it == fld.end()) { ++miss[tr]; continue; }
+            const std::vector<double> &col = it->second;
+            const int lo = mesh->ulevels_nod2D ? mesh->ulevels_nod2D[n] - 1 : 0;
+            const int hi = mesh->nlevels_nod2D[n] - 1;
+            for (int lev = lo; lev < hi && (size_t)lev < col.size(); ++lev) {
+                const double d = scale * col[(size_t)lev];
+                v[FESOM_NODE3D(n, lev, nl)] += (real_t)d;
+                sum[tr] += d; if (fabs(d) > amax[tr]) amax[tr] = fabs(d);
+            }
+            ++hit[tr];
+        }
+        tracers->data[idx].values_fld.modify_host();
+        tracers->data[idx].values_fld.sync_device();
+    }
+    if (mype == 0) {
+        printf("[fesom_perturb] STRUCTURED perturbation from %s.tr{0,1}.*.bin, scale %g\n", base, scale);
+        printf("[fesom_perturb]   rank 0: T %ld nodes hit / %ld missing, |max dT| %.3e; "
+               "S %ld / %ld, |max dS| %.3e\n", hit[0], miss[0], amax[0], hit[1], miss[1], amax[1]);
+        printf("[fesom_perturb] *** PERTURBATION APPLIED ***\n\n");
+    }
+}
+
 void fesom_perturb_apply(struct fesom_tracers *tracers,
                          const struct fesom_mesh *mesh,
                          const struct fesom_partit *partit,
@@ -95,6 +160,17 @@ void fesom_perturb_apply(struct fesom_tracers *tracers,
         fprintf(stderr, "[fesom_perturb] FESOM_PERTURB_MODE=%s not recognised "
                         "(want initial_only | first_step)\n", mode);
         exit(1);
+    }
+    /* §4r: method=file — a STRUCTURED perturbation. Read a per-node, per-level (T, S) field from
+     * FESOM_PERTURB_FILE (the tracer-trace binary layout, one file per tracer:
+     * <base>.tr0.bin / <base>.tr1.bin, int32 gid, int32 nlv, nlv*float64; any rank layout — the
+     * whole set is read and matched by global id), scaled by FESOM_PERTURB_SCALE (default 1),
+     * and ADDED to values. Twin of m16_perturb_file in the Fortran gen_ic3d.F90. Used to test
+     * whether the port's DP trajectory amplifies the actual SP-DP direction faster than
+     * upstream's — the random-T envelope cannot probe that direction. */
+    if (strcmp(method, "file") == 0) {
+        fesom_perturb_apply_file(tracers, mesh, partit, is_restart, first_step, mype);
+        return;
     }
     const int gaussian = (strcmp(method, "gaussian") == 0);
     if (!gaussian && strcmp(method, "uniform") != 0) {

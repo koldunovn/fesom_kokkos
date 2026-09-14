@@ -93,13 +93,20 @@ if [ -n "${PSEED:-}" ]; then
     export FESOM_PERTURB=1 FESOM_PERTURB_MODE=initial_only FESOM_PERTURB_METHOD=gaussian
     export FESOM_PERTURB_SEED="$PSEED" FESOM_PERTURB_TEMP="0,${PAMP:-1e-6}"
 fi
+# §4r: PFILE=<base> applies a STRUCTURED perturbation (the tracer-trace layout, <base>.tr{0,1}.*.bin)
+# scaled by PSCALE (default 1) — the step-1 SP-DP field, to test whether each code's DP trajectory
+# amplifies THAT direction. The Fortran twin reads the same file via FESOM_PERTURB_FILE.
+if [ -n "${PFILE:-}" ]; then
+    export FESOM_PERTURB=1 FESOM_PERTURB_MODE=initial_only FESOM_PERTURB_METHOD=file
+    export FESOM_PERTURB_FILE="$PFILE" FESOM_PERTURB_SCALE="${PSCALE:-1}"
+fi
 
 echo "=== M16 faithfulness — port arms (Kokkos Serial) ==="
 echo "runroot : $RUNROOT"
 echo "arms    : $ARMS"
 echo "steps   : $NSTEPS at dt=$DT   (= $((NSTEPS/32)) days at step_per_day 32)"
 echo "ranks   : ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)  [$(hostname)]"
-echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}${FESOM_SALT_ANOMALY:+ FESOM_SALT_ANOMALY=1}${FESOM_PERTURB:+ FESOM_PERTURB=1 seed=$FESOM_PERTURB_SEED T=$FESOM_PERTURB_TEMP}; everything else unset (KPP + standard EVP are the port defaults)"
+echo "knobs   : FESOM_ALE=zstar FESOM_FORCING_SET=$FESOM_FORCING_SET${FESOM_IC_EXTRAP:+ FESOM_IC_EXTRAP=$FESOM_IC_EXTRAP}${FESOM_SALT_ANOMALY:+ FESOM_SALT_ANOMALY=1}${FESOM_PERTURB:+ FESOM_PERTURB=1 method=${FESOM_PERTURB_METHOD:-gaussian} seed=${FESOM_PERTURB_SEED:-none} T=${FESOM_PERTURB_TEMP:-none} file=${FESOM_PERTURB_FILE:-none}}; everything else unset (KPP + standard EVP are the port defaults)"
 echo
 
 for arm in $ARMS; do
