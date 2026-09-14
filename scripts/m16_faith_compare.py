@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M16 Gate 4 — the faithfulness statement, computed from the arms' NetCDF output.
 
-    m16_faith_compare.py <runroot> [--vars sst,a_ice,temp,salt] [--rec -1]
+    m16_faith_compare.py <runroot> [--vars sst,a_ice,temp,salt] [--rec -1] [--year YYYY|all]
 
 The question this answers is NOT "is SP close to DP" — that alone has no bar. It is:
 
@@ -40,11 +40,22 @@ except ImportError:
 VARS_DEFAULT = ["sst", "a_ice", "temp", "salt"]
 
 
+YEAR = None   # --year YYYY restricts to that year's file; --year all concatenates the years (§5 multi-year)
+
+
 def load(arm_dir, var, rec):
-    """Return the record `rec` of `var` from whichever file in arm_dir/output holds it."""
-    pats = [os.path.join(arm_dir, "output", f"{var}.fesom.*.nc"),
+    """Return the record `rec` of `var` from whichever file in arm_dir/output holds it.
+
+    Both codes write one file per model year (`sst.fesom.1958.nc` Fortran, `sst.fesom.1958.monthly.nc`
+    port), so a 3-year arm has three candidates and the first one sorted is always 1958. `--year 1960`
+    picks that year's file; `--year all` stacks the years in order so `rec` indexes the whole run
+    (0 = Jan of year 1, -1 = Dec of the last year, 12*k+m = month m of year k)."""
+    year = "*" if YEAR in (None, "all") else str(YEAR)
+    pats = [os.path.join(arm_dir, "output", f"{var}.fesom.{year}.nc"),
+            os.path.join(arm_dir, "output", f"{var}.fesom.{year}.*.nc"),
             os.path.join(arm_dir, "output", f"{var}.*.nc"),
             os.path.join(arm_dir, "output", "*.nc")]
+    chunks, names = [], []
     for p in pats:
         for f in sorted(glob.glob(p)):
             try:
@@ -53,10 +64,18 @@ def load(arm_dir, var, rec):
                 continue
             if var in ds.variables:
                 v = ds.variables[var]
-                a = np.array(v[rec] if v.ndim > 1 else v[:], dtype=np.float64)
-                ds.close()
-                return a, os.path.basename(f)
+                if YEAR == "all" and v.ndim > 1:
+                    chunks.append(np.array(v[:], dtype=np.float64)); names.append(os.path.basename(f))
+                else:
+                    a = np.array(v[rec] if v.ndim > 1 else v[:], dtype=np.float64)
+                    ds.close()
+                    return a, os.path.basename(f)
             ds.close()
+        if chunks:
+            break                      # all year-files of the first matching pattern, nothing else
+    if chunks:
+        allrec = np.concatenate(chunks, axis=0)
+        return allrec[rec], "+".join(names)
     return None, None
 
 
@@ -149,6 +168,9 @@ def main():
         varlist = args[args.index("--vars") + 1].split(",")
     if "--rec" in args:
         rec = int(args[args.index("--rec") + 1])
+    global YEAR
+    if "--year" in args:
+        YEAR = args[args.index("--year") + 1]
     do_where = "--where" in args
 
     names = sorted(d for d in os.listdir(runroot)
@@ -171,7 +193,7 @@ def main():
 
     print(f"runroot : {runroot}")
     print(f"arms    : {' '.join(names)}")
-    print(f"record  : {rec}   variables: {','.join(varlist)}")
+    print(f"record  : {rec}   year: {YEAR or 'first file'}   variables: {','.join(varlist)}")
     print()
 
     verdict = {}

@@ -2248,7 +2248,7 @@ port job: `FESOM_VISC_OPT=5`, `FESOM_ICE_DIFF=0`, zstar, JRA55, no anomaly. 40 j
 | 6 | **SP ensemble** (the one experiment that can put error bars on the 60–70°S residual) | `psp_r{12345,22318,31415}`, `fsp_r{12345,22318,31415}` — SP runs from perturbed ICs | `faith/final_year` | 27459768–770, 27459778–780 |
 | 4 | **salt anomaly ON**, full year, both codes | `fdp fsp pdp psp` with #986 | `faith/final_year_anom` | 27459781–784 |
 | 5 | **multi-year**: 3 years (the 8 h compute limit; 1 yr = 2h10 port / 1h50 Fortran) | `fdp fsp pdp psp` | `faith/final_3yr` | 27459785–788 |
-| 2 | **speed on the final binary**: CORE2 GPU 1×4 and 2×8 knobs-off (the G2 production rows), CPU 1×64 | `dp sp` ABBA, `M16_BINS=bin/final` | `port2/m14/gladder.*` | 27459808, 27459809, 27459810 |
+| 2 | **speed on the final binary**: CORE2 GPU 1×4 and 2×8 knobs-off (the G2 production rows), CPU 1×64 | `dp sp` ABBA, `M16_BINS=bin/final` | `port2/m14/gladder.*` | ~~27459808, 27459809~~ → 27460349, 27460350 (GPU), 27459810 (CPU) |
 | 3 | **GPU faithfulness**: CUDA DP ×2 (self-noise floor), CUDA SP; + a Serial pair at the same physics | `gdp gdp_2 gsp` (new `jobs/job_m16_faith_gpu`, 2×4 GPUs) + Serial `pdp psp` with `VISCOPT=7` | `faith/final_year_gpu` | 27459817–819, 27459820–821 |
 
 ⚠️ **Two things to read the GPU rows with.** (a) `visc_filt_bcksct` (opt 5) is host-only — not
@@ -2257,8 +2257,17 @@ the Serial-vs-GPU statement is same-physics. §3s measured the 5-vs-7 choice as 
 ratio, so the GPU ratio can still be set beside the Fortran's, with that caveat stated. (b) CUDA is
 not run-to-run reproducible: `gsp − gdp` is read against `gdp_2 − gdp`, never against zero.
 
-The multi-year port arm relies on the port's year-rollover output (`*.1959.*`, `*.1960.*`); the
-compare script reads one file per arm, so a 3-year reader is needed when it lands.
+The multi-year port arm relies on the port's year-rollover output (`*.1959.*`, `*.1960.*`);
+`m16_faith_compare.py` now takes `--year YYYY` (that year's file) or `--year all` (years stacked,
+`--rec` indexes the whole run: 35 = Dec of year 3). Regression: all three modes give the same
+0.7437/0.8514 on `year_g3`.
+
+⚠️ `bin/final` was copied by hand and had no `PROVENANCE.txt`; the ladder jobs' preflight refuses an
+sp arm without one, so the two GPU speed jobs died at 9 s (`REFUSE: … has no precision PROVENANCE`)
+before any other `M16_BINS=bin/final` job had started. The file was written 2026-09-15 00:27 from the
+build dirs (md5s verified identical to `build-m16{serial,cuda}{,-sp}/fesom_port`, `USE_SINGLE_PRECISION`
+read from each `CMakeCache.txt`) while every other §5/§6/§7 job was still pending, and the two GPU
+jobs resubmitted; nothing else needed resubmission.
 
 ## 6. GPU strong scaling, SP vs DP, four meshes (launched 2026-09-14, binary `final`)
 The D13 campaign shape: **SP alone**, knobs-off (`FESOM_SPEED=1` — the certified M7 baseline — and
