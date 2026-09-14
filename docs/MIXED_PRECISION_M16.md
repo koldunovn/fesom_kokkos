@@ -2260,6 +2260,29 @@ not run-to-run reproducible: `gsp − gdp` is read against `gdp_2 − gdp`, neve
 The multi-year port arm relies on the port's year-rollover output (`*.1959.*`, `*.1960.*`); the
 compare script reads one file per arm, so a 3-year reader is needed when it lands.
 
+## 6. GPU strong scaling, SP vs DP, four meshes (launched 2026-09-14, binary `final`)
+The D13 campaign shape: **SP alone**, knobs-off (`FESOM_SPEED=1` — the certified M7 baseline — and
+`FESOM_IC_EXTRAP=det` on both arms), the **CG solver**, none of the M9/M10/M11 levers, `WSPLIT=1` on
+fArc/dars/NG5 (the cold-start rule), `-C a100_80`, 16 GPU nodes = 64 A100 cap. Protocol dts
+CORE2 1800 · fArc 900 · dars 120 · NG5 180; 300 steps; ABBA `dp sp sp dp` after a discarded warm-up;
+the number is the model's own per-step timer, min over legs; `gpumem_max=` polled per leg.
+`jobs/job_m14_ladder_gpu`, `M16_BINS=bin/final`, one job per point:
+
+| mesh | nodes (GPUs) | jobs |
+|---|---|---|
+| CORE2 | 1 (4) · 2 (8) · 4 (16) · 8 (32) · 16 (64) | 27459844, 848, 849, 850, 851 |
+| fArc | 2 (8) · 4 (16) · 8 (32) · 16 (64) | 27459852, 854, 857, 859 |
+| dars | 2 (8) · 4 (16) · 8 (32) · 16 (64) | 27459860, 861, 862, 863 |
+| NG5 | 4 (16) · 8 (32) · 16 (64) | 27459864, 865, 866 |
+
+Things to read the rows with: CORE2 is past its knee by 16 nodes (G2: 0.0618 s/step at 1N vs
+0.0794 at 16N) — the curve is the point. The GPU runs `opt_visc=7` (bcksct is host-only). **NG5 FP64
+at 16 nodes died at step 2 with the CG-NaN class on the `e0` binary (§1, 2026-09-08)** — that
+allocator defect is fixed (`MALLOC_ASYNC=OFF`, pair `e3` onward), so whether the FP64 arm now
+survives at 32/64 GPUs is itself a result; the SP arm survived then. dars/NG5 at 2/4 nodes are
+memory attempts (`gpumem_max` will say). The det fill (~7 min NG5) sits outside the timing window
+but inside the wall — NG5 jobs carry 1h40.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
