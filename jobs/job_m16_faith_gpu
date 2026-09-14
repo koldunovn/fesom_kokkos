@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=m16_faith_g
+#SBATCH -p gpu
+#SBATCH -C a100_80
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --exclude=l50154
+#SBATCH -A ab0995
+#SBATCH --nodes=2
+#SBATCH -t 03:00:00
+#SBATCH -o /work/ab0995/a270088/port2/m16/faith/faith_g.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/faith/faith_g.%j.err
+#
+# M16 Gate 4 — the GPU arms of the faithfulness matrix (CUDA, final bins, both precisions).
+#
+#   sbatch --export=ALL,ARMS="gdp gsp gdp_2",RUNROOT=...,NSTEPS=17520 jobs/job_m16_faith_gpu
+#
+# CUDA is NOT run-to-run reproducible (atomics), so the GPU arm's SP-DP must be read against
+# the GPU's OWN self-noise: run the DP arm TWICE (gdp, gdp_2) and take relL2(gdp_2, gdp) as the
+# floor. Arm name: g?p — 2nd char picks the precision (gdp -> dp, gsp -> sp); a trailing _<tag>
+# is a repeat. Same physics knobs as jobs/job_m16_faith_port (VISC_OPT=5, ICE_DIFF=0, zstar,
+# jra55, no anomaly). 2 nodes x 4 GPUs = 8 ranks = dist_8. Rule: -C a100_80 on every GPU absolute;
+# Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF in the build (the M14 GPU CG-NaN class).
+set -u
+BINROOT=${BINROOT:?pin the binary root}
+RUNROOT=${RUNROOT:?set RUNROOT}
+ARMS=${ARMS:?set ARMS}
+NSTEPS=${NSTEPS:?set NSTEPS}
+DT=${DT:-1800}
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+YEAR=1958
+ROOT=/home/a/a270088/port_kokkos_sp
+source /sw/etc/profile.levante >/dev/null 2>&1 || true
+source "$ROOT/env_cuda.sh" >/dev/null 2>&1
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1 UCX_MEMTYPE_CACHE=n \
+       OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+export FESOM_ALE=zstar FESOM_PRINT_EVERY=320 FESOM_FORCING_SET=jra55
+export FESOM_VISC_OPT=7            # bcksct (5) is host-only, not ported to CUDA: the GPU arm runs 7
+export FESOM_ICE_DIFF=${ICEDIFF:-0}
+[ "${SALTANOM:-0}" = 1 ] && export FESOM_SALT_ANOMALY=1
+echo "=== M16 faithfulness — GPU arms (CUDA) ==="
+echo "runroot : $RUNROOT   arms: $ARMS   steps: $NSTEPS dt=$DT   ranks: ${SLURM_NTASKS:-?} on ${SLURM_NNODES:-?} node(s)"
+echo "knobs   : FESOM_ALE=zstar FESOM_VISC_OPT=7 (bcksct is host-only) FESOM_ICE_DIFF=$FESOM_ICE_DIFF${FESOM_SALT_ANOMALY:+ FESOM_SALT_ANOMALY=1}"
+for arm in $ARMS; do
+    case "$arm" in ?sp*) prec=sp ;; *) prec=dp ;; esac
+    BIN="$BINROOT/$prec/fesom_port_cuda"
+    [ -x "$BIN" ] || { echo "!! $arm: no binary $BIN"; continue; }
+    dir="$RUNROOT/$arm"; out="$dir/output"; rm -rf "$dir"; mkdir -p "$out"
+    echo "--- $arm ($prec, md5 $(md5sum "$BIN" | cut -c1-32)) ---"
+    t0=$SECONDS
+    srun -l --ntasks="${SLURM_NTASKS}" --gpus-per-task=1 "$BIN" "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" "$YEAR" \
+         > "$dir/run.log" 2> "$dir/run.err"
+    echo "rc=$?  wall=$((SECONDS - t0))s"
+    grep -ciE "nan|inf" "$dir/run.log" 2>/dev/null | sed 's/^/nan-ish log lines: /'
+    ls "$out"/*.nc 2>/dev/null | wc -l | sed 's/^/  out files: /'
+done
+echo "=== done ==="
