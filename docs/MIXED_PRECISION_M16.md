@@ -2274,6 +2274,9 @@ the number is the model's own per-step timer, min over legs; `gpumem_max=` polle
 | fArc | 2 (8) · 4 (16) · 8 (32) · 16 (64) | 27459852, 854, 857, 859 |
 | dars | 2 (8) · 4 (16) · 8 (32) · 16 (64) | 27459860, 861, 862, 863 |
 | NG5 | 4 (16) · 8 (32) · 16 (64) | 27459864, 865, 866 |
+| **dars, NG5 at 32 nodes (128 GPUs)** — user override of the 16-node GPU cap, 2026-09-15 ("try to put NG5 and dars to 32") | `dist_128` on /pool | 27459887, 27459888 |
+
+**Knobs-off, stated precisely** (user check 2026-09-15): M9 mEVP/EVPWIDE off (standard EVP), M10 solver variants off (plain `cg`), M12 split-explicit off (CG), M11 re-rolled partitions off (stock `dist_N`). ON on both arms: `FESOM_SPEED=1` = the M7 blessed set from `main` (device residency, fewer syncs/fences, fused kernels, and `CGPIPE` — the single-exchange form of the same CG, byte-identical on Serial, pre-M10); the #984 preconditioner (upstream's shipped default, so the oracle runs it too); `det` and `WSPLIT` (correctness). The user chose to keep CGPIPE on as the port's baseline.
 
 Things to read the rows with: CORE2 is past its knee by 16 nodes (G2: 0.0618 s/step at 1N vs
 0.0794 at 16N) — the curve is the point. The GPU runs `opt_visc=7` (bcksct is host-only). **NG5 FP64
