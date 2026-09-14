@@ -74,6 +74,10 @@ SALTANOM=${9:-0}
 
 CFG=/home/a/a270088/fesom2_sp/config
 MESH=/work/ab0995/a270088/port2/mesh/core2
+# §7 (Fortran scaling ladder): FAITH_MESH=<dir> overrides the mesh — fArc/dars/NG5 from /pool or the
+# *_bigpart copies, exactly the directories jobs/job_m14_ladder_cpu resolves for the port. Everything
+# else in the setup (JRA55, PHC, the four deviations) is mesh-independent.
+MESH=${FAITH_MESH:-$MESH}
 PHCDIR=/pool/data/AWICM/FESOM2/INITIAL/phc3.0
 FORC=/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0
 

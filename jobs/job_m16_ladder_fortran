@@ -1,0 +1,81 @@
+#!/bin/bash
+#SBATCH --job-name=m16_fladder
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --ntasks-per-node=128
+#SBATCH -o /work/ab0995/a270088/port2/m16/fladder/fladder.%j.out
+#SBATCH -e /work/ab0995/a270088/port2/m16/fladder/fladder.%j.err
+#
+# M16 §7 — the FORTRAN oracle's SP-vs-DP strong-scaling ladder, matched to the port's
+# jobs/job_m14_ladder_cpu protocol: one point per job, ABBA (dp sp sp dp), NSTEPS steps at the
+# mesh's protocol dt, min over legs, the code's OWN timer — upstream's
+#     runtime total (ice+oce): <mean> <min> <max>     (seconds, all ranks, the timestep loop only)
+# divided by NSTEPS. Each leg runs in its OWN directory (the Fortran advances fesom.clock at the
+# end of a run, so a re-run in the same dir would RESTART instead of cold-start). Run dirs come
+# from scripts/m16_faith_setup.sh with FAITH_MESH pointing at the same mesh directory the port's
+# ladder resolves for this rank count; det (ic_extrap_det, our PR #979) is ON as on the port's arms.
+#
+#   sbatch --nodes=8 --ntasks=1024 --time=01:00:00 --export=ALL,POINT=farc jobs/job_m16_ladder_fortran
+#
+# Oracle: /work/ab0995/a270088/port2/m16/oracle/{dp,sp}/bin/fesom.x (upstream main a62f180, Intel).
+set -u
+SRC=/home/a/a270088/port_kokkos_sp
+ORACLE=/work/ab0995/a270088/port2/m16/oracle
+POINT=${POINT:?core2|farc|dars|ng5}
+N=${SLURM_NTASKS:?}
+NSTEPS=${NSTEPS:-300}
+ROOTDIR=${ROOTDIR:-/work/ab0995/a270088/port2/m16/fladder}
+case "$POINT" in
+  core2) SPD=48;  MESH=/work/ab0995/a270088/port2/mesh/core2 ;;                                   # dt 1800, private copy (L73)
+  farc)  SPD=96;  if [ "$N" -le 2304 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/farc; else MESH=/work/ab0995/a270088/port2/mesh/farc_bigpart; fi ;;   # dt 900
+  dars)  SPD=720; if [ "$N" -le 4096 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/dars; else MESH=/work/ab0995/a270088/port2/mesh/dars_bigpart; fi ;;   # dt 120
+  ng5)   SPD=480; if [ "$N" -le 8192 ]; then MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/ng5;  else MESH=/work/ab0995/a270088/port2/mesh/ng5_bigpart;  fi ;;   # dt 180
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+[ -d "$MESH/dist_$N" ] || { echo "no partition $MESH/dist_$N"; exit 2; }
+
+source /sw/etc/profile.levante >/dev/null 2>&1 || true
+set +u; export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+cd /home/a/a270088/fesom2_sp && source env.sh levante.dkrz.de+intel >/dev/null 2>&1
+set -u
+export HDF5_USE_FILE_LOCKING=FALSE
+ulimit -s 204800
+
+RUN=$ROOTDIR/${POINT}_n${N}_$SLURM_JOB_ID
+mkdir -p "$RUN"
+echo "=== M16 Fortran ladder — $POINT ranks=$N nodes=${SLURM_NNODES} dt=$((86400/SPD)) steps=$NSTEPS ABBA ==="
+echo "mesh : $MESH/dist_$N"
+echo "dp   : $(md5sum $ORACLE/dp/bin/fesom.x | cut -c1-32)   sp: $(md5sum $ORACLE/sp/bin/fesom.x | cut -c1-32)"
+echo "nodes: $SLURM_JOB_NODELIST"; echo
+
+declare -A best
+for leg in dp1 sp1 sp2 dp2; do
+    prec=${leg:0:2}
+    dir=$RUN/$leg
+    FAITH_MESH=$MESH bash "$SRC/scripts/m16_faith_setup.sh" "$dir" "$NSTEPS" s "" "$SPD" "" 1 jra55 0 >/dev/null \
+        || { echo "leg $leg: setup failed"; continue; }
+    t0=$SECONDS
+    ( cd "$dir" && srun -l --ntasks="$N" "$ORACLE/$prec/bin/fesom.x" ) > "$dir/run.log" 2> "$dir/run.err"
+    rc=$?
+    wall=$((SECONDS - t0))
+    tot=$(grep -E "runtime total \(ice\+oce\)" "$dir/run.log" | tail -1 | awk '{print $(NF-2)}')
+    all=$(grep -E "Runtime for all timesteps" "$dir/run.log" | tail -1 | awk '{print $(NF-1)}')
+    if [ "$rc" = 0 ] && [ -n "$tot" ]; then
+        sps=$(awk -v t="$tot" -v n="$NSTEPS" 'BEGIN{printf "%.5f", t/n}')
+        echo "leg $leg ($prec): rc=$rc s/step=$sps  (ice+oce mean ${tot}s, loop wall ${all}s, job wall ${wall}s)"
+        cur=${best[$prec]:-}
+        if [ -z "$cur" ] || awk -v a="$sps" -v b="$cur" 'BEGIN{exit !(a<b)}'; then best[$prec]=$sps; fi
+    else
+        echo "leg $leg ($prec): rc=$rc FAILED (wall ${wall}s)"; tail -3 "$dir/run.err" | sed 's/^/    /'
+    fi
+    # the run dir's output is not needed after the timer is read — keep the logs, drop the data
+    rm -rf "$dir/output"/*.nc "$dir/output"/*.restart 2>/dev/null
+done
+echo
+echo "=== result ==="
+if [ -n "${best[dp]:-}" ] && [ -n "${best[sp]:-}" ]; then
+    ratio=$(awk -v s="${best[sp]}" -v d="${best[dp]}" 'BEGIN{printf "%.4f", s/d}')
+    echo "FLADDER $POINT N=$N nodes=${SLURM_NNODES} dp=${best[dp]} sp=${best[sp]} sp/dp=$ratio steps=$NSTEPS dt=$((86400/SPD))"
+else
+    echo "FLADDER $POINT N=$N nodes=${SLURM_NNODES} INCOMPLETE dp=${best[dp]:-?} sp=${best[sp]:-?}"
+fi

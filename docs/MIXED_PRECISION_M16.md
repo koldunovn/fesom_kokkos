@@ -2286,6 +2286,39 @@ survives at 32/64 GPUs is itself a result; the SP arm survived then. dars/NG5 at
 memory attempts (`gpumem_max` will say). The det fill (~7 min NG5) sits outside the timing window
 but inside the wall — NG5 jobs carry 1h40.
 
+## 7. The Fortran oracle's SP-vs-DP scaling ladder, matched to the port's CPU ladder (launched 2026-09-15)
+**Why.** The only Fortran SP-vs-DP scaling that existed was Suvarchal's `core2_scaling`
+(`/work/ab0995/b380667/fesom_exps_19082026`): CORE2 only, 64–864 ranks, 2-month runs at dt 900 on
+/pool's mesh, the pre-merge binary `27ed9f4f`, "Runtime for all timesteps" including output. It says
+the Fortran loses **40–45 %** to single precision on CPU (64 r: 2174 → 1186 s, 0.55; 128 r: 0.56;
+256 r: 0.61) — far more than the port's GPU −14 % — which is what a bandwidth-bound CPU code should
+do. But it is not our oracle, not our mesh, not our protocol, and not the big meshes. Our oracle had
+never been scaled: every Fortran run in this track was 64 ranks on one node.
+
+**The ladder.** New `jobs/job_m16_ladder_fortran`: one point per job, ABBA `dp sp sp dp`, 300 steps at
+the protocol dt, each leg in its own run directory (the Fortran advances `fesom.clock`, so a re-run
+in place would *restart*), the code's **own** timer — `runtime total (ice+oce)` mean over ranks,
+the timestep loop only — divided by 300, min over legs. Run dirs from `m16_faith_setup.sh` with the
+new `FAITH_MESH=` override, pointing at exactly the mesh directory the port's `job_m14_ladder_cpu`
+resolves for that rank count (/pool for ≤2304/4096/8192, the `*_bigpart` copies above); `det` ON as
+on the port's arms; JRA55 + PHC. Oracle `a62f180`, Intel, `oracle/{dp,sp}/bin/fesom.x`.
+**The port's CPU ladder runs beside it at every point** (`M16_BINS=bin/final`, 128 ranks/node,
+`WSPLIT=1` on the large meshes) so the comparison is same-mesh, same-ranks, same-protocol.
+CORE2 gets the single 1 × 64 reference point (the faithfulness posture) and no ladder — the user's
+2026-08-14 rule: CORE2 is not a CPU-scaling subject.
+
+| mesh | ranks (nodes) | Fortran jobs | port CPU jobs |
+|---|---|---|---|
+| CORE2 | 64 (1) | 27460035 | 27459810 (§5) |
+| fArc | 512 (4) · 1024 (8) · 2048 (16) · 4096 (32) | 27460036, 038, 040, 042 | 27460037, 039, 041, 043 |
+| dars | 1024 (8) · 2048 (16) · 4096 (32) · 8192 (64) | 27460044, 046, 048, 050 | 27460045, 047, 049, 051 |
+| NG5 | 2048 (16) · 4096 (32) · 8192 (64) | 27460052, 054, 056 | 27460053, 055, 057 |
+
+Things to read it with: the Fortran has no `WSPLIT`, so whether it survives 300 steps of a PHC
+cold start on dars at dt 120 / NG5 at dt 180 is itself a result (rule 0.41); the Fortran's timer
+excludes output and init, the port's ladder timer likewise, but the two are different instruments
+and only the SP/DP *ratio* per code is protocol-clean — the cross-code absolute needs the caveat.
+
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`
   DP control leg; TKE `dbl_t` give-back; stiffness-shadow device-memory give-back.
