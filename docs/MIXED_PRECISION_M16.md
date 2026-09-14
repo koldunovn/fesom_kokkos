@@ -2304,12 +2304,12 @@ resolves for that rank count (/pool for ≤2304/4096/8192, the `*_bigpart` copie
 on the port's arms; JRA55 + PHC. Oracle `a62f180`, Intel, `oracle/{dp,sp}/bin/fesom.x`.
 **The port's CPU ladder runs beside it at every point** (`M16_BINS=bin/final`, 128 ranks/node,
 `WSPLIT=1` on the large meshes) so the comparison is same-mesh, same-ranks, same-protocol.
-CORE2 gets the single 1 × 64 reference point (the faithfulness posture) and no ladder — the user's
-2026-08-14 rule: CORE2 is not a CPU-scaling subject.
+CORE2 was first given only the 1 × 64 reference point (the 2026-08-14 rule); the user then asked for a
+CORE2 CPU ladder **capped at 1000 cores** — 64/128/256/512/864, the same rungs as Suvarchal's set.
 
 | mesh | ranks (nodes) | Fortran jobs | port CPU jobs |
 |---|---|---|---|
-| CORE2 | 64 (1) | 27460035 | 27459810 (§5) |
+| CORE2 | 64 (1) · 128 (1) · 256 (2) · 512 (4) · 864 (7) — **user 2026-09-15: "do core cpu scaling, but only up to 1000 cores not more"**; 864 is the largest partition under the cap | 27460035, 068, 070, 072, 075 | 27459810, 27460069, 071, 074, 076 |
 | fArc | 512 (4) · 1024 (8) · 2048 (16) · 4096 (32) | 27460036, 038, 040, 042 | 27460037, 039, 041, 043 |
 | dars | 1024 (8) · 2048 (16) · 4096 (32) · 8192 (64) | 27460044, 046, 048, 050 | 27460045, 047, 049, 051 |
 | NG5 | 2048 (16) · 4096 (32) · 8192 (64) | 27460052, 054, 056 | 27460053, 055, 057 |
