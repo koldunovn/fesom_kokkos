@@ -28,6 +28,11 @@ set -u
 source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
 side_config "$SIDE" || exit 2
 source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+KCFG=$(dirname "$BIN")/kokkos/KokkosCore_config.h          # L132: no cudaMallocAsync pool (job_xmach)
+if [ "$SIDE" = gpu ] && [ -f "$KCFG" ] && grep -q '^#define KOKKOS_ENABLE_CUDA\b' "$KCFG" \
+   && grep -q '^#define KOKKOS_ENABLE_IMPL_CUDA_MALLOC_ASYNC' "$KCFG"; then
+  echo "REFUSE: $BIN was built with the cudaMallocAsync pool ON (L132). Reconfigure with --clean."; exit 2
+fi
 export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
 export FESOM_FORCING_DIR=$INPUTS/forcing_1958 FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
 PHC=$INPUTS/ic/phc3.0_winter.nc

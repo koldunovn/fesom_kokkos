@@ -10,6 +10,20 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+# --- Kokkos CUDA allocator: the cudaMallocAsync pool is OFF in every CUDA build --------------
+# Lesson L132 (Levante, 2026-09-08). Kokkos >= 4 hands CUDA Views out of a stream-ordered
+# cudaMallocAsync pool by default. Device pointers from that pool, passed to CUDA-aware MPI
+# (OpenMPI 4.1.5 / UCX 1.14 on Levante), delivered wrong halo slots intermittently: a leg dies at
+# a random step with a huge or NaN residual in the SSH solver and the next leg on the same nodes
+# runs. The August 2026 ladders recorded this as "a leg exited rc=1" and it reads like the wsplit
+# CFL trap. With the pool off, 15 of 15 thousand-step legs completed (8 of 15 before) and the
+# device path got faster. A build property, not a run-time knob, so it is fixed here (FORCE: an
+# existing build directory picks it up on reconfigure). The ladder jobs refuse a CUDA binary whose
+# KokkosCore_config.h still defines KOKKOS_ENABLE_IMPL_CUDA_MALLOC_ASYNC. Kokkos 4.4.01 has no HIP
+# equivalent, so the LUMI build is unchanged.
+set(Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC OFF CACHE BOOL
+    "cudaMallocAsync pool (L132: corrupts CUDA-aware MPI halos)" FORCE)
+
 # --- Kokkos (vendored submodule, built in-tree; backend via -DKokkos_ENABLE_*) -------------
 # -DFESOM_KOKKOS_DIR=<path> builds against an EXTERNAL Kokkos source tree instead of the
 # vendored 4.4.01. Added for toolkit experiments: Kokkos 4.4 cannot compile against CUDA 13

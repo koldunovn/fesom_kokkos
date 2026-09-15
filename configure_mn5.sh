@@ -40,6 +40,8 @@ cd "${BUILD_DIR}"
 # rejects most C++ flags it sees, the wrapper rewrites them for g++ host pass).
 # MPI_*_COMPILER point at the HPC-X mpicc/mpicxx from nvidia-hpc-sdk so FindMPI
 # extracts the cuda_copy / cuda_ipc UCX flags.
+# The cudaMallocAsync pool is OFF (also forced in CMakeLists.txt): Kokkos' pool memory handed to
+# CUDA-aware MPI corrupts halo exchanges intermittently (lesson L132, PACKAGE doc section 7.11).
 cmake "${SOURCE_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CXX_COMPILER="${SOURCE_DIR}/externals/kokkos/bin/nvcc_wrapper" \
@@ -49,6 +51,7 @@ cmake "${SOURCE_DIR}" \
     -DKokkos_ENABLE_SERIAL=ON \
     -DKokkos_ENABLE_CUDA=ON \
     -DKokkos_ARCH_HOPPER90=ON \
+    -DKokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF \
     "${CMAKE_EXTRA[@]}"
 
 cmake --build . --parallel "$(nproc --all)"

@@ -30,6 +30,7 @@ fleet (§5.2) → harvest (§6).** Read §7 (traps) before the first `sbatch`.
 | paper's certified branch | `m14-integrate` @ `d4a9fe0` (its `src/` is unchanged since the paper's build sha `a0b474b`, 2026-08-18) |
 | this branch | `xmach-lumi-mn5` = `d4a9fe0` + (a) one backend-neutral gate for the device path, (b) the LUMI/MN5 environments, (c) `jobs/xmach/`, (d) this document |
 | what (a) changes | **nothing on CUDA or Serial**: every `#ifdef KOKKOS_ENABLE_CUDA` in `src/` became `#if FESOM_GPU_RESIDENT`, defined in the new `src/fesom_gpu.hpp` as `CUDA || HIP`; the pinned-host mirror space becomes `Kokkos::HIPHostPinnedSpace` under HIP. Verified on Levante by rebuilding the pristine and the edited tree in the same directory and comparing every object file (§10). |
+| what (b) changes | **the CUDA build only**: Kokkos' cudaMallocAsync pool is OFF (`CMakeLists.txt`, forced; `configure_mn5.sh` passes it too). Pool memory handed to CUDA-aware MPI corrupts halo exchanges intermittently (lesson L132, section 7.11), which is what voided the August NG5 16-node legs on Levante. The FESOM objects are unchanged; the linked Kokkos library is not, so the CUDA binary is no longer byte-identical to the paper's certified one, and the Levante ladder is being re-measured with the same setting. HIP: no equivalent option in Kokkos 4.4.01, LUMI unchanged. |
 | why (a) is needed | on an AMD/HIP build the old CUDA-only guard compiled the device-resident halo path OUT and resolved every `FESOM_SPEED_*` lever to OFF — correct output, 2–3× slow, silent. The June LUMI branch fixed the halo half of this; the levers (which did not exist in June) would have stayed dead. `docs/PORT_HIP_LUMI.md` has the June story. |
 | paper's configuration ("base" arm of every Levante row) | `FESOM_SPEED=1` (the certified tier-1 lever set, incl. CGPIPE; inert on the Serial/CPU build) + `FESOM_IC_EXTRAP=det` (deterministic, partition-independent initial-condition fill) + `FESOM_WSPLIT=1` on farc/dars/ng5 (OFF on core2). Default physics (linear free surface, KPP, standard EVP, GM/Redi on), PHC3 initial condition, JRA55-do 1958 forcing. |
 | explicitly OUT | `FESOM_SSH_SOLVER`, `FESOM_SSH_MODE=se`, `FESOM_SPEED_EVPWIDE*`, optimised partitions, any `FESOM_PRECISION`/single-precision build (that is branch `m16-precision`, a different paper). The job scrubs every inherited `FESOM_*` knob before setting the three above, so these cannot leak in. |
@@ -70,6 +71,10 @@ hold whatever you change:
   that is a build-environment defect, never a code regression. If in doubt, run the halo
   selfcheck gate (§4) before believing anything.
 - **Kokkos stays the vendored 4.4.01.** Do not point CMake at a system Kokkos.
+- **The CUDA build has the cudaMallocAsync pool OFF.** `CMakeLists.txt` forces
+  `Kokkos_ENABLE_IMPL_CUDA_MALLOC_ASYNC=OFF`; check `build-cuda-mn5/kokkos/KokkosCore_config.h`
+  does NOT contain `KOKKOS_ENABLE_IMPL_CUDA_MALLOC_ASYNC`. The jobs refuse a binary that does
+  (section 7.11). A build directory from before this change: reconfigure with `--clean`.
 
 Login-node smoke (seconds; needs the bundle from §3): `mpirun -np 1 ./build-*/fesom_port
 <INPUTS>/core2 /tmp/smoke 1800 5 -1 <INPUTS>/ic/phc3.0_winter.nc 1958` with
@@ -203,7 +208,7 @@ XCSV LUMI_MI250X,ng5,GPU,2,16,GCD,180,0.6498,0.0016,2,300,on,lumi:x_ng5_gpu_16.1
 ```
 
 A leg is REJECTED (its timing not admitted) with the reason in brackets: `no-final-step`,
-`nan-in-state`, `cg-iters-0`, `CG-NaN(rule0.41:wsplit?)`, `NO-LEVER-ANNOUNCE(dead-knob)`,
+`nan-in-state`, `cg-iters-0`, `CG-NaN(rule0.41:wsplit / L132:allocator)`, `NO-LEVER-ANNOUNCE(dead-knob)`,
 `CGPIPE-INACTIVE(transport)`, `LEVER-ON-ON-CPU`, `det-not-announced`, `wsplit-not-announced`.
 Each of those is a configuration or build fault, never noise — fix the cause, resubmit with
 `FORCE=1`. A job with no admitted legs prints `NO ADMITTED LEGS` and no XCSV line.
@@ -266,6 +271,18 @@ CG-iteration corrections. Deliver `s_per_step` at the measured dt.
 10. **Do not "improve" anything.** No knob, no compiler flag, no Kokkos version, no partition other
     than the bundle's, no dt other than the table's. A variant you think is worth measuring is a
     separate, labelled extra row — never a replacement of the protocol row.
+    The one build setting the branch fixes itself, the CUDA allocator of item 11, is part of the
+    build of record, not an improvement.
+11. **The CUDA allocator pool (L132).** Kokkos >= 4 allocates CUDA Views from a cudaMallocAsync
+    pool by default, and device pointers from that pool passed to CUDA-aware MPI delivered wrong
+    halo slots intermittently on Levante (OpenMPI 4.1.5 / UCX 1.14): a leg dies at a random step
+    with a huge or NaN CG residual, the next leg on the same nodes runs. It looks exactly like
+    trap 2, and it is not: wsplit was declared. The branch builds every CUDA binary with the
+    pool OFF and `job_xmach`/`job_xmach_gates` refuse one that has it ON. If a CUDA leg still
+    dies with `CG_kk: pp·App is -nan` or a residual of 1e50 or more at step 1 or 2, keep the
+    `run.err` and report it; do not resubmit with `FORCE=1`. Whether HPC-X on MN5 shows the same
+    symptom with the pool ON was never tested, and does not need to be. HIP has no such pool in
+    Kokkos 4.4.01.
 
 ## 8. What to expect (for sanity, not for a pass bar)
 
@@ -322,3 +339,10 @@ The 23 CUDA objects whose debug sections differ are exactly the TUs that include
 branch produces the same machine code as `m14-integrate` @ `d4a9fe0`. The only behavioural
 change is on HIP, where the device path and the levers now exist.
 
+**Addendum 2026-09-15 (evening), after the message went out.** The CUDA allocator setting above
+(section 1 row (b), section 2, trap 11) was added after the verification record. The statement that
+the CUDA machine code is byte-identical to `m14-integrate` holds for the FESOM objects and no longer
+for the linked Kokkos library. What the change is worth: on Levante the fixed allocator ran 15 of
+15 thousand-step legs (8 of 15 before) and the ladder rungs moved by a few percent (CORE2 1 node
+0.0618 to 0.0601 s/step; the long CORE2 4-node test by 17 percent), so the paper's Levante GPU
+ladder is re-measured with the same setting before any cross-machine number is compared.

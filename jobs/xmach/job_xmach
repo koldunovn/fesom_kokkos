@@ -46,6 +46,13 @@ esac
 MESH=$INPUTS/$POINT
 [ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N does not exist"; exit 2; }
 [ -x "$BIN" ] || { echo "REFUSE: binary $BIN missing"; exit 2; }
+# L132: a CUDA build on Kokkos' cudaMallocAsync pool corrupts CUDA-aware MPI halos at random and
+# its legs die with a NaN CG residual. The branch builds with the pool OFF; refuse anything else.
+KCFG=$(dirname "$BIN")/kokkos/KokkosCore_config.h
+if [ "$SIDE" = gpu ] && [ -f "$KCFG" ] && grep -q '^#define KOKKOS_ENABLE_CUDA\b' "$KCFG" \
+   && grep -q '^#define KOKKOS_ENABLE_IMPL_CUDA_MALLOC_ASYNC' "$KCFG"; then
+  echo "REFUSE: $BIN was built with the cudaMallocAsync pool ON (L132). Reconfigure with --clean."; exit 2
+fi
 for f in nod2d.out elem2d.out aux3d.out nlvls.out elvls.out edges.out edge_tri.out; do
   [ -f "$MESH/$f" ] || { echo "REFUSE: $MESH/$f missing"; exit 2; }; done
 
@@ -96,7 +103,7 @@ leg () {                       # leg <name> <index>
     [ -n "$last" ] || { live=no; why="$why no-final-step"; }
     echo "$last" | grep -qiE 'nan|inf' && { live=no; why="$why nan-in-state"; }
     echo "$last" | grep -qE 'it=0[^0-9]' && { live=no; why="$why cg-iters-0"; }
-    grep -q 'pp·App is' "$out/run.err" 2>/dev/null && { live=no; why="$why CG-NaN(rule0.41:wsplit?)"; }
+    grep -q 'pp·App is' "$out/run.err" 2>/dev/null && { live=no; why="$why CG-NaN(rule0.41:wsplit / L132:allocator)"; }
     # KNOB LIVENESS (the dead-knob trap): on the GPU build the levers MUST announce themselves.
     if [ "$SIDE" = gpu ]; then
         grep -q '\[fesom_speed\] FESOM_SPEED_SWSKIP = ON' "$out/run.err" "$out/run.log" 2>/dev/null \
