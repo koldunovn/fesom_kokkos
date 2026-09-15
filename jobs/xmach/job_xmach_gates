@@ -1,0 +1,100 @@
+#!/bin/bash
+#SBATCH --job-name=xgates
+#
+# jobs/xmach/job_xmach_gates — the DAY-0 gate ladder on a new machine (JUPITER plan §3 + Addendum D,
+# corrected after the 2026-07 run): CORE2 private mesh, dist_8, 20 steps, snapshots at 0 and 20.
+#
+#   SIDE=cpu (Serial build, CPU partition):
+#     G-det   serial np8 rep a vs rep b  -> BYTE-IDENTICAL required (platform determinism; a
+#             failure here is host-MPI/stack rot, not physics)
+#   SIDE=gpu (device build, GPU partition):
+#     G-fid   GPU np8 (device transport) and GPU np8 (FESOM_HALO_STAGE=1) -> compared against the
+#             CPU leg with scripts/gpu_fidelity_check.py (climate-close ceilings). This is THE gate
+#             of record for the device build on this machine. Bitwise gates are INVALID for GPU
+#             builds (atomics: the device transport does not reproduce itself run-to-run).
+#     G-self  GPU np8 with FESOM_HALO_SELFCHECK=1: every device exchange is re-done on the host and
+#             diffed; SILENT = pass. Any "[halo-selfcheck]" mismatch line = transport bug (or a
+#             non-GPU-aware MPI): STOP.
+#     G-ab    transport A/B, 100 steps, device vs FESOM_HALO_STAGE=1 -> the faster one is the fleet
+#             TRANSPORT (JUPITER: STAGE won at scale; dolpung: device transport crashed; LUMI 2026-06:
+#             device transport worked and was 2.6x host-halo). Measure, do not assume.
+#
+# Snapshots are cross-decomposition INcomparable (partition-dependent IC interpolation), so every
+# pair here is the same np (8). Run the CPU gate first; the GPU job compares against it.
+#
+# Environment in: ROOT MACHINE SIDE  (INPUTS RUNBASE from the machine file)
+set -u
+: "${ROOT:?}" "${MACHINE:?}" "${SIDE:?}"
+source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
+side_config "$SIDE" || exit 2
+source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=$INPUTS/forcing_1958 FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
+PHC=$INPUTS/ic/phc3.0_winter.nc
+MESH=$INPUTS/core2
+G=$RUNBASE/gates/$MACHINE; mkdir -p "$G"
+N=8
+[ "$SLURM_NTASKS" -eq 8 ] || { echo "REFUSE: gates run at exactly 8 ranks (got $SLURM_NTASKS)"; exit 2; }
+echo "=== xmach gates $MACHINE/$SIDE  binary=$BIN md5=$(md5sum $BIN | cut -d' ' -f1)  $(date) ==="
+echo "nodes: $SLURM_JOB_NODELIST"
+
+run () {   # run <subdir> <nsteps> <snap_every> <extra knobs, space-separated VAR=VAL>
+    local out=$G/$1 nst=$2 snap=$3; shift 3
+    rm -rf "$out"; mkdir -p "$out"
+    local v; for v in $(env | grep -oE '^FESOM_[A-Za-z0-9_]*=' | sed 's/=$//'); do
+        case $v in FESOM_FORCING_DIR|FESOM_CHL_FILE|FESOM_PRINT_EVERY) ;; *) unset "$v" ;; esac; done
+    export FESOM_SPEED=1 FESOM_IC_EXTRAP=det          # the paper's base config; wsplit OFF on core2
+    local kv; for kv in $RUNTIME_ENV "$@"; do [ -n "$kv" ] && export "$kv"; done
+    launch $N "$BIN" "$MESH" "$out" 1800 "$nst" "$snap" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    local rc=$?
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
+    echo "RESULT $1 rc=$rc steps=$nst snaps=$(ls $out/snap_*.nc 2>/dev/null | wc -l) s/step=${t:-NA}"
+    [ $rc -ne 0 ] && tail -5 "$out/run.err" | sed 's/^/    | /'
+    return $rc
+}
+
+if [ "$SIDE" = cpu ]; then
+    run ser_a 20 20; run ser_b 20 20
+    if python3 -c "import numpy, netCDF4" 2>/dev/null; then
+        python3 "$ROOT/scripts/diff_snap.py" "$G/ser_a" "$G/ser_b" > "$G/gdet.txt" 2>&1 \
+            && echo "VERDICT G-det serial np8 rep-pair: BYTE-IDENTICAL PASS" \
+            || { echo "VERDICT G-det: FAIL — host nondeterminism"; tail -8 "$G/gdet.txt" | sed 's/^/    | /'; }
+    else
+        echo "python3 with numpy+netCDF4 not on this node — run on a login node:"
+        echo "  python3 $ROOT/scripts/diff_snap.py $G/ser_a $G/ser_b   # exit 0 = byte-identical"
+    fi
+    grep -q '\[fesom_speed\] .* = ON' "$G/ser_a/run.err" && echo "!! a FESOM_SPEED lever announced ON on the CPU build — must not happen"
+    grep -q 'FESOM_IC_EXTRAP=det' "$G/ser_a/run.log" && echo "det announce: OK" || echo "!! det NOT announced"
+else
+    run gpu_dev   20 20
+    run gpu_stage 20 20 FESOM_HALO_STAGE=1
+    run gpu_self  20 -1 FESOM_HALO_SELFCHECK=1
+    if grep -qi 'selfcheck' "$G/gpu_self/run.log" "$G/gpu_self/run.err" | grep -qiE 'mismatch|fail|max'; then :; fi
+    if grep -hiE 'halo-selfcheck|selfcheck.*(mismatch|FAIL)' "$G/gpu_self/run.log" "$G/gpu_self/run.err" | grep -v '=0' | head -3 | grep -q .; then
+        echo "VERDICT G-self: FAIL — device halo exchange differs from the host exchange (transport bug / MPI not GPU-aware)"
+        grep -hiE 'selfcheck' "$G/gpu_self/run.log" "$G/gpu_self/run.err" | head -5 | sed 's/^/    | /'
+    else echo "VERDICT G-self halo selfcheck: SILENT = PASS"; fi
+    for d in gpu_dev gpu_stage; do
+        grep -q '\[fesom_speed\] FESOM_SPEED_SWSKIP = ON' "$G/$d/run.err" && echo "$d: levers announce ON: OK" \
+            || echo "!! $d: NO lever announce — the dead-knob trap (is this a FESOM_GPU_RESIDENT build?)"
+        grep -q 'cgpipe.*INACTIVE' "$G/$d/run.log" "$G/$d/run.err" && echo "!! $d: CGPIPE INACTIVE"
+    done
+    # transport A/B (timing): 100 steps each, same allocation
+    run ab_dev   100 -1
+    run ab_stage 100 -1 FESOM_HALO_STAGE=1
+    td=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$G/ab_dev/run.log"   | tail -1 | grep -oE '[0-9.]+')
+    ts=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$G/ab_stage/run.log" | tail -1 | grep -oE '[0-9.]+')
+    echo "TRANSPORT A/B core2 dist_8 100 steps: device=${td:-NA}  stage=${ts:-NA}  -> use the faster one as TRANSPORT (re-check at one NG5 rung)"
+    if python3 -c "import numpy, netCDF4" 2>/dev/null && [ -d "$G/ser_a" ]; then
+        for d in gpu_dev gpu_stage; do
+            python3 "$ROOT/scripts/gpu_fidelity_check.py" "$G/ser_a" "$G/$d" > "$G/fid_$d.txt" 2>&1 \
+                && echo "VERDICT G-fid $d vs serial np8: PASS" || echo "VERDICT G-fid $d vs serial np8: FAIL (see $G/fid_$d.txt)"
+            tail -4 "$G/fid_$d.txt" | sed 's/^/    | /'
+        done
+    else
+        echo "fidelity compare not run here (needs the CPU gate output + python3 numpy/netCDF4). On a login node:"
+        echo "  python3 $ROOT/scripts/gpu_fidelity_check.py $G/ser_a $G/gpu_dev"
+        echo "  python3 $ROOT/scripts/gpu_fidelity_check.py $G/ser_a $G/gpu_stage"
+    fi
+fi
+echo "=== gates done $(date) ==="

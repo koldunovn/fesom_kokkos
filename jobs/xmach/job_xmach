@@ -1,0 +1,136 @@
+#!/bin/bash
+#SBATCH --job-name=xmach
+#
+# jobs/xmach/job_xmach — ONE rung of the cross-machine strong-scaling ladder (LUMI or MN5),
+# the paper's Levante protocol (jobs/job_m14_ladder_{cpu,gpu}) ported verbatim:
+#
+#   * one job = one mesh at one rank count, inside ONE allocation on the SAME nodes
+#   * a throwaway WARMUP leg first (the first leg of an allocation is systematically slow), then
+#     TWO measured legs; the reported number is the MIN over admitted legs
+#   * 300 steps, snapshots off (snap_every=-1), the model's own loop timer (`loop timing` line,
+#     which excludes its warmup steps) — never walltime
+#   * dt per mesh (rule 0.41): core2 1800 · farc 900 · dars 120 · ng5 180
+#   * the paper's "base" configuration and NOTHING else:
+#       FESOM_SPEED=1        the certified tier-1 lever set (+CGPIPE); inert on the CPU build
+#       FESOM_IC_EXTRAP=det  the deterministic initial-condition fill (partition-independent)
+#       FESOM_WSPLIT=1       on farc/dars/ng5 (a configuration, not a lever); OFF on core2
+#     No SSH-solver, split-explicit, partition or sea-ice lever, no single precision. The job
+#     scrubs every FESOM_* knob it inherits before setting these.
+#   * every leg is checked for aliveness before its timing is admitted (rc=0 is not aliveness).
+#
+# All machine specifics (account, partitions, launcher, paths) live in machine_<MACHINE>.sh.
+# The SBATCH resource lines are given by the submitter (submit_xmach.sh), not here.
+#
+# Environment in (from the submitter):
+#   ROOT MACHINE SIDE POINT            required
+#   NSTEPS (300)  TRANSPORT ("")       TRANSPORT="FESOM_HALO_STAGE=1" = staged pinned-host MPI leg
+#   WSPLIT (from POINT)  INPUTS RUNBASE (from the machine file unless overridden)
+set -u
+: "${ROOT:?}" "${MACHINE:?}" "${SIDE:?}" "${POINT:?}"
+source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
+side_config "$SIDE" || exit 2
+source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=$INPUTS/forcing_1958
+export FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
+PHC=$INPUTS/ic/phc3.0_winter.nc
+NSTEPS=${NSTEPS:-300}
+TRANSPORT=${TRANSPORT:-}
+
+N=$SLURM_NTASKS
+case "$POINT" in
+  core2) DT=1800 ;;  farc) DT=900 ;;  dars) DT=120 ;;  ng5) DT=180 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+MESH=$INPUTS/$POINT
+[ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N does not exist"; exit 2; }
+[ -x "$BIN" ] || { echo "REFUSE: binary $BIN missing"; exit 2; }
+for f in nod2d.out elem2d.out aux3d.out nlvls.out elvls.out edges.out edge_tri.out; do
+  [ -f "$MESH/$f" ] || { echo "REFUSE: $MESH/$f missing"; exit 2; }; done
+
+# 🔴 WSPLIT MUST BE DECLARED (rule 0.41). A cold PHC start at the protocol dt rides a vertical-CFL
+# blow-up on the big meshes; the onset step is roundoff-seeded, so identical runs die anywhere
+# from step 4 to step 291 and it reads as a random solver bug ("CG_kk: pp·App is -nan" on stderr).
+# ON for farc/dars/ng5, OFF for core2 — exactly as every paper row was measured.
+case "${WSPLIT:-$POINT}" in
+    1)             WSPLIT_TAG=wsplit1 ;;
+    0)             WSPLIT_TAG=wsplit0 ;;
+    core2)         WSPLIT_TAG=wsplit0 ;;
+    farc|dars|ng5) WSPLIT_TAG=wsplit1 ;;
+    *) echo "REFUSE: WSPLIT='${WSPLIT:-}' is not 0 or 1"; exit 2 ;;
+esac
+
+OUT=$RUNBASE/${MACHINE}_${SIDE}_${POINT}_${N}_${SLURM_JOB_ID}
+mkdir -p "$OUT"; : > "$OUT/legs.txt"
+MD5=$(md5sum "$BIN" | cut -d' ' -f1)
+echo "=== xmach $MACHINE/$SIDE — $POINT ranks=$N nodes=$SLURM_NNODES ($RPN/node) dt=$DT steps=$NSTEPS ==="
+echo "mesh     : $MESH/dist_$N"
+echo "binary   : $BIN  md5=$MD5"
+echo "wsplit   : $WSPLIT_TAG"
+echo "transport: '${TRANSPORT:-device}'"
+echo "nodes    : $SLURM_JOB_NODELIST"
+echo "started  : $(date)"
+
+clean_env () {
+    # scrub EVERY inherited model knob, then set the paper's base configuration
+    local v
+    for v in $(env | grep -oE '^FESOM_[A-Za-z0-9_]*=' | sed 's/=$//'); do
+        case $v in FESOM_FORCING_DIR|FESOM_CHL_FILE|FESOM_PRINT_EVERY) ;; *) unset "$v" ;; esac
+    done
+    export FESOM_SPEED=1 FESOM_IC_EXTRAP=det
+    [ "$WSPLIT_TAG" = wsplit1 ] && export FESOM_WSPLIT=1
+    local kv
+    for kv in $RUNTIME_ENV $TRANSPORT; do export "$kv"; done
+}
+
+leg () {                       # leg <name> <index>
+    local name=$1 idx=$2 out="$OUT/${idx}_${name}"
+    mkdir -p "$out"; clean_env
+    launch "$N" "$BIN" "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    local rc=$?
+    local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
+    local live=yes why=""
+    # ZOMBIE CHECK: a final step line must exist, be finite, and report a non-zero solver count
+    local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$out/run.log" | tail -1)
+    [ -n "$last" ] || { live=no; why="$why no-final-step"; }
+    echo "$last" | grep -qiE 'nan|inf' && { live=no; why="$why nan-in-state"; }
+    echo "$last" | grep -qE 'it=0[^0-9]' && { live=no; why="$why cg-iters-0"; }
+    grep -q 'pp·App is' "$out/run.err" 2>/dev/null && { live=no; why="$why CG-NaN(rule0.41:wsplit?)"; }
+    # KNOB LIVENESS (the dead-knob trap): on the GPU build the levers MUST announce themselves.
+    if [ "$SIDE" = gpu ]; then
+        grep -q '\[fesom_speed\] FESOM_SPEED_SWSKIP = ON' "$out/run.err" "$out/run.log" 2>/dev/null \
+            || { live=no; why="$why NO-LEVER-ANNOUNCE(dead-knob:FESOM_GPU_RESIDENT?)"; }
+        grep -q 'cgpipe.*INACTIVE' "$out/run.log" "$out/run.err" 2>/dev/null && { live=no; why="$why CGPIPE-INACTIVE(transport)"; }
+    else
+        grep -q '\[fesom_speed\] .* = ON' "$out/run.err" 2>/dev/null && { live=no; why="$why LEVER-ON-ON-CPU(FORCE_SERIAL leaked)"; }
+    fi
+    grep -q 'FESOM_IC_EXTRAP=det' "$out/run.log" "$out/run.err" 2>/dev/null || { live=no; why="$why det-not-announced"; }
+    if [ "$WSPLIT_TAG" = wsplit1 ]; then
+        grep -q '\[wsplit\] FESOM_WSPLIT = ON' "$out/run.log" "$out/run.err" 2>/dev/null || { live=no; why="$why wsplit-not-announced"; }
+    fi
+    echo "leg $idx $name: rc=$rc s/step=${t:-NA} live=$live${why:+ [$why]}"
+    if [ "$live" = yes ] && [ "$rc" -eq 0 ] && [ -n "$t" ]; then echo "$name $t" >> "$OUT/legs.txt"
+    else echo "  !! leg REJECTED — timing not admitted"; tail -4 "$out/run.err" | sed 's/^/    | /'; fi
+}
+
+echo; echo "--- warmup (discarded) ---"
+leg warmup 0
+: > "$OUT/legs.txt"
+echo; echo "--- measured legs ---"
+leg base 1; leg base 2
+
+echo; echo "=== result ==="
+awk -v L="$LABEL" -v M="$POINT" -v B="$BACKEND" -v NN="$SLURM_NNODES" -v U="$N" -v UK="$UNIT" -v DT="$DT" \
+    -v ST="$NSTEPS" -v SRC="$MACHINE:${SLURM_JOB_NAME}.${SLURM_JOB_ID}" -v CFG="paper+$WSPLIT_TAG+${TRANSPORT:-device}" \
+    -v MD5="$MD5" -v J="$SLURM_JOB_ID" -v TR="${TRANSPORT:-device}" '
+    { v[NR]=$2; if (NR==1 || $2<mn) mn=$2; s+=$2 }
+    END {
+      if (NR==0) { print "  NO ADMITTED LEGS"; exit 1 }
+      mean=s/NR; sd=0; if (NR>1) { for(i=1;i<=NR;i++) sd+=(v[i]-mean)^2; sd=sqrt(sd/(NR-1)) }
+      printf "  legs=%d  min=%.4f  mean=%.4f  std=%.4f  spread=%.2f%%\n", NR, mn, mean, sd, (NR>1?(s-mn*NR)/mn*100/(NR-1):0)
+      printf "  SYPD at dt=%d: %.2f\n", DT, DT/(365.0*mn)
+      # the paper CSV schema (data/jupiter_vs_lumi.csv) + provenance columns:
+      printf "XCSV %s,%s,%s,%d,%d,%s,%d,%.4f,%.4f,%d,%d,on,%s,%s,%s,%s,%s\n", L, M, B, NN, U, UK, DT, mn, sd, NR, ST, SRC, CFG, MD5, J, TR
+    }' "$OUT/legs.txt"
+echo "finished : $(date)"
