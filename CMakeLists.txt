@@ -133,7 +133,8 @@ enable_testing()
 # green. They are pure host logic (calendar math, I/O config/stream parsing) with no Kokkos
 # dependency and no backend-dependent behaviour, fully covered by the Serial/OpenMP ctest.
 # (test_field below links Kokkos and builds on every backend.)
-if(NOT Kokkos_ENABLE_CUDA)
+# (HIP: excluded too — hipcc/amdclang++ would compile them, but the LUMI build stays minimal.)
+if(NOT Kokkos_ENABLE_CUDA AND NOT Kokkos_ENABLE_HIP)
   add_executable(test_calendar tests/test_calendar.c src/fesom_calendar.cpp)
   set_source_files_properties(tests/test_calendar.c PROPERTIES LANGUAGE CXX)
   target_include_directories(test_calendar PRIVATE src)

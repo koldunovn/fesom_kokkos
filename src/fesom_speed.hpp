@@ -37,8 +37,8 @@
 
 /* ⚠️⚠️ THIS INCLUDE IS LOad-BEARING. DO NOT REMOVE IT. ⚠️⚠️
  *
- * fesom_speed_resolve() below is guarded by `#ifndef KOKKOS_ENABLE_CUDA` (the "Serial stays
- * legacy" rule). That macro comes from Kokkos' generated config. If this header is included
+ * fesom_speed_resolve() below is guarded by `#if !FESOM_GPU_RESIDENT` (the "Serial stays
+ * legacy" rule; CUDA or HIP = resident, fesom_gpu.hpp). That macro comes from Kokkos' generated config. If this header is included
  * in a TU BEFORE anything that pulls the config in, the macro is not yet defined, the guard
  * fires *even on a CUDA build*, and EVERY KNOB IN THAT TU SILENTLY RESOLVES TO OFF.
  *
@@ -50,7 +50,7 @@
  *
  * Kokkos_Macros.hpp is the cheap header whose only job is to define the KOKKOS_ENABLE_*
  * macros. Including it here makes this header INCLUDE-ORDER-INDEPENDENT. */
-#include <Kokkos_Macros.hpp>
+#include "fesom_gpu.hpp"   /* FESOM_GPU_RESIDENT, built on <Kokkos_Macros.hpp> — same include-order guarantee */
 
 #include <cstdio>
 #include <cstdlib>
@@ -108,7 +108,7 @@ inline int fesom_speed_resolve_impl(const char *lever, bool use_master)
     int  asked = 0, on = 0;
     if (fesom_speed_parse_int(var, &v))                              { asked = 1; on = (v != 0); }
     else if (use_master && fesom_speed_parse_int("FESOM_SPEED", &v)) { asked = 1; on = (v != 0); }
-#ifndef KOKKOS_ENABLE_CUDA
+#if !FESOM_GPU_RESIDENT
     if (on && !fesom_speed_force_serial()) on = 0;   /* Serial stays legacy */
 #endif
     int rank = 0, inited = 0;
@@ -165,7 +165,7 @@ inline int fesom_speed_int(const char *lever, int deflt, int *cache)
         snprintf(var, sizeof var, "FESOM_SPEED_%s", lever);
         long v = 0;
         int r = fesom_speed_parse_int(var, &v) ? (int)v : deflt;
-#ifndef KOKKOS_ENABLE_CUDA
+#if !FESOM_GPU_RESIDENT
         if (!fesom_speed_force_serial()) r = deflt;   /* Serial stays legacy */
 #endif
         *cache = r;

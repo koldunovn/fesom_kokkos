@@ -681,7 +681,7 @@ int fesom_timestep(int                          step_n,
         s_visc_opt = (vo && vo[0]) ? atoi(vo) : 7;
         FESOM_CHECK(s_visc_opt == 5 || s_visc_opt == 7,
                     "FESOM_VISC_OPT=%d unsupported (5 or 7)", s_visc_opt);
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         FESOM_CHECK(s_visc_opt == 7,
                     "FESOM_VISC_OPT=5 (bcksct) is host-only — not ported to CUDA yet");
 #endif

@@ -2308,7 +2308,7 @@ void fesom_ssh_wire_report(void)
                             "true>rtol events=%ld\n", w.v_maxtrue, w.v_maxgap, w.v_fail);
         fflush(stderr);
     }
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     {
         const int NL = 10000, NF = 1000;
         Kokkos::fence();
@@ -2711,7 +2711,7 @@ static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
 
     /* ring composition needs the cgpipe 2-ring graph; it is unavailable at npes==1 and under
      * FESOM_HOST_HALO (announced in the interaction check). */
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     const bool transport_ok = fesom_halo_device_active();
 #else
     const bool transport_ok = true;
@@ -2747,7 +2747,7 @@ static int ssh_solve_cg2(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     auto exch = [&](fesom::Field &f) {
         if (!parallel) return;
         ++g_sshwire.s_exch;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
 #endif
         f.modify_device(); f.sync_host();
@@ -2978,7 +2978,7 @@ static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     const int     N_global = parallel ? mesh->nod2D : N;
     const long    solve_id = g_sshwire.solves + 1;
 
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     const bool transport_ok = fesom_halo_device_active();
 #else
     const bool transport_ok = true;
@@ -3009,7 +3009,7 @@ static int ssh_solve_pipecg(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     auto exch = [&](fesom::Field &f) {
         if (!parallel) return;
         ++g_sshwire.s_exch;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
 #endif
         f.modify_device(); f.sync_host();
@@ -3419,7 +3419,7 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     const int     N_global = parallel ? mesh->nod2D : N;
     const long    solve_id = g_sshwire.solves + 1;
 
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     const bool transport_ok = fesom_halo_device_active();
 #else
     const bool transport_ok = true;
@@ -3457,7 +3457,7 @@ static int ssh_solve_pcsi(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     auto exch = [&](fesom::Field &f) {
         if (!parallel) return;
         ++g_sshwire.s_exch;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
 #endif
         f.modify_device(); f.sync_host();
@@ -3617,7 +3617,7 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     const int     N_global = parallel ? mesh->nod2D : N;
     const long    solve_id = g_sshwire.solves + 1;
 
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     const bool transport_ok = fesom_halo_device_active();
 #else
     const bool transport_ok = true;
@@ -3648,7 +3648,7 @@ static int ssh_solve_oati(const fesom_ssh_stiff *S, fesom_solverinfo *si,
     auto exch = [&](fesom::Field &f) {
         if (!parallel) return;
         ++g_sshwire.s_exch;
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) { fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit); return; }
 #endif
         f.modify_device(); f.sync_host();
@@ -3967,7 +3967,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
      * device views are taken below. */
     static int s_cgpipe = -1;
     const bool cgpipe_env = fesom_speed_on("CGPIPE", &s_cgpipe);
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     const bool transport_ok = fesom_halo_device_active();   /* keep the debug toggle coherent */
 #else
     const bool transport_ok = true;   /* Serial: host Views + host MPI (the FORCE_SERIAL proof) */
@@ -4034,7 +4034,7 @@ int fesom_ssh_solve_cg_kk(const fesom_ssh_stiff *S,
     auto exch = [&](fesom::Field &f, bool wire_count = true) {
         if (!parallel) return;
         if (wire_count) ++g_sshwire.s_exch;          /* M10 [ssh-wire] */
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
         if (fesom_halo_device_active()) {            /* M5.1: device pack -> GPU-aware MPI -> device unpack */
             fesom_halo_exchange_device(f, FESOM_HALO_NOD2D, 1, 1, partit);
             return;
