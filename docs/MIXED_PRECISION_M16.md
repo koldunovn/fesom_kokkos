@@ -2318,15 +2318,188 @@ CORE2 CPU ladder **capped at 1000 cores** — 64/128/256/512/864, the same rungs
 
 | mesh | ranks (nodes) | Fortran jobs | port CPU jobs |
 |---|---|---|---|
-| CORE2 | 64 (1) · 128 (1) · 256 (2) · 512 (4) · 864 (7) — **user 2026-09-15: "do core cpu scaling, but only up to 1000 cores not more"**; 864 is the largest partition under the cap | 27460035, 068, 070, 072, 075 | 27459810, 27460069, 071, 074, 076 |
-| fArc | 512 (4) · 1024 (8) · 2048 (16) · 4096 (32) | 27460036, 038, 040, 042 | 27460037, 039, 041, 043 |
-| dars | 1024 (8) · 2048 (16) · 4096 (32) · 8192 (64) | 27460044, 046, 048, 050 | 27460045, 047, 049, 051 |
-| NG5 | 2048 (16) · 4096 (32) · 8192 (64) | 27460052, 054, 056 | 27460053, 055, 057 |
+| CORE2 | 64 (1) · 128 (1) · 256 (2) · 512 (4) · 864 (7) — **user 2026-09-15: "do core cpu scaling, but only up to 1000 cores not more"**; 864 is the largest partition under the cap | 27460035, 068, 070, 072, 075 (zstar+opt5) → **27468350–354** (matched physics, §7a) | 27459810, 27460069, 071, 074, 076 |
+| fArc | 512 (4) · 1024 (8) · 2048 (16) · 4096 (32) | ~~27460036, 038, 040, 042~~ aborted (check_opt_visc) → **27468355–358** | 27460037, 039, 041, 043 |
+| dars | 1024 (8) · 2048 (16) · 4096 (32) · 8192 (64) | ~~27460044, 046, 048, 050~~ → **27468359–362** | 27460045, 047, 049, 051 |
+| NG5 | 2048 (16) · 4096 (32) · 8192 (64) | ~~27460052, 054, 056~~ → **27468363–365** | 27460053, 055, 057 |
 
 Things to read it with: the Fortran has no `WSPLIT`, so whether it survives 300 steps of a PHC
 cold start on dars at dt 120 / NG5 at dt 180 is itself a result (rule 0.41); the Fortran's timer
 excludes output and init, the port's ladder timer likewise, but the two are different instruments
 and only the SP/DP *ratio* per code is protocol-clean — the cross-code absolute needs the caveat.
+
+### 5a. RESULTS of the evidence campaign (read 2026-09-15, all 40 jobs completed; `final` binary)
+
+**The final 1-year matrix, with error bars.** Every SP member (`psp` + 3 SP-ensemble members from
+1e-6 K-perturbed ICs; same for the Fortran) is measured against its code's unperturbed DP arm; the
+spread across the 4 members is the error bar (`scratchpad/final_matrix.py`). December 1958, global,
+mean ± spread; "env" = the code's own FP64 σ=1e-6 K twin spread (mean of 5 seeds):
+
+| var | Fortran SP−DP | port SP−DP | **ratio port/F** | F env · port env | F/env · P/env |
+|---|---|---|---|---|---|
+| sst | 1.43e-3 ± 1.3e-4 | 1.09e-3 ± 5.9e-5 | **0.76 ± 0.08** | 9.2e-4 · 4.5e-4 | 1.6 · 2.4 |
+| temp | 2.76e-3 ± 1.9e-4 | 1.80e-3 ± 9.2e-5 | **0.65 ± 0.06** | 1.8e-3 · 7.4e-4 | 1.5 · 2.4 |
+| salt | 1.71e-4 ± 1.6e-5 | 1.42e-4 ± 6.3e-6 | **0.83 ± 0.09** | 1.1e-4 · 5.5e-5 | 1.5 · 2.6 |
+| a_ice | 2.63e-3 ± 7.2e-5 | 5.11e-3 ± 5.2e-5 | **1.95 ± 0.06** | 1.1e-3 · 1.2e-3 | 2.4 · 4.1 |
+| ssh | 1.95e-3 ± 7.7e-5 | 2.29e-3 ± 1.4e-5 | **1.18 ± 0.05** | 7.2e-4 · 3.3e-4 | 2.7 · 7.0 |
+
+Month by month the ratio is not stationary (sst 0.96 Jan → 1.33 May → 0.55 Nov → 0.76 Dec; salt
+1.09 → 1.13 → 0.72 → 0.83): the port's SP−DP grows more slowly than upstream's in the second half of
+the year, when upstream's departure catches up with its own chaos envelope (F/env → 1.5) while the
+port's envelope is 2× smaller (§3b-year-b) so it stays at 2.4×. The 5-seed envelopes reproduce
+§3b-year-b (port FP64 twins 2–4× tighter than upstream's).
+
+**The 60–70°S residual now has an error bar, and it is small.** December, by band (4 SP members each):
+
+| band | sst ratio | temp | salt | a_ice | ssh |
+|---|---|---|---|---|---|
+| 60–70°S | **2.63 ± 0.02** | **2.06 ± 0.01** | **1.91 ± 0.03** | 2.14 ± 0.06 | 2.15 ± 0.01 |
+| 40–60°S | 1.33 ± 0.01 | 1.28 ± 0.00 | 1.19 ± 0.04 | 2.57 ± 0.68 | 1.27 ± 0.00 |
+| 20°S–20°N | **0.54 ± 0.10** | **0.52 ± 0.07** | **0.62 ± 0.09** | — | 0.54 ± 0.08 |
+| 40–60°N | 1.17 ± 0.02 | 1.13 ± 0.01 | 1.10 ± 0.01 | 0.45 ± 0.14 | 1.30 ± 0.01 |
+| 60–90°N | 1.01 ± 0.04 | 1.18 ± 0.01 | 1.61 ± 0.00 | 1.25 ± 0.09 | 1.40 ± 0.02 |
+
+So §4t's numbers are ensemble-robust: the band excess is 2–2.6× with ±1 % error bars, the tropical
+deficit 0.5–0.6× with ±15 %. In the band both codes' SP−DP sit far above their own FP64 envelope
+(F 5×, port 10×) while the two envelopes are equal (1.14e-3 vs 1.54e-3 sst; 9.3e-4 vs 9.7e-4 temp;
+1.21e-5 vs 1.19e-5 salt): the excess is systematic, not chaotic amplification — as §4p/§4r said.
+
+🔴 **The salt-anomaly year explains the band.** With upstream's #986 `use_salt_anomaly` ON in both
+codes (`final_year_anom`, knob verified fired on all four arms), December:
+
+| | F SP−DP · port SP−DP · ratio, anomaly OFF | **anomaly ON** |
+|---|---|---|
+| sst global | 1.53e-3 · 1.11e-3 · 0.73 | 1.20e-3 · 4.18e-4 · **0.35** |
+| temp global | 2.74e-3 · 1.83e-3 · 0.67 | 2.18e-3 · 7.01e-4 · **0.32** |
+| salt global | 1.73e-4 · 1.44e-4 · 0.83 | 1.38e-4 · 5.21e-5 · **0.38** |
+| ssh global | 1.99e-3 · 2.29e-3 · 1.15 | 8.85e-4 · 2.96e-4 · **0.33** |
+| a_ice global | 2.61e-3 · 5.13e-3 · 1.96 | 1.69e-3 · 2.39e-3 · **1.41** |
+| **sst 60–70°S** | 5.9e-3 · 1.55e-2 · **2.63** | 2.67e-3 · 3.22e-3 · **1.21** |
+| **salt 60–70°S** | 6.4e-5 · 1.23e-4 · **1.91** | 1.76e-5 · 1.96e-5 · **1.11** |
+| a_ice 60–70°S | 5.9e-3 · 1.25e-2 · 2.14 | 3.7e-3 · 5.2e-3 · 1.40 |
+
+Storing S−35 instead of S (float ulp 1.2e-7 instead of 3.8e-6 at S≈34) cuts the port's SP−DP by
+2.7× globally and 4.8× in the band, upstream's by 1.3× and 2.2×. Decomposing SP−DP² ≈ salt-rounding²
++ other²: globally the salt-rounding parts are equal (port 1.03e-3, F 0.95e-3 sst) and the port's
+*other* part is 3× smaller (4.2e-4 vs 1.2e-3 — the dbl_t islands: CG §3r, the stiffness shadow, the
+integrals); in 60–70°S the port's salt-rounding part is 2.9× upstream's (1.52e-2 vs 5.2e-3). So the
+band residual is **absolute-salinity float rounding** — the same class as §3v, not a flow
+sensitivity — and the band is where it matters because near freezing the density gradient is
+salinity-controlled (thermal expansion → 0), so a 4e-6-psu rounding floor drives the dynamics
+directly under the Antarctic ice. Both codes carry it; the port carries ~3× more of it there; the
+anomaly formulation upstream added for exactly this reason removes it in both. Which per-step
+absolute-S float write the port rounds differently from upstream is NOT identified: the tracer
+update (`values += del_ttf/hnode_new`), the implicit vertical solve (increment form, `values += tr`)
+and `bc_surface` are the same expression in both codes; FMA contraction was checked and refuted —
+`objdump` shows **0** `vfmadd` in both `oracle/sp/lib64/libfesom.so` and `bin/final/sp/fesom_port_serial`
+(both scalar SSE, 17103 / 7107 `mulss|addss`). With the anomaly ON the port is at or inside upstream
+everywhere except a_ice (1.4) and the band's sst (1.2). This is the paper's statement for the
+residual: measured, bounded, mechanism-class identified, removed by upstream's own #986 option.
+
+**Three years.** `final_3yr`, Dec of each year (`--year all --rec 11/23/35`; year 1 reproduces
+`final_year` bit-for-bit — both codes are run-to-run deterministic):
+
+| | year 1 | year 2 | year 3 |
+|---|---|---|---|
+| sst F · port · ratio | 1.53e-3 · 1.11e-3 · 0.73 | 4.26e-3 · 2.20e-3 · 0.52 | 5.35e-3 · 3.42e-3 · 0.64 |
+| temp | 2.74e-3 · 1.83e-3 · 0.67 | 6.82e-3 · 3.92e-3 · 0.58 | 9.32e-3 · 5.56e-3 · 0.60 |
+| salt | 1.73e-4 · 1.44e-4 · 0.83 | 4.10e-4 · 2.94e-4 · 0.72 | 5.10e-4 · 3.73e-4 · 0.73 |
+| a_ice | 2.61e-3 · 5.13e-3 · 1.96 | 3.37e-3 · 5.56e-3 · 1.65 | 4.57e-3 · 9.87e-3 · 2.16 |
+| ssh | 1.99e-3 · 2.29e-3 · 1.15 | 4.90e-3 · 4.67e-3 · 0.95 | 8.06e-3 · 6.75e-3 · 0.84 |
+| port-DP vs F-DP (chaos ceiling), sst | 8.7e-3 | 1.01e-2 | 1.01e-2 |
+
+The code-to-code DP gap saturates by year 2 (1.0e-2 sst); upstream's SP−DP reaches half of it by
+year 3, the port's a third. The ratio stays 0.5–0.75 for T/S through year 3; a_ice stays 1.6–2.2.
+
+**GPU faithfulness** (`final_year_gpu`: CUDA `gdp gdp_2 gsp` at 2×4 A100, 23 min per year; Serial
+`pdp psp` at the same physics, `opt_visc=7`). December, global / 60–70°S:
+
+| | gsp−gdp | CUDA self-noise gdp_2−gdp | Serial(opt 7) psp−pdp | CUDA-vs-Serial at DP | Fortran fsp−fdp |
+|---|---|---|---|---|---|
+| sst | 1.45e-3 / 2.09e-2 | 2.8e-4 / 1.2e-3 | 1.36e-3 / 2.05e-2 | 1.39e-3 / 1.7e-3 | 1.53e-3 / 5.9e-3 |
+| temp | 2.26e-3 / 1.78e-2 | 4.6e-4 / 1.2e-3 | 2.02e-3 / 1.76e-2 | 2.24e-3 / 1.4e-3 | 2.74e-3 / 7.0e-3 |
+| salt | 1.73e-4 / 1.56e-4 | 3.3e-5 / 1.2e-5 | 1.57e-4 / 1.53e-4 | 2.38e-4 / 1.3e-5 | 1.73e-4 / 6.4e-5 |
+| a_ice | 6.11e-3 / 1.56e-2 | 1.3e-3 / 3.0e-3 | 5.99e-3 / 1.53e-2 | 2.4e-3 / 2.4e-3 | 2.61e-3 / 5.6e-3 |
+
+CUDA SP−DP equals Serial SP−DP at the same physics to 2–6 % (globally and in the band) and is 5× the
+CUDA self-noise globally, 17× in the band: the SP statement transfers to the GPU unchanged. Against
+the Fortran: 0.94 / 0.83 / 1.00 / 2.34 (sst/temp/salt/a_ice) — same picture as Serial. Read with
+§5's caveat: opt 7 vs the Fortran's opt 5 (and the opt-7 Serial pair's band ratio is 3.5 vs 2.6
+under opt 5 — the band is sensitive to the viscosity scheme, which is itself consistent with a
+salinity-rounding floor driving the dynamics there).
+
+**Speed on `final` (CORE2 GPU knobs-off, ABBA, 300 steps; `gladder.27460349/350`):** 1×4 A100:
+DP 0.0682 · SP 0.0562 s/step, **SP/DP 0.824 (−17.6 %)**, gpumem 3461 → 1977 MiB; 2×8: 0.0527 ·
+0.0457, **0.867 (−13.3 %)**. The §6 ladder repeats both points on a different day: 0.0679/0.0560
+and 0.0525/0.0456 — reproducible to 0.5 %. CPU 1×64 (`ladder.27459810`): DP 0.4350 · SP 0.2861,
+**0.658 (−34.2 %)**.
+
+### 6a. RESULTS — GPU ladder (10 of 18 points read 2026-09-15 11:30; 16/32-node points still queued)
+
+| mesh | GPUs | DP s/step | SP s/step | SP/DP | gpumem DP → SP (MiB/GPU) |
+|---|---|---|---|---|---|
+| CORE2 | 4 | 0.0679 | 0.0560 | **0.825** | 3461 → 1977 |
+| CORE2 | 8 | 0.0525 | 0.0456 | **0.869** | 2635 → 1553 |
+| CORE2 | 16 | 0.0546 | 0.0503 | 0.921 | 2297 → 1321 |
+| CORE2 | 32 | 0.0557 | 0.0509 | 0.914 | 2059 → 1185 |
+| fArc | 8 | 0.1191 | 0.0972 | **0.816** | 6053 → 3471 |
+| fArc | 16 | 0.0938 | 0.0808 | 0.861 | 4021 → 2291 |
+| fArc | 32 | 0.0828 | 0.0736 | 0.889 | 2943 → 1677 |
+| dars | 8 | 0.4503 | 0.3704 | **0.823** | 26183 → 14813 |
+| dars | 16 | 0.2684 | 0.2062 | **0.768** | 14199 → 8023 |
+| NG5 | 16 | 0.7303 | 0.6114 | **0.837** | 36765 → 20755 |
+
+Leg spreads ≤ 1.1 %. CORE2 knobs-off stops scaling at 8 GPUs (16 and 32 are *slower* than 8) and
+the SP gain shrinks with it (−17.5 → −13 → −8 %): SP pays in bytes and the small-mesh GPU step is
+latency past 2 nodes. fArc: −18 → −14 → −11 %. dars is the byte-heaviest and gains most (−23 % at
+16 GPUs). SP halves device memory everywhere (43–46 % less). NG5 FP64 survived 300 steps at 16
+GPUs (36.8 GB/GPU, so 8 GPUs would not fit).
+
+### 7a. RESULTS — Fortran vs port CPU ladders (2026-09-15)
+
+🔴 **The first Fortran ladder timed the wrong physics.** `m16_faith_setup.sh` writes the
+*faithfulness* namelists — zstar, `opt_visc=5`, no w-split — while the port's ladder jobs run the
+port's defaults (linfs, `opt_visc=7`, `WSPLIT=1` off CORE2). CORE2 ran (27460035…075: 64 r
+0.3665/0.2051 s/step, 0.560; 128 r 0.591; 256 r 0.650; 512 r 0.738; 864 r 0.840) but every
+fArc/dars/NG5 leg was ABORTED at start by upstream's `check_opt_visc` ("opt_visc=5 … Resol/Rrossby
+< 1.5 … Run finished unexpectedly", 27460036–056). The job now patches the three namelist lines to
+the port's ladder physics after setup (`ALE=linfs VISC=7`, `use_wsplit=.true.` on fArc/dars/NG5)
+and prints them (`physics:` line, L80); all 16 points resubmitted 27468350–365. CORE2 at the matched
+physics moves < 2 % (64 r 0.3591/0.1996 → the earlier row was zstar+bcksct).
+
+**CORE2 (matched physics, linfs · opt 7; both codes 128 ranks/node except 64 r):**
+
+| ranks | Fortran DP · SP · SP/DP | port DP · SP · SP/DP | port/F at DP |
+|---|---|---|---|
+| 64 | 0.3591 · 0.1996 · **0.556** | 0.4350 · 0.2861 · **0.658** | 1.21 |
+| 128 | 0.1602 · 0.0950 · 0.593 | 0.1974 · 0.1320 · 0.669 | 1.23 |
+| 256 | 0.0806 · 0.0529 · 0.656 | 0.1048 · 0.0772 · 0.737 | 1.30 |
+| 512 | 0.0445 · 0.0330 · 0.741 | 0.0573 · 0.0449 · 0.784 | 1.29 |
+| 864 | 0.0331 · 0.0281 · 0.848 | 0.0415 · 0.0348 · 0.839 | 1.25 |
+
+**fArc / dars / NG5 (port complete; Fortran as they land):**
+
+| mesh | ranks | Fortran DP · SP · SP/DP | port DP · SP · SP/DP |
+|---|---|---|---|
+| fArc | 512 | 0.2028 · 0.1258 · **0.620** | 0.2470 · 0.1654 · **0.670** |
+| fArc | 1024 | 0.1134 · 0.0762 · 0.672 | 0.1352 · 0.0999 · 0.739 |
+| fArc | 2048 | (27468357) | 0.0765 · 0.0619 · 0.809 |
+| fArc | 4096 | (27468358) | 0.0580 · 0.0514 · 0.886 |
+| dars | 1024 | (27468359) | 0.8517 · 0.5471 · **0.642** |
+| dars | 2048 | (27468360) | 0.4167 · 0.2714 · 0.651 |
+| dars | 4096 | (27468361) | 0.2025 · 0.1371 · 0.677 |
+| dars | 8192 | (27468362) | 0.1013 · 0.0755 · 0.745 |
+| NG5 | 2048 | (27468363) | 1.2231 · 0.8092 · **0.662** |
+| NG5 | 4096 | (27468364) | 0.6305 · 0.4049 · 0.642 |
+| NG5 | 8192 | (27468365) | 0.3102 · 0.2117 · 0.683 |
+
+Reading so far: on CPU the Fortran gains more from SP than the port at every rung where both exist
+(0.556 vs 0.658 at CORE2 64 r; 0.620 vs 0.670 at fArc 512) and the gap closes with rank count
+(0.848 vs 0.839 at 864 r) — the per-rank working set shrinks toward cache and the SP byte advantage
+with it, on both codes alike. The port is 20–30 % slower than the Intel-built Fortran at DP on CPU
+(a compiler/flags statement: both binaries are scalar SSE; the port is the GPU code run on
+`Kokkos::Serial`). Suvarchal's pre-merge CORE2 numbers (0.55/0.56/0.61 at 64/128/256 r, a different
+timer and mesh) sit within 0.01–0.05 of ours.
 
 ## 4. Untested list (kept honest)
 - every M14 recipe knob at SP (G3); CA solvers `pipecg`/`pcsi`/`cg2` at SP; `FESOM_FORCING_POINTSLOPE`

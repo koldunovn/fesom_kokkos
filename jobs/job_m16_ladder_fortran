@@ -16,6 +16,7 @@
 # ladder resolves for this rank count; det (ic_extrap_det, our PR #979) is ON as on the port's arms.
 #
 #   sbatch --nodes=8 --ntasks=1024 --time=01:00:00 --export=ALL,POINT=farc jobs/job_m16_ladder_fortran
+# Physics = the port ladder's defaults (linfs, opt_visc 7, wsplit on farc/dars/ng5); ALE= VISC= WSPLIT= override.
 #
 # Oracle: /work/ab0995/a270088/port2/m16/oracle/{dp,sp}/bin/fesom.x (upstream main a62f180, Intel).
 set -u
@@ -33,6 +34,13 @@ case "$POINT" in
   *) echo "unknown POINT=$POINT"; exit 2 ;;
 esac
 [ -d "$MESH/dist_$N" ] || { echo "no partition $MESH/dist_$N"; exit 2; }
+# The port's ladder (jobs/job_m14_ladder_cpu, _gpu) runs the port DEFAULTS: linfs, opt_visc=7,
+# FESOM_WSPLIT=1 on every mesh but CORE2. The faith setup writes the FAITHFULNESS namelists (zstar,
+# opt_visc=5 + check_opt_visc, no wsplit) — the first ladder (27460035–056, 2026-09-15) ran those:
+# CORE2 timed a different physics from the port's, and fArc/dars/NG5 were ABORTED by check_opt_visc
+# ("opt_visc=5 ... Resol/Rrossby<1.5"). So the three are patched to the port's ladder physics here.
+ALE=${ALE:-linfs}; VISC=${VISC:-7}
+case "${WSPLIT:-$POINT}" in 1|farc|dars|ng5) WSPLIT_ON=.true. ;; *) WSPLIT_ON=.false. ;; esac
 
 source /sw/etc/profile.levante >/dev/null 2>&1 || true
 set +u; export LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
@@ -54,6 +62,10 @@ for leg in dp1 sp1 sp2 dp2; do
     dir=$RUN/$leg
     FAITH_MESH=$MESH bash "$SRC/scripts/m16_faith_setup.sh" "$dir" "$NSTEPS" s "" "$SPD" "" 1 jra55 0 >/dev/null \
         || { echo "leg $leg: setup failed"; continue; }
+    sed -i "s/^which_ALE .*/which_ALE          = '$ALE'/"            "$dir/namelist.config"
+    sed -i "s/^opt_visc .*/opt_visc           = $VISC/"               "$dir/namelist.dyn"
+    sed -i "s/^use_wsplit .*/use_wsplit         = $WSPLIT_ON/"        "$dir/namelist.dyn"
+    [ "$leg" = dp1 ] && echo "physics: $(grep -hE '^(which_ALE|opt_visc|use_wsplit|wsplit_maxcfl) ' "$dir/namelist.config" "$dir/namelist.dyn" | tr -s ' ' | tr '\n' ';')"
     t0=$SECONDS
     ( cd "$dir" && srun -l --ntasks="$N" "$ORACLE/$prec/bin/fesom.x" ) > "$dir/run.log" 2> "$dir/run.err"
     rc=$?
