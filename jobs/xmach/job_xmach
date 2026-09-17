@@ -92,7 +92,7 @@ clean_env () {
 }
 
 leg () {                       # leg <name> <index>
-    local name=$1 idx=$2 out="$OUT/${idx}_${name}"
+    local name=$1 idx=$2; local out="$OUT/${idx}_${name}"
     mkdir -p "$out"; clean_env
     launch "$N" "$BIN" "$MESH" "$out" "$DT" "$NSTEPS" -1 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
     local rc=$?
