@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include <mpi.h>
+#include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1373,6 +1374,129 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
     m->eDim_edge2D   = p->eDim_edge2D;
 }
 
+/*--- Local node renumbering for gather locality (investigation, off by default) ---------*/
+/*
+ * FESOM_REORDER=morton|shuffle  permutes each rank's INTERIOR node numbering.
+ *
+ * Why: arrays are node-major (FESOM_NODE3D = node*nl + lev), so reading a neighbour node
+ * jumps (delta_node * nl * 8) bytes. On NG5/dist_16 the mean spatial-neighbourhood span is
+ * ~7500 nodes = 4.2 MB, which is exactly where an MI250X GCD is worst at indirect gather
+ * (2.9x slower than an H100, measured with tools/bwtest). Morton order shrinks that span to
+ * ~100 nodes = 54 kB, predicted ~1.7x. This switch exists to test that prediction.
+ *
+ * Only interior nodes [0, myDim) are permuted. Halo slots (myDim, myDim+eDim] keep their
+ * index, so com_nod2D.rlist — whose ORDER must stay matched to the sender's slist — is
+ * untouched; only slist VALUES are remapped through the permutation.
+ *
+ * This is a pure renumbering: the physics is invariant, results change only by
+ * floating-point reduction order.
+ */
+static uint32_t fesom_part1by1(uint32_t x)
+{
+    x &= 0x0000ffffu;
+    x = (x | (x << 8)) & 0x00FF00FFu;
+    x = (x | (x << 4)) & 0x0F0F0F0Fu;
+    x = (x | (x << 2)) & 0x33333333u;
+    x = (x | (x << 1)) & 0x55555555u;
+    return x;
+}
+
+typedef struct { uint32_t key; int idx; } fesom_keyidx;
+
+static int fesom_cmp_keyidx(const void *a, const void *b)
+{
+    const fesom_keyidx *A = (const fesom_keyidx *)a, *B = (const fesom_keyidx *)b;
+    if (A->key != B->key) return (A->key < B->key) ? -1 : 1;
+    return (A->idx < B->idx) ? -1 : (A->idx > B->idx);   /* stable */
+}
+
+static void reorder_nodes_for_locality(fesom_mesh *m, fesom_partit *p)
+{
+    const char *mode = getenv("FESOM_REORDER");
+    if (!mode || !*mode || strcmp(mode, "none") == 0) return;
+    const int do_morton  = (strcmp(mode, "morton")  == 0);
+    const int do_shuffle = (strcmp(mode, "shuffle") == 0);
+    FESOM_CHECK(do_morton || do_shuffle,
+                "FESOM_REORDER='%s' is not one of none|morton|shuffle", mode);
+
+    const int myDim = p->myDim_nod2D;
+    if (myDim <= 1) return;
+
+    fesom_keyidx *ki = (fesom_keyidx *)malloc((size_t)myDim * sizeof(*ki));
+    FESOM_CHECK(ki != NULL, "reorder: out of memory");
+
+    if (do_morton) {
+        /* Only rank 0 has read the global coordinates; broadcast them as float (the key
+         * needs cell resolution, not radians) so every rank can key its own nodes. */
+        int gN = (p->mype == 0) ? m->nod2D : 0;
+        MPI_CHECK(MPI_Bcast(&gN, 1, MPI_INT, 0, p->MPI_COMM_FESOM));
+        float *gc = (float *)malloc((size_t)gN * 2 * sizeof(float));
+        FESOM_CHECK(gc != NULL, "reorder: out of memory for %d global coords", gN);
+        if (p->mype == 0)
+            for (int i = 0; i < gN; ++i) {
+                gc[(size_t)i * 2]     = (float)m->coord_nod2D[(size_t)i * 2];
+                gc[(size_t)i * 2 + 1] = (float)m->coord_nod2D[(size_t)i * 2 + 1];
+            }
+        MPI_CHECK(MPI_Bcast(gc, gN * 2, MPI_FLOAT, 0, p->MPI_COMM_FESOM));
+
+        float xmin = 1e30f, xmax = -1e30f, ymin = 1e30f, ymax = -1e30f;
+        for (int i = 0; i < myDim; ++i) {
+            int g = p->myList_nod2D[i] - 1;
+            float x = gc[(size_t)g * 2], y = gc[(size_t)g * 2 + 1];
+            if (x < xmin) xmin = x;  if (x > xmax) xmax = x;
+            if (y < ymin) ymin = y;  if (y > ymax) ymax = y;
+        }
+        const float sx = (xmax > xmin) ? 65535.0f / (xmax - xmin) : 0.0f;
+        const float sy = (ymax > ymin) ? 65535.0f / (ymax - ymin) : 0.0f;
+        for (int i = 0; i < myDim; ++i) {
+            int g = p->myList_nod2D[i] - 1;
+            uint32_t cx = (uint32_t)((gc[(size_t)g * 2]     - xmin) * sx);
+            uint32_t cy = (uint32_t)((gc[(size_t)g * 2 + 1] - ymin) * sy);
+            if (cx > 65535u) cx = 65535u;
+            if (cy > 65535u) cy = 65535u;
+            ki[i].key = fesom_part1by1(cx) | (fesom_part1by1(cy) << 1);
+            ki[i].idx = i;
+        }
+        free(gc);
+    } else {
+        /* Control: a deliberately bad ordering. If the gather hypothesis is right this must
+         * hurt the HIP build much more than the CUDA build. */
+        uint32_t s = 1469598103u + (uint32_t)p->mype * 2654435761u;
+        for (int i = 0; i < myDim; ++i) {
+            s ^= s << 13; s ^= s >> 17; s ^= s << 5;      /* xorshift32 */
+            ki[i].key = s;
+            ki[i].idx = i;
+        }
+    }
+
+    qsort(ki, (size_t)myDim, sizeof(*ki), fesom_cmp_keyidx);
+
+    /* ord[new] = old ; inv[old] = new */
+    int *inv = (int *)malloc((size_t)myDim * sizeof(int));
+    int *newList = (int *)malloc((size_t)myDim * sizeof(int));
+    FESOM_CHECK(inv && newList, "reorder: out of memory");
+    for (int n = 0; n < myDim; ++n) {
+        inv[ki[n].idx] = n;
+        newList[n] = p->myList_nod2D[ki[n].idx];
+    }
+    memcpy(p->myList_nod2D, newList, (size_t)myDim * sizeof(int));
+
+    /* slist holds 1-based LOCAL interior indices; remap the values, keep the order. */
+    int nsend = p->com_nod2D.sptr[p->com_nod2D.sPEnum] - 1;
+    for (int k = 0; k < nsend; ++k) {
+        int old0 = p->com_nod2D.slist[k] - 1;
+        FESOM_CHECK(old0 >= 0 && old0 < myDim,
+                    "reorder: slist[%d]=%d out of interior range [1..%d]",
+                    k, p->com_nod2D.slist[k], myDim);
+        p->com_nod2D.slist[k] = inv[old0] + 1;
+    }
+
+    free(newList); free(inv); free(ki);
+    if (p->mype == 0)
+        printf("[reorder] FESOM_REORDER=%s applied to %d interior nodes/rank "
+               "(halo untouched)\n", mode, myDim);
+}
+
 /*--- Public entry points ----------------------------------------------------*/
 
 void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir,
@@ -1388,6 +1512,7 @@ void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir,
     }
 
     if (partit->npes > 1) {
+        reorder_nodes_for_locality(m, partit);   /* must precede scatter: rewrites myList */
         scatter_mesh(m, partit);
     } else {
         /* npes==1, synthesised partit: m already has global=local arrays from
