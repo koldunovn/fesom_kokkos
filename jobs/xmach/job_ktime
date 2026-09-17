@@ -32,7 +32,9 @@ TOOL=$ROOT/tools/kp_ktime.so
 PROFBASE=$RUNBASE/ktime/${MACHINE}_${POINT}_${N}_${SLURM_JOB_ID}
 for REORDER in $REORDER_LIST; do
 for FLATB1H in $FLAT_LIST; do
-export FESOM_FLAT=$FLATB1H
+# sbatch --export is comma-separated, so tag lists arrive with "+" and are
+# translated here rather than being silently truncated at the first comma.
+export FESOM_FLAT=$(echo "$FLATB1H" | tr "+" ",")
 PROF=$PROFBASE/${REORDER}_flat${FLATB1H}
 mkdir -p "$PROF/run"        # the model opens its output stream here; it must exist first
 
