@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH --job-name=xktime
+#
+# jobs/xmach/job_ktime — per-kernel device-time profile via the kp_ktime Kokkos Tools connector.
+#
+# INVESTIGATION ONLY — emits no XCSV and must never be harvested as a measurement row. The
+# connector fences the device around every kernel, so the run is serialised: kernel SHARES are
+# meaningful, the wall time is not.
+#
+# Runs the paper's base configuration so the kernel mix is the one the ladder actually measured;
+# only the tool library and the step count differ.
+#
+# Environment in: ROOT MACHINE  [POINT=core2] [NSTEPS=50] [TRANSPORT=...]
+set -u
+: "${ROOT:?}" "${MACHINE:?}"
+source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
+side_config gpu || exit 2
+BIN=${BIN_OVERRIDE:-$BIN}          # investigation builds override the measurement binary
+source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+
+POINT=${POINT:-core2}; NSTEPS=${NSTEPS:-50}; TRANSPORT=${TRANSPORT:-}; REORDER_LIST=${REORDER_LIST:-${REORDER:-none}}; FLAT_LIST=${FLAT_LIST:-none}
+N=$SLURM_NTASKS
+case "$POINT" in
+  core2) DT=1800 ;; farc) DT=900 ;; dars) DT=120 ;; ng5) DT=180 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;;
+esac
+MESH=$INPUTS/$POINT
+TOOL=$ROOT/tools/kp_ktime.so
+[ -f "$TOOL" ] || { echo "REFUSE: $TOOL missing — build it first"; exit 2; }
+[ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N missing"; exit 2; }
+
+PROFBASE=$RUNBASE/ktime/${MACHINE}_${POINT}_${N}_${SLURM_JOB_ID}
+for REORDER in $REORDER_LIST; do
+for FLATB1H in $FLAT_LIST; do
+export FESOM_FLAT=$FLATB1H
+PROF=$PROFBASE/${REORDER}_flat${FLATB1H}
+mkdir -p "$PROF/run"        # the model opens its output stream here; it must exist first
+
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=$INPUTS/forcing_1958 FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
+export FESOM_SPEED=1 FESOM_IC_EXTRAP=det
+case "$POINT" in farc|dars|ng5) export FESOM_WSPLIT=1 ;; esac
+[ -n "$TRANSPORT" ] && export $TRANSPORT
+for kv in $RUNTIME_ENV; do [ -n "$kv" ] && export "$kv"; done
+export FESOM_REORDER=$REORDER
+export KOKKOS_TOOLS_LIBS=$TOOL
+export KP_KTIME_OUT=$PROF/ktime
+PHC=$INPUTS/ic/phc3.0_winter.nc
+
+echo "=== kp_ktime profile: $MACHINE $POINT dist_$N  ${NSTEPS} steps  transport='${TRANSPORT:-device}' reorder=$REORDER flat=$FLATB1H ==="
+echo "binary : $BIN  md5=$(md5sum "$BIN" | cut -d' ' -f1)"
+echo "tool   : $TOOL"
+echo "nodes  : $SLURM_JOB_NODELIST"
+echo "started: $(date)"
+
+if [ "$MACHINE" = mn5 ]; then
+  # OpenMPI forwards nothing implicitly: the tool variables must be named explicitly or the
+  # connector simply never loads on the ranks and the run looks normal but produces no CSV.
+  xs=(); for v in $(env | grep -oE '^(FESOM_[A-Za-z0-9_]*|HDF5_USE_FILE_LOCKING|SLURM_CPU_BIND|KOKKOS_TOOLS_LIBS|KP_KTIME_OUT)='); do
+    xs+=(-x "${v%=}"); done
+  mpirun --bind-to none "${xs[@]}" -np "$N" "$BIN" "$MESH" "$PROF/run" "$DT" "$NSTEPS" -1 "$PHC" 1958 \
+      > "$PROF/run.log" 2> "$PROF/run.err"
+else
+  srun -n "$N" "$BIN" "$MESH" "$PROF/run" "$DT" "$NSTEPS" -1 "$PHC" 1958 \
+      > "$PROF/run.log" 2> "$PROF/run.err"
+fi
+rc=$?
+echo "rc=$rc  finished: $(date)"
+grep -c '\[fesom_speed\].*= ON' "$PROF/run.err" 2>/dev/null | sed 's/^/levers announced: /'
+if [ -f "$PROF/ktime.rank0.csv" ]; then
+  echo "=== top 20 kernels (rank 0) ==="
+  head -23 "$PROF/ktime.rank0.csv"
+else
+  echo "NO CSV — connector did not load. stderr tail:"; tail -10 "$PROF/run.err"
+fi
+echo "csv: $PROF/ktime.rank0.csv"
+done
+done
