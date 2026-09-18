@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=gpu_dfix
+#SBATCH -p gpu
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=4
+#SBATCH --ntasks-per-node=4
+#SBATCH --gres=gpu:4
+#SBATCH --gpu-bind=none
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/gpu_driftfix.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/gpu_driftfix.%j.err
+# CUDA smoke of the drift fixes (drift-fix-kk): 96 steps on 4 A100, snapshots at 48/96, plus
+# the Serial twin at the same 4 ranks for the climate-close comparison (GPU is never byte-exact).
+set -u
+KK=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$KK/env_cuda.sh"
+export OMPI_MCA_pml=ucx OMPI_MCA_btl=self UCX_NET_DEVICES=mlx5_0:1
+export UCX_MEMTYPE_CACHE=n OMPI_MCA_coll_hcoll_enable=0 OMPI_MCA_io=romio321 HDF5_USE_FILE_LOCKING=FALSE
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=/work/ab0995/a270088/port_paper_v2/runs/gpu_driftfix_smoke; mkdir -p $ROOT/cuda $ROOT/serial
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_IC_EXTRAP=det FESOM_PRINT_EVERY=24
+echo "=== CUDA $(date -Is)"
+srun -l --ntasks=4 "$KK/build-m14cuda/fesom_port" "$MESH" "$ROOT/cuda" 1800 96 48 "$PHC" 1958 > $ROOT/cuda/run.log 2> $ROOT/cuda/run.err
+echo "cuda rc=$?"; grep -E "bulk surface current|scale_area" $ROOT/cuda/run.log | head -2; tail -1 $ROOT/cuda/run.log | cut -c1-120
+echo "=== Serial (4 ranks) $(date -Is)"
+srun -l --ntasks=4 "$KK/build-m14serial/fesom_port" "$MESH" "$ROOT/serial" 1800 96 48 "$PHC" 1958 > $ROOT/serial/run.log 2> $ROOT/serial/run.err
+echo "serial rc=$?"; tail -1 $ROOT/serial/run.log | cut -c1-120

@@ -752,10 +752,24 @@ void fesom_jra55_step(fesom_jra55 *jra,
     static int s_coef_diag = (getenv("FESOM_DIAG_COEF") != nullptr);
     static int s_coef_call = 0;
 
-    /* Fortran sbc_do (line 1500-ish): rdate = julday(yearnew,1,1) + (daynew-1) + timenew/86400 */
+    /* Fortran sbc_do (gen_surface_forcing.F90:1519-1520):
+     *   rdate = julday(yearnew,1,1) + (daynew-1) + timenew/86400 - dt/86400/2
+     * where timenew is the clock AFTER `call clock`, i.e. the END of the current
+     * step, so the forcing is interpolated to the MIDDLE of the step. The
+     * calendar handed in here is the START of the step, so the same instant is
+     * start + dt/2. Drift fix 2 (2026-09-18, = fesom2_port_drift@c4881f3): the
+     * port used to evaluate at the step start, a uniform 15-minute lag of every
+     * forcing field. FESOM_FORCING_MIDSTEP=0 restores the old evaluation. */
+    static int s_mid_checked = 0, s_mid = 1;
+    if (!s_mid_checked) {
+        const char *e = getenv("FESOM_FORCING_MIDSTEP");
+        if (e) s_mid = atoi(e) != 0;
+        s_mid_checked = 1;
+    }
     real_t rdate = (real_t)fesom_jra_julday(yearnew, 1, 1, jra->fld[0].calendar)
                  + (real_t)(daynew - 1)
-                 + timenew / 86400.0;
+                 + timenew / 86400.0
+                 + (s_mid ? 0.5 * (real_t)FESOM_PHASE1_DT / 86400.0 : 0.0);
 
     /* Refresh data + coefs whenever rdate has crossed t_indx_p1 in any field.
      * NOTE (M7 A.2): this fires ~1 step in 60 at dt180 (3-hourly JRA), NOT every step —

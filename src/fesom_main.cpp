@@ -1272,6 +1272,31 @@ skip_rest_state:
                  * on the device (the T/uvnode per-step DtoH in fesom_step.cpp are gone). Drop-in: leaves the
                  * same host-authoritative forcing/ice state the C twin did, so the ice step + coupling are
                  * unchanged. The single-threaded host loop (blmc/L49 trap, ~16% of the NG5 step) is gone. */
+                /* Drift fix 1 (2026-09-18, = fesom2_port_drift@c4881f3): the Fortran runloop calls
+                 * compute_vel_nodes at the top of EVERY step (fesom_module.F90, right after
+                 * `call clock`), so update_atm_forcing's bulk formulae see the surface current of
+                 * the step that just ended (ocean2ice -> ice%srfoce_u from UV(:,1,:)). The port
+                 * left uvnode as fesom_timestep's substep 3 computed it one step earlier, i.e. the
+                 * bulk saw a current one step OLD — a systematic bias in |U_a - u_w|, not an
+                 * FP-floor difference. uv is device-resident across the boundary (M5.13g1), so
+                 * this is the same device kernel + device halo the step itself uses.
+                 * FESOM_BULK_UVNODE_LAG=1 restores the old order for bisection. */
+                {
+                    static int s_lag_checked = 0, s_lag = 0;
+                    if (!s_lag_checked) {
+                        const char *e = getenv("FESOM_BULK_UVNODE_LAG");
+                        s_lag = (e && atoi(e));
+                        s_lag_checked = 1;
+                        if (mpi.mype == 0)
+                            printf("[fesom_port] bulk surface current: %s\n",
+                                   s_lag ? "one-step LAG (legacy port order)"
+                                         : "recomputed each step (Fortran order)");
+                    }
+                    if (!s_lag) {
+                        fesom_compute_vel_nodes_kk(&mesh, &dyn);
+                        fesom_halo_field(dyn.uvnode_fld, FESOM_HALO_NOD3D, mesh.nl, 2, &mpi);
+                    }
+                }
                 FPROF_BEG(_tb); fesom_bulk_compute_kk(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi); FPROF_END(_tb, "force:bulk_compute");
                 if (verify_bulk) {
                     /* C twin reads SST + uvnode on the HOST → make them host-current first (no-op on
