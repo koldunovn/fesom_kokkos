@@ -1193,7 +1193,7 @@ void evpw_exchange(struct fesom_ice *ice, struct fesom_partit *p, const EvpwPlan
             fflush(stdout);
         }
     }
-#ifndef KOKKOS_ENABLE_CUDA
+#if !FESOM_GPU_RESIDENT
     /* selfcheck level 3 (Serial-only): dump the WORST urhs slot's full gather composition.
      * All Views are host-resident on Serial — direct indexing. */
     static bool s_dumped = false;

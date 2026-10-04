@@ -1,0 +1,84 @@
+#!/bin/bash
+#SBATCH --job-name=xflatspeed
+#
+# jobs/xmach/job_flat_speed — what FESOM_FLAT is worth in s/step, unfenced.
+#
+# The kp_ktime numbers are FENCED device time: real per-kernel times, but the run is
+# serialised, so they cannot be read as a wall-clock gain. This runs the paper's own timing
+# protocol instead — warmup leg discarded, two measured legs, min over legs, the model's own
+# `loop timing` line — with the profiler absent, once per FESOM_FLAT setting, all inside ONE
+# allocation so the comparison is on the same nodes.
+#
+# NOT a measurement row: this uses an investigation binary (build-*-reorder) and deliberately
+# emits no XCSV, so it can never be picked up by scripts/xmach_harvest.py.
+#
+# Environment in: ROOT MACHINE [POINT=ng5] [NSTEPS=300] [TRANSPORT=...] [FLAT_LIST="none all"]
+#                 BIN_OVERRIDE
+set -u
+: "${ROOT:?}" "${MACHINE:?}"
+source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
+side_config gpu || exit 2
+BIN=${BIN_OVERRIDE:-$BIN}
+source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+
+POINT=${POINT:-ng5}; NSTEPS=${NSTEPS:-300}; TRANSPORT=${TRANSPORT:-}
+FLAT_LIST=${FLAT_LIST:-none all}
+N=$SLURM_NTASKS
+case "$POINT" in core2) DT=1800 ;; farc) DT=900 ;; dars) DT=120 ;; ng5) DT=180 ;;
+  *) echo "unknown POINT=$POINT"; exit 2 ;; esac
+MESH=$INPUTS/$POINT
+[ -d "$MESH/dist_$N" ] || { echo "REFUSE: $MESH/dist_$N missing"; exit 2; }
+OUT=$RUNBASE/flat_speed/${MACHINE}_${POINT}_${N}_${SLURM_JOB_ID}
+mkdir -p "$OUT"
+PHC=$INPUTS/ic/phc3.0_winter.nc
+
+echo "=== FESOM_FLAT s/step: $MACHINE $POINT dist_$N  ${NSTEPS} steps  transport='${TRANSPORT:-device}' ==="
+echo "binary : $BIN  md5=$(md5sum "$BIN" | cut -d' ' -f1)"
+echo "nodes  : $SLURM_JOB_NODELIST"
+echo "started: $(date)"
+
+leg () {            # leg <flat-spec> <leg-name>
+    local spec=$1 name=$2; local d="$OUT/${spec}_${name}"
+    mkdir -p "$d/run"
+    ( export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+      export FESOM_FORCING_DIR=$INPUTS/forcing_1958 FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
+      export FESOM_SPEED=1 FESOM_IC_EXTRAP=det
+      case "$POINT" in farc|dars|ng5) export FESOM_WSPLIT=1 ;; esac
+      export FESOM_FLAT=$(echo "$spec" | tr '+' ',')
+      [ -n "$TRANSPORT" ] && export $TRANSPORT
+      for kv in $RUNTIME_ENV; do [ -n "$kv" ] && export "$kv"; done
+      if [ "$MACHINE" = mn5 ]; then
+        xs=(); for v in $(env | grep -oE '^(FESOM_[A-Za-z0-9_]*|HDF5_USE_FILE_LOCKING|SLURM_CPU_BIND)='); do xs+=(-x "${v%=}"); done
+        mpirun --bind-to none "${xs[@]}" -np "$N" "$BIN" "$MESH" "$d/run" "$DT" "$NSTEPS" -1 "$PHC" 1958
+      else
+        srun -n "$N" "$BIN" "$MESH" "$d/run" "$DT" "$NSTEPS" -1 "$PHC" 1958
+      fi ) > "$d/run.log" 2> "$d/run.err"
+    local rc=$? t
+    t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$d/run.log" | tail -1 | grep -oE '[0-9.]+')
+    # same liveness checks the ladder applies: a finite final step with a non-zero solver count
+    local last; last=$(grep -E '^[[:space:]]*[0-9]+[[:space:]]+it=' "$d/run.log" | tail -1)
+    local live=yes
+    [ -n "$last" ] || live=no
+    echo "$last" | grep -qiE 'nan|inf' && live=no
+    echo "$last" | grep -qE 'it=0[^0-9]' && live=no
+    echo "  flat=${spec:-none} $name: rc=$rc s/step=${t:-NA} live=$live"
+    [ "$live" = yes ] && [ "$rc" -eq 0 ] && [ -n "$t" ] && echo "$t" >> "$OUT/$spec.legs"
+    [ "$rc" -eq 0 ] || tail -3 "$d/run.err" | sed 's/^/    | /'
+}
+
+for spec in $FLAT_LIST; do
+    : > "$OUT/$spec.legs"
+    echo; echo "--- FESOM_FLAT=$(echo "$spec" | tr '+' ',') ---"
+    leg "$spec" warmup; : > "$OUT/$spec.legs"      # warmup discarded, as in the ladder
+    leg "$spec" base1; leg "$spec" base2
+done
+
+echo; echo "=== result (min over admitted legs, model's own loop timer) ==="
+for spec in $FLAT_LIST; do
+    awk -v S="$spec" -v DT="$DT" '{v[NR]=$1; if(NR==1||$1<m) m=$1}
+      END{ if(NR==0){printf "  flat=%-34s NO ADMITTED LEGS\n", S; exit}
+           printf "  flat=%-34s legs=%d  min=%.4f s/step   SYPD@dt=%d: %.3f\n", S, NR, m, DT, DT/(365.0*m) }' \
+      "$OUT/$spec.legs"
+done
+echo "finished: $(date)"
+echo "out: $OUT"

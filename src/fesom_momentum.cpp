@@ -4,6 +4,7 @@
  * line-by-line; deferred branches are explicitly listed in fesom_momentum.h.
  */
 #include "fesom_momentum.h"
+#include "fesom_flat.hpp"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -355,6 +356,55 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
     /* 2. horizontal advection via edge loop (Fortran 427-544) — EDGE→NODE SCATTER (atomic_add).
        The C re-evaluates the same `un1*uv[el1] + un2*uv[el2]` for the n1 (+=) and n2 (-=) writes;
        the n2 atomic adds its negation (a - X == a + (-X), IEEE-exact). */
+    {   static const bool flat_ = fesom_flat_on("momadv");
+    if (flat_) {
+    Kokkos::parallel_for("fesom_momadv_horiz", Kokkos::RangePolicy<>(0, (size_t)Emy_edge*nl),
+        KOKKOS_LAMBDA(const size_t i_) {
+            const int ed = (int)(i_ / (size_t)nl), nz = (int)(i_ - (size_t)ed*nl);
+            int n1 = edges(2*ed + 0), n2 = edges(2*ed + 1);
+            int el1 = edge_tri(2*ed + 0), el2 = edge_tri(2*ed + 1);
+            if (el1 < 0) return;
+            int ul1 = ulev_e(el1) - 1, bl1 = nlev_e(el1) - 2;
+            real_t dx1 = edge_cross(4*ed + 0), dy1 = edge_cross(4*ed + 1);
+            /* un1/un2 were per-thread FESOM_MAX_LEVELS arrays purely to carry one level's
+             * value to the atomic loops below; at one thread per level they are scalars and
+             * the scratch allocation disappears with them. */
+            if (el2 >= 0) {
+                int ul2 = ulev_e(el2) - 1, bl2 = nlev_e(el2) - 2;
+                real_t dx2 = edge_cross(4*ed + 2), dy2 = edge_cross(4*ed + 3);
+                int lo = ul1 < ul2 ? ul1 : ul2, hi = bl1 > bl2 ? bl1 : bl2;
+                if (nz < lo || nz > hi) return;
+                real_t un1n = 0.0, un2n = 0.0;              /* the zero-fill of the old loop */
+                if (nz >= ul1 && nz <= bl1)
+                    un1n =  uv(FESOM_ELEMVEC(el1,nz,nl)+1)*dx1 - uv(FESOM_ELEMVEC(el1,nz,nl)+0)*dy1;
+                if (nz >= ul2 && nz <= bl2)
+                    un2n = -uv(FESOM_ELEMVEC(el2,nz,nl)+1)*dx2 + uv(FESOM_ELEMVEC(el2,nz,nl)+0)*dy2;
+                real_t c0 = un1n*uv(FESOM_ELEMVEC(el1,nz,nl)+0) + un2n*uv(FESOM_ELEMVEC(el2,nz,nl)+0);
+                real_t c1 = un1n*uv(FESOM_ELEMVEC(el1,nz,nl)+1) + un2n*uv(FESOM_ELEMVEC(el2,nz,nl)+1);
+                if (n1 < my) {
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+0),  c0);
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+1),  c1);
+                }
+                if (n2 < my) {
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+0), -c0);
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+1), -c1);
+                }
+            } else {     /* boundary edge — only el1 contributes */
+                if (nz < ul1 || nz > bl1) return;
+                real_t un1n = uv(FESOM_ELEMVEC(el1,nz,nl)+1)*dx1 - uv(FESOM_ELEMVEC(el1,nz,nl)+0)*dy1;
+                real_t c0 = un1n*uv(FESOM_ELEMVEC(el1,nz,nl)+0);
+                real_t c1 = un1n*uv(FESOM_ELEMVEC(el1,nz,nl)+1);
+                if (n1 < my) {
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+0),  c0);
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n1,nz,nl)+1),  c1);
+                }
+                if (n2 < my) {
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+0), -c0);
+                    Kokkos::atomic_add(&un(FESOM_ELEMVEC(n2,nz,nl)+1), -c1);
+                }
+            }
+        });
+    } else {
     Kokkos::parallel_for("fesom_momadv_horiz", Kokkos::RangePolicy<>(0, Emy_edge),
         KOKKOS_LAMBDA(const int ed) {
             int n1 = edges(2*ed + 0), n2 = edges(2*ed + 1);
@@ -401,6 +451,8 @@ void fesom_momentum_adv_scalar_kk(const struct fesom_mesh *mesh,
                     }
             }
         });
+    }
+    }
 
     /* 3. divide by scalar control-volume area (Fortran 550-555). Per-node, race-free.
      * M5.19 bucket-A coalescing flip: one thread per (node, LEVEL) — un is node-major
@@ -1491,6 +1543,36 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
         KOKKOS_LAMBDA(const int i) { Uc(i) = 0.0; Vc(i) = 0.0; });
 
     /* Stage 1 edge loop (Fortran 631-665) — EDGE→ELEMENT scatter (atomic_add). */
+    {   static const bool flat_ = fesom_flat_on("visc1");
+    if (flat_) {
+    Kokkos::parallel_for("fesom_visc_bidiff_stage1", Kokkos::RangePolicy<>(0, (size_t)Eedg*nl),
+        KOKKOS_LAMBDA(const size_t i_) {
+            const int ed = (int)(i_ / (size_t)nl), nz = (int)(i_ - (size_t)ed*nl);
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            if (el1 < 0 || el2 < 0) return;
+            real_t len = Kokkos::sqrt(area(el1) + area(el2));
+            int nu1 = ulev(el1) - 1, nu2 = ulev(el2) - 1;
+            int nzmin = (nu1 > nu2) ? nu1 : nu2;            /* maxval(ulevels) */
+            int nl1 = nlev(el1) - 1, nl2 = nlev(el2) - 1;
+            int nzmax = (nl1 < nl2) ? nl1 : nl2;            /* minval(nlevels)-1 */
+            if (nz < nzmin || nz >= nzmax) return;
+            {
+                real_t u1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 0)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                real_t v1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 1)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                real_t vi = u1*u1 + v1*v1;
+                real_t inner = (g1*Kokkos::sqrt(vi) > g2*vi) ? g1*Kokkos::sqrt(vi) : g2*vi;
+                vi = Kokkos::sqrt((g0 > inner ? g0 : inner) * len);
+                real_t du = u1 * vi, dv = v1 * vi;
+                Kokkos::atomic_add(&Uc(FESOM_ELEM3D(el1, nz, nl)), -du);
+                Kokkos::atomic_add(&Vc(FESOM_ELEM3D(el1, nz, nl)), -dv);
+                Kokkos::atomic_add(&Uc(FESOM_ELEM3D(el2, nz, nl)),  du);
+                Kokkos::atomic_add(&Vc(FESOM_ELEM3D(el2, nz, nl)),  dv);
+            }
+        });
+    } else {
     Kokkos::parallel_for("fesom_visc_bidiff_stage1", Kokkos::RangePolicy<>(0, Eedg),
         KOKKOS_LAMBDA(const int ed) {
             int el1 = edge_tri(2*ed + 0);
@@ -1516,6 +1598,8 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
                 Kokkos::atomic_add(&Vc(FESOM_ELEM3D(el2, nz, nl)),  dv);
             }
         });
+    }
+    }
 
     /* ---- INTERNAL HALO BRACKET: exchange_elem(U_c, V_c) (Fortran 670-672) ----
      * Stage 1 wrote Uc/Vc on device → halo → stage 2 reads halo-current Uc/Vc on
@@ -1526,6 +1610,40 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
     fesom_halo_field2(dyn->u_b_fld, dyn->v_b_fld, FESOM_HALO_ELEM3D, nl, 1, partit);
 
     /* Stage 2 edge loop (Fortran 677-742, non-subcycl) — EDGE→ELEMENT scatter into uv_rhs. */
+    {   static const bool flat_ = fesom_flat_on("visc2");
+    if (flat_) {
+    Kokkos::parallel_for("fesom_visc_bidiff_stage2", Kokkos::RangePolicy<>(0, (size_t)Eedg*nl),
+        KOKKOS_LAMBDA(const size_t i_) {
+            const int ed = (int)(i_ / (size_t)nl), nz = (int)(i_ - (size_t)ed*nl);
+            int el1 = edge_tri(2*ed + 0);
+            int el2 = edge_tri(2*ed + 1);
+            if (el1 < 0 || el2 < 0) return;
+            real_t a1 = area(el1), a2 = area(el2);
+            real_t len = Kokkos::sqrt(a1 + a2);
+            int nu1 = ulev(el1) - 1, nu2 = ulev(el2) - 1;
+            int nzmin = (nu1 > nu2) ? nu1 : nu2;
+            int nl1 = nlev(el1) - 1, nl2 = nlev(el2) - 1;
+            int nzmax = (nl1 < nl2) ? nl1 : nl2;
+            if (nz < nzmin || nz >= nzmax) return;
+            {
+                real_t u1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 0)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 0);
+                real_t v1 = uv(FESOM_ELEMVEC(el1, nz, nl) + 1)
+                          - uv(FESOM_ELEMVEC(el2, nz, nl) + 1);
+                real_t vi = u1*u1 + v1*v1;
+                real_t inner = (g1*Kokkos::sqrt(vi) > g2*vi) ? g1*Kokkos::sqrt(vi) : g2*vi;
+                vi = -dt * Kokkos::sqrt((g0 > inner ? g0 : inner) * len);
+                real_t mag = Kokkos::sqrt(u1*u1 + v1*v1);
+                real_t viLapl = dt * ((g0h > g1h*mag) ? g0h : g1h*mag) * len;  /* 0 for CORE2 */
+                real_t du = vi * (Uc(FESOM_ELEM3D(el1, nz, nl)) - Uc(FESOM_ELEM3D(el2, nz, nl))) + viLapl*u1;
+                real_t dv = vi * (Vc(FESOM_ELEM3D(el1, nz, nl)) - Vc(FESOM_ELEM3D(el2, nz, nl))) + viLapl*v1;
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 0), -(du / a1));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el1, nz, nl) + 1), -(dv / a1));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 0),  (du / a2));
+                Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 1),  (dv / a2));
+            }
+        });
+    } else {
     Kokkos::parallel_for("fesom_visc_bidiff_stage2", Kokkos::RangePolicy<>(0, Eedg),
         KOKKOS_LAMBDA(const int ed) {
             int el1 = edge_tri(2*ed + 0);
@@ -1555,6 +1673,8 @@ void fesom_visc_filt_bidiff_kk(const struct fesom_mesh *mesh,
                 Kokkos::atomic_add(&uv_rhs(FESOM_ELEMVEC(el2, nz, nl) + 1),  (dv / a2));
             }
         });
+    }
+    }
 
     dyn->uv_rhs_fld.modify_device();   /* driver sync_host()s before the elem3D halo */
 }

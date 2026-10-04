@@ -43,3 +43,6 @@ docs/report/*.aux
 docs/report/*.log
 docs/report/*.out
 docs/report/*.toc
+lev72/
+lev128/
+xmach.csv

@@ -24,7 +24,7 @@
 
 bool fesom_halo_device_active()
 {
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     static int cached = -1;
     if (cached < 0) {
         const char *e = getenv("FESOM_HOST_HALO");
@@ -38,7 +38,7 @@ bool fesom_halo_device_active()
 
 bool fesom_halo_stage_on()
 {
-#ifdef KOKKOS_ENABLE_CUDA
+#if FESOM_GPU_RESIDENT
     static int cached = -1;
     if (cached < 0) {
         const char *e = getenv("FESOM_HALO_STAGE");
@@ -188,9 +188,9 @@ void fesom_halo_syncstats_report(int timed_steps, fesom_partit *p)
     fflush(stdout);
 }
 
-#ifndef KOKKOS_ENABLE_CUDA
+#if !FESOM_GPU_RESIDENT
 void fesom_halo_device_free() { /* no device Views on host backends */ }
-#else  // ====================== CUDA device path ===========================
+#else  // ============= GPU-resident device path (CUDA + HIP, fesom_gpu.hpp) =======
 
 #include <Kokkos_Core.hpp>
 #include <mpi.h>
@@ -209,8 +209,8 @@ struct DevHaloScratch {
     Kokkos::View<int*>    rlist_d;   // device copy of cs->rlist (1-based local idx)
     Kokkos::View<double*> send_d;    // device send buffer (grown on demand)
     Kokkos::View<double*> recv_d;    // device recv buffer
-    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> send_h;  // FESOM_HALO_STAGE pinned mirrors
-    Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> recv_h;  //   (allocated only when staged)
+    Kokkos::View<double*, fesom_halo_pinned_space> send_h;  // FESOM_HALO_STAGE pinned mirrors
+    Kokkos::View<double*, fesom_halo_pinned_space> recv_h;  //   (allocated only when staged)
     bool                  built = false;
     std::vector<MPI_Request> reqs;
 };
@@ -317,11 +317,11 @@ inline void halo_fence_pre_mpi()
  * A deep_copy with no exec-space argument fences, so the NOFENCE2 audit holds
  * unchanged: MPI never touches device memory in this mode, and the H2D copy
  * into recv_d is stream-ordered against the following unpack. */
-inline void grow_pinned(Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &v,
+inline void grow_pinned(Kokkos::View<double*, fesom_halo_pinned_space> &v,
                         size_t need, const char *label)
 {
     if (v.extent(0) < need)
-        v = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>(std::string(label), need);
+        v = Kokkos::View<double*, fesom_halo_pinned_space>(std::string(label), need);
 }
 inline void stage_announce(fesom_partit *p)
 {
@@ -334,14 +334,14 @@ inline void stage_announce(fesom_partit *p)
         fflush(stderr);
     }
 }
-inline void stage_d2h(const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h,
+inline void stage_d2h(const Kokkos::View<double*, fesom_halo_pinned_space> &h,
                       const Kokkos::View<double*> &d, size_t n)
 {
     if (n) Kokkos::deep_copy(Kokkos::subview(h, std::make_pair((size_t)0, n)),
                              Kokkos::subview(d, std::make_pair((size_t)0, n)));
 }
 inline void stage_h2d(const Kokkos::View<double*> &d,
-                      const Kokkos::View<double*, Kokkos::CudaHostPinnedSpace> &h, size_t n)
+                      const Kokkos::View<double*, fesom_halo_pinned_space> &h, size_t n)
 {
     if (n) Kokkos::deep_copy(Kokkos::subview(d, std::make_pair((size_t)0, n)),
                              Kokkos::subview(h, std::make_pair((size_t)0, n)));
@@ -374,8 +374,8 @@ void fesom_halo_device_free()
         g_dev[i].rlist_d = Kokkos::View<int*>();
         g_dev[i].send_d  = Kokkos::View<double*>();
         g_dev[i].recv_d  = Kokkos::View<double*>();
-        g_dev[i].send_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
-        g_dev[i].recv_h  = Kokkos::View<double*, Kokkos::CudaHostPinnedSpace>();
+        g_dev[i].send_h  = Kokkos::View<double*, fesom_halo_pinned_space>();
+        g_dev[i].recv_h  = Kokkos::View<double*, fesom_halo_pinned_space>();
         g_dev[i].reqs.clear();
         g_dev[i].built = false;
     }
@@ -733,4 +733,4 @@ void fesom_halo_device_selfcheck(fesom::Field &f, fesom_halo_kind kind,
                     cs->rPEnum, gfails, gmax);
 }
 
-#endif // KOKKOS_ENABLE_CUDA
+#endif // FESOM_GPU_RESIDENT

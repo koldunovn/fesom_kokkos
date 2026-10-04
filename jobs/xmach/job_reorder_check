@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --job-name=xreorder_chk
+#
+# jobs/xmach/job_reorder_check — correctness gate for FESOM_REORDER.
+#
+# A local renumbering must leave the physics alone: same mesh, same partition, same fields,
+# only a different order of the node index. It cannot be bitwise (reduction order changes,
+# and on GPU atomics are non-deterministic anyway), so this runs the same 20-step CORE2
+# dist_8 case three times — none / morton / shuffle — with a snapshot at step 20, and
+# compares them with the same climate-close checker the GPU fidelity gate uses.
+#
+# If morton or shuffle drifts from none by more than that ceiling, the permutation is wrong
+# (most likely the com_nod2D.slist remap) and the timing experiment is meaningless.
+set -u
+: "${ROOT:?}" "${MACHINE:?}"
+source "$ROOT/jobs/xmach/machine_${MACHINE}.sh"
+side_config gpu || exit 2
+BIN=${BIN_OVERRIDE:-$BIN}
+source "$ENVSH" > /dev/null 2>&1 || { echo "cannot source $ENVSH"; exit 2; }
+TRANSPORT=${TRANSPORT:-}
+N=$SLURM_NTASKS
+MESH=$INPUTS/core2
+G=$RUNBASE/reorder_check/${MACHINE}_${SLURM_JOB_ID}
+mkdir -p "$G"
+export HDF5_USE_FILE_LOCKING=FALSE FESOM_PRINT_EVERY=999
+export FESOM_FORCING_DIR=$INPUTS/forcing_1958 FESOM_CHL_FILE=$INPUTS/ic/Sweeney_2005.nc
+PHC=$INPUTS/ic/phc3.0_winter.nc
+
+echo "=== reorder correctness: $MACHINE core2 dist_$N, 20 steps, snapshot at 20 ==="
+echo "binary: $BIN  md5=$(md5sum "$BIN" | cut -d' ' -f1)"
+
+run_one () {                      # run_one <mode>
+    local mode=$1 out="$G/$mode"
+    mkdir -p "$out/run"
+    ( export FESOM_SPEED=1 FESOM_IC_EXTRAP=det FESOM_REORDER=$mode
+      [ -n "$TRANSPORT" ] && export $TRANSPORT
+      for kv in $RUNTIME_ENV; do [ -n "$kv" ] && export "$kv"; done
+      if [ "$MACHINE" = mn5 ]; then
+        xs=(); for v in $(env | grep -oE '^(FESOM_[A-Za-z0-9_]*|HDF5_USE_FILE_LOCKING|SLURM_CPU_BIND)='); do xs+=(-x "${v%=}"); done
+        mpirun --bind-to none "${xs[@]}" -np "$N" "$BIN" "$MESH" "$out/run" 1800 20 20 "$PHC" 1958
+      else
+        srun -n "$N" "$BIN" "$MESH" "$out/run" 1800 20 20 "$PHC" 1958
+      fi ) > "$out/run.log" 2> "$out/run.err"
+    local rc=$?
+    echo "  $mode: rc=$rc snaps=$(ls "$out/run"/snap_*.nc 2>/dev/null | wc -l) $(grep -c '^\[reorder\]' "$out/run.log" 2>/dev/null) announce"
+    grep -h '^\[reorder\]' "$out/run.log" 2>/dev/null | head -1 | sed 's/^/    | /'
+    [ $rc -eq 0 ] || tail -4 "$out/run.err" | sed 's/^/    | /'
+}
+
+for mode in none morton shuffle; do run_one "$mode"; done
+
+echo
+echo "=== comparison (climate-close ceilings, same checker as G-fid) ==="
+if python3 -c "import numpy, netCDF4" 2>/dev/null; then
+    for mode in morton shuffle; do
+        python3 "$ROOT/scripts/gpu_fidelity_check.py" "$G/none/run" "$G/$mode/run" > "$G/cmp_$mode.txt" 2>&1 \
+            && echo "VERDICT reorder=$mode vs none: PASS" \
+            || echo "VERDICT reorder=$mode vs none: FAIL (see $G/cmp_$mode.txt)"
+        tail -4 "$G/cmp_$mode.txt" | sed 's/^/    | /'
+    done
+else
+    echo "no numpy/netCDF4 here — run on a login node:"
+    for mode in morton shuffle; do
+        echo "  python3 $ROOT/scripts/gpu_fidelity_check.py $G/none/run $G/$mode/run"
+    done
+fi
+echo "out: $G"
