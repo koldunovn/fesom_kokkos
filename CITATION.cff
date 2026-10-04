@@ -1,0 +1,59 @@
+cff-version: 1.2.0
+title: "fesom_kokkos: a C++/Kokkos port of the FESOM2 ocean and sea-ice model for CPUs and GPUs"
+message: "If you use this software, please cite it, together with the FESOM2 model it ports."
+type: software
+authors:
+  - family-names: Koldunov
+    given-names: Nikolay
+    orcid: "https://orcid.org/0000-0002-3365-8146"
+    affiliation: Alfred Wegener Institute, Helmholtz Centre for Polar and Marine Research
+  - family-names: Beyer
+    given-names: Sebastian
+    orcid: "https://orcid.org/0000-0002-3731-0278"
+    affiliation: Alfred Wegener Institute, Helmholtz Centre for Polar and Marine Research
+version: 1.0.0
+repository-code: "https://github.com/koldunovn/fesom_kokkos"
+license: Apache-2.0
+abstract: >-
+  A performance-portable C++/Kokkos port of the ocean and sea-ice core of the
+  FESOM2 unstructured-mesh model. One source tree builds for CPUs (Kokkos Serial
+  and OpenMP back-ends) and GPUs (CUDA and HIP). The Serial build reproduces the C
+  port (fesom_port) byte for byte; the GPU builds keep the whole time step on the
+  device and exchange halos with GPU-aware MPI.
+keywords:
+  - ocean model
+  - sea ice
+  - FESOM2
+  - Kokkos
+  - GPU
+  - performance portability
+references:
+  - type: article
+    title: "The Finite-volumE Sea ice-Ocean Model (FESOM2)"
+    authors:
+      - family-names: Danilov
+        given-names: Sergey
+      - family-names: Sidorenko
+        given-names: Dmitry
+      - family-names: Wang
+        given-names: Qiang
+      - family-names: Jung
+        given-names: Thomas
+    journal: Geoscientific Model Development
+    volume: 10
+    start: 765
+    end: 789
+    year: 2017
+    doi: 10.5194/gmd-10-765-2017
+  - type: article
+    title: "Kokkos 3: Programming Model Extensions for the Exascale Era"
+    authors:
+      - family-names: Trott
+        given-names: Christian R.
+    journal: IEEE Transactions on Parallel and Distributed Systems
+    volume: 33
+    issue: 4
+    start: 805
+    end: 817
+    year: 2022
+    doi: 10.1109/TPDS.2021.3097283

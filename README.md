@@ -13,15 +13,19 @@ bit-for-bit identical** to the C reference, and the **CUDA build is climate-clos
 ~26 kLoC across `src/*.{cpp,hpp,h}`, mirroring the Fortran/C modules with the same loop
 bounds and halo discipline. Built and exercised on DKRZ **Levante** (A100 GPU partition).
 
+## Version 1.0.0
+
+Version 1.0.0 is the code of the paper *An Ocean Model Ported by a Large Language Model: Experience and Lessons from FESOM2 (Fortran to C to C++/Kokkos)* (Koldunov et al.). It joins the commit of the paper's GPU hindcast (`0bd6515`, the drift fixes) with the cross-machine branch that produced the GPU scaling measurements (`d1a5690`, CUDA memory pool off, HIP-neutral device path), the off-by-default kernel flattening of pull request 2, and two portability changes from pull request 1. With every option at its default it runs the code path of those commits. To run the model on your own machine with the CORE2 input data archived on Zenodo, see [docs/RUNNING.md](docs/RUNNING.md).
+
 ---
 
 ## Status
 
 | | |
 |---|---|
-| **Backends** | Serial ✅ · OpenMP ✅ · CUDA (Ampere80) ✅ · HIP (gfx90a) planned (M6) |
+| **Backends** | Serial ✅ · OpenMP ✅ · CUDA (A100, H100, GH200) ✅ · HIP (MI250X) ✅ |
 | **Coverage** | Ocean + sea-ice fully device-resident & validated (M0–M4 tagged) |
-| **Current** | `M5.x` GPU-performance campaign (tip `m5.23-comm-grind` → M5.24 TDMA lever) |
+| **Current** | version 1.0.0, the code of the paper (see above) |
 | **Kokkos** | 4.4.01, vendored as a git submodule, built in-tree (matches ICON) |
 | **Precision** | `real_t = double` (mixed precision is the next major lever toward 2 SYPD) |
 
@@ -122,10 +126,12 @@ cmake -S . -B build-cuda -DCMAKE_BUILD_TYPE=Release \
 cmake --build build-cuda -j
 ```
 
-### LUMI (AMD / HIP) — later (M6)
+### LUMI (AMD / HIP)
 
-Same submodule, no source changes (the no-vendor-lock contract):
+Same submodule, no source changes:
 `-DKokkos_ENABLE_HIP=ON -DKokkos_ARCH_AMD_GFX90A=ON` with ROCm `hipcc` as `CMAKE_CXX_COMPILER`.
+`env_lumi.sh` loads the LUMI modules; [docs/PORT_HIP_LUMI.md](docs/PORT_HIP_LUMI.md) and
+`jobs/xmach/` describe the LUMI and MareNostrum 5 runs.
 
 ### Diagnostic build options
 
@@ -208,11 +214,11 @@ Same shape with `-p compute`, `--ntasks-per-node=128`, `source env.sh`, and the
 |---|---|
 | CORE2 mesh | `/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2` |
 | PHC3.0 winter IC | `/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc` |
-| JRA55-do forcing | reader hard-codes the `/pool/data/.../JRA55-do/` layout for the requested year |
+| JRA55-do forcing | `/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/<var>.<year>.nc`, or `$FESOM_FORCING_DIR/<var>.<year>.nc` |
 | Output | `/work/ab0995/a270088/port2/...` |
 
 Mesh layout the model expects under `<mesh_dir>`: the global files `nod2d.out`, `elem2d.out`,
-`aux3d.out`, `nlvls.out`, `elvls.out`, `edges.out`, `edge_tri.out`, `depth.out`, plus
+`aux3d.out`, `nlvls.out`, `elvls.out`, `edges.out`, `edge_tri.out`, plus
 `dist_<NPES>/my_list*.out` + `com_info*.out` partition files **pre-generated for the exact
 rank count** you run (generated with `fesom_ini.x`).
 
@@ -432,3 +438,7 @@ The C port stays the bit-identity oracle, and the Fortran source
 - **Blowup from a cold start on dars/NG5 at the production `dt`** — expected; the cold PHC IC exceeds
   vertical CFL. Run from a spun-up restart or a smaller `dt` (see `docs/SCALING_M524.md`).
 ```
+
+## License and citation
+
+[Apache-2.0](LICENSE). The model is a port of [FESOM2](https://github.com/FESOM/fesom2) (Danilov et al., 2017, [doi:10.5194/gmd-10-765-2017](https://doi.org/10.5194/gmd-10-765-2017)) and builds on [Kokkos](https://github.com/kokkos/kokkos) (Trott et al., 2022). If you use it, please cite this software ([CITATION.cff](CITATION.cff)), FESOM2, and the datasets you ran it with.
