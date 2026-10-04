@@ -1014,13 +1014,18 @@ skip_rest_state:
         use_jra = 1;
         /* Phase 3 step 25 paths from work_core/namelist.forcing. Directory
          * overridable via FESOM_FORCING_DIR (same knob as the JRA55 reader —
-         * one dir holds the 8 JRA fields + these two); default = the
-         * historical /pool literal, byte-for-byte. */
+         * one dir holds the 8 JRA fields + these two); FESOM_SSS_PATH and
+         * FESOM_RUNOFF_PATH override each file on its own (PR #1). Unset or
+         * empty, the historical /pool literals are reproduced byte for byte. */
         const char *fdir = getenv("FESOM_FORCING_DIR");
         if (!fdir || !fdir[0]) fdir = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0";
         static char sss_path[1024], runoff_path[1024];
-        snprintf(sss_path,    sizeof sss_path,    "%s/PHC2_salx.nc",    fdir);
-        snprintf(runoff_path, sizeof runoff_path, "%s/CORE2_runoff.nc", fdir);
+        const char *sss_env    = getenv("FESOM_SSS_PATH");
+        const char *runoff_env = getenv("FESOM_RUNOFF_PATH");
+        if (sss_env && sss_env[0]) snprintf(sss_path, sizeof sss_path, "%s", sss_env);
+        else snprintf(sss_path,    sizeof sss_path,    "%s/PHC2_salx.nc",    fdir);
+        if (runoff_env && runoff_env[0]) snprintf(runoff_path, sizeof runoff_path, "%s", runoff_env);
+        else snprintf(runoff_path, sizeof runoff_path, "%s/CORE2_runoff.nc", fdir);
         fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
         use_sr = 1;
         printf("[fesom_port] SSS restoring: %s\n", sss_path);
