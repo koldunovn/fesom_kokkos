@@ -35,7 +35,7 @@ EXPORT="ALL,ROOT=$ROOT,MACHINE=$MACHINE,SIDE=$SIDE,INPUTS=$INPUTS,RUNBASE=$RUNBA
 gpu_ranks () { case "$1" in core2) echo "4 8 16 32 64";; farc) echo "4 8 16 32 64 128 256";;
                             dars) echo "8 16 32 64 128 256 512";; ng5) echo "16 32 64 128 256 512";; esac; }
 deep_rung () { case "${SIDE}_$1_$2" in gpu_ng5_512|gpu_dars_512|cpu_ng5_4096|cpu_ng5_3584) return 0;; *) return 1;; esac; }
-path_rung () { local minr; minr=$(ranks_for "$1" | awk '{print $1}')
+path_rung () { local minr; minr=$(ranks_for "$1" | head -1)
                [ "$1" = core2 ] && [ "$2" -eq "$RPN" ] && return 0
                [ "$1" = ng5 ] && [ "$2" -eq "$minr" ] && return 0; return 1; }
 ranks_for () { local r; for r in $( [ "$SIDE" = gpu ] && gpu_ranks "$1" || cpu_ranks "$1" ); do

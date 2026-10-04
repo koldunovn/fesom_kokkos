@@ -34,6 +34,7 @@
  * slot at level (nl-1) stays 0; this trades a few bytes for consistency.
  */
 #include "fesom_tracer_adv.h"
+#include "fesom_flat.hpp"
 #include "fesom_ale.h"       // M7-wsplit: fesom_wsplit_on()
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -1639,6 +1640,22 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
     /* ===== 4. fct_LO from upwind (compute_fct_LO): edge→node SCATTER + per-node finalise ===== */
     Kokkos::parallel_for("fct_LO_zero", RP(0, (size_t)myDim * nl),
         KOKKOS_LAMBDA(const size_t i) { fctLO(i) = 0.0; });
+    {   static const bool flat_ = fesom_flat_on("lo");
+    if (flat_) {
+    Kokkos::parallel_for("fct_LO_scatter", RP(0, (size_t)Ee*nl), KOKKOS_LAMBDA(const size_t i) {
+        const int e = (int)(i / (size_t)nl), nz = (int)(i - (size_t)e*nl);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (nu2 > nu12) nu12 = nu2;
+        if (nz < nu12 || nz >= nl12) return;
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        real_t f = aflux_h(i);
+        Kokkos::atomic_add(&fctLO((size_t)n1*nl+nz),  f);
+        Kokkos::atomic_add(&fctLO((size_t)n2*nl+nz), -f);
+    });
+    } else {
     Kokkos::parallel_for("fct_LO_scatter", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
         int n1 = edges(2*e+0), n2 = edges(2*e+1);
         int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
@@ -1652,6 +1669,8 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             Kokkos::atomic_add(&fctLO((size_t)n2*nl+nz), -f);
         }
     });
+    }
+    }
     /* M5.21 flat lever: one thread per (node,LEVEL). f_bot = aflux_v[nz+1] is an INPUT
      * (aflux_v built in upw1v, not modified here); fctLO[k] is read-then-written at the
      * SAME level (no cross-level dep) → each (n,nz) independent, bit-identical. */
@@ -1983,6 +2002,28 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         size_t k = (size_t)n*nl+nz; fplus(k) = pos; fminus(k) = neg;
     });
     /* b1 horizontal: edge→node SCATTER (atomic_add) into fct_plus/fct_minus. */
+    {   /* M5.22-style flat lever, experimental: FESOM_FLAT_B1H=1 -> one thread per (edge,LEVEL) */
+    static const bool flat_b1h = [](){ const char *v = getenv("FESOM_FLAT_B1H");
+                                       bool on = (v && *v == '1') || fesom_flat_on("b1h");
+                                       if (on) printf("[fct_zal_b1h] FESOM_FLAT_B1H = ON (flat edge,LEVEL)\n");
+                                       return on; }();
+    if (flat_b1h) {
+    Kokkos::parallel_for("fct_zal_b1h", RP(0, (size_t)Ee*nl), KOKKOS_LAMBDA(const size_t i) {
+        const int e = (int)(i / (size_t)nl), nz = (int)(i - (size_t)e*nl);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (el2>=0 && nu2 < nu12) nu12 = nu2;
+        if (nz < nu12 || nz >= nl12) return;
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        real_t f = aflux_h(i);                       /* i == e*nl+nz -> coalesced */
+        Kokkos::atomic_add(&fplus ((size_t)n1*nl+nz), (f>0.0? f:0.0));
+        Kokkos::atomic_add(&fminus((size_t)n1*nl+nz), (f<0.0? f:0.0));
+        Kokkos::atomic_add(&fplus ((size_t)n2*nl+nz), (-f>0.0? -f:0.0));
+        Kokkos::atomic_add(&fminus((size_t)n2*nl+nz), (-f<0.0? -f:0.0));
+    });
+    } else {
     Kokkos::parallel_for("fct_zal_b1h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {
         int n1 = edges(2*e+0), n2 = edges(2*e+1);
         int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
@@ -1998,6 +2039,8 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             Kokkos::atomic_add(&fminus((size_t)n2*nl+nz), (-f<0.0? -f:0.0));
         }
     });
+    }
+    }
     /* b2: per-node limiter factors. */
     /* M5.22 flat lever: one thread per (node,LEVEL). Pure per-level map (every read/write at the
      * same k: areasvol/hnode_new/fplus/fminus/fmax/fmin) → coalesced, bit-identical (continue→return). */
@@ -2064,6 +2107,23 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
         real_t f_top = aflux_v((size_t)n*nl+nz), f_bot = aflux_v((size_t)n*nl+(nz+1));
         dtv(k) += (f_top - f_bot) * dt / a;
     });
+    {   static const bool flat_ = fesom_flat_on("f2d");
+    if (flat_) {
+    Kokkos::parallel_for("fct_f2d_h", RP(0, (size_t)Ee*nl), KOKKOS_LAMBDA(const size_t i) {
+        const int e = (int)(i / (size_t)nl), nz = (int)(i - (size_t)e*nl);
+        int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
+        int nl1 = (el1>=0)? nlev_e(el1)-1 : 0, nu1 = (el1>=0)? ulev_e(el1)-1 : 0;
+        int nl2 = (el2>=0)? nlev_e(el2)-1 : 0, nu2 = (el2>=0)? ulev_e(el2)-1 : 0;
+        int nl12 = (nl1>nl2)? nl1 : nl2;
+        int nu12 = nu1; if (el2>=0 && nu2 > 0 && nu2 < nu12) nu12 = nu2;
+        if (nz < nu12 || nz >= nl12) return;
+        int n1 = edges(2*e+0), n2 = edges(2*e+1);
+        real_t f = aflux_h(i);
+        real_t a1 = areasvol((size_t)n1*nl+nz), a2 = areasvol((size_t)n2*nl+nz);
+        if (a1 > 0.0) Kokkos::atomic_add(&dth((size_t)n1*nl+nz),   f*dt/a1);
+        if (a2 > 0.0) Kokkos::atomic_add(&dth((size_t)n2*nl+nz), -(f*dt/a2));
+    });
+    } else {
     Kokkos::parallel_for("fct_f2d_h", RP(0, Ee), KOKKOS_LAMBDA(const int e) {   /* edge→node SCATTER */
         int n1 = edges(2*e+0), n2 = edges(2*e+1);
         int el1 = edge_tri(2*e+0), el2 = edge_tri(2*e+1);
@@ -2078,6 +2138,8 @@ void fesom_tracer_advect_one_fct_kk(fesom_tracer_adv_scratch *sc,
             if (a2 > 0.0) Kokkos::atomic_add(&dth((size_t)n2*nl+nz), -(f*dt/a2));
         }
     });
+    }
+    }
 
     /* ===== 9. del_ttf = del_ttf_advhoriz + del_ttf_advvert (per-node, full nl) ===== */
     Kokkos::parallel_for("fct_delttf_sum", RP(0, (size_t)myDim * nl),

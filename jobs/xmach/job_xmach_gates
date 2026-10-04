@@ -53,7 +53,7 @@ run () {   # run <subdir> <nsteps> <snap_every> <extra knobs, space-separated VA
     launch $N "$BIN" "$MESH" "$out" 1800 "$nst" "$snap" "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
     local rc=$?
     local t; t=$(grep -oE '\->[[:space:]]*[0-9.]+ s/step' "$out/run.log" | tail -1 | grep -oE '[0-9.]+')
-    echo "RESULT $1 rc=$rc steps=$nst snaps=$(ls $out/snap_*.nc 2>/dev/null | wc -l) s/step=${t:-NA}"
+    echo "RESULT ${out##*/} rc=$rc steps=$nst snaps=$(ls $out/snap_*.nc 2>/dev/null | wc -l) s/step=${t:-NA}"
     [ $rc -ne 0 ] && tail -5 "$out/run.err" | sed 's/^/    | /'
     return $rc
 }
